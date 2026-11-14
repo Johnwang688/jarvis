@@ -17,7 +17,7 @@ import { SparkleSetting } from "./SparkleSetting";
 import { AuroraSetting } from "./AuroraSetting";
 import { api } from "../api";
 import { INSTALL_MENU, type InstallStatus } from "../state/installApp";
-import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
+import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, unsortedWhy, type ProjectForm } from "../lib/projects";
 import {
   chosenHere, configDefaultLine, effectiveDefault, refusal, removeNotice, rowBadges, type RosterView,
 } from "../lib/roster";
@@ -442,7 +442,7 @@ export function ProjectDialog(props: {
           ) : null}
           {inbox ? (
             <div className="muted small" data-testid="project-inbox-note">
-              Unsorted is where chat with no project lands: its name and folder are fixed.
+              {initial?.name === "Inbox" ? unsortedWhy("Inbox") + " Its folder is fixed too." : "Unsorted is where chat with no project lands: its name and folder are fixed."}
             </div>
           ) : null}
 

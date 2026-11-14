@@ -133,6 +133,46 @@ class Store(unittest.TestCase):
         self.assertNotIn("Inbox", taken)
         self.assertEqual(P.unique_name("unsorted", taken), "unsorted (1)")
 
+    # -- "Inbox" is the fallback name: never on two projects (review of #366, MED) --
+
+    def test_inbox_is_reserved_when_the_fallback_would_be_needed(self):
+        mine = self.projects.create("Mine", str(self.root))
+        rewrite(self.stores, mine.id, name="Unsorted")        # an older project holds the name
+        taken = P.project_names_taken(self.stores)
+        self.assertIn("Inbox", taken)                         # the catch-all will be called Inbox
+        with self.assertRaises(StoreError):
+            self.projects.create("inbox", str(self.root))
+        self.assertEqual(self.projects.inbox().name, "Inbox")
+        self.assertEqual([p.name for p in self.projects.list() if p.name == "Inbox"], ["Inbox"])
+
+    def test_ordinary_inbox_first_then_the_fallback_is_refused(self):
+        mine = self.projects.create("Mine", str(self.root))
+        rewrite(self.stores, mine.id, name="Unsorted")
+        other = self.projects.create("Other", str(self.root))
+        rewrite(self.stores, other.id, name="Inbox")          # written behind the API's back
+        with self.assertRaises(StoreError):
+            self.projects.inbox()                             # never a second "Inbox"
+        with self.assertRaises(StoreError):
+            self.projects.create("Inbox", str(Path.home()), inbox=True)
+        self.assertEqual(len(self.projects.list(inbox=True)), 0)
+
+    def test_fallback_first_then_an_ordinary_inbox_is_refused(self):
+        self.legacy()
+        mine = self.projects.create("Mine", str(self.root))
+        rewrite(self.stores, mine.id, name="Unsorted")
+        self.assertIn("Inbox", P.project_names_taken(self.stores))
+        for name in ("Inbox", " INBOX "):
+            with self.assertRaises(StoreError):
+                self.projects.create(name, str(self.root))
+        third = self.projects.create("Third", str(self.root))
+        with self.assertRaises(StoreError):
+            self.projects.save(replace(third, name="inbox"))
+
+    def test_inbox_is_free_for_ordinary_projects_otherwise(self):
+        self.projects.inbox()                                 # Unsorted
+        self.assertNotIn("Inbox", P.project_names_taken(self.stores))
+        self.assertEqual(self.projects.create("Inbox", str(self.root)).name, "Inbox")
+
 
 class Wire(Base):
     """The daemon: start migrates, and the PATCH guard stays keyed on the flag."""
@@ -161,6 +201,12 @@ class Wire(Base):
             self.restart()
         self.assertEqual(self.stores.projects.get(found.id).name, "Inbox")
         self.assertEqual(self.stores.projects.get(self.other.id).name, "unsorted")
+
+    def test_post_projects_never_makes_a_second_inbox(self):
+        rewrite(self.stores, self.other.id, name="Unsorted")
+        made = self.request("POST", "/projects", {"name": "Inbox", "root": str(self.repo_b)}, 201)
+        self.assertEqual(made["name"], "Inbox (1)")           # numbered, never a second Inbox
+        self.assertEqual(self.stores.projects.inbox().name, "Inbox")
 
     def test_a_normal_project_cannot_be_created_or_renamed_to_unsorted_over_http(self):
         made = self.request("POST", "/projects", {"name": "Unsorted", "root": str(self.repo_b)}, 201)

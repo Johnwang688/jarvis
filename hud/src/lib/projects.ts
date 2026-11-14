@@ -50,7 +50,13 @@ export function uniqueName(wanted: string, taken: (string | null | undefined)[])
  * `archived` comes from `/archive`, since `/projects` hides archived projects.
  */
 export function projectNamesTaken(projects: Project[], but?: string | null, archived: string[] = []): string[] {
-  return [...projects.filter((p) => p.id !== but).map((p) => p.name), ...archived, "Unsorted"];
+  const names = [...projects.filter((p) => p.id !== but).map((p) => p.name), ...archived];
+  // "Inbox" is the catch-all's fallback name: reserved when no catch-all exists
+  // yet and another project already holds "Unsorted" (a catch-all that carries it
+  // is in the list already). Mirrors `project_names_taken` in projects.py.
+  const unsortedHeld = names.some((n) => nameKey(n) === "unsorted");
+  const noCatchAll = !projects.some((p) => p.inbox);
+  return [...names, "Unsorted", ...(unsortedHeld && noCatchAll ? ["Inbox"] : [])];
 }
 
 /** The menu's reason for the catch-all project's disabled Rename and Archive (WS-0).
@@ -58,7 +64,7 @@ export function projectNamesTaken(projects: Project[], but?: string | null, arch
  * already holds "Unsorted" (the migration never renames the owner's project). */
 export function unsortedWhy(name: string): string {
   return name === "Inbox"
-    ? "Unsorted is where chat with no project lands. This one is still called Inbox because another project is already named Unsorted. It keeps its name and cannot be archived."
+    ? "This project is where chat with no project lands. It is still called Inbox because another project is already named Unsorted. It keeps its name and cannot be archived."
     : "Unsorted is where chat with no project lands. It keeps its name and cannot be archived.";
 }
 

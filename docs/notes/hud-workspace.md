@@ -2344,7 +2344,10 @@ The owner's answer O-4: the project where chat with no project lands is named
   catch-all stays "Inbox", the start logs a warning and the owner's project is
   never renamed; the project menu (`unsortedWhy`) says why. The store accepts
   "Inbox" for the catch-all only in that case (another project holds "Unsorted")
-  or when the stored record already carries it.
+  or when the stored record already carries it. Never on two projects (review of
+  #366): "Inbox" is reserved for ordinary projects while a catch-all carries it, or
+  none exists yet and another project holds "Unsorted" (`inbox_name_reserved`,
+  `project_names_taken`, `projectNamesTaken`).
 - **The PATCH guard** in `daemon.py` stays keyed on `project.inbox` and still
   refuses name and root changes; the migration never goes through it.
 - Tests: `tests/v2/unsorted_check.py` (store, migration, guard), `archive_check.py`,

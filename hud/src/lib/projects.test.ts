@@ -262,6 +262,28 @@ describe("the Unsorted project's menu text (WS-0)", () => {
   });
 
   it("says why it is still called Inbox when another project holds Unsorted", () => {
-    expect(unsortedWhy("Inbox")).toContain("still called Inbox because another project is already named Unsorted");
+    expect(unsortedWhy("Inbox")).toContain("It is still called Inbox because another project is already named Unsorted");
+    expect(unsortedWhy("Inbox")).not.toMatch(/^Unsorted is where/);
+  });
+});
+
+describe("Inbox is the catch-all's fallback name (review of #366)", () => {
+  const catchAll = project({ id: "ca", name: "Inbox", inbox: true });
+  const mine = project({ id: "m", name: "Unsorted" });
+
+  it("is reserved while no catch-all exists and another project holds Unsorted", () => {
+    expect(projectNamesTaken([mine])).toEqual(["Unsorted", "Unsorted", "Inbox"]);
+    expect(projectNamesTaken([], null, ["unsorted"])).toEqual(["unsorted", "Unsorted", "Inbox"]);
+    expect(uniqueName("inbox", projectNamesTaken([mine]))).toBe("inbox (1)");
+  });
+
+  it("is in the list once, by the catch-all's own name, when the catch-all carries it", () => {
+    expect(projectNamesTaken([catchAll, mine])).toEqual(["Inbox", "Unsorted", "Unsorted"]);
+  });
+
+  it("is free otherwise", () => {
+    expect(projectNamesTaken([project({ id: "ca", name: "Unsorted", inbox: true })]))
+      .toEqual(["Unsorted", "Unsorted"]);
+    expect(projectNamesTaken([project({ id: "m", name: "site" })])).not.toContain("Inbox");
   });
 });

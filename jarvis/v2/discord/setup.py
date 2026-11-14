@@ -17,7 +17,7 @@ discord` first (the bot token bundle), and then:
 5. writes `~/.config/jarvis/discord_guild.json` (mode 600) with the four ids.
 
 The daemon reads that file whenever it needs it, so no restart is needed;
-it then links the Inbox to #ungrouped. Nothing printed holds the bot token.
+it then links the Unsorted project to #ungrouped. Nothing printed holds the bot token.
 """
 from __future__ import annotations
 
@@ -154,6 +154,6 @@ def _run(rest, ask, out, commands) -> int:
 
     # 5. The file.
     target = write_guild(GuildConfig(guild_id, str(category), str(archive), str(ungrouped)))
-    out(f"Saved {target}. The daemon picks it up without a restart and links the Inbox "
+    out(f"Saved {target}. The daemon picks it up without a restart and links the Unsorted project "
         f"to #{UNGROUPED}; then use \"Create channels\" in the HUD's Discord panel.")
     return 0

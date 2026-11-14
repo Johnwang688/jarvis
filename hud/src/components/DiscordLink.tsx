@@ -85,7 +85,7 @@ export function DiscordLink(props: { project: Project; onChanged?: () => void })
       ) : null}
       {inbox ? (
         <div className="muted small" data-testid="discord-inbox-note">
-          Unsorted posts in #ungrouped; only <code>jarvis auth discord-guild</code> changes that.
+          {props.project.name} posts in #ungrouped; only <code>jarvis auth discord-guild</code> changes that.
         </div>
       ) : (
         <div className="row">
