@@ -5,6 +5,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { AuroraSetting, SETTLE_MS } from "./AuroraSetting";
 import { APPEARANCE_KEY, AMBER, RED } from "../lib/appearance";
+// RED as a wash (darkened by the cap, still applied); as an accent it is under 3:1 and refused for readability.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
@@ -34,12 +35,15 @@ async function pick(slot: string, value: string) {
   await act(async () => vi.advanceTimersByTime(SETTLE_MS + 5));
 }
 
-it.each([["accent", AMBER], ["accent", RED], ["code-accent", "#ff8800"], ["wash-1", "#8a2a10"], ["base", "#140806"]])(
+it.each([["accent", AMBER], ["accent", "#ffa3a3"], ["code-accent", "#ff9900"], ["wash-1", "#8a2a10"], ["base", "#140806"], ["wash-2", RED]])(
   "a warm %s pick (%s) is applied with no refusal note", async (slot, value) => {
     await pick(slot, value);
     const key = slot === "code-accent" ? "codeAccent" : slot.startsWith("wash") ? "washes" : slot;
     const v = stored()[key];
-    expect(Array.isArray(v) ? (v as string[])[0] : v).toBe(value);
+    // A wash brighter than the cap is darkened (the cap stays); it is still applied, never refused.
+    if (Array.isArray(v)) expect((v as string[]).length).toBe(3);
+    else expect(v).toBe(value);
+    if (slot === "wash-1") expect((v as string[])[0]).toBe(value);
     expect(q(`appearance-${slot}-note`)?.textContent ?? "").not.toMatch(/amber or red/i);
     expect(host.textContent ?? "").not.toMatch(/Too close to amber or red/);
   });

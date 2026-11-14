@@ -152,15 +152,16 @@ describe("the spark lavender", () => {
     const concept = [176, 166, 240];
     c.forEach((v, i) => expect(Math.abs(v * 255 - concept[i]!)).toBeLessThan(20));
   });
-  it("follows a custom wash and never lands in the amber or red band", () => {
+  it("follows a custom wash of any hue, warm included (owner 2026-11-14)", () => {
     const green = sparkLavender([0.2, 0.7, 0.3], [0.4, 0.8, 0.9]);
     expect(Math.abs(hueOf(green) - hueOf([0.2, 0.7, 0.3]))).toBeLessThan(1);
     for (const wash of [[0.9, 0.1, 0.1], [0.9, 0.6, 0.1], [0.9, 0.1, 0.4]] as const) {
       const c = sparkLavender(wash, [0.4, 0.8, 0.9]);
-      const h = hueOf(c);
-      expect(h >= 70 && h <= 335).toBe(true);
+      expect(Math.abs(hueOf(c) - hueOf(wash))).toBeLessThan(1);
     }
-    const all = sparkLavender([0.9, 0.1, 0.1], [0.9, 0.6, 0.1]);
-    expect(hueOf(all)).toBeGreaterThan(200);
+  });
+  it("falls back to the concept's lavender only for a colour that does not parse", () => {
+    const c = sparkLavender([NaN, 0, 0], [2, 0, 0]);
+    [176, 166, 240].forEach((v, i) => expect(Math.abs(c[i]! * 255 - v)).toBeLessThan(1));
   });
 });

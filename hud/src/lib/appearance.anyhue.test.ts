@@ -16,7 +16,8 @@ import { luminance } from "./oklch";
 import { addCustomPreset, checkCustomPreset, loadCustomPresets } from "./presets";
 import css from "../theme.css?raw";
 
-const WARM = [AMBER, RED, "#ff8800", "#f472b6", "#ffd700", "#e11d48", "#fb923c"];
+// Warm accents that clear the 3:1 readability floor (which stays): amber, gold, orange, light red, pink.
+const WARM = [AMBER, "#ffd700", "#ff9900", "#fb923c", "#ffa3a3", "#ff8a8a", "#ff9ed8"];
 const mem = () => {
   const m: Record<string, string> = {};
   return { m, getItem: (k: string) => m[k] ?? null, setItem: (k: string, v: string) => void (m[k] = v) };
@@ -47,17 +48,17 @@ describe("any hue for the owner's colours", () => {
 
   it("a fully warm palette resolves exactly as stored (no blend fallback)", () => {
     const washes = ["#8a2a10", "#7a4a00", "#6a1a2a"];
-    const r = resolveColours({ accent: AMBER, washes, base: "#140806", codeAccent: "#ff8800" });
-    expect(r).toEqual({ accent: AMBER, washes, base: "#140806", codeAccent: "#ff8800" });
+    const r = resolveColours({ accent: AMBER, washes, base: "#140806", codeAccent: "#ff9900" });
+    expect(r).toEqual({ accent: AMBER, washes, base: "#140806", codeAccent: "#ff9900" });
     expect(colourProps(r)["--wash-1"]).toBe("#8a2a10");
   });
 
   it("presets and custom presets with warm colours pass, add and load", () => {
     const warm = { id: "warm", name: "Warm", accent: AMBER, washes: ["#8a2a10", "#7a4a00", "#6a1a2a"] as const, base: "#140806" };
     expect(checkPreset(warm)).toBeNull();
-    expect(checkCustomPreset({ ...warm, id: "c-warm", washes: [...warm.washes], codeAccent: RED })).toBeNull();
+    expect(checkCustomPreset({ ...warm, id: "c-warm", washes: [...warm.washes], codeAccent: "#ffa3a3" })).toBeNull();
     const s = mem();
-    const r = addCustomPreset("Ember", { accent: AMBER, washes: [...warm.washes], base: warm.base, codeAccent: RED }, s);
+    const r = addCustomPreset("Ember", { accent: AMBER, washes: [...warm.washes], base: warm.base, codeAccent: "#ffa3a3" }, s);
     expect(r.ok).toBe(true);
     expect(loadCustomPresets(s).map((p) => p.name)).toEqual(["Ember"]);
     for (const p of COLOUR_PRESETS) expect(checkPreset(p), p.id).toBeNull();
@@ -70,6 +71,10 @@ describe("any hue for the owner's colours", () => {
       expect(checkBase(bad).ok, String(bad)).toBe(false);
     }
     expect(checkAccent("#101418").ok).toBe(false);
+    // The error red itself is under 3:1 on the glass (2.5:1): refused for readability, not for its hue.
+    const red = checkAccent(RED);
+    expect(red.ok).toBe(false);
+    if (!red.ok) expect(red.reason).not.toMatch(/amber or red/i);
     expect(resolveColours({ codeAccent: "#2a0a0a" }).codeAccent).toBe(DEFAULT_COLOURS.codeAccent);
     const w = checkWash("#ff4400");
     expect(w.ok && luminance(w.value) <= WASH_MAX_LUMINANCE + 1e-9).toBe(true);

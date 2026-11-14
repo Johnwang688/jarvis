@@ -101,7 +101,7 @@ folders/worktrees. Never `_Store._delete` a project. `Daemon.start()` never call
 a model. Quota, title, cost and cache claims need evidence.
 
 The HUD is **aurora glass**, not the global palette: cyan accent; amber
-pending/red error fixed, nothing near bar RGB aurora. Keep dimensions, input behavior and owner
+pending/red error fixed; owner colours any hue. Keep dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving: owner switches.
 Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config (Browser note,

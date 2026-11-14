@@ -5,7 +5,8 @@ its own. The terminal is played by the terminal suite's `FakePty`, so no shell r
 
 What is pinned, each written to bite:
   - picking an accent changes the focus ring, the selection colour, the badge border and the stored record;
-  - an amber (or red, or near-red) pick is refused: the reason shows, and nothing changes (the tokens, the
+  - any hue may be picked (owner 2026-11-14): amber, orange and light red accents apply; the error red as an
+    accent is refused only for contrast (2.5:1 on the glass). Before 2026-11-14 a warm pick was refused (the
     picker's value and the stored record are all as they were);
   - a bright wash is clamped: the swatch and `--wash-2` hold the darkened colour, and a note says so;
   - Reset restores the defaults (no inline tokens left) and clears the record;
@@ -183,17 +184,20 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
               f"{_token(page, '--accent-hi')} {_token(page, '--syn-fn')}")
         check("the pick is stored and shown in the readout",
               _stored(page).get("accent") == LAVENDER and page.locator('[data-testid="appearance-accent-hex"]').inner_text() == LAVENDER)
-        # ---- refused picks -----------------------------------------------------------------------------
+        # ---- any hue (owner 2026-11-14): warm accents apply; contrast still refuses ------------------------
+        for warm in (AMBER, "#ff9900", "#ffa3a3"):
+            _pick(page, "appearance-accent", warm)
+            until(lambda: _token(page, "--accent") == warm, timeout=3)
+            check(f"a warm accent {warm} is applied with no refusal note",
+                  _stored(page).get("accent") == warm and page.locator('[data-testid="appearance-accent-note"]').count() == 0)
+        _pick(page, "appearance-accent", LAVENDER)
+        until(lambda: _token(page, "--accent") == LAVENDER, timeout=3)
         before = (_inline(page), _stored(page))
-        for bad in (AMBER, "#f87171", "#ff8800", "#b0ae7e", "#b1ae76"):
-            _pick(page, "appearance-accent", bad)
-            until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
-            note = page.locator('[data-testid="appearance-accent-note"]').inner_text()
-            check(f"an accent of {bad} is refused with a reason",
-                  "amber or red" in note and note.startswith("Not applied"), note)
-            check(f"and nothing changes: the tokens, the stored record and the picker keep {LAVENDER}",
-                  (_inline(page), _stored(page)) == before and _token(page, "--accent") == LAVENDER
-                  and page.locator('[data-testid="appearance-accent"]').input_value() == LAVENDER)
+        _pick(page, "appearance-accent", "#f87171")
+        until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
+        note = page.locator('[data-testid="appearance-accent-note"]').inner_text()
+        check("the error red as an accent is refused for contrast only (not for its hue), nothing changes",
+              "Too dark" in note and "amber or red" not in note and (_inline(page), _stored(page)) == before, note)
         _pick(page, "appearance-accent", "#1a3a4a")
         until(lambda: "Too dark" in (page.locator('[data-testid="appearance-accent-note"]').inner_text() or ""), timeout=3)
         check("a too-dark accent is refused with its contrast ratio and the last good value stays",
@@ -227,21 +231,19 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
         check("an accent pick checks the current clamped washes", "Too dark" in page.locator('[data-testid="appearance-accent-note"]').inner_text()
               and _token(page, "--accent") == "#a0c4ff")
+        _pick(page, "appearance-wash-1", "#8a2a10")
+        until(lambda: _token(page, "--wash-1") == "#8a2a10", timeout=3)
+        check("a dark red-orange wash is applied as picked (no amber/red refusal)",
+              _stored(page)["washes"][0] == "#8a2a10" and "amber or red" not in (page.locator('[data-testid="appearance-wash-1-note"]').inner_text() if page.locator('[data-testid="appearance-wash-1-note"]').count() else ""))
         _pick(page, "appearance-wash-1", "#ff8800")
-        until(lambda: "amber or red" in (page.locator('[data-testid="appearance-wash-1-note"]').inner_text() or ""), timeout=3)
-        check("an amber wash is refused and the wash stays", _token(page, "--wash-1") != "#ff8800" and _stored(page)["washes"][0] == "#2a8fa0")
-        _pick(page, "appearance-wash-1", "#dbb1b9")
-        until(lambda: "amber or red" in page.locator('[data-testid="appearance-wash-1-note"]').inner_text(), timeout=3)
-        check("a near-grey wash whose clamped output enters the band is refused", _token(page, "--wash-1") == "#2a8fa0")
-        _pick(page, "appearance-wash-1", "#6a8a60")
-        until(lambda: _token(page, "--wash-1") not in ("#2a8fa0", ""), timeout=3)
-        w1 = _token(page, "--wash-1")
-        before = (_token(page, "--wash-1"), _token(page, "--wash-2"), _token(page, "--wash-3"), _token(page, "--base"), _stored(page))
+        until(lambda: _token(page, "--wash-1") not in ("#8a2a10", ""), timeout=3)
+        check("a bright orange wash is applied, darkened to the wash cap (the cap stays)",
+              _token(page, "--wash-1") != "#ff8800" and page.locator('[data-testid="appearance-wash-1-note"]').inner_text().startswith("Darkened to"))
         _pick(page, "appearance-wash-2", "#e70075")
-        until(lambda: "mix into amber or red" in (page.locator('[data-testid="appearance-wash-2-note"]').inner_text() or ""), timeout=3)
-        after = (_token(page, "--wash-1"), _token(page, "--wash-2"), _token(page, "--wash-3"), _token(page, "--base"), _stored(page))
-        check("a wash that passes alone but blends into amber/red with the others is refused with the reason, tokens unchanged",
-              before == after and w1 != "#2a8fa0", f"{before} {after}")
+        until(lambda: _token(page, "--wash-2") not in (w2, ""), timeout=3)
+        check("a wash that used to be refused for blending into amber/red is applied now", _stored(page)["washes"][1] == _token(page, "--wash-2"))
+        _pick(page, "appearance-wash-2", w2)
+        until(lambda: _token(page, "--wash-2") == w2, timeout=3)
         _pick(page, "appearance-wash-1", "#2a8fa0")
         until(lambda: _token(page, "--wash-1") == "#2a8fa0", timeout=3)
         _pick(page, "appearance-base", "#808080")
@@ -373,8 +375,8 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         before = mock.sse_connections()
         page.reload()
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
-        check("a hostile stored record is never applied (no inline token holds url(), var() or amber)",
-              "url(" not in _inline(page) and "var(" not in _inline(page) and AMBER not in _inline(page)
+        check("a hostile stored record is never applied (no inline token holds url() or var())",
+              "url(" not in _inline(page) and "var(" not in _inline(page)
               and _token(page, "--accent") == DEFAULT_ACCENT, _inline(page)[:200])
         mock.await_reconnect(before)
 
