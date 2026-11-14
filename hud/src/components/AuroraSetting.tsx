@@ -17,16 +17,25 @@
 // the stored colours, so choosing a static preset, Aurora or Reset turns it off and the colours are back. The
 // five pickers are disabled while it is on; the speed slider is left slow, right fast.
 //
+// Custom presets (owner 2026-11-13, lib/presets.ts) join the row after RGB: "Save as preset" names the current
+// accent, three washes, background and editor & terminal colour. A custom preset applies like a built-in one and
+// also sets the editor & terminal colour; only these have a pencil (rename in place) and a x (delete, with Undo
+// for 10 s). The controls are always in the DOM and focusable; CSS only fades them in on hover and focus.
+//
 // "Editor & terminal" is its own colour (`codeAccent`), judged exactly like the accent by the same settle and
 // commit path. Presets, Aurora and RGB never change it and it stays enabled under RGB; Reset clears it.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   APPEARANCE_EVENT, COLOUR_PRESETS, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPalette, checkPreset, checkWash, loadAppearance,
   matchingPreset, resolveColours, saveAppearance,
   type Appearance, type ColourPreset, type Motion,
 } from "../lib/appearance";
 import { deriveAccent } from "../lib/appearance";
+import {
+  CUSTOM_PRESETS_KEY, PRESETS_EVENT, addCustomPreset, checkCustomPreset, cleanPresetName, deleteCustomPreset, loadCustomPresets,
+  renameCustomPreset, restoreCustomPreset, type CustomPreset,
+} from "../lib/presets";
 
 const LABELS: Record<Motion, string> = { fluid: "Fluid", flow: "Flow", still: "Still" };
 
@@ -42,6 +51,8 @@ const CODE_SLOT: { slot: Slot; label: string } = { slot: "code-accent", label: "
 type Note = { kind: "refused" | "clamped"; text: string };
 /** How long the picker's input must be still before a pick is judged (its `change` judges at once). */
 export const SETTLE_MS = 80;
+/** How long Undo stays after deleting a custom preset. */
+const UNDO_MS = 10_000;
 
 /** A colour input whose `input` events are passed on as they come and whose native `change` commits. */
 function ColourInput(props: { slot: Slot; value: string; disabled?: boolean; onInput: (slot: Slot, value: string) => void; onCommit: (slot: Slot, value: string) => void }) {
@@ -61,6 +72,16 @@ function ColourInput(props: { slot: Slot; value: string; disabled?: boolean; onI
   );
 }
 
+/** The small palette strip a preset button shows (the same markup for a built-in and a custom preset). */
+function PresetSwatch({ p }: { p: { base: string; washes: readonly string[]; accent: string } }) {
+  return (
+    <span className="appearance-preset-swatch" aria-hidden="true" style={{ background: p.base }}>
+      {p.washes.map((w, i) => <span key={i} style={{ background: w }} />)}
+      <span className="appearance-preset-accent" style={{ background: p.accent }} />
+    </span>
+  );
+}
+
 export function AuroraSetting() {
   const [a, setA] = useState<Appearance>(() => loadAppearance());
   const [notes, setNotes] = useState<Partial<Record<Slot, Note>>>({});
@@ -77,6 +98,45 @@ export function AuroraSetting() {
     };
   }, []);
   const change = (patch: Partial<Appearance>) => setA(saveAppearance(patch));
+
+  // ---- custom presets: the list (re-read on this window's event and on another window's storage event) ----
+  const [customs, setCustoms] = useState<CustomPreset[]>(() => loadCustomPresets());
+  const [naming, setNaming] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
+  const renamingRef = useRef<string | null>(null);
+  const [customNote, setCustomNote] = useState("");
+  const [undo, setUndo] = useState<{ preset: CustomPreset; index: number } | null>(null);
+  const undoTimer = useRef<number | undefined>(undefined);
+  const refocus = useRef<string | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const renameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const refreshList = (e?: Event) => {
+      if (e instanceof StorageEvent && e.key !== null && e.key !== CUSTOM_PRESETS_KEY) return;
+      const next = loadCustomPresets();
+      setCustoms((cur) => JSON.stringify(cur) === JSON.stringify(next) ? cur : next);
+    };
+    window.addEventListener(PRESETS_EVENT, refreshList);
+    window.addEventListener("storage", refreshList);
+    return () => {
+      window.removeEventListener(PRESETS_EVENT, refreshList);
+      window.removeEventListener("storage", refreshList);
+    };
+  }, []);
+  useEffect(() => () => window.clearTimeout(undoTimer.current), []);
+  // A rename whose preset another window removed is over.
+  useEffect(() => {
+    if (renaming && !customs.some((p) => p.id === renaming.id)) { renamingRef.current = null; setRenaming(null); }
+  }, [customs, renaming]);
+  useEffect(() => { if (naming !== null) { nameRef.current?.focus(); nameRef.current?.select(); } }, [naming === null]);
+  useEffect(() => { if (renaming) { renameRef.current?.focus(); renameRef.current?.select(); } }, [renaming?.id]);
+  // After a form closes by key or button, focus goes back to the control that opened it.
+  useEffect(() => {
+    if (!refocus.current) return;
+    sectionRef.current?.querySelector<HTMLElement>(`[data-testid="${refocus.current}"]`)?.focus();
+    refocus.current = null;
+  });
   // The colours the pickers hold: what is stored, whether or not RGB is on (RGB keeps them for later).
   const colours = resolveColours({ ...a, rgb: false });
   const family = deriveAccent(colours.accent).props;
@@ -185,11 +245,99 @@ export function AuroraSetting() {
     change({ rgb: !a.rgb });
   };
   const current = a.rgb ? undefined : matchingPreset(colours);
+
+  // ---- custom presets: apply, save, rename, delete, undo ----
+  const clearUndo = () => {
+    window.clearTimeout(undoTimer.current);
+    undoTimer.current = undefined;
+    setUndo(null);
+  };
+  const applyCustom = (p: CustomPreset) => {
+    dropPending();
+    clearUndo();
+    const refused = checkCustomPreset(p);
+    if (refused) return setCustomNote(refused.reason);
+    setNotes({});
+    setCustomNote("");
+    change({ accent: p.accent, washes: [...p.washes], base: p.base, codeAccent: p.codeAccent, rgb: false });
+  };
+  const customPressed = (p: CustomPreset) =>
+    !a.rgb && p.accent === colours.accent && p.base === colours.base && p.washes.every((w, i) => w === colours.washes[i])
+    && p.codeAccent === codeColour;
+  const openSave = () => {
+    flush(); // a pick still settling is part of the colours being saved
+    clearUndo();
+    setCustomNote("");
+    let n = customs.length + 1;
+    const used = new Set(customs.map((p) => p.name.toLowerCase()));
+    while (used.has(`custom ${n}`)) n++;
+    setNaming(`Custom ${n}`);
+  };
+  const closeSave = () => { refocus.current = "appearance-save-preset"; setNaming(null); setCustomNote(""); };
+  const commitSave = () => {
+    if (naming === null) return;
+    if (a.rgb) return setCustomNote("Turn RGB off to save your colours as a preset.");
+    const r = addCustomPreset(naming, { ...colours, codeAccent: codeColour });
+    if (!r.ok) return setCustomNote(r.reason);
+    clearUndo();
+    setCustoms(r.presets);
+    closeSave();
+  };
+  const startRename = (p: CustomPreset) => {
+    clearUndo();
+    setCustomNote("");
+    renamingRef.current = p.id;
+    setRenaming({ id: p.id, value: p.name });
+  };
+  const endRename = (refocusPencil: boolean) => {
+    if (refocusPencil && renamingRef.current) refocus.current = `appearance-custom-rename-${renamingRef.current}`;
+    renamingRef.current = null;
+    setRenaming(null);
+  };
+  const commitRename = (id: string, raw: string, viaKey: boolean) => {
+    if (renamingRef.current !== id) return;
+    const before = customs.find((p) => p.id === id);
+    if (before && cleanPresetName(raw) === before.name) return endRename(viaKey);
+    const r = renameCustomPreset(id, raw);
+    if (!r.ok) {
+      setCustomNote(r.reason);
+      setCustoms(loadCustomPresets());
+      return;
+    }
+    clearUndo();
+    setCustomNote("");
+    setCustoms(r.presets);
+    endRename(viaKey);
+  };
+  const onRenameKey = (e: KeyboardEvent<HTMLInputElement>, id: string) => {
+    if (e.key === "Escape") { e.preventDefault(); setCustomNote(""); endRename(true); }
+    else if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); commitRename(id, e.currentTarget.value, true); }
+  };
+  const removeCustom = (p: CustomPreset) => {
+    clearUndo();
+    const r = deleteCustomPreset(p.id);
+    if (!r.ok) {
+      setCustomNote(r.reason);
+      return setCustoms(loadCustomPresets());
+    }
+    setCustomNote("");
+    setCustoms(r.presets);
+    setUndo({ preset: r.preset!, index: r.index! });
+    undoTimer.current = window.setTimeout(() => { undoTimer.current = undefined; setUndo(null); }, UNDO_MS);
+  };
+  const undoDelete = () => {
+    if (!undo) return;
+    const r = restoreCustomPreset(undo.preset, undo.index);
+    clearUndo();
+    if (!r.ok) return setCustomNote(r.reason);
+    setCustomNote("");
+    setCustoms(r.presets);
+  };
   const custom = colours.accent !== DEFAULT_COLOURS.accent || colours.base !== DEFAULT_COLOURS.base
     || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]) || codeColour !== DEFAULT_COLOURS.codeAccent;
 
   return (
-    <section className="read-aloud" data-testid="appearance" aria-label="Appearance">
+    <section ref={sectionRef} className="read-aloud" data-testid="appearance" aria-label="Appearance">
       <h3>Appearance</h3>
       <label>
         Motion{" "}
@@ -278,6 +426,97 @@ export function AuroraSetting() {
           <span className="appearance-preset-swatch rgb" aria-hidden="true" />
           RGB
         </button>
+        {customs.map((p) => (
+          <span key={p.id} className="appearance-custom">
+            {renaming?.id === p.id ? (
+              <span className="appearance-preset appearance-custom-editing">
+                <PresetSwatch p={p} />
+                <input
+                  ref={renameRef}
+                  type="text"
+                  className="appearance-custom-name"
+                  data-testid={`appearance-custom-name-${p.id}`}
+                  aria-label={`New name for ${p.name}`}
+                  value={renaming.value}
+                  onChange={(e) => setRenaming({ id: p.id, value: e.target.value })}
+                  onKeyDown={(e) => onRenameKey(e, p.id)}
+                  onBlur={(e) => commitRename(p.id, e.currentTarget.value, false)}
+                />
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="appearance-preset"
+                data-testid={`appearance-custom-${p.id}`}
+                aria-pressed={customPressed(p)}
+                title={`${p.name}: accent ${p.accent}, editor and terminal ${p.codeAccent}`}
+                onClick={() => applyCustom(p)}
+              >
+                <PresetSwatch p={p} />
+                {p.name}
+              </button>
+            )}
+            <button
+              type="button"
+              className="appearance-custom-act"
+              data-testid={`appearance-custom-rename-${p.id}`}
+              aria-label={`Rename ${p.name}`}
+              title="Rename"
+              onClick={() => startRename(p)}
+            >
+              <span aria-hidden="true">{"\u270E"}</span>
+            </button>
+            <button
+              type="button"
+              className="appearance-custom-act"
+              data-testid={`appearance-custom-delete-${p.id}`}
+              aria-label={`Delete ${p.name}`}
+              title="Delete"
+              onClick={() => removeCustom(p)}
+            >
+              <span aria-hidden="true">{"\u00D7"}</span>
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="appearance-custom-bar" data-testid="appearance-custom-bar">
+        {naming === null ? (
+          <button
+            type="button"
+            data-testid="appearance-save-preset"
+            disabled={a.rgb}
+            title={a.rgb ? "Turn RGB off to save your colours as a preset" : "Save the current colours, including the editor and terminal colour, as a preset"}
+            onClick={openSave}
+          >
+            Save as preset
+          </button>
+        ) : (
+          <span className="appearance-custom-form">
+            <input
+              ref={nameRef}
+              type="text"
+              data-testid="appearance-preset-name"
+              aria-label="Preset name"
+              value={naming}
+              onChange={(e) => setNaming(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") { e.preventDefault(); closeSave(); }
+                else if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); commitSave(); }
+              }}
+            />{" "}
+            <button type="button" data-testid="appearance-preset-name-save" disabled={a.rgb} onClick={commitSave}>Save</button>{" "}
+            <button type="button" data-testid="appearance-preset-name-cancel" onClick={closeSave}>Cancel</button>
+          </span>
+        )}
+        {undo && (
+          <span className="appearance-custom-undo" role="status">
+            {" "}Deleted {undo.preset.name}.{" "}
+            <button type="button" data-testid="appearance-custom-undo" onClick={undoDelete}>Undo</button>
+          </span>
+        )}
+        {customNote && (
+          <p className="appearance-note refused" role="status" data-testid="appearance-custom-note">{customNote}</p>
+        )}
       </div>
       <p>A preset sets every colour below at once. Adjust any of them afterwards to make it your own.</p>
       {a.rgb && (
