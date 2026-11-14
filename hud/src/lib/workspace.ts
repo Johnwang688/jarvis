@@ -679,6 +679,42 @@ export function showSubagent(ws: Workspace, pane: PaneNo, ref: SubagentRef, focu
   return { ...ws, panes, focused: focus ? pane : ws.focused };
 }
 
+/**
+ * A chat's `hud_open_browser` page (2026-11-13, decisions D2): one Remote tab
+ * at `url`, marked **not the owner's** (`source: {kind: "unknown"}`, so the
+ * daemon resolves it as unknown and no agent looks at or drives it until the
+ * owner navigates it himself, `submitBrowserUrl`), with no Remote handle yet:
+ * the window's `ensure` creates it through `restore`, which is never the
+ * owner's navigation and admits no loopback port. The default (named)
+ * profile; see and drive at their defaults. `url` was judged by the caller
+ * (lib/agentpanes `agentBrowserUrl`).
+ */
+export const AGENT_BROWSER_SOURCE: BrowserSource = { kind: "unknown" };
+export function agentBrowserSpec(url: string, id: string = browserTabId()): PaneSpec {
+  return mirrorBrowser({ view: "browser", projectId: null, terminalId: null },
+    { tabs: [{ id, url, mode: "remote", source: { ...AGENT_BROWSER_SOURCE } }], active: id });
+}
+
+/**
+ * An existing pane shows a chat's `hud_open_browser` page: a new active
+ * Remote tab at `url` (not the owner's, as `agentBrowserSpec`) beside the
+ * tabs it already had, and the Browser view. What it held stays in its spec.
+ * Focus never moves. Unchanged for a Private pane (D2: never Private) or one
+ * whose tabs are full.
+ */
+export function showAgentBrowser(ws: Workspace, pane: PaneNo, url: string): Workspace {
+  if (!isPaneNo(pane) || ws.panes[pane - 1].browserProfile === "private") return ws;
+  const added = addBrowserTab(ws, pane, url, { mode: "remote", source: { ...AGENT_BROWSER_SOURCE } });
+  if (added === ws) return ws;
+  const panes = added.panes.map((p, i) => {
+    if (i !== pane - 1) return p;
+    const next: PaneSpec = { ...p, view: "browser" };
+    delete next.subagent;
+    return next;
+  }) as Panes;
+  return { ...added, panes, focused: ws.focused };
+}
+
 /** The spec a split opens for sub-agent `ref`. */
 export function subagentSpec(ref: SubagentRef): PaneSpec {
   return { view: "subagent", projectId: null, terminalId: null, subagent: { threadId: ref.threadId, sid: ref.sid } };

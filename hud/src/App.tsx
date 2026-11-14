@@ -74,7 +74,7 @@ import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard"
 import { frameKey } from "./lib/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { driving } from "./state/driving";
-import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
+import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentBrowserUrl, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
 import { WINDOW_ID } from "./lib/windowId";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -140,7 +140,8 @@ import { inMonaco, maxWidth } from "./lib/layout";
 import { chordSecond } from "./lib/editorkeys";
 import {
   PANE_NOS, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, presetOfWs, show as showOf, slotOf, splitTitle,
-  showSubagent as showSubagentIn, subagentSpec, type PaneNo, type PaneSpec, type View,
+  showSubagent as showSubagentIn, subagentSpec, agentBrowserSpec, showAgentBrowser,
+  type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
 import type { Axis } from "./lib/splittree";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -1958,12 +1959,30 @@ export default function App() {
             if (refs.length) {
               agentOpens.current = [...agentOpens.current, {
                 requestId: agentRequestId(data.request_id), threadId: tid, at: Date.now(),
-                items: refs.map((ref) => ({ kind: "subagent" as const, ref })),
+                items: refs.map((ref) => ({ kind: "subagent" as const, ref })), total: refs.length,
               }].slice(-AGENT_BATCHES_MAX);
               // Placed after this window's next commit, never from here: the
               // layout read here may not show the last placement yet.
               setAgentOpenTick((t) => t + 1);
             }
+          }
+          break;
+        case "browser_open":
+          // A chat's own `hud_open_browser` (browser_open.py, decisions D2):
+          // public pages the daemon judged, each for a new Remote pane on the
+          // default profile, placed as one batch like `subagent_open`. Each
+          // URL is judged again here and a local or private one is refused
+          // (counted as not placed). The tab is never the owner's: no agent
+          // looks at or drives it, and it is created through `restore`, so it
+          // opens no loopback port (lib/workspace `agentBrowserSpec`).
+          if (tid && Array.isArray(data.urls) && data.urls.length) {
+            const named = data.urls.slice(0, AGENT_OPEN_MAX);
+            const urls = named.map(agentBrowserUrl).filter((u: string | null): u is string => u !== null);
+            agentOpens.current = [...agentOpens.current, {
+              requestId: agentRequestId(data.request_id), threadId: tid, at: Date.now(),
+              items: urls.map((url: string) => ({ kind: "browser" as const, url })), total: named.length,
+            }].slice(-AGENT_BATCHES_MAX);
+            setAgentOpenTick((t) => t + 1);
           }
           break;
         default:
@@ -2685,27 +2704,46 @@ export default function App() {
    * One chat's ask, as a batch (lib/agentpanes): a child already shown stays
    * where it is and counts as shown; the rest take the free panes, then the
    * window is laid out once as a grid. Never moves focus. Null while the
-   * window cannot change (a card).
+   * window cannot change (a card). A page (`hud_open_browser`) never goes
+   * into a Private pane or one whose tabs are full; what the window refused
+   * to judge sound is counted as not placed (`batch.total`).
    */
   const placeAgentBatch = (batch: AgentBatch): { placed: number; notPlaced: number; changed: boolean } | null => {
     if (crashedRef.current || blockedNow.current) return null;
     const lay = layoutNow.current;
     let shown = 0;
+    let pages = false;
     const asks: AgentAsk[] = [];
     for (const item of batch.items) {
+      if (item.kind === "browser") {
+        const url = item.url;
+        pages = true;
+        asks.push({ show: (w, n) => showAgentBrowser(w, n, url), spec: agentBrowserSpec(url) });
+        continue;
+      }
       const ref = item.ref;
       const there = lay.fit.panes.some((n) => lay.ws.panes[n - 1].view === "subagent"
         && sameRef(lay.ws.panes[n - 1].subagent, ref));
       if (there) shown++;
       else asks.push({ show: (w, n) => showSubagentIn(w, n, ref, false), spec: subagentSpec(ref) });
     }
-    if (!asks.length) return { placed: shown, notPlaced: 0, changed: false };
-    const got = lay.placeAgent(agentFreePanes(batch.threadId), asks);
+    const total = Math.max(batch.total, batch.items.length);
+    if (!asks.length) return { placed: shown, notPlaced: total - shown, changed: false };
+    let free = agentFreePanes(batch.threadId);
+    if (pages) {
+      free = free.filter((n) => {
+        const spec = lay.ws.panes[n - 1];
+        return spec.browserProfile !== "private" && (spec.browser?.tabs.length ?? 0) < BROWSER_TABS_MAX;
+      });
+    }
+    const got = lay.placeAgent(free, asks);
     if (got === null) return null;
     const placed = got.filter((n) => n !== null).length;
-    const last = [...got].reverse().find((n): n is PaneNo => n !== null);
-    if (last !== undefined) lastSubPane.current = last;
-    return { placed: shown + placed, notPlaced: batch.items.length - shown - placed, changed: placed > 0 };
+    if (!pages) {
+      const last = [...got].reverse().find((n): n is PaneNo => n !== null);
+      if (last !== undefined) lastSubPane.current = last;
+    }
+    return { placed: shown + placed, notPlaced: total - shown - placed, changed: placed > 0 };
   };
   // The bus handler is set up once; it reaches the current placement here.
   const placeAgentBatchNow = useRef(placeAgentBatch);

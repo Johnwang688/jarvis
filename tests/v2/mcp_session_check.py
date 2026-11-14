@@ -867,7 +867,7 @@ class BridgeChecks(DaemonHarness):
                                    "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
                                    "G = set(s.CHAT_GIT_TOOLS); "
                                    "C = {'chat_list', 'chat_summary', 'chat_search', 'chat_read', 'chat_send', 'chat_wait', "
-                                   "'owner_post', 'hud_open_subagents'}; "
+                                   "'owner_post', 'hud_open_subagents', 'hud_open_browser'}; "
                                    "assert set(s.SESSION_TOOLS) - C == MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | G; "
                                    "assert all(t.providers == frozenset({'claude', 'codex'}) for n, t in s.SESSION_TOOLS.items() if n not in G); "
                                    "assert all(s.SESSION_TOOLS[n].providers == frozenset({'codex'}) and s.SESSION_TOOLS[n].foreground_only for n in G); "

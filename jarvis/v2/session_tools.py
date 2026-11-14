@@ -10,8 +10,9 @@ listed tool runs **in the daemon**, through the bridge's single
 
 Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog,
 the chat reads and `chat_send`/`chat_wait` (`tools/chats.py`) and
-`owner_post` (`tools/owner_post.py`) and `hud_open_subagents`
-(`tools/hud_subagents.py`), filtered by installed tool availability.
+`owner_post` (`tools/owner_post.py`), `hud_open_subagents`
+(`tools/hud_subagents.py`) and `hud_open_browser` (`tools/hud_open_browser.py`),
+filtered by installed tool availability.
 Codex foreground-only calls are bound to the exact native parent handle/turn
 before daemon dispatch. Tests may register temporary entries without widening
 the production catalog.
@@ -130,6 +131,15 @@ SUBAGENT_PANE_TOOLS = ("hud_open_subagents",)
 SESSION_TOOLS["hud_open_subagents"] = SessionTool(
     "hud_open_subagents", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
 
+# Opening public pages in new Remote Browser panes of the owner's HUD (owner,
+# 2026-11-13, decisions D2-D4; `tools/hud_open_browser.py`, `browser_open.py`).
+# Bound exactly as `hud_open_subagents` is: foreground-only, desk-only, not
+# read-only (`permit` decides at `jarvis-session-delegate`). External MCP never
+# gets it.
+BROWSER_PANE_TOOLS = ("hud_open_browser",)
+SESSION_TOOLS["hud_open_browser"] = SessionTool(
+    "hud_open_browser", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -167,7 +177,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post, hud_subagents  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post, hud_subagents, hud_open_browser  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:
