@@ -109,6 +109,18 @@ export const PANE_NOS: readonly PaneNo[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1
 /** A pane in a split is never drawn narrower or shorter than this. */
 export const PANE_MIN_W = 360;
 export const PANE_MIN_H = 200;
+
+/**
+ * The rule the workspace draws between panes (components/Workspace.tsx
+ * `boxStyle`): every fraction is of the area plus one rule and each pane
+ * gives one back, so a pane of fraction `f` along `length` px is drawn
+ * `f * (length + RULE) - RULE` px, and `k` equal panes `(length + RULE) / k -
+ * RULE` px each (review of PR #358, LOW 2).
+ */
+export const RULE = 1;
+
+/** The px `k` equal panes are drawn across `length` px, rules taken out. */
+export const drawnCell = (length: number, k: number): number => (length + RULE) / k - RULE;
 /** The bottom panel's height: stored, then fitted. */
 export const PANEL = { min: 120, def: 260, max: 1600 } as const;
 /** The window-wide title bar above everything (§2.1). */
@@ -1266,7 +1278,8 @@ export type SplitWhy = "" | "dropped" | "across" | "down" | "room" | "max" | "hi
  *    while every such line crosses at most three; a split down, while every
  *    vertical line through it crosses at most two.
  *  - **room** (FS-4, §4.5): each half at least 360 wide (right) or 200 tall
- *    (down), at the source's drawn px. Never by borrowing from the side
+ *    (down) as it would be drawn, the rule between the halves counted
+ *    (`RULE`). Never by borrowing from the side
  *    panes (FS-7). With no measured window it is skipped.
  *  - **max**: all twelve ids are drawn (FS-1).
  *  - **hidden-edit**: the only ids left are hidden panes with an unsaved
@@ -1285,7 +1298,9 @@ export function splitVerdict(
     : crossing(rects, "y", r.left, r.left + r.width) > MAX_DOWN - 1) {
     return { ok: false, why: axis === "x" ? "across" : "down" };
   }
-  const half = (axis === "x" ? box.px.width : box.px.height) / 2;
+  // Each half as drawn: half the source's fraction of the area plus one rule,
+  // less the rule it gives back (RULE), not half its nominal px.
+  const half = (axis === "x" ? r.width : r.height) / 2 * ((axis === "x" ? fit.width : fit.height) + RULE) - RULE;
   if (Number.isFinite(half) && half < (axis === "x" ? PANE_MIN_W : PANE_MIN_H)) return { ok: false, why: "room" };
   if (orderOf(ws).length >= PANE_NOS.length) return { ok: false, why: "max" };
   // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.

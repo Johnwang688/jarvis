@@ -21,7 +21,7 @@
 // more pane changes nothing.
 
 import { balancedRows, gridTree, minH as treeMinH, minW as treeMinW, MAX_ACROSS, MAX_DOWN, MAX_LEAVES, shapeKey } from "./splittree";
-import { orderOf, PANE_MIN_H, PANE_MIN_W, PANE_NOS, type PaneNo, type PaneSpec, type Workspace, type WorkspaceFit } from "./workspace";
+import { drawnCell, orderOf, PANE_MIN_H, PANE_MIN_W, PANE_NOS, RULE, type PaneNo, type PaneSpec, type Workspace, type WorkspaceFit } from "./workspace";
 import type { SubagentRef } from "./subagents";
 import { isLoopbackHost, judgeBrowserUrl } from "./browser";
 
@@ -111,16 +111,8 @@ export interface AgentPlacement {
   grid: number[] | null;
 }
 
-/**
- * The rule the workspace draws between panes (components/Workspace.tsx
- * `boxStyle`): every fraction is of the area plus one rule and each pane
- * gives one back, so `k` equal panes across `length` px are drawn
- * `(length + RULE) / k - RULE` px each (review of PR #358, LOW 2).
- */
-export const RULE = 1;
-
-/** The px `k` equal panes are drawn across `length` px, rules taken out. */
-export const drawnCell = (length: number, k: number): number => (length + RULE) / k - RULE;
+/** The rule between panes and a cell's drawn px (`lib/workspace`), re-exported for the grid's callers. */
+export { RULE, drawnCell };
 
 /**
  * Panes per row for `t` panes that fit `width` x `height` (the centre's px;

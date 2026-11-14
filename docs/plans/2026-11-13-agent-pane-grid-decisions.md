@@ -122,8 +122,9 @@ Browser pane: the drive tools need a pane that is already showing.
    of #358). If the re-layout unmounts the focused control in the owner's pane,
    focus goes back to that pane's message box or to the pane itself, never to a
    frame. The fit checks the cells as drawn, so the 1px rules between panes
-   count. `splitVerdict` and `autoSplit` still check the nominal halves;
-   that is out of this PR's scope.
+   count. `splitVerdict` and `autoSplit` checked the nominal halves; a
+   follow-up (2026-11-14, `claude/hud-split-gaps`) makes them count the rule
+   too.
 
 ## How PR B implements D2–D6 (`claude/hud-open-browser`)
 

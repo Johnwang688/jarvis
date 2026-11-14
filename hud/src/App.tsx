@@ -130,7 +130,7 @@ import { NewVexProject } from "./components/NewVexProject";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 import { guildConfigured, ownerLine } from "./lib/discord";
-import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, useLayout } from "./components/Layout";
+import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, keyboardPane, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminalRead, terminalReadable, terminals } from "./components/Terminal";
 import { markAnswered } from "./lib/taskQuestions";
@@ -304,7 +304,8 @@ export default function App() {
       const node = target instanceof Element ? target.closest<HTMLElement>("[data-pane]") : null;
       const id = Number(node?.dataset.pane);
       if (PANE_NOS.includes(id as PaneNo)) return id as PaneNo;
-      const test = target instanceof Element ? target.closest<HTMLElement>('[data-testid^="pane-"]')?.dataset.testid : "";
+      // The pane's section, not a control inside it (`pane-2-view` read as no pane).
+      const test = target instanceof Element ? target.closest<HTMLElement>('section[data-testid^="pane-"]')?.dataset.testid : "";
       return paneOfTestId(test);
     };
     const used = (e: Event) => { const pane = paneOf(e.target); if (pane) devUsed.current[pane] = Date.now(); };
@@ -2902,8 +2903,8 @@ export default function App() {
     const lay = layoutNow.current, ports = daemonPortsNow();
     if (crashedRef.current) return "drop";
     if (ports.status !== "ok") return "wait";
-    const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
-    const activePane = paneOfTestId(active?.dataset.testid);
+    // The pane's section, not a control inside it (`pane-2-view` read as no pane).
+    const activePane = keyboardPane();
     const held = devHeld();
     const w: DevWindow = {
       enabled: devservers.enabled === true, blocked: blockedNow.current, covered: settingsNow.current,

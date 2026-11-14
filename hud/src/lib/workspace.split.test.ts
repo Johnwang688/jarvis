@@ -314,19 +314,63 @@ describe("the verdict: four across, three down, counted over the whole window (F
 // ---- FS-4, dropped, max, hidden-edit and the order of reasons ----------------------------
 
 describe("the verdict's other reasons (FS-4, P-6, FS-1), first reason wins (§5.1)", () => {
-  it("FS-4 at 719/720 px wide and 399/400 px tall, on the fitted size", () => {
+  it("FS-4 at 720/721 px wide and 400/401 px tall, on the fitted size, the rule between the halves counted", () => {
+    // Each half is drawn (f / 2) * (length + RULE) - RULE px (components/Workspace.tsx boxStyle):
+    // a 720 px pane splits into two 359.5 px halves, so 721 is the least that splits right
+    // and 401 the least that splits down (review of PR #358, LOW 2, carried to the split).
     const one = defaultWorkspace();
-    expect(fitAt(one, 792, 1000).boxes[1]!.px.width).toBe(720);
-    expect(verdict(one, 1, "x", fitAt(one, 792, 1000))).toEqual({ ok: true, why: "" });
-    expect(verdict(one, 1, "x", fitAt(one, 791, 1000))).toEqual({ ok: false, why: "room" });
-    expect(verdict(one, 1, "y", fitAt(one, 791, 400))).toEqual({ ok: true, why: "" });
-    expect(verdict(one, 1, "y", fitAt(one, 791, 399))).toEqual({ ok: false, why: "room" });
-    // A nested pane: two columns at 1440 wide are 720 each; at 1439, 719.5.
+    expect(fitAt(one, 793, 1000).boxes[1]!.px.width).toBe(721);
+    expect(verdict(one, 1, "x", fitAt(one, 793, 1000))).toEqual({ ok: true, why: "" });
+    expect(verdict(one, 1, "x", fitAt(one, 792, 1000))).toEqual({ ok: false, why: "room" });
+    expect(fitAt(one, 791, 401).boxes[1]!.px.height).toBe(401);
+    expect(verdict(one, 1, "y", fitAt(one, 791, 401))).toEqual({ ok: true, why: "" });
+    expect(verdict(one, 1, "y", fitAt(one, 791, 400))).toEqual({ ok: false, why: "room" });
+    // A nested pane: two columns at 1443 wide halve to 360 drawn; at 1442, 359.75.
     const two = setPreset(one, "cols2");
-    expect(verdict(two, 2, "x", fitAt(two, 72 + 1440, 1000)).ok).toBe(true);
-    expect(verdict(two, 2, "x", fitAt(two, 72 + 1439, 1000)).why).toBe("room");
+    expect(verdict(two, 2, "x", fitAt(two, 72 + 1443, 1000)).ok).toBe(true);
+    expect(verdict(two, 2, "x", fitAt(two, 72 + 1442, 1000)).why).toBe("room");
     // Unmeasured: FS-4 is skipped.
     expect(verdict(one, 1, "x", unmeasured(one)).ok).toBe(true);
+  });
+
+  it("FS-4 as drawn: every split the verdict allows draws both halves at least 360 x 200, rules counted (property)", () => {
+    // The two new panes, as Workspace.tsx boxStyle draws them: f * (length + RULE) - RULE px.
+    const drawn = (fit: WorkspaceFit, n: PaneNo, axis: Axis) => {
+      const r = fit.boxes[n]!.rect;
+      return axis === "x" ? r.width * (fit.width + W.RULE) - W.RULE : r.height * (fit.height + W.RULE) - W.RULE;
+    };
+    let allowed = 0, refused = 0;
+    for (const preset of ["single", "cols2", "rows2", "grid4", "cols3"] as const) {
+      const ws = setPreset(defaultWorkspace(), preset);
+      for (let w = 700; w <= 1600; w += 1) for (const h of [398, 399, 400, 401, 402, 802, 803, 804, 805]) {
+        if (w % 7 !== 0 && ![720, 721, 1442, 1443, 1444, 2165].includes(w)) continue;
+        const fit = fitAt(ws, w + 72, h);
+        if (fit.dropped > 0) continue;
+        for (const n of fit.panes) for (const axis of ["x", "y"] as const) {
+          const v = splitVerdict(ws, fit, n, axis);
+          if (v.why === "room") { refused++; continue; }
+          if (!v.ok) continue;
+          allowed++;
+          const after = splitPane(ws, fit, n, axis, allocate(ws)!, chat());
+          const fit2 = fitAt(after, w + 72, h);
+          const added = orderOf(after).find((id) => !orderOf(ws).includes(id))!;
+          for (const half of [n, added]) {
+            expect(drawn(fit2, half, axis), `${preset} ${w}x${h} pane ${n} ${axis}: half ${half}`)
+              .toBeGreaterThanOrEqual((axis === "x" ? W.PANE_MIN_W : W.PANE_MIN_H) - 1e-9);
+          }
+        }
+      }
+    }
+    // Not vacuous: both outcomes happen across the sweep.
+    expect(allowed).toBeGreaterThan(50);
+    expect(refused).toBeGreaterThan(50);
+  });
+
+  it("autoSplit follows the drawn verdict: nothing at 720 x 400, down at 720 x 401, right at 721 x 400", () => {
+    const one = defaultWorkspace();
+    expect(autoSplit(one, fitAt(one, 72 + 720, 400), P(1))).toBeNull();
+    expect(autoSplit(one, fitAt(one, 72 + 720, 401), P(1))?.axis).toBe("y");
+    expect(autoSplit(one, fitAt(one, 72 + 721, 400), P(1))?.axis).toBe("x");
   });
 
   it("FS-7: 1920 px with both side panes open draws 684 px columns; a third is disabled, never borrowing from the side panes", () => {
@@ -447,10 +491,10 @@ describe("the split (§5.1)", () => {
     const three = setPreset(defaultWorkspace(), "cols3");
     expect(splitPane(three, fitWorkspace(DEFAULT_LAYOUT, three, 900, 700), 1, "y", 4, chat())).toBe(three); // dropped
     const one = defaultWorkspace();
-    expect(splitPane(one, fitAt(one, 791, 1000), 1, "x", 2, chat())).toBe(one); // room
+    expect(splitPane(one, fitAt(one, 792, 1000), 1, "x", 2, chat())).toBe(one); // room
     // Not vacuous: the same calls with a free id, a drawn source and a verdict that is ok do split.
     expect(orderOf(splitPane(w, fit, 1, "y", 3, chat()))).toEqual([1, 3, 2]);
-    expect(orderOf(splitPane(one, fitAt(one, 792, 1000), 1, "x", 2, chat()))).toEqual([1, 2]);
+    expect(orderOf(splitPane(one, fitAt(one, 793, 1000), 1, "x", 2, chat()))).toEqual([1, 2]);
   });
 
   it("never draws one id twice, and stops at twelve with \"max\" (property, carry-forward from FS1)", () => {
