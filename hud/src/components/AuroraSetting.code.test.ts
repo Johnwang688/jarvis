@@ -51,8 +51,14 @@ it("a pick is stored and shown, and does not touch the accent", async () => {
   expect(q("appearance-code-accent-hex")!.textContent).toBe("#c0aef5");
 });
 
-it("an amber pick is refused with a reason and nothing is stored", async () => {
+it("an amber pick is applied (any hue, owner 2026-11-14)", async () => {
   await pick("#fbbf24");
+  expect(stored().codeAccent).toBe("#fbbf24");
+  expect(q("appearance-code-accent-note")).toBeNull();
+});
+
+it("a pick too dark to read on the glass is refused with a reason and nothing is stored", async () => {
+  await pick("#101418");
   expect(stored().codeAccent).toBeUndefined();
   expect(q("appearance-code-accent-note")!.textContent).toMatch(/^Not applied/);
 });

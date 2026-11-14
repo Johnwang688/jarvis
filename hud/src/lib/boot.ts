@@ -37,20 +37,14 @@ export function hueOf(c: readonly [number, number, number]): number {
   return (h * 60 + 360) % 360;
 }
 
-/** Amber and red keep their meaning (pending, error): no tint may land in 0..70 or 335..360 degrees. */
-const inWarmBand = (c: readonly [number, number, number]) => {
-  const h = hueOf(c);
-  return h < 70 || h > 335;
-};
-
 /**
- * The spark glass's violet tint, from the live tokens: `--wash-3` lifted halfway to white (the default
- * palette gives about the concept's lavender), else the accent lifted the same way, else the concept's own
- * value, whenever a custom palette would put it in the amber or red band.
+ * The spark glass's tint, from the live tokens: `--wash-3` lifted halfway to white (the default palette
+ * gives about the concept's lavender). Any hue follows (owner 2026-11-14: the owner's colours may be amber
+ * or red too); a token that does not parse falls back to the concept's own lavender.
  */
 export function sparkLavender(wash3: readonly [number, number, number], accent: readonly [number, number, number]): [number, number, number] {
   const lift = (c: readonly [number, number, number]): [number, number, number] => [c[0] + (1 - c[0]) * 0.5, c[1] + (1 - c[1]) * 0.5, c[2] + (1 - c[2]) * 0.5];
-  for (const c of [wash3, accent]) if (!inWarmBand(c)) return lift(c);
+  for (const c of [wash3, accent]) if (c.length === 3 && c.every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) return lift(c);
   return [...FALLBACK_LAVENDER];
 }
 

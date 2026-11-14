@@ -14,7 +14,7 @@ it("actual darkUnclamped matches unclamped guards on cap neighbours and fixed-se
   const A = await import("./appearance"), O = await import("./oklch");
   // Exercise the private function's actual body without editing production or duplicating its predicate.
   const body = source.match(/function darkUnclamped\(hex: string, cap: number\): boolean \{([^}]+)\}/)![1];
-  const dark = new Function("impersonatesMeaning", "WASH_CHROMA_FLOOR", "luminance", `return (hex, cap) => {${body}}`)(A.impersonatesMeaning, A.WASH_CHROMA_FLOOR, O.luminance) as (h: string, cap: number) => boolean;
+  const dark = new Function("luminance", `return (hex, cap) => {${body}}`)(O.luminance) as (h: string, cap: number) => boolean;
   const colours = new Set<string>([...A.DEFAULT_WASHES, A.DEFAULT_BASE, A.AMBER, A.RED, "#000000", "#ffffff", "#00ffff"]);
   let seed = 0x912da45;
   for (let i = 0; i < 8000; i++) { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; colours.add(hex(seed & 0xffffff)); }

@@ -93,7 +93,7 @@ describe("RGB colour model", () => {
     expect(resolveColours({ rgb: false, accent: "#c4a8ff" }).accent).toBe("#c4a8ff");
   });
 
-  it("hand-picked colours keep the amber/red guard (the loosening is RGB mode only)", () => {
-    expect(resolveColours({ washes: ["#c04010", "#3468c4", "#6450c4"] }).washes[0]).toBe("#2a8fa0");
+  it("hand-picked warm colours are kept too (any hue, owner 2026-11-14)", () => {
+    expect(resolveColours({ washes: ["#c04010", "#3468c4", "#6450c4"] }).washes[0]).toBe("#c04010");
   });
 });

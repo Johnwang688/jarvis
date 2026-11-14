@@ -4,10 +4,9 @@
 // that is too bright is darkened and says so. A per-window convenience kept in this window
 // (localStorage). The aurora is decoration only: it never moves anything or takes focus.
 //
-// While a picker is dragged its picks are judged once the input settles (SETTLE_MS): the blend proof
-// (checkPalette) takes a few ms on an ordinary palette but can take a few hundred near the band. The
-// picker's `change` (released, or a value typed or filled in) judges the last pick at once. Nothing is
-// applied before it is judged.
+// While a picker is dragged its picks are judged once the input settles (SETTLE_MS). The picker's `change`
+// (released, or a value typed or filled in) judges the last pick at once. Nothing is applied before it is
+// judged. Any hue is allowed, amber and red included (owner 2026-11-14).
 //
 // A preset sets all five colours in one click, through checkPreset (the same guards). The first preset is the
 // default and clears the stored colours, as Reset does; the pickers stay free to fine-tune any preset.
@@ -21,16 +20,15 @@
 // accent, three washes, background and editor & terminal colour. A custom preset applies like a built-in one and
 // also sets the editor & terminal colour; only these have a pencil (rename in place) and a x (delete, with Undo
 // for 10 s). The controls are always in the DOM and focusable; CSS only fades them in on hover and focus.
-// The list is read with the quick per-colour guards only; the whole-palette proof runs on the one preset
-// clicked (checkCustomPreset in applyCustom), which a refusal stops with a note. Nothing here (render,
-// pressed state, the storage/event refresh) ever runs the full check over the list.
+// The list is read with the per-colour guards; the preset clicked is checked again (checkCustomPreset in
+// applyCustom), which a refusal stops with a note.
 //
 // "Editor & terminal" is its own colour (`codeAccent`), judged exactly like the accent by the same settle and
 // commit path. Presets, Aurora and RGB never change it and it stays enabled under RGB; Reset clears it.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
-  APPEARANCE_EVENT, COLOUR_PRESETS, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPalette, checkPreset, checkWash, loadAppearance,
+  APPEARANCE_EVENT, COLOUR_PRESETS, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPreset, checkWash, loadAppearance,
   matchingPreset, resolveColours, saveAppearance,
   type Appearance, type ColourPreset, type Motion,
 } from "../lib/appearance";
@@ -169,8 +167,6 @@ export function AuroraSetting() {
     if (slot === "base") {
       const r = checkBase(value);
       if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
-      const mixed = checkPalette(colours.washes, r.value);
-      if (mixed) return note(slot, { kind: "refused", text: mixed.reason });
       note(slot, r.clamped ? { kind: "clamped", text: r.note ?? "" } : null);
       return change({ base: r.value });
     }
@@ -179,8 +175,6 @@ export function AuroraSetting() {
     if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
     const washes = [...colours.washes];
     washes[i] = r.value;
-    const mixed = checkPalette(washes, colours.base);
-    if (mixed) return note(slot, { kind: "refused", text: mixed.reason });
     // A brighter aurora must not make the accent unreadable on it.
     const still = checkAccent(colours.accent, washes);
     if (!still.ok) return note(slot, { kind: "refused", text: `That would make the accent hard to read: ${still.reason}` });
@@ -570,8 +564,7 @@ export function AuroraSetting() {
       </div>
       <p>
         The accent marks focus, links, the selection bar and the orb; its lighter and quieter relatives follow it.
-        Amber and red keep their meanings (a tool running or an approval waiting, an error): a colour close to
-        them is not applied. A bright aurora colour is darkened to keep text readable.
+        Any colour works, amber and red included. A bright aurora colour is darkened to keep text readable.
       </p>
       <div className="appearance-colour" data-testid="appearance-code-colour">
         <label>

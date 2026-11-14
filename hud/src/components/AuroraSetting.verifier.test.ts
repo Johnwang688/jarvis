@@ -3,8 +3,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { AuroraSetting, SETTLE_MS } from "./AuroraSetting";
 import {
-  AMBER, APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_CODE_ACCENT, DEFAULT_APPEARANCE, DEFAULT_COLOURS,
-  checkAccent, checkBase, checkPalette, checkPreset, checkWash, loadAppearance, resolveColours,
+  APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_CODE_ACCENT, DEFAULT_APPEARANCE, DEFAULT_COLOURS,
+  checkAccent, checkPreset, loadAppearance, resolveColours,
   type ColourPreset,
 } from "../lib/appearance";
 import { applyAppearance, installAppearance } from "../lib/appearanceApply";
@@ -78,7 +78,7 @@ it("every shipped preset survives resolving exactly and applies all five colours
 });
 
 it("a preset clears refusal and darkening notes and each picker can fine tune it", async () => {
-  await drag("accent", AMBER);
+  await drag("accent", "#101418"); // too dark to read: refused with a note
   await commit("accent");
   await drag("wash-1", "#ffffff");
   await commit("wash-1");
@@ -124,12 +124,10 @@ it("presets and Aurora preserve unrelated and unknown stored fields", async () =
 });
 
 const unsafe: [string, Partial<ColourPreset>][] = [
-  ["meaning accent", { accent: AMBER }],
   ["malformed accent", { accent: "var(--red)" }],
-  ["meaning wash", { washes: ["#ff7a00", "#3468c4", "#6450c4"] }],
+  ["bright warm wash needing a clamp", { washes: ["#ff7a00", "#3468c4", "#6450c4"] }],
   ["wash needing a clamp", { washes: ["#9fe8ff", "#3468c4", "#6450c4"] }],
   ["base needing a clamp", { base: "#405060" }],
-  ["unsafe blend of individually safe colours", { washes: ["#590029", "#3468c4", "#6450c4"], base: "#000000" }],
   ["accent unreadable over its own washes", { accent: "#ababab", washes: ["#838283", "#838283", "#838283"] }],
 ];
 
@@ -139,11 +137,6 @@ it.each(unsafe)("a preset with %s is refused before storage", async (_label, pat
   Object.assign(p, patch);
   try {
     expect(checkPreset(p)).not.toBeNull();
-    if (_label === "unsafe blend of individually safe colours") {
-      p.washes.forEach((w) => expect(checkWash(w)).toMatchObject({ ok: true, clamped: false }));
-      expect(checkBase(p.base)).toMatchObject({ ok: true, clamped: false });
-      expect(checkPalette(p.washes, p.base)).not.toBeNull();
-    }
     if (_label === "accent unreadable over its own washes") {
       expect(checkAccent(p.accent).ok).toBe(true);
       expect(checkAccent(p.accent, p.washes).ok).toBe(false);

@@ -27,7 +27,10 @@ describe("custom preset trust boundary (independent verifier)", () => {
   it("rejects code accents against their own washes, including readable default-only accents", () => {
     const gray: [string, string, string] = ["#838283", "#838283", "#838283"];
     expect(loadCustomPresets(memory([entry({ washes: gray, accent: "#e8edf3", codeAccent: "#ababab" })]))).toEqual([]);
-    expect(loadCustomPresets(memory([entry({ codeAccent: AMBER })]))).toEqual([]);
+  });
+
+  it("keeps an amber code accent (any hue, owner 2026-11-14)", () => {
+    expect(loadCustomPresets(memory([entry({ codeAccent: AMBER })]))).toEqual([entry({ codeAccent: AMBER })]);
   });
 
   it("ignores __proto__, constructor, deep unknown fields and non-entry nesting", () => {

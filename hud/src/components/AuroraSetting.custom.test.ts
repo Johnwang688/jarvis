@@ -229,12 +229,19 @@ it("custom presets survive a remount, and another window's change refreshes the 
   expect(customButtons()).toHaveLength(2);
 });
 
-it("a hostile stored entry never shows up", async () => {
+it("a hostile stored entry never shows up, but an amber one does (any hue, owner 2026-11-14)", async () => {
   await act(async () => {
     localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify([
-      { id: "c-bad", name: "Hot", accent: AMBER, washes: ["#2a8fa0", "#3468c4", "#6450c4"], base: "#0a1116", codeAccent: "#6fc3df" },
+      { id: "c-bad", name: "Bad", accent: "url(x)", washes: ["#2a8fa0", "#3468c4", "#6450c4"], base: "#0a1116", codeAccent: "#6fc3df" },
     ]));
     window.dispatchEvent(new StorageEvent("storage", { key: CUSTOM_PRESETS_KEY }));
   });
   expect(customButtons()).toHaveLength(0);
+  await act(async () => {
+    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify([
+      { id: "c-hot", name: "Hot", accent: AMBER, washes: ["#2a8fa0", "#3468c4", "#6450c4"], base: "#0a1116", codeAccent: "#6fc3df" },
+    ]));
+    window.dispatchEvent(new StorageEvent("storage", { key: CUSTOM_PRESETS_KEY }));
+  });
+  expect(customButtons()).toHaveLength(1);
 });
