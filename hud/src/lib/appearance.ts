@@ -574,7 +574,8 @@ export const RGB_ACCENT = "#e8edf3";
 /** RGB mode's background under the washes: a dark neutral, inside BASE_MAX_LUMINANCE. */
 export const RGB_BASE = "#0a0b10";
 const RGB_LIGHTNESS = 0.55, RGB_CHROMA = 0.14;
-const RGB_TABLE: readonly string[] = Array.from({ length: 360 }, (_, deg) =>
+/** The wash at each whole degree of hue (index = degree); `rgbWashes` and the renderer's palette table share it. */
+export const RGB_TABLE: readonly string[] = Array.from({ length: 360 }, (_, deg) =>
   clampLuminance(lchHex({ L: RGB_LIGHTNESS, C: RGB_CHROMA, h: deg }), WASH_MAX_LUMINANCE));
 
 /** The table index (whole degrees) of a phase, 0..1 a full turn: it wraps either way, and a non-finite one is 0. */

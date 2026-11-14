@@ -80,7 +80,10 @@ export function AuroraSetting() {
   // The colours the pickers hold: what is stored, whether or not RGB is on (RGB keeps them for later).
   const colours = resolveColours({ ...a, rgb: false });
   const family = deriveAccent(colours.accent).props;
-  const codeColour = colours.codeAccent;
+  // The code accent is shown exactly as it is applied: judged against the washes actually displayed (RGB's own
+  // under RGB), not the stored ones the other pickers keep showing.
+  const applied = resolveColours(a);
+  const codeColour = applied.codeAccent;
 
   const note = (slot: Slot, n: Note | null) => setNotes((cur) => {
     const next = { ...cur };
@@ -89,7 +92,7 @@ export function AuroraSetting() {
   });
   const pick = (slot: Slot, value: string) => {
     if (slot === "code-accent") {
-      const r = checkAccent(value, resolveColours(a).washes);
+      const r = checkAccent(value, applied.washes);
       if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
       note(slot, null);
       return change({ codeAccent: r.value });
