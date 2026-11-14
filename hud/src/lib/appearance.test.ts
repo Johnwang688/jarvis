@@ -433,3 +433,30 @@ describe("natural drift storage", () => {
     expect(JSON.parse(m[APPEARANCE_KEY]!).drift).toBe(1);
   });
 });
+
+describe("colour presets", async () => {
+  const A = await import("./appearance");
+  it("every preset passes every guard as it stands (no clamp, no refusal) and survives resolveColours", () => {
+    for (const p of A.COLOUR_PRESETS) {
+      expect(A.checkPreset(p), p.id).toBeNull();
+      for (const c of [p.accent, p.base, ...p.washes]) expect(A.normHex(c), `${p.id} ${c}`).toBe(c);
+      const r = A.resolveColours({ accent: p.accent, washes: [...p.washes], base: p.base });
+      expect(A.matchingPreset(r)?.id, p.id).toBe(p.id);
+    }
+  });
+  it("ids and names are unique, and the first preset is the default", () => {
+    const ids = A.COLOUR_PRESETS.map((p) => p.id), names = A.COLOUR_PRESETS.map((p) => p.name);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(names).size).toBe(names.length);
+    expect(A.matchingPreset(A.DEFAULT_COLOURS)?.id).toBe(A.COLOUR_PRESETS[0].id);
+    expect(A.matchingPreset(A.resolveColours({}))?.id).toBe("aurora");
+  });
+  it("checkPreset refuses a preset a hand pick would refuse or darken", () => {
+    const base = A.COLOUR_PRESETS[1];
+    expect(A.checkPreset({ ...base, accent: A.AMBER })).not.toBeNull();
+    expect(A.checkPreset({ ...base, washes: ["#ff7a00", base.washes[1], base.washes[2]] })).not.toBeNull();
+    expect(A.checkPreset({ ...base, washes: ["#9fe8ff", base.washes[1], base.washes[2]] })).not.toBeNull(); // would clamp
+    expect(A.checkPreset({ ...base, base: "#405060" })).not.toBeNull(); // would clamp
+    expect(A.checkPreset({ ...base, accent: "#101418" })).not.toBeNull(); // too dark
+  });
+});

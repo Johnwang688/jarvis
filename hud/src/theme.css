@@ -2481,6 +2481,12 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
 /* Settings -> Appearance colours (AG-3): a row per colour, a hex readout, the reason a pick was refused
    or darkened, and a preview strip. Nothing here is amber or red unless it is the refusal text, which is
    an error and so keeps the error colour. */
+.appearance-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.appearance-preset { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px 4px 4px; }
+.appearance-preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.appearance-preset-swatch { display: inline-flex; align-items: stretch; gap: 0; width: 44px; height: 18px; padding: 3px; box-sizing: border-box; border-radius: 4px; border: 1px solid var(--rim); overflow: hidden; }
+.appearance-preset-swatch > span { flex: 1 1 0; }
+.appearance-preset-swatch > .appearance-preset-accent { flex: 0 0 8px; margin-left: 3px; border-radius: 2px; }
 .appearance-colour { margin: 6px 0; }
 .appearance-colour input[type="color"] { width: 40px; height: 22px; padding: 0; vertical-align: middle; border: 1px solid var(--border-strong); background: none; cursor: pointer; }
 .appearance-colour code { font-family: var(--mono); word-spacing: normal; color: var(--text-muted); }

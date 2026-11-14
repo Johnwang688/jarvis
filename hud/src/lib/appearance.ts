@@ -542,6 +542,52 @@ export interface Colours {
 export const DEFAULT_COLOURS: Colours = { accent: DEFAULT_ACCENT, washes: [...DEFAULT_WASHES], base: DEFAULT_BASE };
 
 /**
+ * Ready-made palettes for Settings -> Appearance. A preset is only a shortcut for picking all five colours at
+ * once: it is saved through the same guards as a hand pick (checkPreset), and appearance.test.ts holds every
+ * one to them unclamped, so a preset never needs darkening and never comes near amber or red. The first is
+ * the default; choosing it clears the stored colours, exactly as Reset does.
+ */
+export interface ColourPreset {
+  id: string;
+  name: string;
+  accent: string;
+  washes: readonly [string, string, string];
+  base: string;
+}
+export const COLOUR_PRESETS: readonly ColourPreset[] = [
+  { id: "aurora", name: "Aurora", accent: DEFAULT_ACCENT, washes: DEFAULT_WASHES, base: DEFAULT_BASE },
+  { id: "moonlight", name: "Moonlight", accent: "#e8edf3", washes: ["#3e5266", "#2c3d55", "#4a4f68"], base: "#0a0d12" },
+  { id: "graphite", name: "Graphite", accent: "#e5e7eb", washes: ["#3a3f48", "#2a2e35", "#1e2126"], base: "#0e0f12" },
+  { id: "deep-blue", name: "Deep blue", accent: "#7fb2ff", washes: ["#1e3a7a", "#143063", "#0f2147"], base: "#070e1f" },
+  { id: "northern-lights", name: "Northern lights", accent: "#5eead4", washes: ["#4a2391", "#0e6b76", "#1b2a6b"], base: "#0b0d20" },
+  { id: "emerald", name: "Emerald", accent: "#6ee7b7", washes: ["#1f8a5e", "#1d6f78", "#2b5a9e"], base: "#08130f" },
+  { id: "glacier", name: "Glacier", accent: "#a5f3fc", washes: ["#2a7f9a", "#368cac", "#2b5f8a"], base: "#081218" },
+  { id: "nebula", name: "Nebula", accent: "#c4a8ff", washes: ["#5b3fb8", "#7a3aa8", "#3a46b8"], base: "#0d0b1a" },
+  { id: "orchid", name: "Orchid", accent: "#e48cf5", washes: ["#7a2f9a", "#4b3ab0", "#8a2f7e"], base: "#120a17" },
+];
+
+/** A preset through every colour guard: null when it may be saved as it stands, else the first refusal. */
+export function checkPreset(p: ColourPreset): Refusal | null {
+  for (const w of p.washes) {
+    const r = checkWash(w);
+    if (!r.ok) return r;
+    if (r.clamped) return refuse(r.note ?? "A preset colour would need darkening.");
+  }
+  const b = checkBase(p.base);
+  if (!b.ok) return b;
+  if (b.clamped) return refuse(b.note ?? "A preset background would need darkening.");
+  const mixed = checkPalette(p.washes, p.base);
+  if (mixed) return mixed;
+  const a = checkAccent(p.accent, p.washes);
+  return a.ok ? null : a;
+}
+
+/** The preset these colours are, if any (compared after resolveColours, so lower-case `#rrggbb`). */
+export function matchingPreset(c: Colours): ColourPreset | undefined {
+  return COLOUR_PRESETS.find((p) => p.accent === c.accent && p.base === c.base && p.washes.every((w, i) => w === c.washes[i]));
+}
+
+/**
  * The colours to apply for a record: every stored value is checked again here, and one that fails (or is
  * missing) is its default. A stored wash is clamped, so an over-bright stored value still applies safely.
  */
