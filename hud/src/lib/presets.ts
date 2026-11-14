@@ -12,7 +12,7 @@
 // A rename or delete of an id another window already removed is a refusal, not a crash. Every successful write
 // fires PRESETS_EVENT on `window` (the `storage` event covers other windows).
 
-import { COLOUR_PRESETS, checkAccent, checkPreset, normHex, type Colours, type Refusal } from "./appearance";
+import { COLOUR_PRESETS, checkAccent, checkBase, checkPreset, checkWash, normHex, type Colours, type Refusal } from "./appearance";
 import { readKey, writeKey, type StorageArg } from "./storage";
 
 export const CUSTOM_PRESETS_KEY = "jarvis.hud.presets";
@@ -70,11 +70,28 @@ export function checkCustomPreset(p: CustomPreset): Refusal | null {
   const key = [c.accent, ...c.washes, c.base, c.codeAccent].join(",");
   const hit = verdicts.get(key);
   if (hit !== undefined) return hit;
-  let verdict: Refusal | null = checkPreset({ id: "custom", name: "custom", accent: c.accent, washes: c.washes, base: c.base });
+  // The cheap per-colour guards run first, so a doomed colour set is refused before the palette proof
+  // (inside checkPreset) is paid for; nothing that fails a guard is kept either way.
+  let verdict: Refusal | null = null;
+  for (const w of c.washes) {
+    const r = checkWash(w);
+    if (!r.ok) { verdict = r; break; }
+    if (r.clamped) { verdict = { ok: false, reason: r.note ?? "A preset colour would need darkening." }; break; }
+  }
+  if (!verdict) {
+    const b = checkBase(c.base);
+    if (!b.ok) verdict = b;
+    else if (b.clamped) verdict = { ok: false, reason: b.note ?? "A preset background would need darkening." };
+  }
+  if (!verdict) {
+    const a = checkAccent(c.accent, c.washes);
+    if (!a.ok) verdict = a;
+  }
   if (!verdict) {
     const code = checkAccent(c.codeAccent, c.washes);
     if (!code.ok) verdict = code;
   }
+  if (!verdict) verdict = checkPreset({ id: "custom", name: "custom", accent: c.accent, washes: c.washes, base: c.base });
   if (verdicts.size >= 512) verdicts.clear();
   verdicts.set(key, verdict);
   return verdict;
@@ -106,7 +123,9 @@ export function loadCustomPresets(storage?: Store | null): CustomPreset[] {
     const out: CustomPreset[] = [];
     const ids = new Set<string>();
     const names = new Set<string>(BUILTIN_NAMES);
-    for (const e of parsed) {
+    // At most this many raw entries are examined, however many are stored, so a hostile list cannot hold the
+    // thread: a list this HUD wrote has at most MAX_CUSTOM_PRESETS, and the rest is slack for dropped entries.
+    for (const e of parsed.slice(0, MAX_CUSTOM_PRESETS * 2)) {
       if (out.length >= MAX_CUSTOM_PRESETS) break;
       const p = cleanEntry(e);
       if (!p || ids.has(p.id) || names.has(fold(p.name))) continue;
@@ -144,7 +163,12 @@ function newId(taken: ReadonlySet<string>): string {
     const id = `c-${s || "0"}`;
     if (ID_RE.test(id) && !taken.has(id)) return id;
   }
-  return `c-${Date.now().toString(36)}`;
+  // The random source kept colliding (or is absent): the timestamp, with a counter until it is unique.
+  const stamp = Date.now().toString(36).slice(-18);
+  for (let n = 0; ; n++) {
+    const id = `c-${stamp}${n ? n.toString(36) : ""}`;
+    if (ID_RE.test(id) && !taken.has(id)) return id;
+  }
 }
 
 const takenReason = "That name is already used by a preset.";

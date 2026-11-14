@@ -225,11 +225,13 @@ export function AuroraSetting() {
   };
   const reset = () => {
     dropPending();
+    clearUndo();
     setNotes({});
     change({ accent: undefined, washes: undefined, base: undefined, codeAccent: undefined, rgb: false });
   };
   const usePreset = (p: ColourPreset) => {
     dropPending();
+    clearUndo();
     if (p.id === COLOUR_PRESETS[0].id) {
       setNotes({});
       return change({ accent: undefined, washes: undefined, base: undefined, rgb: false });
@@ -241,6 +243,7 @@ export function AuroraSetting() {
   };
   const toggleRgb = () => {
     dropPending();
+    clearUndo();
     setNotes({});
     change({ rgb: !a.rgb });
   };
