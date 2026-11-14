@@ -2757,3 +2757,29 @@ refused, gate never recording, window pages adopted, forget leaving the
 window, a cancelled launch leaving Chrome). **Not verified:** the
 real managed-account sign-in, the profile dialog itself, and what the
 school's policy sets; the owner does that after install.
+
+## Agent-opened Remote tabs: source `agent` (hud_open_browser, 2026-11-13)
+
+Decisions D2–D5: `docs/plans/2026-11-13-agent-pane-grid-decisions.md`;
+workspace side: `hud-workspace.md`, "`hud_open_browser`".
+
+- A chat's `hud_open_browser` opens public pages only. Two judges refuse
+  anything else: the daemon's `browser_open.judge_public_url` and the
+  window's `agentBrowserUrl`. Each page opens in a new Remote tab whose
+  source is `{kind: "agent"}`.
+- **The port gate.** The window makes the tab with `POST /browser/tabs`
+  (no URL) and then `/restore`, never `/navigate`. That makes it not the
+  owner's navigation, so no loopback port is admitted (BR-1a/BR-1c, L2).
+  `owner_browser_check.py` `test_11c` proves `restore` with real Chrome.
+- **Looking and driving (D5).** `agent` is read wherever `owner` is
+  (`look.py`, `drive.py` `_binding`) and grants nothing more:
+  - A look needs `see`.
+  - Driving needs `see`, `drive`, Remote mode and `agents_may_drive`
+    (`panes._effective_drive`, unchanged).
+  - An agent's own `goto` on an owner pane already worked this way.
+- **The mark is sticky.**
+  - It survives every report as a non-owner kind; only the owner's
+    `…/address` route makes the tab `owner`.
+  - A pop-up of the tab is `agent` too.
+  - The daemon refuses a forged variant (`{"kind": "agent", …}` with more
+    keys, 400).

@@ -1546,6 +1546,48 @@ that way.
   shrunk pane's view button, a composer in a shrunk pane, drawn cells at an
   exact fit).
 
+### `hud_open_browser`: a chat opens public pages in new Remote panes (2026-11-13)
+
+Decisions D2–D5 in the same plan file. The owner asked a chat to "pull up
+instagram in the browser" in three panels; no tool could open a Browser
+pane.
+
+- **Tool and service** (`jarvis/v2/tools/hud_open_browser.py`,
+  `jarvis/v2/browser_open.py`). 1–11 URLs, bound as `hud_open_subagents`
+  (tool check, then `agent_panes.refuse_desk_caller` under the daemon lock,
+  again after the lookups). Every URL is judged daemon-side first
+  (`judge_public_url`: `policy.judge_url`, then http(s), no Jarvis port on
+  any host, a public IP literal or a name not local by its spelling that
+  resolves only to public addresses); one refusal refuses the call and
+  publishes nothing. Bus record `browser_open {thread_id, data: {urls,
+  request_id?}}`; the window reports as above ("Opened 3 of 3 …").
+- **The HUD** places the record as one batch (`placeAgentBatch`), judging
+  each URL again (`lib/agentpanes.ts` `agentBrowserUrl`: no loopback, no
+  private/link-local/CGNAT/IPv6 literal, no one-label or local-network name;
+  refused ones count as not placed). A new pane is `agentBrowserSpec`: a
+  Browser view on the default profile with one Remote tab, `source {kind:
+  "agent"}`, no Remote handle; see and drive at their defaults. A reused pane
+  gains an active tab (`showAgentBrowser`); never a Private pane or one with
+  12 tabs. Focus never moves.
+- **Never the owner's navigation.** The pane's `ensure` makes the tab with
+  `POST /browser/tabs` (no URL) and `/restore`, never `/navigate`, so no
+  loopback port is admitted (BR-1a/BR-1c, L2).
+- **The agent's tab (D5).** `agent` is a source kind of its own (HUD
+  `BrowserSource`, daemon `ResolvedSource`): the chat may look at it, and
+  drive it under the usual switches (the pane's see and drive, Remote,
+  `agents_may_drive`), exactly as an owner pane it navigated with `goto`. It
+  grants nothing beyond `owner`, is sticky across reports, survives storage
+  and a split's copy, passes to a pop-up, and becomes the owner's only on
+  his own address-bar Enter. A forged variant is `unknown` (HUD) or refused
+  (daemon).
+- Tests: `tests/v2/hud_open_browser_check.py` (binding, URL refusals with
+  mutations, the publish and report, `AgentTab`: resolve, `_effective_drive`
+  under each switch, the drive binding and the look); `agentpanes.test.ts`
+  (the spec, the source reported to `/browser/front`, defaults, storage);
+  `tests/face/hud_v2_agent_browser_check.py` (restore never navigate, focus,
+  the registry's `agent` resolution, the report); also a section of
+  `hud_v2_check.py`.
+
 ## Native sub-agents: the owner's Stop on one child (SV-4, 2026-10-15)
 
 API: `docs/hud-api.md` "`POST /threads/{id}/subagents/{sid}/stop`"; daemon

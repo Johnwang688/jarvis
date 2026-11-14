@@ -11,12 +11,17 @@ checked in the tool and again by the service under the daemon lock.
 
 **It never admits a loopback port.** Two halves: loopback, LAN and Jarvis
 URLs are refused here (`Urls`), and the HUD opens each page through the
-window's `restore` path with the tab marked not the owner's
-(`hud/src/lib/agentpanes.test.ts` "agentBrowserSpec", with its mutation;
-`tests/face/hud_v2_agent_browser_check.py`: POST /browser/tabs without a URL,
-then /restore, never /navigate). That `restore` never opens the gate, with
-real Chrome, is `owner_browser_check.py`
+window's `restore` path with the tab marked the agent's, never the owner's
+navigation (`hud/src/lib/agentpanes.test.ts` "agentBrowserSpec", with its
+mutation; `tests/face/hud_v2_agent_browser_check.py`: POST /browser/tabs
+without a URL, then /restore, never /navigate). That `restore` never opens
+the gate, with real Chrome, is `owner_browser_check.py`
 `test_11c_stored_restore_never_opens_gate_or_hits_control_ports`.
+
+**The chat may look at and drive what it opened (D5)** under the usual
+switches, as an owner pane it navigated: `AgentTab` (the registry's
+resolve and `_effective_drive` with every switch, the drive binding, the
+look), with the source-list mutation below.
 
 Free and hermetic: no DNS (every resolver here is a stand-in), every daemon
 on port 0 over a temporary V2_DATA_DIR and temporary config.
@@ -38,6 +43,9 @@ TEST -> MUTATION
   a name resolving to a private address        Urls.test_a_name_must_resolve_to_public_addresses_only
   one bad URL publishes the good ones          Urls.test_one_refusal_refuses_the_whole_call
   words or names on the bus                    Publish.test_the_bus_carries_the_judged_urls_and_an_id_only
+  `agent` left out of look/drive's kinds       AgentTab.test_the_drive_binding_accepts_it_as_an_owner_pane_and_still_refuses_unknown,
+                                               AgentTab.test_the_look_accepts_it
+  drive granted with a switch off              AgentTab.test_drive_is_refused_when_any_switch_is_off
 """
 from __future__ import annotations
 
@@ -359,6 +367,114 @@ class Publish(unittest.TestCase):
     def test_it_shares_the_daemons_report_waiter(self):
         daemon = SimpleNamespace(agent_pane_reports=agent_panes.PaneReports(SimpleNamespace()))
         self.assertIs(browser_open.BrowserOpens(daemon).reports, daemon.agent_pane_reports)
+
+
+# --- the agent's tab in the pane registry, the look and the drive (decision D5) ---------------
+
+from copy import deepcopy  # noqa: E402
+
+from jarvis.v2.browser import drive as drive_mod, look as look_mod  # noqa: E402
+from jarvis.v2.browser.panes import BrowserPanes, PaneRefused  # noqa: E402
+
+PW, PROFILE, TAB, LOCAL_ID = "a" * 32, "p-0123abcd", "0123abcd", "abcdef"
+
+
+class AgentTab(unittest.TestCase):
+    """An agent-opened Remote tab (`source {kind: "agent"}`) resolves for a
+    look and is driven under exactly the switches an owner pane is: the
+    pane's see and drive, Remote, and `agents_may_drive`."""
+
+    def setUp(self):
+        self.flags = {"agents_may_drive": True}
+        self.rows = {TAB: {"tab_id": TAB, "profile": PROFILE, "ctx": None, "url": IG,
+                           "page_identity": 1, "document_generation": 1}}
+        self.host = SimpleNamespace(pane_tab=lambda tid: deepcopy(self.rows.get(tid)),
+                                    refused_ports=lambda: REFUSED_PORTS, input_held=lambda: False,
+                                    loopback_open=lambda port: False)
+        settings = SimpleNamespace(value=lambda key: self.flags.get(key))
+        self.daemon = SimpleNamespace(browser=self.host, browser_settings=settings,
+                                      devservers=SimpleNamespace(source_snapshot=lambda entry: None),
+                                      terminals=SimpleNamespace(readable_source=lambda tid: False))
+        self.registry = BrowserPanes(self.daemon, clock=lambda: 1.0)
+        self.daemon.browser_panes = self.registry
+        self.registry.window_started(PW)
+        self.seq = 0
+
+    def report(self, *, see=True, drive=True, mode="remote", source=None):
+        self.seq += 1
+        tab = ({"id": LOCAL_ID, "mode": "remote", "tab_id": TAB, "source": source}
+               if mode == "remote" else
+               {"id": LOCAL_ID, "mode": "direct", "url": "http://localhost:23456/", "source": source})
+        return self.registry.report({
+            "window": PW, "seq": self.seq, "focus_seq": self.seq, "focused_slot": 1, "covered": False,
+            "panes": [{"pane_id": 2, "slot": 1, "drawn": True, "profile": PROFILE, "ctx": None, "see": see,
+                       "drive": drive, "active": LOCAL_ID, "tabs": [tab]}]})
+
+    def test_resolves_as_the_agents_with_drive_under_the_usual_switches(self):
+        receipt = self.report(source={"kind": "agent"})
+        snap = self.registry.resolve("1")
+        self.assertEqual((snap.source.kind, snap.mode, snap.see, snap.drive), ("agent", "remote", True, True))
+        self.assertTrue(receipt["panes"][0]["drive"])
+        pane = self.registry._windows[PW].panes[2]
+        self.assertTrue(self.registry._effective_drive(pane))
+
+    def test_drive_is_refused_when_any_switch_is_off(self):
+        for label, kw, flag in (("pane drive off", {"drive": False}, True),
+                                ("pane see off", {"see": False}, True),
+                                ("agents_may_drive off", {}, False),
+                                ("Direct, not Remote", {"mode": "direct"}, True)):
+            with self.subTest(case=label):
+                self.flags["agents_may_drive"] = flag
+                self.report(source={"kind": "agent"}, **kw)
+                pane = self.registry._windows[PW].panes[2]
+                self.assertFalse(self.registry._effective_drive(pane))
+                self.assertFalse(self.registry.resolve("1").drive)
+        self.flags["agents_may_drive"] = True
+        self.report(source={"kind": "agent"})
+        self.assertTrue(self.registry.resolve("1").drive, "all on again: drive")
+
+    def test_a_later_report_never_turns_it_into_the_owners(self):
+        self.report(source={"kind": "agent"})
+        self.report(source=None)
+        self.assertEqual(self.registry.resolve("1").source.kind, "agent")
+
+    def test_a_forged_agent_source_is_refused(self):
+        for bad in ({"kind": "agent", "thread_id": "ab12cd34"}, {"kind": "agent", "owner": True},
+                    {"kind": "Agent"}):
+            with self.subTest(source=bad):
+                with self.assertRaises(PaneRefused):
+                    self.report(source=bad)
+
+    def test_the_drive_binding_accepts_it_as_an_owner_pane_and_still_refuses_unknown(self):
+        self.report(source={"kind": "agent"})
+        snap = self.registry.resolve("1")
+        stub = SimpleNamespace(daemon=self.daemon)
+        stub._url = lambda url: drive_mod.BrowserDrive._url(stub, url)
+        self.assertEqual(drive_mod.BrowserDrive._binding(stub, snap).source.kind, "agent")
+        self.flags["agents_may_drive"] = False
+        self.report(source={"kind": "agent"})
+        with self.assertRaises(drive_mod.LookRefused):
+            drive_mod.BrowserDrive._binding(stub, self.registry.resolve("1"))
+        self.flags["agents_may_drive"] = True
+        self.rows[TAB] = dict(self.rows[TAB])
+        unknown = BrowserPanes(self.daemon, clock=lambda: 1.0)
+        self.daemon.browser_panes = unknown
+        unknown.window_started(PW)
+        self.registry = unknown
+        self.report(source={"kind": "unknown"})
+        with self.assertRaises(drive_mod.LookRefused):
+            drive_mod.BrowserDrive._binding(stub, unknown.resolve("1"))
+
+    def test_the_look_accepts_it(self):
+        self.report(source={"kind": "agent"})
+        snap = self.registry.resolve("1")
+        look = look_mod.BrowserLook(self.daemon)
+
+        def go():
+            runtime.bind(depth=0, desk={"present": True})
+            look._current(snap)
+            return True
+        self.assertTrue(contextvars.Context().run(go))
 
 
 # --- through the real daemon and bridge ------------------------------------------------------

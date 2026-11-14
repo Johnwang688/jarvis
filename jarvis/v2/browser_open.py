@@ -15,11 +15,13 @@ Each HUD window places the panes as one batch (`lib/agentpanes.ts`, as
 never the chat's own pane, the focused or keyboard pane, a pane an agent is
 driving or one holding work, never moving focus. Each new pane is a Browser
 view on the default (named, never Private) profile with one Remote tab at
-its URL, marked **not the owner's** (`source: {kind: "unknown"}`, so no
-agent can look at or drive it until the owner navigates it himself), and
-created through the window's restore path, which is never the owner's own
-navigation: it admits no loopback port in the gate (BR-1a/BR-1c and
-amendment 2's L2). The window judges each URL again and refuses loopback.
+its URL, marked **the agent's** (`source: {kind: "agent"}`, decision D5:
+the chat may look at it and, with that pane's "Jarvis can drive" and
+`agents_may_drive` on, drive it, exactly as an owner pane it navigated with
+its own `goto`; `browser/panes.py` `ResolvedSource`), and created through
+the window's restore path, which is never the owner's own navigation: it
+admits no loopback port in the gate (BR-1a/BR-1c and amendment 2's L2). The
+window judges each URL again and refuses loopback.
 
 What it cannot do: open a loopback, LAN, link-local or Jarvis address, any
 scheme but http(s), a Private pane, a Direct frame, take focus, close a pane,
@@ -205,8 +207,9 @@ class BrowserOpens:
                     f"Settings may be open there), so whether all {n} opened is not known.")
         placed, not_placed = answer["placed"], answer["not_placed"]
         if not_placed == 0:
-            return (f"Opened {placed} of {n} Browser pane(s) at {sites}, in Remote mode. They are "
-                    "not yours to look at or drive until the owner navigates them himself.")
+            return (f"Opened {placed} of {n} Browser pane(s) at {sites}, in Remote mode. You can "
+                    "look at them, and drive them where the owner allows it, as with any Browser "
+                    "pane.")
         return (f"Opened {placed} of {n} Browser pane(s) at {sites}; no room for {not_placed} (the "
                 "window is too small for more panes, or the rest hold the owner's work).")
 

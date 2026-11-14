@@ -10,8 +10,9 @@ Codex owner chats are offered it through the session catalog
 `permit` decides (`jarvis-session-delegate`). `EXPLICIT_ONLY`, so no v1
 surface holds it; the fast path never does; never in `mcp_catalog.MCP_TOOLS`.
 Not `PARALLEL_SAFE`, not dangerous: it asks the owner's window to show
-public pages, judged first, which no agent may then look at or drive until
-the owner navigates them himself; it admits no loopback port.
+public pages, judged first. The chat may then look at and drive them under
+the usual switches, as a pane it navigated with its own `goto` (decision
+D5); it admits no loopback port and never takes focus.
 """
 from __future__ import annotations
 

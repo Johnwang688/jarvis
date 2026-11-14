@@ -3525,6 +3525,21 @@ already over) is 404; a second window's answer is 409 (the first wins). No
 query string. The body carries counts and ids only, never a URL, name or
 word, and decides nothing: it is only what the chat is told.
 
+**Bus record** `browser_open` (`hud_open_browser`, decisions D2–D5): `{thread_id,
+data: {urls: [url, …], request_id?}}`, 1–11 URLs as the daemon judged them
+(public http(s) only). The window judges each again, places the record as
+one batch, and reports as above. Each page becomes a Remote tab with
+`source {kind: "agent"}` and no handle, made by `POST /browser/tabs` without
+a URL and then `POST /browser/tabs/{id}/restore` (never `navigate`: no
+loopback port is opened).
+
+**Browser pane source `agent`** (`POST /browser/front`, a Remote or Direct
+tab's `source`): exactly `{"kind": "agent"}`, any other key 400. The
+registry resolves it as `agent`: looked at and driven as an owner pane is
+(see, drive, Remote, `agents_may_drive`), never the owner's navigation, and
+kept across reports until the owner's own `…/address` makes the tab
+`owner`.
+
 ## Additions 2026-10-16: owner pickers for native select, date and colour controls (B-PICKERS)
 
 Chrome's screencast never draws a `<select>`, date, time, datetime-local,

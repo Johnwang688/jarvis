@@ -307,7 +307,9 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     if(now.current.view.ws.panes.some(p=>p.browser?.tabs.some(t=>t.remoteTabId===remoteId)))return;
     const id=browserTabId(initial.browser?.tabs.map(t=>t.id)??[]);
     const parent=initial.browser?.tabs.find(t=>t.remoteTabId===opener);
-    now.current.view.addBrowserTab(pane,row.url??"",{id,mode:"remote",...((parent?.source||parent?.auto)?{source:{kind:"unknown" as const}}:{})});
+    // A pop-up keeps an agent-opened page's provenance (D5: as a page the agent navigated); any other marked parent's is unknown.
+    const inherited=parent?.source?.kind==="agent"?{source:{kind:"agent" as const}}:(parent?.source||parent?.auto)?{source:{kind:"unknown" as const}}:{};
+    now.current.view.addBrowserTab(pane,row.url??"",{id,mode:"remote",...inherited});
     now.current.view.setBrowserRemote(pane,id,{mode:"remote",remoteTabId:remoteId,url:row.url,title:row.title,ctx:row.ctx??undefined});
   },[allowed,selectedProfile,orphan]);
   const focusPane=useCallback((pane:PaneNo)=>{

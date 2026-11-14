@@ -14,7 +14,7 @@ import {
   type LayoutNode, type StoredNode,
 } from "./splittree";
 import {
-  agentBrowserSpec, defaultWorkspace, fitWorkspace, orderOf, parseWorkspace, PANE_MIN_H, PANE_MIN_W, PANE_NOS,
+  agentBrowserSpec, copySpec, defaultWorkspace, fitWorkspace, workspaceStorage, orderOf, parseWorkspace, PANE_MIN_H, PANE_MIN_W, PANE_NOS,
   setBrowserUrl, setPreset, showAgentBrowser, showSubagent, submitBrowserUrl, subagentSpec, type PaneNo, type Workspace,
 } from "./workspace";
 
@@ -294,15 +294,15 @@ describe("agentBrowserUrl: the window judges each page again", () => {
   });
 });
 
-describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is never the owner's", () => {
+describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is the agent's, never the owner's", () => {
   const PORTS = { hud: 8405, api: 8402, workshop: 8403, self: 8405, frameHardened: true };
 
-  it("a new pane: Browser view, default profile, one Remote tab with an unknown source and no handle yet", () => {
+  it("a new pane: Browser view, default profile, one Remote tab marked the agent's, with no handle yet", () => {
     const spec = agentBrowserSpec("https://www.instagram.com/", "abc123");
     expect(spec).toEqual({
       view: "browser", projectId: null, terminalId: null, browserUrl: "https://www.instagram.com/",
       browser: { active: "abc123", tabs: [{ id: "abc123", url: "https://www.instagram.com/", mode: "remote",
-        source: { kind: "unknown" } }] },
+        source: { kind: "agent" } }] },
     });
     // No browserProfile (the default, never Private), no see/drive keys (their defaults), no remoteTabId
     // (the window's `ensure` creates it through `restore`, never the owner's `navigate`).
@@ -310,14 +310,14 @@ describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is never the ow
     expect("see" in spec || "drive" in spec).toBe(false);
   });
 
-  it("the daemon is told the tab is not the owner's (source unknown, never null = owner)", () => {
+  it("the daemon is told the tab is the agent's (source agent, never null = the owner's navigation)", () => {
     const ws0 = defaultWorkspace();
     const ws = { ...ws0, tree: gridTree([P(1), P(2)], [2])!, panes: ws0.panes.map((p, i) =>
       i === 1 ? agentBrowserSpec("https://www.instagram.com/", "abc123") : p) };
     const front = browserFront(ws, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS);
     const pane = front.panes.find((p) => p.pane_id === 2)!;
     expect(pane.profile).toBe("p-11111111");
-    expect(pane.tabs).toEqual([{ id: "abc123", mode: "remote", tab_id: null, source: { kind: "unknown" } }]);
+    expect(pane.tabs).toEqual([{ id: "abc123", mode: "remote", tab_id: null, source: { kind: "agent" } }]);
     // What this pins: a tab without the mark would be reported as the owner's own (null).
     const owners = { ...ws, panes: ws.panes.map((p, i) => i === 1
       ? { ...p, browser: { ...p.browser!, tabs: p.browser!.tabs.map(({ source: _s, ...t }) => t) } } : p) };
@@ -325,10 +325,35 @@ describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is never the ow
       .panes.find((p) => p.pane_id === 2)!.tabs[0].source).toBeNull();
   });
 
+  it("see and drive keep a new pane's defaults: reported on, the daemon still gates drive (D5)", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, tree: gridTree([P(1), P(2)], [2])!, panes: ws0.panes.map((p, i) =>
+      i === 1 ? agentBrowserSpec("https://www.instagram.com/", "abc123") : p) };
+    const pane = browserFront(ws, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS)
+      .panes.find((p) => p.pane_id === 2)!;
+    expect([pane.see, pane.drive]).toEqual([true, true]);
+    // The owner's switches still win: off is stored and reported off.
+    const off = { ...ws, panes: ws.panes.map((p, i) => i === 1 ? { ...p, drive: false as const } : p) };
+    expect(browserFront(off, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS)
+      .panes.find((p) => p.pane_id === 2)!.drive).toBe(false);
+  });
+
+  it("the agent mark survives storage and a split's copy; a forged one is unknown, never the owner's", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, panes: ws0.panes.map((p, i) => i === 0 ? agentBrowserSpec("https://a.example.com/", "abc123") : p) };
+    const back = parseWorkspace(JSON.stringify(workspaceStorage(ws)));
+    expect(back.panes[0].browser!.tabs[0].source).toEqual({ kind: "agent" });
+    expect(copySpec(ws.panes[0]).browser!.tabs[0].source).toEqual({ kind: "agent" });
+    const forged = { ...ws, panes: ws.panes.map((p, i) => i === 0
+      ? { ...p, browser: { ...p.browser!, tabs: [{ ...p.browser!.tabs[0], source: { kind: "agent", owner: true } }] } } : p) };
+    expect(parseWorkspace(JSON.stringify(workspaceStorage(forged as Workspace))).panes[0].browser!.tabs[0].source)
+      .toEqual({ kind: "unknown" });
+  });
+
   it("only the owner's own address-bar Enter turns it into the owner's tab", () => {
     const ws0 = defaultWorkspace();
     const ws = { ...ws0, panes: ws0.panes.map((p, i) => i === 0 ? agentBrowserSpec("https://a.example.com/", "abc123") : p) };
-    expect(setBrowserUrl(ws, P(1), "https://a.example.com/next").panes[0].browser!.tabs[0].source).toEqual({ kind: "unknown" });
+    expect(setBrowserUrl(ws, P(1), "https://a.example.com/next").panes[0].browser!.tabs[0].source).toEqual({ kind: "agent" });
     expect(submitBrowserUrl(ws, P(1), "https://b.example.com/").panes[0].browser!.tabs[0].source).toBeUndefined();
   });
 
@@ -338,7 +363,7 @@ describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is never the ow
     expect(next.panes[2].view).toBe("browser");
     expect(next.panes[2].projectId).toBe(three.panes[2].projectId);
     const tabs = next.panes[2].browser!.tabs;
-    expect(tabs.at(-1)).toMatchObject({ url: "https://www.instagram.com/", mode: "remote", source: { kind: "unknown" } });
+    expect(tabs.at(-1)).toMatchObject({ url: "https://www.instagram.com/", mode: "remote", source: { kind: "agent" } });
     expect(next.panes[2].browser!.active).toBe(tabs.at(-1)!.id);
     expect(next.focused).toBe(three.focused);
     // Never a Private pane (D2).
@@ -356,7 +381,7 @@ describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is never the ow
     expect(out.ws.focused).toBe(1);
     for (const [i, n] of [2, 3, 4].entries()) {
       const tab = out.ws.panes[n - 1].browser!.tabs[0];
-      expect(tab).toMatchObject({ url: pages[i], mode: "remote", source: { kind: "unknown" } });
+      expect(tab).toMatchObject({ url: pages[i], mode: "remote", source: { kind: "agent" } });
       expect(tab.remoteTabId).toBeUndefined();
     }
   });

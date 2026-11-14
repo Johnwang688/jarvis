@@ -1968,13 +1968,15 @@ export default function App() {
           }
           break;
         case "browser_open":
-          // A chat's own `hud_open_browser` (browser_open.py, decisions D2):
-          // public pages the daemon judged, each for a new Remote pane on the
-          // default profile, placed as one batch like `subagent_open`. Each
-          // URL is judged again here and a local or private one is refused
-          // (counted as not placed). The tab is never the owner's: no agent
-          // looks at or drives it, and it is created through `restore`, so it
-          // opens no loopback port (lib/workspace `agentBrowserSpec`).
+          // A chat's own `hud_open_browser` (browser_open.py, decisions D2,
+          // D5): public pages the daemon judged, each for a new Remote pane on
+          // the default profile, placed as one batch like `subagent_open`.
+          // Each URL is judged again here and a local or private one is
+          // refused (counted as not placed). The tab is the agent's (`source
+          // {kind: "agent"}`: looked at and driven under the usual switches,
+          // as a pane it navigated), never the owner's navigation: it is
+          // created through `restore`, so it opens no loopback port
+          // (lib/workspace `agentBrowserSpec`). Focus never moves.
           if (tid && Array.isArray(data.urls) && data.urls.length) {
             const named = data.urls.slice(0, AGENT_OPEN_MAX);
             const urls = named.map(agentBrowserUrl).filter((u: string | null): u is string => u !== null);

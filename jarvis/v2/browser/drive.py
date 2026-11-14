@@ -135,7 +135,8 @@ class BrowserDrive:
         fresh=registry.after_navigation(snapshot) if navigation else snapshot
         if fresh is None or (not navigation and not registry.still_current(snapshot)):raise LookRefused(CHANGED)
         source=fresh.source
-        if source.kind not in ("owner","terminal","thread"):raise LookRefused(SOURCE_UNKNOWN)
+        # `agent`: a page a chat opened (hud_open_browser, D5), driven as an owner pane it navigated.
+        if source.kind not in ("owner","agent","terminal","thread"):raise LookRefused(SOURCE_UNKNOWN)
         if source.kind=="terminal" and not self.daemon.terminals.readable_source(source.terminal_id):
             raise LookRefused(SOURCE_OFF)
         self._url(fresh.url)

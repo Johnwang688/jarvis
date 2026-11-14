@@ -13,9 +13,10 @@ the production pane registry and a fake Chrome host; no page is loaded):
     /browser/tabs` with no URL and then `/restore` (which never opens a
     loopback port, `owner_browser_check.py` test_11c), never `/navigate`
     and never a new tab with a URL;
-  - **never the owner's tab**: `/browser/front` reports each one with
-    `source {kind: "unknown"}`, so the registry resolves it as unknown and
-    no agent may look at or drive it;
+  - **the agent's tab, never the owner's navigation** (decision D5):
+    `/browser/front` reports each one with `source {kind: "agent"}`; the
+    production registry resolves it as `agent`, with see on and drive as the
+    usual switches say (exactly `agents_may_drive`, the pane's own at defaults);
   - the window judges each URL again: a loopback URL in the record is not
     opened (and nothing ever reaches it), and is counted as not placed in
     the report to `/agent-panes/report`.
@@ -70,10 +71,10 @@ def agent_browser_checks(browser, mock, base, check, until, guard, init_script):
         check("three pages from one pane: a grid of four, the chat first",
               ws["order"][0] == 1 and len(new) == 3 and all(s["view"] == "browser" for s in specs),
               str(ws["order"]))
-        check("each new pane: the default profile, one Remote tab at its page, not the owner's",
+        check("each new pane: the default profile, one Remote tab at its page, the agent's",
               sorted(s["browser"]["tabs"][0]["url"] for s in specs) == sorted(PAGES)
               and all(len(s["browser"]["tabs"]) == 1 and s["browser"]["tabs"][0]["mode"] == "remote"
-                      and s["browser"]["tabs"][0].get("source") == {"kind": "unknown"}
+                      and s["browser"]["tabs"][0].get("source") == {"kind": "agent"}
                       # The default profile (the window pins its id once the pane mounts), never Private;
                       # see and drive at their defaults (stored only when off).
                       and s.get("browserProfile", "p-11111111") == "p-11111111"
@@ -95,15 +96,35 @@ def agent_browser_checks(browser, mock, base, check, until, guard, init_script):
         fronts = [b for m, p, b in mock.calls if m == "POST" and p == "/browser/front"]
         last = fronts[-1] if fronts else {"panes": []}
         agent = [p for p in last["panes"] if p["pane_id"] in new]
-        check("/browser/front tells the daemon each tab is not the owner's (source unknown)",
-              len(agent) == 3 and all(t["source"] == {"kind": "unknown"} and t["mode"] == "remote"
+        check("/browser/front tells the daemon each tab is the agent's (source agent, never null)",
+              len(agent) == 3 and all(t["source"] == {"kind": "agent"} and t["mode"] == "remote"
                                       for p in agent for t in p["tabs"])
               and all(p["profile"] == "p-11111111" for p in agent), json.dumps(agent)[:400])
         host = state(mock)
-        check("the registry resolves them as unknown: no agent may look or drive",
-              all(b.source.kind == "unknown" for w in mock.browser_panes._windows.values()
+        check("the registry resolves them as the agent's",
+              all(b.source.kind == "agent" for w in mock.browser_panes._windows.values()
                   for pane in w.panes.values() if pane.pane_id in new for b in pane.tabs.values()),
               str(len(host.rows)))
+        slots = [ws["order"].index(n) + 1 for n in new]
+        snaps = []
+
+        def resolved():
+            # The window's next report lands after each Remote handle settles: wait for it.
+            snaps.clear()
+            for slot in slots:
+                try:
+                    snaps.append(mock.browser_panes.resolve(str(slot)))
+                except Exception as exc:
+                    snaps.append(exc)
+            return all(not isinstance(x, Exception) for x in snaps)
+        try:
+            until(resolved, timeout=5)
+        except Exception:
+            pass
+        may_drive = mock.browser_settings.value("agents_may_drive") is True
+        check("each resolves for a look: see on, Remote, the agent's; drive exactly as agents_may_drive says (D5)",
+              all(getattr(x, "source", None) is not None and x.source.kind == "agent" and x.see and x.mode == "remote"
+                  and x.drive is may_drive for x in snaps), f"may_drive={may_drive} " + repr(snaps)[:300])
         report = reports[0]
         check("the window reports 3 opened, 1 not (the loopback URL), keyed by the request id",
               report["request_id"] == rid and (report["placed"], report["not_placed"]) == (3, 1), str(report))
