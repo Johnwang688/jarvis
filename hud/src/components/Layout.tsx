@@ -172,13 +172,18 @@ export function keyboardPane(): PaneNo | null {
  * nothing holds it any more (the element unmounted, focus fell to `<body>`),
  * it goes back to that pane's own focus target — its message box, else the
  * pane — never a Browser frame (R-1), and not while a card is up
- * (`blocked`). Focus that moved anywhere else meanwhile is left alone.
+ * (`blocked`). Focus that moved anywhere else meanwhile is left alone, and
+ * once it has been seen anywhere outside `pane` the watch ends: the owner
+ * moved it, so a later fall to `<body>` (a click on blank space) is theirs
+ * too (Sol re-verify of PR #358).
  */
 export function keepKeyboard(pane: PaneNo, blocked: () => boolean, frames = 4) {
   requestAnimationFrame(() => {
     const el = document.activeElement;
     const lost = !el || el === document.body || !el.isConnected;
-    // Not lost (yet): look again for a few frames, while the change draws.
+    // Somewhere else, live: the owner's choice. Stop watching.
+    if (!lost && keyboardPane() !== pane) return;
+    // Still in the pane: look again for a few frames, while the change draws.
     if (!lost) { if (frames > 0) keepKeyboard(pane, blocked, frames - 1); return; }
     if (blocked()) return;
     const box = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
