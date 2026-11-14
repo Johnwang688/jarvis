@@ -2127,6 +2127,8 @@ derived accent token is computed in OKLCH from the default so the default is
 byte-exact. Stored in `localStorage['jarvis.hud.appearance']` (per window, never
 sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
 
+**Presets, Pink, RGB, editor colour (2026-11-13).** Settings → Appearance has ten static presets (PR #357 plus Pink), each saved through `checkPreset`, the same guards as a hand pick. **RGB** (owner decision 2026-11-13) cycles the aurora's three washes, 120° apart, round the **full** OKLCH wheel, red, orange and yellow included. This is the one owner exception to "no colour near amber/red". It is limited to the aurora background in RGB mode: hand picks and presets keep the guard, every RGB wash keeps the D-8 luminance cap, and the accent is the near-white `RGB_ACCENT`. The controller swaps uniforms per step from a 360-entry table (`aurora/rgb.ts`) and writes no CSS per frame. Still and reduced motion draw one frame. The speed is 8–120 s per cycle (default 30). **Editor & terminal colour** (`codeAccent`, default `#6fc3df`) drives `--code-accent`, `--code-accent-hi` and `--syn-fn`. Monaco's chrome and the terminal read those instead of `--accent*`, so a white or preset accent no longer whitens code. Presets and RGB never change it; Reset clears it.
+
 **Startup animation (D-12, 2026-11-12):** "Constellation + Orb" (`lib/boot.ts`, `components/BootOverlay.tsx`) replaces the 2026-10-12 boot above, keeping all its play/skip/shield/cap rules; it draws its own aurora from the live tokens, docks into the real `#orb` and crossfades to the HUD.
 
 **Boot click shield timing (follow-up to #354, 2026-11-12):** the 7 s cap ends the drawing and GL context whatever the pointer does. The invisible shield then leaves `SHIELD_MS` (450 ms) after the latest release, anchored to the release: eaten clicks never extend it. A pointer still held at `SHIELD_DEADLINE_MS` (7450 ms) loses it then; a release before that keeps its own 450 ms even past 7450, so the absolute bound is `SHIELD_ABSOLUTE_MS` (7900 ms), enforced by a backstop timer.
@@ -2136,5 +2138,5 @@ sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
 
 **Known gaps.** GPU performance is unmeasured on the owner's machine (the
 60 fps / 4 ms budget): the recorded numbers are headless SwiftShader only.
-The phone is not themed (AG-5). The derived `--accent-hi`/`--syn-fn` are not
+The phone is not themed (AG-5). The derived `--accent-hi`/`--code-accent-hi`/`--syn-fn` are not
 themselves guard-checked. A live look at the HUD after install is the owner's.

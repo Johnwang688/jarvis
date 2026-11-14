@@ -210,12 +210,12 @@ describe("the chrome", () => {
     expect(c["editor.lineHighlightBackground"]).toBe(p["--bg-2"]);
     expect(c["editorLineNumber.foreground"]).toBe(p["--text-muted"]);
     expect(c["editorLineNumber.activeForeground"]).toBe(p["--text-2"]);
-    expect(c["editorCursor.foreground"]).toBe(p["--accent-hi"]);
-    expect(c["editor.selectionBackground"]).toBe(`${p["--accent"]}40`);
-    expect(c["editor.inactiveSelectionBackground"]).toBe(`${p["--accent"]}21`);
-    expect(c["editor.findMatchBackground"]).toBe(`${p["--accent"]}59`);
-    expect(c["editor.findMatchBorder"]).toBe(p["--accent"]);
-    expect(c["editor.findMatchHighlightBackground"]).toBe(`${p["--accent"]}26`);
+    expect(c["editorCursor.foreground"]).toBe(p["--code-accent-hi"]);
+    expect(c["editor.selectionBackground"]).toBe(`${p["--code-accent"]}40`);
+    expect(c["editor.inactiveSelectionBackground"]).toBe(`${p["--code-accent"]}21`);
+    expect(c["editor.findMatchBackground"]).toBe(`${p["--code-accent"]}59`);
+    expect(c["editor.findMatchBorder"]).toBe(p["--code-accent"]);
+    expect(c["editor.findMatchHighlightBackground"]).toBe(`${p["--code-accent"]}26`);
     expect(c["editor.wordHighlightBackground"]).toBe("#ffffff14"); // white at 8%: --selected
     expect(c["editorBracketMatch.border"]).toBe(p["--text-muted"]);
     expect([1, 2, 3].map((n) => c[`editorBracketHighlight.foreground${n}`]))

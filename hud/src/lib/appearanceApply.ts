@@ -5,7 +5,7 @@
 // style change.
 
 import {
-  APPEARANCE_EVENT, DEFAULT_ACCENT, DEFAULT_COLOURS, colourProps, deriveAccent, loadAppearance, resolveColours,
+  APPEARANCE_EVENT, DEFAULT_ACCENT, DEFAULT_CODE_ACCENT, DEFAULT_COLOURS, colourProps, deriveAccent, loadAppearance, resolveColours,
   type Appearance,
 } from "./appearance";
 import { DEFAULT_COOL, setCoolHues } from "./orbpalette";
@@ -16,7 +16,8 @@ export const MANAGED_PROPS: readonly string[] = Object.keys(colourProps(DEFAULT_
 export function applyAppearance(a: Appearance, root: HTMLElement = document.documentElement): void {
   const c = resolveColours(a);
   const isDefault =
-    c.accent === DEFAULT_ACCENT && c.base === DEFAULT_COLOURS.base && c.washes.every((w, i) => w === DEFAULT_COLOURS.washes[i]);
+    c.accent === DEFAULT_ACCENT && c.codeAccent === DEFAULT_CODE_ACCENT && c.base === DEFAULT_COLOURS.base
+    && c.washes.every((w, i) => w === DEFAULT_COLOURS.washes[i]);
   if (isDefault) {
     for (const k of MANAGED_PROPS) root.style.removeProperty(k);
     setCoolHues(DEFAULT_COOL);

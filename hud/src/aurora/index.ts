@@ -31,6 +31,7 @@ export function startAurora(doc: Document = document): (() => void) | null {
       stir: a.stir,
       activity: a.activity,
       drift: a.drift,
+      cycle: a.rgb ? a.rgbSpeed : null,
     };
   };
 

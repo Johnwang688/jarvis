@@ -113,12 +113,12 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         check("xterm's cyan is the default accent before a pick", cyan0 == _rgb(DEFAULT_ACCENT), cyan0)
 
         # ---- live re-theme (the workspace is on screen, so the terminal and Monaco are mounted) -----------------
-        page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({motion: 'fluid', stir: true, activity: true, accent: v}));
+        page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({motion: 'fluid', stir: true, activity: true, accent: v, codeAccent: v}));
           window.__orbPigments = new Set();
           window.dispatchEvent(new Event('hud-appearance-change')); }""", [APPEARANCE, LAVENDER])
         until(lambda: _token(page, "--accent") == LAVENDER, timeout=3)
         cyan1 = page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color")
-        check("the open terminal re-themed live (cyan is the new accent), with no reload", cyan1 == _rgb(LAVENDER), cyan1)
+        check("the open terminal re-themed live (cyan is the new editor & terminal colour), with no reload", cyan1 == _rgb(LAVENDER), cyan1)
         until(lambda: page.evaluate(f"getComputedStyle({cursor}).backgroundColor") != cur0, timeout=3)
         cur1 = page.evaluate(f"getComputedStyle({cursor}).backgroundColor")
         check("and the open Monaco editor re-themed live (its cursor colour changed)", cur1 != cur0, f"{cur0} -> {cur1}")
@@ -132,12 +132,22 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         check("and back to the default again live", cyan2 == _rgb(DEFAULT_ACCENT), cyan2)
 
         # Another window's storage event takes the same live path, including Monaco and xterm.
-        page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({accent: v}));
+        page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({accent: v, codeAccent: v}));
           window.dispatchEvent(new StorageEvent('storage', {key: k})); }""", [APPEARANCE, LAVENDER])
         until(lambda: page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color") == _rgb(LAVENDER), timeout=3)
         until(lambda: page.evaluate(f"getComputedStyle({cursor}).backgroundColor") == cur1, timeout=3)
         check("a storage event also re-themes xterm and Monaco live", _token(page, "--accent") == LAVENDER)
         page.evaluate("(k) => { localStorage.removeItem(k); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
+
+        page.evaluate("(k) => { localStorage.setItem(k, JSON.stringify({accent: '#e8edf3'})); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
+        until(lambda: _token(page, "--accent") == "#e8edf3", timeout=3)
+        cyanw = page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color")
+        curw = page.evaluate(f"getComputedStyle({cursor}).backgroundColor")
+        check("a white accent alone leaves the terminal cyan, the editor cursor and --syn-fn on today's cyan",
+              cyanw == _rgb(DEFAULT_ACCENT) and curw == cur0 and _token(page, "--syn-fn") == "#8ec5d6"
+              and _token(page, "--code-accent") == DEFAULT_ACCENT, f"{cyanw} {curw} {_token(page, '--syn-fn')}")
+        page.evaluate("(k) => { localStorage.removeItem(k); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
+        until(lambda: _token(page, "--accent") == DEFAULT_ACCENT, timeout=3)
 
         page.locator('[data-testid="titlebar-settings"]').click()
         page.wait_for_selector('[data-testid="appearance-accent"]')
@@ -168,8 +178,8 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
               _token(page, "--focus-ring") == f"0 0 0 2px {LAVENDER}" and _token(page, "--badge-fast") == LAVENDER
               and _token(page, "--accent-line") == "rgba(192, 174, 245, 0.45)", _inline(page)[:200])
         check("and the selection colour follows it", "192, 174, 245" in sel, sel)
-        check("the lighter and quieter relatives are derived, not the default's",
-              _token(page, "--accent-hi") not in ("#9ad6ea", "") and _token(page, "--syn-fn") not in ("#8ec5d6", ""),
+        check("the accent's lighter relative is derived, and the syntax colour stays the editor's own",
+              _token(page, "--accent-hi") not in ("#9ad6ea", "") and _token(page, "--syn-fn") == "#8ec5d6",
               f"{_token(page, '--accent-hi')} {_token(page, '--syn-fn')}")
         check("the pick is stored and shown in the readout",
               _stored(page).get("accent") == LAVENDER and page.locator('[data-testid="appearance-accent-hex"]').inner_text() == LAVENDER)
@@ -242,7 +252,9 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         # ---- presets: one click sets all five colours, through the same guards -------------------------
         presets = page.evaluate("""() => [...document.querySelectorAll('[data-testid^="appearance-preset-"]')]
           .map((b) => b.dataset.testid.slice('appearance-preset-'.length))""")
-        check("Settings shows the nine colour presets, Aurora first", len(presets) == 9 and presets[0] == "aurora", str(presets))
+        check("Settings shows ten colour presets, Aurora first, Pink last, then RGB",
+              len(presets) == 11 and presets[0] == "aurora" and presets[-2:] == ["pink", "rgb"], str(presets))
+        presets = presets[:-1]
         shots = os.environ.get("JARVIS_PRESET_SHOTS")
         hand_picked = _stored(page)
         for pid in presets[1:] + presets[:1]:
@@ -263,6 +275,31 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
                       f"{tokens} {hexes} pressed={pressed} notes={notes}")
             if shots:
                 page.screenshot(path=str(Path(shots) / f"preset-{pid}.png"))
+        # ---- RGB: the aurora cycles, the accent is white, the pickers wait; the editor colour is separate ------
+        page.locator('[data-testid="appearance-preset-nebula"]').click()
+        page.locator('[data-testid="appearance-preset-rgb"]').click()
+        until(lambda: _token(page, "--accent") == "#e8edf3", timeout=3)
+        check("RGB: only RGB pressed, the accent is white, the pickers are disabled with a note, the speed slider works",
+              page.locator('[data-testid^="appearance-preset-"][aria-pressed="true"]').count() == 1
+              and page.locator('[data-testid="appearance-preset-rgb"]').get_attribute("aria-pressed") == "true"
+              and page.locator('[data-testid="appearance-accent"]').is_disabled()
+              and page.locator('[data-testid="appearance-rgb-note"]').count() == 1
+              and page.locator('[data-testid="appearance-rgb-speed"]').is_enabled()
+              and _stored(page).get("accent") == "#c4a8ff")
+        page.locator('[data-testid="appearance-rgb-speed"]').fill("118")
+        until(lambda: _stored(page).get("rgbSpeed") == 10, timeout=3)
+        check("the speed slider stores 10 s per cycle at 118", page.locator('[data-testid="appearance-rgb-speed-value"]').inner_text() == "10 s per cycle")
+        if shots:
+            page.screenshot(path=str(Path(shots) / "preset-rgb.png"))
+        _pick(page, "appearance-code-accent", LAVENDER)
+        until(lambda: _token(page, "--code-accent") == LAVENDER, timeout=3)
+        check("under RGB the editor & terminal colour can still be picked, and it moves --syn-fn, not the accent",
+              _token(page, "--syn-fn") != "#8ec5d6" and _token(page, "--accent") == "#e8edf3" and _stored(page).get("codeAccent") == LAVENDER)
+        page.locator('[data-testid="appearance-preset-rgb"]').click()
+        until(lambda: _token(page, "--accent") == "#c4a8ff", timeout=3)
+        check("RGB off: the stored Nebula colours come back and the code colour stays", _token(page, "--code-accent") == LAVENDER)
+        page.locator('[data-testid="appearance-reset"]').click()
+        until(lambda: _token(page, "--code-accent") == DEFAULT_ACCENT, timeout=3)
         # Put the hand-picked record back: the reload checks below expect it.
         page.evaluate("([k, v]) => { localStorage.setItem(k, v); window.dispatchEvent(new Event('hud-appearance-change')); }",
                       [APPEARANCE, json.dumps(hand_picked)])

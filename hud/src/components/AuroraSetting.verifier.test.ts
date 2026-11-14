@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { AuroraSetting, SETTLE_MS } from "./AuroraSetting";
 import {
-  AMBER, APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_APPEARANCE, DEFAULT_COLOURS,
+  AMBER, APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_CODE_ACCENT, DEFAULT_APPEARANCE, DEFAULT_COLOURS,
   checkAccent, checkBase, checkPalette, checkPreset, checkWash, loadAppearance, resolveColours,
   type ColourPreset,
 } from "../lib/appearance";
@@ -66,7 +66,7 @@ it("a native commit after a preset cannot flush the discarded drag", async () =>
 it("every shipped preset survives resolving exactly and applies all five colours", async () => {
   for (const p of COLOUR_PRESETS) {
     await act(async () => button(p.id).click());
-    const expected = { accent: p.accent, washes: [...p.washes], base: p.base };
+    const expected = { accent: p.accent, washes: [...p.washes], base: p.base, codeAccent: DEFAULT_CODE_ACCENT };
     expect(resolveColours(loadAppearance()), p.id).toEqual(expected);
     expect(pressed(), p.id).toEqual([p.name]);
     expect(reset().disabled, p.id).toBe(p.id === "aurora");
@@ -120,7 +120,7 @@ it("presets and Aurora preserve unrelated and unknown stored fields", async () =
     await act(async () => button(id).click());
     expect(saved()).toMatchObject(unrelated);
   }
-  expect(saved()).toEqual(unrelated);
+  expect(saved()).toEqual({ ...unrelated, rgb: false, rgbSpeed: 30 });
 });
 
 const unsafe: [string, Partial<ColourPreset>][] = [

@@ -12,6 +12,11 @@
 //    not enter their OKLCH hue band or come near them, and is refused with a reason, never shifted;
 //  - the accent keeps 3:1 on the glass pane (D-8); a wash is darkened until its luminance is no more than
 //    the default brightest wash's, so every D-8 floor holds as measured; the base is capped likewise.
+// Two things sit outside the amber/red rule, each for one reason:
+//  - RGB mode (owner 2026-11-13) cycles the aurora around the FULL wheel, red, orange and yellow included,
+//    like an RGB keyboard. That loosens the band for the aurora background in RGB mode only: the accent stays
+//    white, every wash keeps the D-8 luminance cap, and nothing hand-picked or in a preset is exempt.
+//  - the editor and terminal colour (`codeAccent`) is its own setting, judged exactly like the accent.
 // Fields this HUD does not know ride along untouched through a save.
 
 import { readKey, writeKey } from "./storage";
@@ -39,9 +44,20 @@ export interface Appearance {
   washes?: string[];
   /** AG-3: the colour under the washes (--base), `#rrggbb`. Absent: the default. */
   base?: string;
+  /** The editor's and terminal's accent, `#rrggbb` (--code-accent). Absent: the default. Same guards as `accent`. */
+  codeAccent?: string;
+  /** RGB mode: the aurora cycles the full colour wheel, the accent is white. Only a stored `true` is on. */
+  rgb: boolean;
+  /** Seconds per full RGB cycle, 8..120 (default 30). */
+  rgbSpeed: number;
 }
 
-export const DEFAULT_APPEARANCE: Appearance = { motion: "fluid", stir: true, activity: true, drift: 1 };
+export const DEFAULT_APPEARANCE: Appearance = { motion: "fluid", stir: true, activity: true, drift: 1, rgb: false, rgbSpeed: 30 };
+
+/** A stored RGB cycle time: a finite number clamped to 8..120 seconds; anything else is 30. */
+export function clampRgbSpeed(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(120, Math.max(8, v)) : 30;
+}
 
 /** A stored drift strength: a finite number clamped to 0..2; anything else is 1 (today's drift). */
 export function clampDrift(v: unknown): number {
@@ -51,6 +67,8 @@ export function clampDrift(v: unknown): number {
 // ---- colours: defaults and the guards --------------------------------------------------------------------
 
 export const DEFAULT_ACCENT = "#6fc3df";
+/** The editor's and terminal's accent starts as the same cyan, but is its own setting. */
+export const DEFAULT_CODE_ACCENT = DEFAULT_ACCENT;
 export const DEFAULT_WASHES = ["#2a8fa0", "#3468c4", "#6450c4"] as const;
 export const DEFAULT_BASE = "#0a1116";
 /** The meaning colours (theme.css, never changed): amber is pending, red is an error. */
@@ -538,8 +556,39 @@ export interface Colours {
   accent: string;
   washes: [string, string, string];
   base: string;
+  /** The editor's and terminal's accent. */
+  codeAccent: string;
 }
-export const DEFAULT_COLOURS: Colours = { accent: DEFAULT_ACCENT, washes: [...DEFAULT_WASHES], base: DEFAULT_BASE };
+export const DEFAULT_COLOURS: Colours = {
+  accent: DEFAULT_ACCENT, washes: [...DEFAULT_WASHES], base: DEFAULT_BASE, codeAccent: DEFAULT_CODE_ACCENT,
+};
+
+// ---- RGB mode ---------------------------------------------------------------------------------------------
+//
+// Three washes 120 degrees apart rotate around the whole OKLCH wheel (L 0.55, C 0.14 sit inside sRGB at every
+// hue), each darkened to the D-8 luminance cap. The 360 colours (one per degree of hue) are made once, so a
+// phase is a table lookup. The accent is white and the base a dark neutral, both inside their own caps.
+
+/** RGB mode's accent: the near-white of Moonlight (chroma under the accent floor, so no hue can matter). */
+export const RGB_ACCENT = "#e8edf3";
+/** RGB mode's background under the washes: a dark neutral, inside BASE_MAX_LUMINANCE. */
+export const RGB_BASE = "#0a0b10";
+const RGB_LIGHTNESS = 0.55, RGB_CHROMA = 0.14;
+/** The wash at each whole degree of hue (index = degree); `rgbWashes` and the renderer's palette table share it. */
+export const RGB_TABLE: readonly string[] = Array.from({ length: 360 }, (_, deg) =>
+  clampLuminance(lchHex({ L: RGB_LIGHTNESS, C: RGB_CHROMA, h: deg }), WASH_MAX_LUMINANCE));
+
+/** The table index (whole degrees) of a phase, 0..1 a full turn: it wraps either way, and a non-finite one is 0. */
+export function rgbDegree(phase: number): number {
+  if (!Number.isFinite(phase)) return 0;
+  const f = phase - Math.floor(phase);
+  return Math.min(359, Math.floor(f * 360));
+}
+/** The three washes at `phase` of a cycle: hues 120 degrees apart, every one under the wash luminance cap. */
+export function rgbWashes(phase: number): [string, string, string] {
+  const d = rgbDegree(phase);
+  return [RGB_TABLE[d]!, RGB_TABLE[(d + 120) % 360]!, RGB_TABLE[(d + 240) % 360]!];
+}
 
 /**
  * Ready-made palettes for Settings -> Appearance. A preset is only a shortcut for picking all five colours at
@@ -564,6 +613,7 @@ export const COLOUR_PRESETS: readonly ColourPreset[] = [
   { id: "glacier", name: "Glacier", accent: "#a5f3fc", washes: ["#2a7f9a", "#368cac", "#2b5f8a"], base: "#081218" },
   { id: "nebula", name: "Nebula", accent: "#c4a8ff", washes: ["#5b3fb8", "#7a3aa8", "#3a46b8"], base: "#0d0b1a" },
   { id: "orchid", name: "Orchid", accent: "#e48cf5", washes: ["#7a2f9a", "#4b3ab0", "#8a2f7e"], base: "#120a17" },
+  { id: "pink", name: "Pink", accent: "#f9a8d4", washes: ["#9a2f6e", "#6a2f8a", "#7a2f7e"], base: "#140a12" },
 ];
 
 /** A preset through every colour guard: null when it may be saved as it stands, else the first refusal. */
@@ -590,22 +640,32 @@ export function matchingPreset(c: Colours): ColourPreset | undefined {
 /**
  * The colours to apply for a record: every stored value is checked again here, and one that fails (or is
  * missing) is its default. A stored wash is clamped, so an over-bright stored value still applies safely.
+ * Under RGB the accent, washes (at phase 0) and base are RGB mode's own, whatever else is stored; the code
+ * accent is kept (judged like the accent) either way.
  */
-export function resolveColours(a: Pick<Appearance, "accent" | "washes" | "base">): Colours {
-  const washes = DEFAULT_WASHES.map((d, i) => {
-    const r = checkWash(a.washes?.[i]);
-    return r.ok ? r.value : d;
-  }) as [string, string, string];
-  const baseCheck = checkBase(a.base);
-  const base = baseCheck.ok ? baseCheck.value : DEFAULT_BASE;
-  // The blends, not just each colour: an unsafe stored palette falls back (the washes, then the base).
-  let out = { washes, base };
-  if (checkPalette(out.washes, out.base)) out = { washes: [...DEFAULT_WASHES], base };
-  if (checkPalette(out.washes, out.base)) out = { washes: out.washes, base: DEFAULT_BASE };
-  // The accent is judged against the washes that will actually be shown, after any fallback: a stored accent
-  // that only failed against a refused wash set is kept.
-  const accent = checkAccent(a.accent, out.washes);
-  return { accent: accent.ok ? accent.value : DEFAULT_ACCENT, washes: out.washes as [string, string, string], base: out.base };
+export function resolveColours(a: Partial<Pick<Appearance, "accent" | "washes" | "base" | "codeAccent" | "rgb">>): Colours {
+  let out: { accent: string; washes: [string, string, string]; base: string };
+  if (a.rgb === true) {
+    out = { accent: RGB_ACCENT, washes: rgbWashes(0), base: RGB_BASE };
+  } else {
+    const washes = DEFAULT_WASHES.map((d, i) => {
+      const r = checkWash(a.washes?.[i]);
+      return r.ok ? r.value : d;
+    }) as [string, string, string];
+    const baseCheck = checkBase(a.base);
+    const base = baseCheck.ok ? baseCheck.value : DEFAULT_BASE;
+    // The blends, not just each colour: an unsafe stored palette falls back (the washes, then the base).
+    let mix = { washes, base };
+    if (checkPalette(mix.washes, mix.base)) mix = { washes: [...DEFAULT_WASHES], base };
+    if (checkPalette(mix.washes, mix.base)) mix = { washes: mix.washes, base: DEFAULT_BASE };
+    // The accent is judged against the washes that will actually be shown, after any fallback: a stored accent
+    // that only failed against a refused wash set is kept.
+    const accent = checkAccent(a.accent, mix.washes);
+    out = { accent: accent.ok ? accent.value : DEFAULT_ACCENT, washes: mix.washes as [string, string, string], base: mix.base };
+  }
+  // The editor and terminal colour, judged like the accent against the washes that will be shown.
+  const code = checkAccent(a.codeAccent, out.washes);
+  return { ...out, codeAccent: code.ok ? code.value : DEFAULT_CODE_ACCENT };
 }
 
 // ---- the accent family, derived in OKLCH ------------------------------------------------------------------
@@ -644,7 +704,7 @@ export interface AccentFamily {
 
 /** Everything the accent colours: one pick, the rest derived. */
 export function deriveAccent(accent: string): AccentFamily {
-  const { hi, fn, composing } = accentColours(accent);
+  const { hi, composing } = accentColours(accent);
   return {
     props: {
       "--accent": accent,
@@ -656,16 +716,22 @@ export function deriveAccent(accent: string): AccentFamily {
       "--accent-badge": rgba(accent, 0.4),
       "--focus-ring": `0 0 0 2px ${accent}`,
       "--badge-fast": accent,
-      "--syn-fn": fn,
     },
     orb: { base: triple(accent), hi: triple(hi), composing: triple(composing) },
   };
+}
+
+/** Everything the editor and terminal colour: one pick, the rest derived (the same relations as the accent's). */
+export function deriveCodeAccent(codeAccent: string): Record<string, string> {
+  const { hi, fn } = accentColours(codeAccent);
+  return { "--code-accent": codeAccent, "--code-accent-hi": hi, "--syn-fn": fn };
 }
 
 /** Every custom property a colour record sets on :root. */
 export function colourProps(c: Colours): Record<string, string> {
   return {
     ...deriveAccent(c.accent).props,
+    ...deriveCodeAccent(c.codeAccent),
     "--wash-1": c.washes[0], "--wash-2": c.washes[1], "--wash-3": c.washes[2],
     "--base": c.base, "--bg-0": c.base,
   };
@@ -694,6 +760,10 @@ export function parseAppearance(raw: string | null): Appearance {
   if (accent) out.accent = accent;
   const base = normHex(r.base);
   if (base) out.base = base;
+  const codeAccent = normHex(r.codeAccent);
+  if (codeAccent) out.codeAccent = codeAccent;
+  out.rgb = r.rgb === true;
+  out.rgbSpeed = clampRgbSpeed(r.rgbSpeed);
   if (Array.isArray(r.washes) && r.washes.length === 3) {
     const w = r.washes.map(normHex);
     if (w.some((x) => x)) out.washes = w.map((x, i) => x ?? DEFAULT_WASHES[i]);
@@ -718,8 +788,9 @@ export function saveAppearance(patch: Partial<Appearance>, storage?: Pick<Storag
   }
   const next = { ...loadAppearance(storage), ...patch };
   if ("drift" in patch) next.drift = clampDrift(patch.drift);
+  if ("rgbSpeed" in patch) next.rgbSpeed = clampRgbSpeed(patch.rgbSpeed);
   // A patch field set to undefined is a reset: it must also clear a stored copy, not just hide it.
-  for (const k of ["accent", "washes", "base"] as const) {
+  for (const k of ["accent", "washes", "base", "codeAccent"] as const) {
     if (k in patch && patch[k] === undefined) { delete next[k]; delete unknown[k]; }
   }
   writeKey(APPEARANCE_KEY, JSON.stringify({ ...unknown, ...next }), storage);
