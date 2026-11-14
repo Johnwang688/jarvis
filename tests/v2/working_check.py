@@ -1584,6 +1584,51 @@ class RoundFour(Base):
             eventually(lambda: ws.entry(tid) is not None and ws.entry(tid)["in"])
         self.assertGreaterEqual(len(runs), 2, "the late event was run, by a rerun or a new worker")
 
+    def test_a_successor_worker_keeps_ownership_after_the_old_one_exits(self):
+        """Worker A releases; a late event starts worker B before A's thread
+        has finished. A's exit must not clear B's ownership (Sol's mutant:
+        cleanup in `finally` on every exit, not only when the loop raised)."""
+        guard = patch.object(working, "RECONCILE_S", 0.01)
+        guard.start()
+        self.addCleanup(guard.stop)
+        ws = working.WorkingSet(self.daemon, clock=self.clock, mono=self.clock.mono)
+        trap = TrapLock()
+        ws._lock = trap
+        ws.start()
+        self.addCleanup(ws.stop)
+        real = ws.reconcile
+        runs, b_inside, b_gate, first = [], threading.Event(), threading.Event(), {}
+
+        def reconcile():
+            runs.append(threading.current_thread())
+            if len(runs) == 1:
+                out = real()
+                first["thread"] = threading.current_thread()
+                trap.owner = first["thread"]
+
+                def successor_starts():
+                    # After A's release, before A's thread finishes: a late
+                    # event, and B is running (held inside its reconcile).
+                    ws.observe({"kind": "inbox_changed"})
+                    self.assertTrue(b_inside.wait(2), "the late event started a successor")
+                trap.armed = successor_starts
+                return out
+            b_inside.set()
+            b_gate.wait(5)
+            return real()
+        with patch.object(ws, "reconcile", reconcile):
+            ws.observe({"kind": "inbox_changed"})
+            eventually(lambda: "thread" in first and b_inside.is_set())
+            first["thread"].join(5)                 # A's exit has run to the end
+            self.assertTrue(ws._reconciling, "B still owns the worker slot")
+            self.assertEqual({w.name for w in ws._workers}, {runs[1].name}, "only B is a worker")
+            ws.observe({"kind": "inbox_changed"})   # folded into B, not a third worker
+            time.sleep(0.1)
+            self.assertEqual(len(runs), 2, "no worker ran beside B")
+            b_gate.set()
+            eventually(lambda: not ws._reconciling)
+        self.assertEqual(len(runs), 3, "B ran the folded event once more")
+
     # 2. a move is a lifecycle event --------------------------------------------------------------
 
     def test_activity_across_a_move_and_an_archive_cannot_rejoin(self):
