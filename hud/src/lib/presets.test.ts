@@ -15,7 +15,10 @@
 //     checkAccent against the preset's own washes.
 //   loadCustomPresets(storage?): the valid entries in stored order; drops malformed entries, bad ids,
 //     duplicate ids and names (first wins, names case-insensitively, built-in names included), entries that
-//     fail checkCustomPreset; keeps at most MAX_CUSTOM_PRESETS. Never throws.
+//     fail the quick per-colour guards (format, checkWash/checkBase unclamped, checkAccent of accent and
+//     codeAccent against the washes); keeps at most MAX_CUSTOM_PRESETS; examines every stored entry. Never
+//     throws. The whole-palette proof is NOT run on load (too slow, Sol round 2); add, restore and apply run
+//     the full checkCustomPreset.
 //   addCustomPreset(name, colours, storage?), renameCustomPreset(id, name, storage?),
 //   deleteCustomPreset(id, storage?), restoreCustomPreset(preset, index, storage?) each return
 //     { ok: true, presets, preset?, index? } or { ok: false, reason }. Refusals change nothing.
