@@ -34,7 +34,7 @@ export const SYNTAX_TOKENS = [
 /** The further tokens the editor's chrome is drawn in. */
 export const CHROME_TOKENS = [
   "--bg-1", "--bg-2", "--bg-3", "--border", "--border-strong", "--selected", "--glass-solid",
-  "--accent", "--accent-hi", "--red", "--green",
+  "--code-accent", "--code-accent-hi", "--red", "--green",
 ] as const;
 
 export const TOKENS = [...SYNTAX_TOKENS, ...CHROME_TOKENS] as const;
@@ -241,18 +241,18 @@ export const CHROME: readonly ChromeRow[] = [
   { key: "editor.lineHighlightBorder", token: "--bg-2", alpha: 0 },
   { key: "editorLineNumber.foreground", token: "--text-muted" },
   { key: "editorLineNumber.activeForeground", token: "--text-2" },
-  { key: "editorCursor.foreground", token: "--accent-hi" },
+  { key: "editorCursor.foreground", token: "--code-accent-hi" },
   { key: "editorIndentGuide.background1", token: "--bg-3" },
   { key: "editorIndentGuide.activeBackground1", token: "--border-strong" },
   { key: "editorWhitespace.foreground", token: "--border-strong" },
   // Selection and matches. Monaco's find matches are orange.
-  { key: "editor.selectionBackground", token: "--accent", alpha: 0.25 },
-  { key: "editor.inactiveSelectionBackground", token: "--accent", alpha: 0.13 },
-  { key: "editor.selectionHighlightBackground", token: "--accent", alpha: 0.15 },
-  { key: "editor.findMatchBackground", token: "--accent", alpha: 0.35 },
-  { key: "editor.findMatchBorder", token: "--accent" },
-  { key: "editor.findMatchHighlightBackground", token: "--accent", alpha: 0.15 },
-  { key: "editorOverviewRuler.findMatchForeground", token: "--accent", alpha: 0.6 },
+  { key: "editor.selectionBackground", token: "--code-accent", alpha: 0.25 },
+  { key: "editor.inactiveSelectionBackground", token: "--code-accent", alpha: 0.13 },
+  { key: "editor.selectionHighlightBackground", token: "--code-accent", alpha: 0.15 },
+  { key: "editor.findMatchBackground", token: "--code-accent", alpha: 0.35 },
+  { key: "editor.findMatchBorder", token: "--code-accent" },
+  { key: "editor.findMatchHighlightBackground", token: "--code-accent", alpha: 0.15 },
+  { key: "editorOverviewRuler.findMatchForeground", token: "--code-accent", alpha: 0.6 },
   { key: "editor.wordHighlightBackground", token: "--selected" },
   { key: "editor.wordHighlightStrongBackground", token: "--selected" },
   { key: "editor.wordHighlightTextBackground", token: "--selected" },
@@ -282,7 +282,7 @@ export const CHROME: readonly ChromeRow[] = [
   { key: "diffEditor.removedTextBackground", token: "--red", alpha: 0.15, red: "removed" },
   { key: "diffEditor.removedLineBackground", token: "--red", alpha: 0.07, red: "removed" },
   { key: "diffEditor.diagonalFill", token: "--bg-3" },
-  { key: "diffEditor.moveActive.border", token: "--accent" },
+  { key: "diffEditor.moveActive.border", token: "--code-accent" },
   // Sticky scroll: the pane's own colour, ruled off.
   { key: "editorStickyScroll.background", token: "--bg-1" },
   { key: "editorStickyScroll.border", token: "--border" },
@@ -297,7 +297,7 @@ export const CHROME: readonly ChromeRow[] = [
   { key: "editorSuggestWidget.border", token: "--border-strong" },
   { key: "editorSuggestWidget.foreground", token: "--text" },
   { key: "editorSuggestWidget.selectedBackground", token: "--bg-3" },
-  { key: "editorSuggestWidget.highlightForeground", token: "--accent-hi" },
+  { key: "editorSuggestWidget.highlightForeground", token: "--code-accent-hi" },
   { key: "editorHoverWidget.background", token: "--bg-2" },
   { key: "editorHoverWidget.border", token: "--border-strong" },
   { key: "editorHoverWidget.foreground", token: "--text" },
@@ -326,8 +326,8 @@ export const CHROME: readonly ChromeRow[] = [
   // No code actions are loaded, so no light bulb; never a yellow one.
   { key: "editorLightBulb.foreground", token: "--text-2" },
   { key: "editorLightBulbAi.foreground", token: "--text-2" },
-  { key: "peekViewEditor.matchHighlightBackground", token: "--accent", alpha: 0.35 },
-  { key: "peekViewResult.matchHighlightBackground", token: "--accent", alpha: 0.15 },
+  { key: "peekViewEditor.matchHighlightBackground", token: "--code-accent", alpha: 0.35 },
+  { key: "peekViewResult.matchHighlightBackground", token: "--code-accent", alpha: 0.15 },
   { key: "symbolIcon.classForeground", token: "--syn-type" },
   { key: "symbolIcon.enumeratorForeground", token: "--syn-const" },
   { key: "symbolIcon.eventForeground", token: "--syn-fn" },

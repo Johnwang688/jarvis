@@ -31,7 +31,10 @@ export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): F
       if (n === "WEBGL_debug_renderer_info") return { UNMASKED_RENDERER_WEBGL: 0x9246 };
       if (n === "EXT_color_buffer_float") return state.halfFloat ? {} : null;
       if (n === "EXT_color_buffer_half_float") return state.halfFloat ? {} : null;
-      if (n === "WEBGL_lose_context") return { loseContext: () => void (state.lost = true) };
+      // A controller's destroy releases its context with this; the fake context is shared by every controller a
+      // test makes (each has a canvas, and so a context, in a browser), so it must not be lost by that. A test
+      // loses it on purpose with lose().
+      if (n === "WEBGL_lose_context") return { loseContext: () => undefined };
       return {};
     },
     getParameter: () => (state.lost ? null : state.renderer),
@@ -76,7 +79,9 @@ export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): F
     impl[`delete${kind}`] = (o) => void live.delete(o as object);
   }
   const gl = new Proxy({} as Record<string, unknown>, {
-    get(_t, name: string) {
+    get(t, name: string) {
+      // A test may wrap a method by assigning it on the proxy (the RGB cycle test spies on uniform3fv).
+      if (Object.prototype.hasOwnProperty.call(t, name)) return t[name];
       if (name in impl) return impl[name];
       if (/^[A-Z][A-Z0-9_]+$/.test(name)) return constant(name);
       return () => undefined;

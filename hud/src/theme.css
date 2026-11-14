@@ -74,6 +74,8 @@
 
   --accent: #6fc3df;
   --accent-hi: #9ad6ea;
+  --code-accent: #6fc3df;      /* the editor's and terminal's accent: its own setting (Appearance), not --accent */
+  --code-accent-hi: #9ad6ea;
   --accent-soft: rgba(111, 195, 223, 0.14);
   --accent-line: rgba(111, 195, 223, 0.45);
   --accent-sel: rgba(111, 195, 223, 0.30);     /* ::selection */
@@ -2486,6 +2488,8 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
 .appearance-preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .appearance-preset-swatch { display: inline-flex; align-items: stretch; gap: 0; width: 44px; height: 18px; padding: 3px; box-sizing: border-box; border-radius: 4px; border: 1px solid var(--rim); overflow: hidden; }
 .appearance-preset-swatch > span { flex: 1 1 0; }
+/* RGB: a rainbow in place of a palette (this is the one swatch that is not a stored colour). */
+.appearance-preset-swatch.rgb { background: linear-gradient(90deg, #d9534f, #e0a030, #8fbf3f, #3fbf9f, #3f7fdf, #9f5fdf, #d95fa0); }
 .appearance-preset-swatch > .appearance-preset-accent { flex: 0 0 8px; margin-left: 3px; border-radius: 2px; }
 .appearance-colour { margin: 6px 0; }
 .appearance-colour input[type="color"] { width: 40px; height: 22px; padding: 0; vertical-align: middle; border: 1px solid var(--border-strong); background: none; cursor: pointer; }

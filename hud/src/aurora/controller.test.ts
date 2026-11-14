@@ -14,7 +14,7 @@ let ctl: AuroraController | null;
 let clockMs: number;
 
 const inputs = (o: Partial<AuroraInputs> = {}): AuroraInputs => ({
-  style: "fluid", palette: DEFAULT_PALETTE, still: false, visible: true, stir: true, activity: true, drift: 1, ...o,
+  style: "fluid", palette: DEFAULT_PALETTE, still: false, visible: true, stir: true, activity: true, drift: 1, cycle: null, ...o,
 });
 const canvas = () => host.querySelector("canvas")!;
 const attr = (n: string) => canvas().getAttribute(n);

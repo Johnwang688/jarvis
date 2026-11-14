@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ACCENT_CHROMA_FLOOR, ACCENT_MIN_CONTRAST, AMBER, APPEARANCE_EVENT, APPEARANCE_KEY, BASE_MAX_LUMINANCE, DEFAULT_ACCENT,
+  ACCENT_CHROMA_FLOOR, ACCENT_MIN_CONTRAST, AMBER, APPEARANCE_EVENT, APPEARANCE_KEY, BASE_MAX_LUMINANCE, DEFAULT_ACCENT, DEFAULT_CODE_ACCENT,
   DEFAULT_APPEARANCE, DEFAULT_BASE, DEFAULT_COLOURS, DEFAULT_WASHES, MEANING_DELTA_E, RED, WARM_BAND, WASH_MAX_LUMINANCE,
-  accentContrast, checkAccent, checkBase, checkWash, colourProps, deriveAccent, impersonatesMeaning, loadAppearance, normHex,
+  accentContrast, checkAccent, checkBase, checkWash, colourProps, deriveAccent, deriveCodeAccent, impersonatesMeaning, loadAppearance, normHex,
   clampDrift, parseAppearance, resolveColours, saveAppearance,
 } from "./appearance";
 import { deltaE, hexLch, lchHex, luminance, rgbHex } from "./oklch";
@@ -18,14 +18,14 @@ const store = (init: Record<string, string> = {}) => {
 
 describe("appearance preferences", () => {
   it("default to Fluid with both stirs on", () => {
-    expect(loadAppearance(store())).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1 });
+    expect(loadAppearance(store())).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1, rgb: false, rgbSpeed: 30 });
     expect(DEFAULT_APPEARANCE.motion).toBe("fluid");
   });
 
   it("fall back field by field on a corrupt or wrong-typed record", () => {
     for (const raw of ["{", "null", "[]", '"x"', "12", ""]) expect(parseAppearance(raw), raw).toEqual(DEFAULT_APPEARANCE);
-    expect(parseAppearance('{"motion":"swirl","stir":"yes","activity":false}')).toEqual({ motion: "fluid", stir: true, activity: false, drift: 1 });
-    expect(parseAppearance('{"motion":"still","stir":false}')).toEqual({ motion: "still", stir: false, activity: true, drift: 1 });
+    expect(parseAppearance('{"motion":"swirl","stir":"yes","activity":false}')).toEqual({ motion: "fluid", stir: true, activity: false, drift: 1, rgb: false, rgbSpeed: 30 });
+    expect(parseAppearance('{"motion":"still","stir":false}')).toEqual({ motion: "still", stir: false, activity: true, drift: 1, rgb: false, rgbSpeed: 30 });
   });
 
   it("survive a storage that throws", () => {
@@ -52,8 +52,8 @@ describe("appearance preferences", () => {
   it("saving keeps fields this HUD does not know (a later HUD's, a malformed accent) without applying them", () => {
     const s = store({ [APPEARANCE_KEY]: JSON.stringify({ motion: "flow", base: "url(x)", future: { a: 1 }, accent: 7 }) });
     const next = saveAppearance({ stir: false }, s);
-    expect(next).toEqual({ motion: "flow", stir: false, activity: true, drift: 1 });
-    expect(JSON.parse(s.m[APPEARANCE_KEY]!)).toEqual({ motion: "flow", stir: false, activity: true, drift: 1, base: "url(x)", future: { a: 1 }, accent: 7 });
+    expect(next).toEqual({ motion: "flow", stir: false, activity: true, drift: 1, rgb: false, rgbSpeed: 30 });
+    expect(JSON.parse(s.m[APPEARANCE_KEY]!)).toEqual({ motion: "flow", stir: false, activity: true, drift: 1, rgb: false, rgbSpeed: 30, base: "url(x)", future: { a: 1 }, accent: 7 });
   });
 });
 
@@ -132,7 +132,7 @@ describe("the accent hue guard", () => {
       if (inBand) expect(r.ok, `h=${h} ${hex}`).toBe(false);
       else {
         const d = deriveAccent(hex);
-        const pigments = [hex, d.props["--accent-hi"], d.props["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
+        const pigments = [hex, d.props["--accent-hi"], deriveCodeAccent(hex)["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
         expect(r.ok, `h=${h} ${hex}`).toBe(!pigments.some((v) => impersonatesMeaning(v, ACCENT_CHROMA_FLOOR)));
       }
     }
@@ -180,7 +180,7 @@ describe("the accent hue guard", () => {
           if (hexLch(hex).C < ACCENT_CHROMA_FLOOR) nearGrey++;
           const d = deriveAccent(hex);
           // Alpha tokens share the accent pigment; the focus ring, badge and xterm cyan/cursor do too.
-          const pigments = [hex, d.props["--accent-hi"], d.props["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
+          const pigments = [hex, d.props["--accent-hi"], deriveCodeAccent(hex)["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
           for (const value of pigments) expect(impersonatesMeaning(value, ACCENT_CHROMA_FLOOR), `${hex} -> ${value}`).toBe(false);
         }
       }
@@ -299,8 +299,9 @@ describe("the base clamp", () => {
 describe("the accent family is derived in OKLCH from one pick", () => {
   it("reproduces today's default tokens from the default accent", () => {
     const d = deriveAccent(DEFAULT_ACCENT);
-    for (const k of ["--accent", "--accent-hi", "--accent-soft", "--accent-line", "--accent-sel", "--accent-hover", "--accent-badge", "--focus-ring", "--badge-fast", "--syn-fn"]) {
-      expect(norm(d.props[k]), k).toBe(norm(root.get(k)!));
+    const props = { ...d.props, ...deriveCodeAccent(DEFAULT_CODE_ACCENT) };
+    for (const k of ["--accent", "--accent-hi", "--accent-soft", "--accent-line", "--accent-sel", "--accent-hover", "--accent-badge", "--focus-ring", "--badge-fast", "--code-accent", "--code-accent-hi", "--syn-fn"]) {
+      expect(norm(props[k]), k).toBe(norm(root.get(k)!));
     }
     expect(colourProps(DEFAULT_COLOURS)["--wash-1"]).toBe(root.get("--wash-1"));
     expect(colourProps(DEFAULT_COLOURS)["--wash-2"]).toBe(root.get("--wash-2"));
@@ -312,11 +313,12 @@ describe("the accent family is derived in OKLCH from one pick", () => {
   it("keeps the same relationships for another pick: lighter hi, quieter fn, same hue family, never warm", () => {
     for (const accent of ["#c0aef5", "#6dd0b0", "#a0c4ff", "#f0a0d0"]) {
       const d = deriveAccent(accent);
-      const a = hexLch(accent), hi = hexLch(d.props["--accent-hi"]), fn = hexLch(d.props["--syn-fn"]);
+      const code = deriveCodeAccent(accent);
+      const a = hexLch(accent), hi = hexLch(d.props["--accent-hi"]), fn = hexLch(code["--syn-fn"]);
       expect(hi.L, accent).toBeGreaterThan(a.L);
       expect(fn.C, accent).toBeLessThan(a.C);
       for (const f of [hi, fn]) expect(Math.abs(((f.h - a.h + 540) % 360) - 180), accent).toBeLessThan(40);
-      for (const hex of [d.props["--accent-hi"], d.props["--syn-fn"]]) expect(impersonatesMeaning(hex, ACCENT_CHROMA_FLOOR), hex).toBe(false);
+      for (const hex of [d.props["--accent-hi"], code["--syn-fn"]]) expect(impersonatesMeaning(hex, ACCENT_CHROMA_FLOOR), hex).toBe(false);
       expect(d.props["--focus-ring"]).toBe(`0 0 0 2px ${accent}`);
       expect(d.props["--badge-fast"]).toBe(accent);
       expect(d.props["--accent-soft"]).toMatch(/^rgba\(\d+, \d+, \d+, 0\.14\)$/);
@@ -340,7 +342,9 @@ describe("resolving a stored record", () => {
     expect(c.washes[2]).toBe(DEFAULT_WASHES[2]);
     expect(luminance(c.washes[1])).toBeLessThanOrEqual(WASH_MAX_LUMINANCE);
     expect(luminance(c.base)).toBeLessThanOrEqual(BASE_MAX_LUMINANCE);
-    expect(resolveColours({})).toEqual(DEFAULT_COLOURS);
+    // The editor's colour is read by name, not enumerated (resolveColours): the five-colour palette is the rest.
+    expect(resolveColours({})).toEqual({ accent: DEFAULT_COLOURS.accent, washes: DEFAULT_COLOURS.washes, base: DEFAULT_COLOURS.base });
+    expect(resolveColours({}).codeAccent).toBe(DEFAULT_COLOURS.codeAccent);
   });
   it("parse keeps only well-formed #rrggbb, and a corrupt record falls back to the defaults", () => {
     expect(parseAppearance('{"accent":"#C0AEF5","base":"#0c1418","washes":["#112233","#445566","#778899"]}')).toEqual({
@@ -357,7 +361,7 @@ describe("resolving a stored record", () => {
     expect(loadAppearance(s)).toMatchObject({ accent: "#c0aef5", base: "#0c1418", washes: ["#112233", "#445566", "#778899"] });
     saveAppearance({ accent: undefined, washes: undefined, base: undefined }, s);
     const saved = JSON.parse(s.m[APPEARANCE_KEY]!);
-    expect(saved).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1 });
+    expect(saved).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1, rgb: false, rgbSpeed: 30 });
     expect(loadAppearance(s)).toEqual(DEFAULT_APPEARANCE);
   });
 });

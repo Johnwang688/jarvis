@@ -11,6 +11,7 @@ import type { AuroraStyle } from './keys';
 import { auroraState, createAuroraLoop, type AuroraClock, type AuroraRenderer, type AuroraState } from './loop';
 import { samePalette, type AuroraPalette } from './palette';
 import { gridFor } from './fluid';
+import { rgbPalette } from './rgb';
 import { createAuroraRenderer, type WebAuroraRenderer } from './renderer';
 import { FrameStats } from './stats';
 
@@ -26,6 +27,12 @@ export interface AuroraInputs {
   activity: boolean;
   /** Natural drift strength, 0..2 (Settings -> Appearance; 1 = the tuned drift). */
   drift: number;
+  /**
+   * RGB mode (Settings -> Appearance): seconds per full cycle round the colour wheel, or null for off. While
+   * the aurora runs, each simulation step advances the phase and hands the renderer the next palette; Still
+   * and reduced motion draw the given palette. No CSS token is written per frame.
+   */
+  cycle: number | null;
 }
 
 export interface AuroraOptions {
@@ -93,6 +100,8 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
   let stirs = 0;
   let ripples = 0;
   let channel = 0;
+  /** RGB mode's place in its cycle, 0..1. Advanced only by a running step. */
+  let phase = 0;
 
   // A fresh canvas per controller: a canvas whose context was released cannot get another one.
   const canvas = document.createElement('canvas');
@@ -124,8 +133,15 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
     canvas.style.visibility = on ? 'visible' : 'hidden';
   };
 
+  const cycling = () => state === 'running' && inputs.cycle !== null && inputs.cycle > 0 && Number.isFinite(inputs.cycle);
   const delegate: AuroraRenderer = {
-    step: (dt) => renderer?.step(dt),
+    step: (dt) => {
+      if (renderer && cycling()) {
+        phase = (phase + dt / inputs.cycle!) % 1;
+        renderer.setPalette(rgbPalette(phase));
+      }
+      renderer?.step(dt);
+    },
     draw: () => {
       // Shown only once a frame is really on it (the renderer never draws on a lost context).
       if (renderer && !lost && renderer.draw()) show(true);
@@ -185,6 +201,9 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
     });
     if (next !== state) {
       state = next;
+      // Leaving the running state with RGB on: the renderer holds a cycled palette; a still frame (or the
+      // next resume) is the palette the page gave.
+      if (next !== 'running' && inputs.cycle !== null && renderer && !lost) renderer.setPalette(inputs.palette);
       if (next === 'off') show(false);
       loop.setState(next);
       canvas.setAttribute('data-aurora-state', next);
@@ -318,7 +337,9 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
         renderer?.setDrift(next.drift);
         canvas.setAttribute('data-aurora-drift', String(next.drift));
       }
-      if (renderer && !samePalette(next.palette, prev.palette)) {
+      // Turning RGB off puts the page's palette back (the renderer holds the last cycled one).
+      const uncycled = prev.cycle !== null && next.cycle === null;
+      if (renderer && (uncycled || !samePalette(next.palette, prev.palette))) {
         renderer.setPalette(next.palette);
         // A palette change while still only updates the uniforms; a still frame is drawn again.
         if (state === 'still') {

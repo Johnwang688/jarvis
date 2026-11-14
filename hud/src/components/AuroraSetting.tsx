@@ -11,6 +11,14 @@
 //
 // A preset sets all five colours in one click, through checkPreset (the same guards). The first preset is the
 // default and clears the stored colours, as Reset does; the pickers stay free to fine-tune any preset.
+//
+// RGB (the last button, owner 2026-11-13) is a mode, not a preset: it turns the aurora into a slow cycle round
+// the whole colour wheel with a white accent (lib/appearance.ts keeps the guards that still apply). It keeps
+// the stored colours, so choosing a static preset, Aurora or Reset turns it off and the colours are back. The
+// five pickers are disabled while it is on; the speed slider is left slow, right fast.
+//
+// "Editor & terminal" is its own colour (`codeAccent`), judged exactly like the accent by the same settle and
+// commit path. Presets, Aurora and RGB never change it and it stays enabled under RGB; Reset clears it.
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,7 +30,7 @@ import { deriveAccent } from "../lib/appearance";
 
 const LABELS: Record<Motion, string> = { fluid: "Fluid", flow: "Flow", still: "Still" };
 
-type Slot = "accent" | "wash-1" | "wash-2" | "wash-3" | "base";
+type Slot = "accent" | "wash-1" | "wash-2" | "wash-3" | "base" | "code-accent";
 const SLOTS: { slot: Slot; label: string }[] = [
   { slot: "accent", label: "Accent" },
   { slot: "wash-1", label: "Aurora 1" },
@@ -30,12 +38,13 @@ const SLOTS: { slot: Slot; label: string }[] = [
   { slot: "wash-3", label: "Aurora 3" },
   { slot: "base", label: "Background" },
 ];
+const CODE_SLOT: { slot: Slot; label: string } = { slot: "code-accent", label: "Editor & terminal" };
 type Note = { kind: "refused" | "clamped"; text: string };
 /** How long the picker's input must be still before a pick is judged (its `change` judges at once). */
 export const SETTLE_MS = 80;
 
 /** A colour input whose `input` events are passed on as they come and whose native `change` commits. */
-function ColourInput(props: { slot: Slot; value: string; onInput: (slot: Slot, value: string) => void; onCommit: (slot: Slot, value: string) => void }) {
+function ColourInput(props: { slot: Slot; value: string; disabled?: boolean; onInput: (slot: Slot, value: string) => void; onCommit: (slot: Slot, value: string) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   const commit = useRef(props.onCommit);
   commit.current = props.onCommit;
@@ -48,7 +57,7 @@ function ColourInput(props: { slot: Slot; value: string; onInput: (slot: Slot, v
     return () => el.removeEventListener("change", onChange);
   }, [slot]);
   return (
-    <input ref={ref} type="color" data-testid={`appearance-${slot}`} value={props.value} onChange={(e) => props.onInput(slot, e.target.value)} />
+    <input ref={ref} type="color" data-testid={`appearance-${slot}`} value={props.value} disabled={props.disabled} onChange={(e) => props.onInput(slot, e.target.value)} />
   );
 }
 
@@ -68,8 +77,10 @@ export function AuroraSetting() {
     };
   }, []);
   const change = (patch: Partial<Appearance>) => setA(saveAppearance(patch));
-  const colours = resolveColours(a);
+  // The colours the pickers hold: what is stored, whether or not RGB is on (RGB keeps them for later).
+  const colours = resolveColours({ ...a, rgb: false });
   const family = deriveAccent(colours.accent).props;
+  const codeColour = colours.codeAccent;
 
   const note = (slot: Slot, n: Note | null) => setNotes((cur) => {
     const next = { ...cur };
@@ -77,6 +88,12 @@ export function AuroraSetting() {
     return next;
   });
   const pick = (slot: Slot, value: string) => {
+    if (slot === "code-accent") {
+      const r = checkAccent(value, resolveColours(a).washes);
+      if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
+      note(slot, null);
+      return change({ codeAccent: r.value });
+    }
     if (slot === "accent") {
       const r = checkAccent(value, colours.washes);
       if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
@@ -101,6 +118,8 @@ export function AuroraSetting() {
     // A brighter aurora must not make the accent unreadable on it.
     const still = checkAccent(colours.accent, washes);
     if (!still.ok) return note(slot, { kind: "refused", text: `That would make the accent hard to read: ${still.reason}` });
+    const stillCode = checkAccent(codeColour, washes);
+    if (!stillCode.ok) return note(slot, { kind: "refused", text: `That would make the editor and terminal colour hard to read: ${stillCode.reason}` });
     note(slot, r.clamped ? { kind: "clamped", text: r.note ?? "" } : null);
     return change({ washes });
   };
@@ -131,31 +150,40 @@ export function AuroraSetting() {
     if (!mine && value.toLowerCase() !== shown(slot)) pickRef.current(slot, value);
   };
   useEffect(() => () => window.clearTimeout(timer.current), []);
-  const shown = (slot: Slot) => slot === "accent" ? colours.accent : slot === "base" ? colours.base : colours.washes[Number(slot.slice(5)) - 1];
-  // Reset drops any pick still waiting to be judged, so it cannot land after the defaults (verifier LOW).
-  const reset = () => {
+  const shown = (slot: Slot) =>
+    slot === "accent" ? colours.accent : slot === "base" ? colours.base : slot === "code-accent" ? codeColour
+      : colours.washes[Number(slot.slice(5)) - 1];
+  // A click on a preset, RGB or Reset drops any pick still waiting to be judged, so it cannot land after
+  // it (verifier LOW).
+  const dropPending = () => {
     window.clearTimeout(timer.current);
     timer.current = undefined;
     pending.current = null;
+  };
+  const reset = () => {
+    dropPending();
     setNotes({});
-    change({ accent: undefined, washes: undefined, base: undefined });
+    change({ accent: undefined, washes: undefined, base: undefined, codeAccent: undefined, rgb: false });
   };
   const usePreset = (p: ColourPreset) => {
-    window.clearTimeout(timer.current);
-    timer.current = undefined;
-    pending.current = null;
+    dropPending();
     if (p.id === COLOUR_PRESETS[0].id) {
       setNotes({});
-      return change({ accent: undefined, washes: undefined, base: undefined });
+      return change({ accent: undefined, washes: undefined, base: undefined, rgb: false });
     }
     const refused = checkPreset(p);
     if (refused) return setNotes({ accent: { kind: "refused", text: refused.reason } });
     setNotes({});
-    change({ accent: p.accent, washes: [...p.washes], base: p.base });
+    change({ accent: p.accent, washes: [...p.washes], base: p.base, rgb: false });
   };
-  const current = matchingPreset(colours);
+  const toggleRgb = () => {
+    dropPending();
+    setNotes({});
+    change({ rgb: !a.rgb });
+  };
+  const current = a.rgb ? undefined : matchingPreset(colours);
   const custom = colours.accent !== DEFAULT_COLOURS.accent || colours.base !== DEFAULT_COLOURS.base
-    || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]);
+    || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]) || codeColour !== DEFAULT_COLOURS.codeAccent;
 
   return (
     <section className="read-aloud" data-testid="appearance" aria-label="Appearance">
@@ -236,14 +264,46 @@ export function AuroraSetting() {
             {p.name}
           </button>
         ))}
+        <button
+          type="button"
+          className="appearance-preset"
+          data-testid="appearance-preset-rgb"
+          aria-pressed={a.rgb}
+          title="RGB: the aurora cycles through every colour; the accent stays white"
+          onClick={toggleRgb}
+        >
+          <span className="appearance-preset-swatch rgb" aria-hidden="true" />
+          RGB
+        </button>
       </div>
       <p>A preset sets every colour below at once. Adjust any of them afterwards to make it your own.</p>
+      {a.rgb && (
+        <p data-testid="appearance-rgb-note">
+          RGB is on: the aurora cycles through every colour and the accent stays white. Choosing a preset brings your colours back.
+        </p>
+      )}
+      <label>
+        RGB speed{" "}
+        <input
+          type="range"
+          style={{ width: 220, maxWidth: "60%", verticalAlign: "middle" }}
+          min={8}
+          max={120}
+          step={1}
+          data-testid="appearance-rgb-speed"
+          aria-label="RGB speed"
+          value={128 - Math.round(a.rgbSpeed)}
+          disabled={!a.rgb || a.motion === "still"}
+          onChange={(e) => change({ rgbSpeed: 128 - Number(e.target.value) })}
+        />{" "}
+        <output data-testid="appearance-rgb-speed-value">{Math.round(a.rgbSpeed)} s per cycle</output>
+      </label>
       <div className="appearance-colours" data-testid="appearance-colours">
         {SLOTS.map(({ slot, label }) => (
           <div key={slot} className="appearance-colour">
             <label>
               {label}{" "}
-              <ColourInput slot={slot} value={shown(slot)} onInput={onInput} onCommit={onCommit} />
+              <ColourInput slot={slot} value={shown(slot)} disabled={a.rgb} onInput={onInput} onCommit={onCommit} />
             </label>{" "}
             <code data-testid={`appearance-${slot}-hex`}>{shown(slot)}</code>
             {notes[slot] && (
@@ -265,7 +325,27 @@ export function AuroraSetting() {
         Amber and red keep their meanings (a tool running or an approval waiting, an error): a colour close to
         them is not applied. A bright aurora colour is darkened to keep text readable.
       </p>
-      <button type="button" data-testid="appearance-reset" disabled={!custom && a.accent === undefined && !a.washes && a.base === undefined} onClick={reset}>
+      <div className="appearance-colour" data-testid="appearance-code-colour">
+        <label>
+          {CODE_SLOT.label}{" "}
+          <ColourInput slot={CODE_SLOT.slot} value={codeColour} onInput={onInput} onCommit={onCommit} />
+        </label>{" "}
+        <code data-testid="appearance-code-accent-hex">{codeColour}</code>
+        {notes["code-accent"] && (
+          <p className={"appearance-note " + notes["code-accent"].kind} role="status" data-testid="appearance-code-accent-note">
+            {notes["code-accent"].kind === "refused" ? "Not applied: " : ""}{notes["code-accent"].text}
+          </p>
+        )}
+        <p className="appearance-note clamped">
+          Colours the editor's function names, cursor and selections and the terminal's cyan. It is separate from the accent and stays put when a preset or RGB changes the rest.
+        </p>
+      </div>
+      <button
+        type="button"
+        data-testid="appearance-reset"
+        disabled={!custom && !a.rgb && a.accent === undefined && !a.washes && a.base === undefined && a.codeAccent === undefined}
+        onClick={reset}
+      >
         Reset colours to default
       </button>
     </section>
