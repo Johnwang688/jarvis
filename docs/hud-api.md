@@ -3846,13 +3846,16 @@ never on the phone's listener. No HUD view uses them yet (WS-2).
   - `count` / `pending`: the sidebar count and amber, computed as `waitingCount` / `anyPending`
     (visible rows of rank 1 to 5; any row of rank 1 or 2).
 - **`POST /working/{id}/done`** `{seq}`: `seq` is the entry's as drawn. `200 {thread_id, done: true,
-  token, undo_s: 10, entry}`; the chat is also marked read. `409 {error, entry}` when the chat is not
-  in the set, its `seq` moved on (redraw from `entry`), or it may not leave now (`error` says why: a
-  rank 1 to 4 row waits on it, a turn is running, it waits on an answer, or the inbox could not be
-  read). `400` for a bad id or body.
+  token, undo_s: 10, entry}`; the chat's last turn as of the Done is also marked read (a reply that
+  finished since stays unread). `409 {error, entry}` when the chat is not in the set, its `seq` moved
+  on (redraw from `entry`), or it may not leave now (`error` says why: a rank 1 to 4 row waits on it,
+  a turn is running, it waits on an answer, or the inbox could not be read). `503` when the change
+  could not be saved (nothing changed). `400` for a bad id or body. A thread that gains a rank 1 to 4
+  row after a Done (a deferral overnight) comes back in on its own, with a new `seq`.
 - **`POST /working/{id}/undo`** `{token}`: the `token` Done returned, within `undo_s` seconds
   (the HUD's toast shows 5). `200 {thread_id, done: false, entry}`; `409 {error, entry}` for any
-  other token, after the deadline, or after a daemon restart.
+  other token, after the deadline, after the chat or its project was archived, restored or deleted, or
+  after a daemon restart.
 - **`GET /working/settings`** → `{idle_days, min: 1, max: 30, default: 3}`; **`POST
   /working/settings`** `{idle_days}` (a whole number from 1 to 30, else `400`).
 - An `entry` in a response is `{thread_id, in, since, last, seq, done_at, done_seq, reason}`

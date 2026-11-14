@@ -12,7 +12,11 @@ revision 2, D-1 to D-11, §4 and §5's WS-1 test list).
 * **Eligibility (D-4, IN-8)**: an approval, a chat question and a
   quiet-hours deferral each hold a thread in; so does a running turn; a
   failed `inbox.rows()` read fails closed (an exception, a broker or
-  deferral source that failed, warnings switched off).
+  deferral source that failed, a deferrals file that is not ours), and
+  overlapping reads never mix their failures (`inbox.rows(failures=)`).
+* **Self-healing (IN-8)**: a deferral that lands with no thread-scoped
+  record (the broker announces it only with `inbox_changed`), during a
+  Done's check or just after it, brings its thread back in.
 * **Done and Undo (D-4)**: a stale or bogus `seq` is a 409 with the current
   entry, a repeated Done is a 409, an old token or one after the 10 s
   monotonic deadline is a 409, `seen_thread` is called once, activity
@@ -37,10 +41,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import http.client
 import json
-import logging
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 import threading
@@ -53,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis import config  # noqa: E402
-from jarvis.v2 import inbox, quiet_defer, remote_api, review, trash as T, working  # noqa: E402
+from jarvis.v2 import inbox, remote_api, review, trash as T, working  # noqa: E402
 from jarvis.v2.approvals import ApprovalRequest  # noqa: E402
 from jarvis.v2.daemon import APIError, Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN, Role, TaskState  # noqa: E402
@@ -605,9 +607,15 @@ class Time(Base):
                 self.assertEqual(working.WorkingSet(self.daemon).members(), [])
         path.unlink()
         elsewhere = self.root / "elsewhere.json"
-        elsewhere.write_text(json.dumps({"seeded_at": None, "threads": {}}))
+        # A populated, valid store behind the link: followed, it would show.
+        entry = {"since": T0.isoformat(), "last": T0.isoformat(), "seq": 1, "done_at": None,
+                 "done_seq": None, "done_token": None, "reason": None}
+        elsewhere.write_text(json.dumps({"seeded_at": T0.isoformat(), "idle_days": 9,
+                                         "threads": {tid: entry}}))
         path.symlink_to(elsewhere)
-        self.assertEqual(working.WorkingSet(self.daemon).members(), [], "a symlink is not ours")
+        followed = working.WorkingSet(self.daemon)
+        self.assertEqual((followed.members(), followed.seeded_at, followed.idle_days), ([], None, 3),
+                         "a symlink is not ours")
 
 
 # -- eligibility (D-4, IN-8) ---------------------------------------------------------------------
@@ -680,7 +688,6 @@ class Eligibility(Base):
             ("the broker cannot be read", patch.object(self.daemon.approvals, "pending", broken)),
             ("the deferrals cannot be read", patch.object(self.daemon.inbox.deferred, "_open", broken)),
             ("the questions source fails", patch.object(inbox, "_question_rows", broken)),
-            ("warnings switched off", patch.object(inbox.LOG, "disabled", True)),
         ]
         for name, guard in cases:
             with self.subTest(name=name), guard:
@@ -692,17 +699,65 @@ class Eligibility(Base):
         # task rows never carry a `thread_id` (D-7).
         with patch.object(self.stores.tasks, "list", broken):
             self.assertEqual(self.ws.why_not([tid]), {tid: None})
-        # A warning on another thread meanwhile is not this read's failure.
-        noise = threading.Thread(target=lambda: inbox.LOG.warning("Cannot read pending approvals for the inbox"))
-        real = inbox.rows
-
-        def rows_with_noise(*a, **k):
-            noise.start()
-            noise.join()
-            return real(*a, **k)
-        with patch.object(inbox, "rows", rows_with_noise):
-            self.assertEqual(self.ws.why_not([tid]), {tid: None})
         self.assertEqual(self.ws.sweep(), [tid])
+
+    def test_a_deferrals_file_that_is_not_ours_fails_closed(self):
+        tid = self.thread().id
+        self.publish("turn_finished", tid, data={"stop": "end"})
+        path = self.stores.root / "inbox" / "deferred.json"
+        path.write_text("{ not ours")
+        failures: list = []
+        self.assertEqual(inbox.rows(self.daemon, failures=failures), inbox.rows(self.daemon))
+        self.assertEqual(failures, ["deferred"])
+        self.assertEqual(self.done(tid, status=409)["error"], working.UNREADABLE)
+        self.clock.advance(days=4)
+        self.assertEqual(self.ws.sweep(), [])
+        path.unlink()
+        self.assertEqual(self.ws.sweep(), [tid])
+
+    def test_rows_reports_failures_without_changing_its_output(self):
+        def broken(*_a, **_k):
+            raise OSError("gone")
+        for name, guard, expected in (
+                ("nothing failed", patch.object(inbox, "LOG", inbox.LOG), []),
+                ("broker", patch.object(self.daemon.approvals, "pending", broken), ["approvals"]),
+                ("questions", patch.object(inbox, "_question_rows", broken), ["questions"]),
+                ("tasks", patch.object(self.stores.tasks, "list", broken), ["tasks"]),
+                ("deferrals", patch.object(self.daemon.inbox.deferred, "_open", broken), ["deferred"])):
+            with self.subTest(name=name), guard:
+                failures: list = []
+                for marks in ("hide", "flag", "ignore"):
+                    self.assertEqual(inbox.rows(self.daemon, marks=marks, failures=failures),
+                                     inbox.rows(self.daemon, marks=marks))
+                self.assertEqual(failures, expected * 3)
+
+    def test_overlapping_reads_never_mix_their_failures(self):
+        # A broker that fails only for the "bad" readers: each read's
+        # failures are its own, however the reads overlap (review of #365:
+        # the old log-handler probe could miss a failure when two overlapped).
+        real = self.daemon.approvals.pending
+
+        def pending():
+            if threading.current_thread().name.startswith("bad"):
+                raise OSError("gone")
+            return real()
+        results = {"bad": [], "good": []}
+        start = threading.Barrier(16)
+
+        def reader(kind):
+            start.wait()
+            for _ in range(15):
+                results[kind].append(self.ws._strict_rows())
+        with patch.object(self.daemon.approvals, "pending", pending):
+            workers = [threading.Thread(target=reader, args=(kind,), name=f"{kind}-{i}")
+                       for i in range(8) for kind in ("bad", "good")]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(30)
+        self.assertEqual((len(results["bad"]), len(results["good"])), (120, 120))
+        self.assertTrue(all(r is None for r in results["bad"]), "every failed read fails closed")
+        self.assertTrue(all(isinstance(r, list) for r in results["good"]), "every whole read is whole")
 
 
 # -- Done and Undo (D-4) -------------------------------------------------------------------------
@@ -719,10 +774,10 @@ class DoneUndo(Base):
         tid = self.member()
         seen = []
         real_seen = self.daemon.activity.seen_thread
-        with patch.object(self.daemon.activity, "seen_thread", lambda t: seen.append(t) or real_seen(t)):
+        with patch.object(self.daemon.activity, "seen_thread", lambda t, **kw: seen.append((t, kw)) or real_seen(t, **kw)):
             self.changes.clear()
             got = self.done(tid)
-        self.assertEqual(seen, [tid], "seen_thread once")
+        self.assertEqual(seen, [(tid, {"only_turn": "t1"})], "seen_thread once, for the turn it saw")
         self.assertEqual(self.changes, [CHANGED])
         self.assertEqual((got["done"], got["undo_s"], got["entry"]["in"], got["entry"]["reason"]),
                          (True, 10.0, False, "done"))
@@ -1041,6 +1096,199 @@ class Unchanged(Base):
         self.assertEqual(snapshot(), before)
         self.daemon.resolve_approval(req.req_id, Decision.DENY, False, owner_verified=True)
         worker.join(5)
+
+
+# -- review of #365: self-healing, lifecycle generations, seed, seen, rollbacks ---------------------
+
+
+class ReviewFixes(Base):
+    def member(self, turn_id="t1"):
+        tid = self.thread().id
+        self.publish("user_message", tid, data={})
+        self.publish("turn_finished", tid, turn_id=turn_id, data={"stop": "end"})
+        return tid
+
+    def quiet_deferral(self, thread_id, req_id="dfr0000009"):
+        """A deferral as the broker settles one in quiet hours
+        (approvals.py: `desk.deferred` → `QuietDesk.deferred`): the record,
+        then only `inbox_changed`, with no thread-scoped record."""
+        req = ApprovalRequest(tool="Bash", args={"command": "make deploy"}, command="make deploy",
+                              provider="claude", thread_id=thread_id)
+        req.req_id = req_id
+        row_id = self.daemon.inbox.deferred.add(req, None)
+        self.daemon.bus.publish({"kind": "inbox_changed", "data": {"ids": [row_id], "reason": "deferred"}})
+        return row_id
+
+    # 1. a deferral that does not bump `seq` --------------------------------------------------
+
+    def test_a_deferral_just_after_done_brings_the_thread_back(self):
+        tid = self.member()
+        self.done(tid)
+        seq = self.ws.entry(tid)["seq"]
+        self.changes.clear()
+        self.quiet_deferral(tid)
+        eventually(lambda: self.is_in(tid))
+        entry = self.ws.entry(tid)
+        self.assertEqual((entry["seq"], entry["reason"]), (seq + 1, None))
+        self.assertIn(CHANGED, self.changes)
+        self.assertEqual(self.done(tid, status=409)["error"],
+                         "an approval deferred overnight waits on you in this chat")
+
+    def test_a_deferral_during_the_check_cannot_keep_a_thread_out(self):
+        tid = self.member()
+        real = self.ws.why_not
+
+        def racing(ids, rows=None):
+            out = real(ids, rows)           # read before the deferral: eligible
+            self.quiet_deferral(tid)        # lands between the read and the write; no `seq` bump
+            return out
+        with patch.object(self.ws, "why_not", racing):
+            self.done(tid)                  # the commit goes through...
+        eventually(lambda: self.is_in(tid))   # ...and the reconcile undoes it
+
+    def test_the_sweep_reconciles_first(self):
+        tid = self.member()
+        self.done(tid)
+        req = ApprovalRequest(tool="Bash", args={"command": "x"}, command="x", provider="claude", thread_id=tid)
+        req.req_id = "dfr0000010"
+        self.daemon.inbox.deferred.add(req, None)          # no inbox_changed at all
+        self.assertFalse(self.is_in(tid))
+        self.ws.sweep()
+        self.assertTrue(self.is_in(tid))
+
+    def test_reconcile_brings_in_new_visible_threads_only(self):
+        fresh = self.thread().id
+        archived = self.thread()
+        archived.archived = "2026-11-14T00:00:00+00:00"
+        self.stores.threads.save(archived)
+        self.quiet_deferral(fresh, "dfr0000011")
+        self.quiet_deferral(archived.id, "dfr0000012")
+        eventually(lambda: self.is_in(fresh))
+        self.assertEqual(self.ws.reconcile(), [])
+        self.assertIsNone(self.ws.entry(archived.id), "an archived thread's rows go to needs_you")
+
+    # 4. archive invalidates in-flight changes ------------------------------------------------
+
+    def test_activity_in_flight_across_an_archive_is_dropped(self):
+        tid = self.thread().id
+        real = self.ws._visible_chat
+
+        def archived_meanwhile(thread_id):
+            seen = real(thread_id)                          # visible: passes
+            stored = self.stores.threads.get(thread_id)
+            stored.archived = "2026-11-14T00:00:00+00:00"
+            self.stores.threads.save(stored)
+            self.daemon.bus.publish({"kind": "thread_archived", "thread_id": thread_id,
+                                     "project_id": self.project.id, "data": {}})
+            return seen
+        with patch.object(self.ws, "_visible_chat", archived_meanwhile):
+            self.publish("relay_in", tid, data={})
+        self.assertIsNone(self.ws.entry(tid), "the record from before the archive does not join")
+
+    def test_an_undo_from_before_an_archive_is_refused(self):
+        for scope in ("thread", "project"):
+            with self.subTest(scope=scope):
+                project = self.project if scope == "thread" else self.stores.projects.create(
+                    "P" + scope, str(self.root / "repo2"))
+                tid = self.thread(project).id
+                self.publish("user_message", tid, data={})
+                self.publish("turn_finished", tid, turn_id="t1", data={"stop": "end"})
+                token = self.done(tid)["token"]
+                if scope == "thread":
+                    self.call("POST", f"/threads/{tid}/archive", {})
+                    self.call("POST", f"/threads/{tid}/restore", {})
+                else:
+                    impact = self.call("GET", f"/projects/{project.id}/impact", owner=False)["token"]
+                    self.call("POST", f"/projects/{project.id}/archive?expect={impact}", {})
+                    self.call("POST", f"/projects/{project.id}/restore", {})
+                self.assertIsNone(json.loads((self.stores.root / "inbox" / "working.json").read_text())
+                                  ["threads"][tid]["done_token"])
+                self.call("POST", f"/working/{tid}/undo", {"token": token}, 409)
+                self.assertFalse(self.is_in(tid), "no rejoin without new activity")
+
+    # 5. a failed seed is incomplete ----------------------------------------------------------
+
+    def test_a_failed_seed_keeps_no_marker_and_retries(self):
+        tid = self.thread().id
+        stored = self.stores.threads.get(tid)
+        stored.updated = datetime.now(timezone.utc).isoformat()
+        self.stores.threads.save(stored)
+        clock = Clock()
+        clock.now = datetime.now(timezone.utc)
+        ws = working.WorkingSet(self.daemon, clock=clock, mono=clock.mono)
+        ws._seeded_at = None
+
+        def broken():
+            raise OSError("gone")
+        with patch.object(self.daemon.approvals, "pending", broken):
+            self.assertEqual(ws.seed(), 0)
+        self.assertIsNone(ws.seeded_at, "the marker is not spent")
+        self.assertEqual(ws.members(), [])
+        ws.sweep()                                          # retries
+        self.assertIsNotNone(ws.seeded_at)
+        self.assertEqual(ws.members(), [tid])
+
+    # 6. Done marks read only the reply it saw ------------------------------------------------
+
+    def test_done_leaves_a_newer_reply_unread(self):
+        tid = self.member("t1")
+        self.assertEqual(self.daemon.activity.thread_status(tid), "unread")
+        real = self.ws._changed
+        fired = []
+
+        def reply_meanwhile():
+            real()
+            if not fired:
+                fired.append(1)             # a new turn finishes after the write, before the seen
+                self.publish("turn_finished", tid, turn_id="t2", data={"stop": "end"})
+        with patch.object(self.ws, "_changed", reply_meanwhile):
+            self.done(tid)
+        self.assertEqual(self.daemon.activity.last_turn(tid), "t2")
+        self.assertEqual(self.daemon.activity.thread_status(tid), "unread", "the new reply stays unread")
+        self.assertTrue(self.is_in(tid), "and rejoined")
+        # Without a newer reply, Done marks the one it saw read.
+        other = self.member("t9")
+        self.done(other)
+        self.assertEqual(self.daemon.activity.thread_status(other), "idle")
+
+    # 7. rollbacks and the symlink (Sol's surviving mutants) ---------------------------------
+
+    def test_a_failed_done_save_changes_nothing(self):
+        tid = self.member()
+        before = self.ws.entry(tid)
+
+        def broken():
+            raise OSError("disk full")
+        with patch.object(self.ws, "_save", broken):
+            self.assertEqual(self.done(tid, status=503)["error"], "the Inbox could not be saved; nothing changed")
+        self.assertEqual(self.ws.entry(tid), before)
+        self.assertNotIn(tid, self.ws._undo)
+        self.done(tid)
+
+    def test_a_failed_undo_save_changes_nothing(self):
+        tid = self.member()
+        token = self.done(tid)["token"]
+        before = self.ws.entry(tid)
+
+        def broken():
+            raise OSError("disk full")
+        with patch.object(self.ws, "_save", broken):
+            self.call("POST", f"/working/{tid}/undo", {"token": token}, 503)
+        self.assertEqual(self.ws.entry(tid), before)
+        self.call("POST", f"/working/{tid}/undo", {"token": token})     # the token still works
+        self.assertTrue(self.is_in(tid))
+
+    # 8. the write cap ------------------------------------------------------------------------
+
+    def test_a_write_over_the_cap_is_refused(self):
+        tid = self.member()
+        path = self.stores.root / "inbox" / "working.json"
+        on_disk = path.read_bytes()
+        with patch.object(working, "_FILE_MAX", 64):
+            self.done(tid, status=503)
+            self.publish("relay_in", tid, data={})          # logged, memory stands
+        self.assertEqual(path.read_bytes(), on_disk, "nothing over the cap was written")
+        self.assertTrue(self.is_in(tid))
 
 
 if __name__ == "__main__":

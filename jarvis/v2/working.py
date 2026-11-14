@@ -19,10 +19,13 @@ on it, bumped under the store lock; `last` is the UTC time of the latest.
 `idle_days` is the owner's idle limit (an addition to D-1's shape: the
 setting lives beside the state it governs, under the same protection).
 Every write is one `stores._write_bytes` (a sibling temp file, mode 0600,
-then `os.replace`); a file that is missing, a link, not regular, too large
-or not JSON reads as empty, and a malformed entry is dropped. Membership is
-not a secret (§9 Q7: it is derivable from `/threads` + `/activity`); the
-boundary is on the writes and on the inbox rows the read carries.
+then `os.replace`, with no fsync: a crash can leave the file empty or
+missing, which reads as an empty, unseeded set that is seeded again), and
+a write larger than `_FILE_MAX` is refused (a read refuses one too). A file
+that is missing, a link, not regular, too large or not JSON reads as empty,
+and a malformed entry is dropped. Membership is not a secret (§9 Q7: it is
+derivable from `/threads` + `/activity`); the boundary is on the writes and
+on the inbox rows the read carries.
 
 **What joins (D-2).** A synchronous bus observer (as `activity.py`), reading
 the producer table `ACTIVITY_KINDS` (plus a `subagent` record whose op is
@@ -32,15 +35,29 @@ flagged `compaction` (the owner's Compact button) is skipped; so is any
 record on a task's thread (D-7: tasks stay in Needs you), an archived
 thread, or a thread in an archived project (D-8).
 
-**Leaving (D-3, D-4).** A thread leaves only when it is *eligible*: a fresh
-`inbox.rows()` read shows no row of rank 1 to 4 linked to it by
-`thread_id` (a quiet-hours deferral is rank 4 and counts), and
-`activity.thread_status` is not working or needs_input. A read that fails
-is "not eligible" (fail closed): an exception, or a warning `rows()` logged
-on this thread while reading a source that can hold a linked rank 1 to 4
-row (`_SourceProbe`: approvals, questions, deferrals, or anything it does
-not recognise; the task, missed, decision, check and PR sources never link
-a chat thread). IN-8 carried over to threads. Two ways to leave:
+**The invariant (IN-8): a visible chat thread with a linked row of rank 1
+to 4 is always in.** Two halves keep it:
+
+  * *Leaving needs eligibility.* A thread leaves only when a fresh
+    `inbox.rows()` read shows no row of rank 1 to 4 linked to it by
+    `thread_id` (a quiet-hours deferral is rank 4 and counts), and
+    `activity.thread_status` is not working or needs_input. A read that
+    failed is "not eligible" (fail closed): `rows()` raised, or reported
+    (`failures=`) a source that can hold such a row as failed (approvals,
+    questions, deferrals, a deferrals file that is not ours, or any name not
+    in `_HARMLESS_SOURCES`: task rows carry no chat `thread_id`, and missed,
+    decision, check and PR rows are rank 5 or more).
+  * *Reconciling brings it back.* Not every new blocking row arrives with a
+    thread-scoped record: a quiet-hours deferral is settled by the broker
+    and announced only by `inbox_changed`, so it does not bump `seq`, and
+    can land while a Done or a sweep is deciding, or just after. Every
+    `inbox_changed` arms one debounced `reconcile` (`RECONCILE_S`, off the
+    publish thread; also run at the start of each sweep): one read, and
+    every visible chat thread with a linked rank 1 to 4 row that is out (or
+    has no entry) is brought in, its `seq` bumped. So the invariant can be
+    broken for at most the debounce, and heals itself.
+
+Two ways to leave:
 
   * the timer (`sweep`): hourly, plus once `FIRST_SWEEP_S` after start; a
     thread whose `last` is older than the idle limit leaves with reason
@@ -48,34 +65,42 @@ a chat thread). IN-8 carried over to threads. Two ways to leave:
   * Done (`POST /working/<id>/done {seq}`): `seq` must equal the stored
     one (stale is a 409 with the current entry); then eligibility, and
     `done_at`, `done_seq` and a fresh random `done_token` written in one
-    step; then `activity.seen_thread` once. Undo (`POST
+    step; then `activity.seen_thread` for the last turn it observed only
+    (a reply that finished since stays unread). Undo (`POST
     /working/<id>/undo {token}`) restores the entry only with the stored
     token and before a `UNDO_S` deadline on this process's monotonic clock.
 
-**Locks.** `_decide` serialises the decisions that take a thread out (Done
-and the sweep) and is held across the eligibility read. `_lock` guards the
-store and is never held while anything else is called: the observer runs
-inside `publish`, sometimes under the daemon's lock, and `inbox.rows()`
-takes that lock, so a decision reads the store's `seq` under `_lock`,
-releases it, reads the rows and the status, then takes `_lock` again and
-writes only if `seq` is unchanged. Every record that can make a thread
-ineligible (a message, a turn, an approval, a question) is in the producer
-table and bumps `seq`, so the check and the write are atomic in effect.
+**Locks.** `_decide` serialises the decisions (Done, the sweep, reconcile)
+and is held across their inbox read. `_lock` guards the store and is never
+held while anything else is called: the observer runs inside `publish`,
+sometimes under the daemon's lock, and `inbox.rows()` takes that lock, so a
+decision reads the store's `seq` under `_lock`, releases it, reads the rows
+and the status, then takes `_lock` again and writes only if `seq` is
+unchanged. A message, a turn, an approval and a question each bump `seq`, so
+those cannot slip between the read and the write; a deferral can, and the
+reconcile above brings its thread back.
 
 **Lifecycle (D-8).** Archiving a thread or its project takes it out
 (reason "archived"; its rows show in `needs_you`). Restore does not rejoin.
 Delete drops the entry. A move or rename publishes `working_changed` only.
+Archive, restore and delete bump a lifecycle generation (per thread; one
+counter for every project event) and clear any `done_token`, so activity
+that passed the visibility check before the event is dropped, and an Undo
+from before it is refused.
 
 **The signal (D-5).** `working_changed` carries no ids and no data: `/events`
-is not owner-checked, so it says only *that* something changed. The HUD
-reads `GET /working` (owner-only) again.
+is not owner-checked. Its timing can still hint at membership (it follows a
+record on a member thread); accepted under §9 Q7, since membership is
+derivable anyway. The HUD reads `GET /working` (owner-only) again.
 
 **Startup (D-11).** `Daemon.__init__` loads the store and registers the
 observer; `Daemon.start` seeds once (when `seeded_at` is absent: every
 visible chat thread updated within the idle limit, and every one with a
-linked rank 1 to 4 row) and arms the timer. A seed that adds nothing to a
-store with no file writes nothing (no `<data>/inbox/` folder is made at an
-empty start), so `seeded_at` is then remembered in memory only.
+linked rank 1 to 4 row) and arms the timer. A seed whose inbox read failed
+is incomplete: nothing is added, `seeded_at` stays unset, and the next
+sweep tries again. A seed that adds nothing to a store with no file writes
+nothing (no `<data>/inbox/` folder is made at an empty start), so
+`seeded_at` is then remembered in memory only.
 
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides when a
 thread leaves the owner's Inbox. Tests: tests/v2/working_check.py.
@@ -104,6 +129,7 @@ IDLE_DAYS_MIN = 1
 IDLE_DAYS_MAX = 30
 FIRST_SWEEP_S = 300.0           # the first sweep, after the inbox sources are up
 SWEEP_S = 3600.0                # then hourly
+RECONCILE_S = 0.25              # an `inbox_changed` burst becomes one reconcile
 UNDO_S = 10.0                   # the daemon's Undo window; the HUD's toast shows 5 s
 BLOCKING_MAX_RANK = 4           # IN-8: a linked row of rank 1 to 4 holds a thread in
 COUNTED_MAX_RANK = 5            # `waitingCount` (hud/src/lib/inbox.ts)
@@ -126,28 +152,23 @@ ACTIVITY_KINDS = frozenset({
     "thread_opened",
 })
 SUBAGENT_OPS = frozenset({"started", "finished"})
-# D-8: what takes a thread out, what drops its entry, what only redraws.
+# D-8: what takes a thread out, what drops its entry, what only redraws, and
+# what only bumps the lifecycle generation.
 _LEAVE_KINDS = frozenset({"thread_archived", "project_archived"})
 _DROP_KINDS = frozenset({"thread_deleted", "project_deleted"})
+_RESTORE_KINDS = frozenset({"thread_restored", "project_restored"})
 _REDRAW_KINDS = frozenset({"thread_moved", "thread_updated", "project_updated"})
 
-# The inbox sources whose failure cannot hide a row linked to a chat thread:
-# task rows carry no `thread_id` (D-7), and missed, decision, check and PR
-# rows are rank 5 or more. A warning from any other source, or one this
-# module does not recognise, fails the read closed.
+# The inbox sources (`inbox.rows(failures=...)`) whose failure cannot hide a
+# row linked to a chat thread: task rows carry no `thread_id` (D-7), and
+# missed, decision, check and PR rows are rank 5 or more. Any other name
+# reported fails the read closed.
 _HARMLESS_SOURCES = frozenset({"tasks", "missed", "decisions", "checks", "pull requests"})
-_HARMLESS_MESSAGES = frozenset({
-    "Cannot list tasks for the inbox",
-    "Cannot read missed approvals (%s)",
-    "Cannot show a decision (%s)",
-    "Cannot show a check (%s)",
-})
-_SOURCE_MESSAGE = "Cannot read the inbox's %s (%s)"
 
-_BLOCKING_STATUS = ("working", "needs_input")
 _ROW_WORDS = {"approval": "an approval", "question": "a question", "deferred": "an approval deferred overnight"}
 UNREADABLE = "the Inbox could not be read just now, so nothing leaves it; try again"
 _ENTRY_FIELDS = ("since", "last", "seq", "done_at", "done_seq", "done_token", "reason")
+_NO_SEEN = object()             # Done could not tell which turn it saw: mark nothing read
 
 
 def _utcnow() -> datetime:
@@ -224,28 +245,14 @@ def blocking(row) -> bool:
     return rank is not None and 1 <= rank <= BLOCKING_MAX_RANK
 
 
-class _SourceProbe(logging.Handler):
-    """Attached to the inbox's loggers for one `rows()` read: notes any
-    warning logged on the reading thread by a source that could hold a row
-    linked to a chat thread. `rows()` never raises for one source; this is
-    how a decision learns a source showed nothing because it failed."""
-
-    def __init__(self, ident: int, inbox_logger: str):
-        super().__init__(logging.WARNING)
-        self.ident = ident
-        self.inbox_logger = inbox_logger
-        self.failed = False
-
-    def emit(self, record) -> None:
-        if record.thread != self.ident:
-            return
-        if record.name == self.inbox_logger:
-            if record.msg in _HARMLESS_MESSAGES:
-                return
-            args = record.args if isinstance(record.args, tuple) else ()
-            if record.msg == _SOURCE_MESSAGE and args and args[0] in _HARMLESS_SOURCES:
-                return
-        self.failed = True
+def _linked(rows) -> set[str]:
+    """The thread ids that a rank 1 to 4 row is linked to."""
+    out = set()
+    for row in rows:
+        thread_id = row.get("thread_id") if isinstance(row, dict) else None
+        if isinstance(thread_id, str) and _ID.match(thread_id) and blocking(row):
+            out.add(thread_id)
+    return out
 
 
 class WorkingSet:
@@ -257,13 +264,16 @@ class WorkingSet:
         self.mono = mono or time.monotonic
         self._timer_factory = timer_factory or threading.Timer
         self._lock = threading.RLock()      # the store; never held while calling out
-        self._decide = threading.Lock()     # Done and the sweep, across the eligibility read
+        self._decide = threading.Lock()     # Done, the sweep and reconcile, across their inbox read
         self._threads: dict[str, dict] = {}
         self._seeded_at: str | None = None
         self._idle_days = IDLE_DAYS_DEFAULT
         self._undo: dict[str, tuple[str, float]] = {}   # thread id -> (token, monotonic deadline)
         self._chat: dict[str, bool] = {}                # thread id -> a chat thread (never changes)
+        self._gen: dict[str, int] = {}                  # thread id -> lifecycle generation
+        self._project_gen = 0                           # every project archive, restore, delete
         self._timer = None
+        self._reconcile_timer = None
         self._on = False
         self._load()
 
@@ -316,7 +326,14 @@ class WorkingSet:
             self._idle_days = idle if valid_idle_days(idle) else IDLE_DAYS_DEFAULT
 
     def _save(self) -> None:
-        """Under `_lock`. Raises StoreError/OSError; callers decide."""
+        """Under `_lock`. Raises StoreError/OSError; callers decide. Never
+        writes what a read would refuse (`_FILE_MAX`)."""
+        data = json.dumps({"seeded_at": self._seeded_at, "idle_days": self._idle_days,
+                           "threads": self._threads},
+                          sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        if len(data) > _FILE_MAX:
+            LOG.error("The working set is larger than its file may be (%d bytes); it is not written", len(data))
+            raise StoreError("the working set is too large to write")
         folder = self.path.parent
         try:
             info = os.lstat(folder)
@@ -327,10 +344,7 @@ class WorkingSet:
             raise StoreError(f"{folder.name} is not a folder")
         if stat.S_IMODE(info.st_mode) & 0o077:
             os.chmod(folder, 0o700)
-        data = {"seeded_at": self._seeded_at, "idle_days": self._idle_days,
-                "threads": self._threads}
-        _write_bytes(self.path, json.dumps(data, sort_keys=True, ensure_ascii=True,
-                                           separators=(",", ":")).encode("ascii"))
+        _write_bytes(self.path, data)
 
     def _save_quietly(self) -> None:
         try:
@@ -373,14 +387,23 @@ class WorkingSet:
             known = self._chat[thread.id] = role == "chat" and not thread.task_id
         return known
 
-    def _visible_chat(self, thread_id) -> bool:
-        """A chat thread (never a task's, D-7) that is neither archived nor in
-        an archived project (D-8). Called with no lock of ours held."""
+    def _visible(self, thread_id):
+        """The thread when it is a chat thread (never a task's, D-7) that is
+        neither archived nor in an archived project (D-8), else None. Called
+        with no lock of ours held."""
         thread = self._thread(thread_id)
         if thread is None or not self._is_chat(thread) or thread.archived:
-            return False
+            return None
         from .projects import is_archived
-        return not is_archived(self.daemon.stores, thread.project_id)
+        return None if is_archived(self.daemon.stores, thread.project_id) else thread
+
+    def _visible_chat(self, thread_id) -> bool:
+        return self._visible(thread_id) is not None
+
+    def _generation(self, thread_id) -> tuple[int, int]:
+        """Under `_lock`: the lifecycle generation an in-flight change must
+        still see when it commits."""
+        return self._gen.get(thread_id, 0), self._project_gen
 
     # -- the bus (D-2, D-8) ---------------------------------------------------------------
 
@@ -394,10 +417,14 @@ class WorkingSet:
             kind = record.get("kind")
             if kind in ACTIVITY_KINDS or kind == "subagent":
                 self._activity(kind, record)
+            elif kind == "inbox_changed":
+                self._arm_reconcile()
             elif kind in _LEAVE_KINDS:
                 self._leave_on(kind, record)
             elif kind in _DROP_KINDS:
                 self._drop_on(kind, record)
+            elif kind in _RESTORE_KINDS:
+                self._restore_on(kind, record)
             elif kind in _REDRAW_KINDS:
                 self._redraw_on(kind, record)
         except Exception:
@@ -413,10 +440,17 @@ class WorkingSet:
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
             if data.get("op") not in SUBAGENT_OPS:
                 return
+        # The generation before the visibility check: an archive, restore or
+        # delete that lands after the check (and before the write) bumps it,
+        # and this record is then dropped rather than rejoining.
+        with self._lock:
+            generation = self._generation(thread_id)
         if not self._visible_chat(thread_id):
             return
         now = _iso(self.clock())
         with self._lock:
+            if self._generation(thread_id) != generation:
+                return
             entry = self._threads.get(thread_id)
             if entry is None:
                 self._threads[thread_id] = {"since": now, "last": now, "seq": 1, "done_at": None,
@@ -441,30 +475,79 @@ class WorkingSet:
         self._undo.pop(thread_id, None)
         return True
 
+    def _forget_token(self, thread_id: str) -> bool:
+        """Under `_lock`: no Undo from before a lifecycle event. True when an
+        entry changed."""
+        self._undo.pop(thread_id, None)
+        entry = self._threads.get(thread_id)
+        if entry is not None and entry["done_token"] is not None:
+            entry["done_token"] = None
+            return True
+        return False
+
+    def _project_threads(self, project_id) -> list[str]:
+        """Every entry whose thread is in `project_id` (no lock of ours held)."""
+        with self._lock:
+            known = list(self._threads)
+        out = []
+        for thread_id in known:
+            thread = self._thread(thread_id)
+            if thread is not None and thread.project_id == project_id:
+                out.append(thread_id)
+        return out
+
     def _leave_on(self, kind, record) -> None:
         now = _iso(self.clock())
+        thread_id = record.get("thread_id")
         if kind == "thread_archived":
-            ids = [record.get("thread_id")]
+            with self._lock:
+                if isinstance(thread_id, str):
+                    self._gen[thread_id] = self._gen.get(thread_id, 0) + 1
+            ids = [thread_id]
         else:
-            project_id = record.get("project_id")
-            ids = []
-            for thread_id in self.members():
-                thread = self._thread(thread_id)
-                if thread is not None and thread.project_id == project_id:
-                    ids.append(thread_id)
+            with self._lock:
+                self._project_gen += 1
+            ids = self._project_threads(record.get("project_id"))
+        changed = moved = False
+        with self._lock:
+            for tid in ids:
+                moved |= self._take_out(tid, "archived", now)
+                changed |= self._forget_token(tid)
+            if changed or moved:
+                self._save_quietly()
+        if moved:
+            self._changed()
+
+    def _restore_on(self, kind, record) -> None:
+        """Restore does not rejoin (D-8); it bumps the generation and spends
+        any Undo from before the archive."""
+        thread_id = record.get("thread_id")
+        if kind == "thread_restored":
+            with self._lock:
+                if isinstance(thread_id, str):
+                    self._gen[thread_id] = self._gen.get(thread_id, 0) + 1
+            ids = [thread_id]
+        else:
+            with self._lock:
+                self._project_gen += 1
+            ids = self._project_threads(record.get("project_id"))
         changed = False
         with self._lock:
-            for thread_id in ids:
-                changed |= self._take_out(thread_id, "archived", now)
+            for tid in ids:
+                changed |= self._forget_token(tid)
             if changed:
                 self._save_quietly()
-        if changed:
-            self._changed()
 
     def _drop_on(self, kind, record) -> None:
         if kind == "thread_deleted":
             ids = {record.get("thread_id")}
+            with self._lock:
+                for tid in ids:
+                    if isinstance(tid, str):
+                        self._gen[tid] = self._gen.get(tid, 0) + 1
         else:
+            with self._lock:
+                self._project_gen += 1
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
             removed = data.get("removed_thread_ids")
             ids = {i for i in removed if isinstance(i, str)} if isinstance(removed, list) else set()
@@ -497,31 +580,31 @@ class WorkingSet:
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Cannot announce a working set change (%s)", type(exc).__name__)
 
-    # -- eligibility (D-4) ----------------------------------------------------------------
+    # -- the inbox read (D-4) -------------------------------------------------------------
 
-    def _strict_rows(self) -> list[dict] | None:
+    def _read_rows(self) -> tuple[list[dict], bool]:
         """A fresh `inbox.rows()` (marks ignored, no live checks: neither can
-        hold a rank 1 to 4 row), or None when it failed (fail closed)."""
-        from . import inbox as _inbox, quiet_defer as _quiet_defer
-        loggers = (_inbox.LOG, _quiet_defer.LOG)
-        if not all(logger.isEnabledFor(logging.WARNING) for logger in loggers):
-            LOG.warning("The inbox's warnings are switched off, so a failed read cannot be told; "
-                        "nothing leaves the working set")
-            return None
-        probe = _SourceProbe(threading.get_ident(), _inbox.LOG.name)
-        for logger in loggers:
-            logger.addHandler(probe)
+        hold a rank 1 to 4 row) and whether it is whole for this purpose:
+        False when it raised or reported a source that can hold such a row
+        as failed (`failures=`, per call, so overlapping reads never mix)."""
+        from . import inbox as _inbox
+        failures: list = []
         try:
-            rows = _inbox.rows(self.daemon, with_checks=False, marks="ignore")
+            rows = _inbox.rows(self.daemon, with_checks=False, marks="ignore", failures=failures)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Cannot read the inbox for the working set (%s)", type(exc).__name__)
-            return None
-        finally:
-            for logger in loggers:
-                logger.removeHandler(probe)
-        if probe.failed or not isinstance(rows, list):
-            return None
-        return rows
+            return [], False
+        if not isinstance(rows, list):
+            return [], False
+        failed = set(failures) - _HARMLESS_SOURCES
+        if failed:
+            LOG.warning("The working set's inbox read was incomplete (%s)", ", ".join(sorted(failed)))
+        return rows, not failed
+
+    def _strict_rows(self) -> list[dict] | None:
+        """The read, or None when it is not whole (fail closed)."""
+        rows, whole = self._read_rows()
+        return rows if whole else None
 
     def _status(self, thread_id) -> str:
         return self.daemon.activity.thread_status(thread_id)
@@ -556,6 +639,71 @@ class WorkingSet:
                 out[thread_id] = None
         return out
 
+    # -- reconciling (IN-8, self-healing) --------------------------------------------------
+
+    def _arm_reconcile(self) -> None:
+        """From the observer: one reconcile `RECONCILE_S` from now, off the
+        publish thread, however many `inbox_changed` arrive meanwhile."""
+        with self._lock:
+            if not self._on or self._reconcile_timer is not None:
+                return
+            try:
+                timer = self._timer_factory(RECONCILE_S, self._reconcile_tick)
+                timer.daemon = True
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("Cannot arm a working set reconcile (%s)", type(exc).__name__)
+                return
+            self._reconcile_timer = timer
+        timer.start()
+
+    def _reconcile_tick(self) -> None:
+        with self._lock:
+            self._reconcile_timer = None
+            if not self._on:
+                return
+        try:
+            self.reconcile()
+        except Exception:  # noqa: BLE001
+            LOG.exception("working set: a reconcile failed")
+
+    def reconcile(self) -> list[str]:
+        """Bring in every visible chat thread with a linked rank 1 to 4 row
+        that is out or has no entry, bumping its `seq`. Returns the ids
+        brought in. A read that is not whole still brings in what it shows
+        (bringing in is always safe); the next `inbox_changed` or sweep
+        reads again."""
+        brought: list[str] = []
+        with self._decide:
+            rows, _whole = self._read_rows()
+            linked = _linked(rows)
+            with self._lock:
+                wanted = {tid: self._generation(tid) for tid in linked
+                          if tid not in self._threads or self._threads[tid]["done_at"] is not None}
+            visible = [tid for tid in sorted(wanted) if self._visible_chat(tid)]
+            if not visible:
+                return []
+            now = _iso(self.clock())
+            with self._lock:
+                for thread_id in visible:
+                    if self._generation(thread_id) != wanted[thread_id]:
+                        continue
+                    entry = self._threads.get(thread_id)
+                    if entry is None:
+                        self._threads[thread_id] = {"since": now, "last": now, "seq": 1, "done_at": None,
+                                                    "done_seq": None, "done_token": None, "reason": None}
+                    elif entry["done_at"] is not None:
+                        entry.update(seq=entry["seq"] + 1, since=now, last=now, done_at=None,
+                                     done_seq=None, done_token=None, reason=None)
+                        self._undo.pop(thread_id, None)
+                    else:
+                        continue
+                    brought.append(thread_id)
+                if brought:
+                    self._save_quietly()
+        if brought:
+            self._changed()
+        return brought
+
     # -- Done and Undo (D-4) ---------------------------------------------------------------
 
     def done(self, thread_id: str, seq) -> tuple[int, dict]:
@@ -572,6 +720,13 @@ class WorkingSet:
                     return 409, {"error": "this chat changed since the Inbox was drawn",
                                  "entry": _public(thread_id, entry)}
             why = self.why_not([thread_id])[thread_id]
+            # The last turn as of the check: a turn that finishes after this
+            # bumps `seq` (refused below) or comes after the write (it
+            # rejoins, and stays unread: seen only marks this one).
+            try:
+                observed = self.daemon.activity.last_turn(thread_id)
+            except Exception:  # noqa: BLE001
+                observed = _NO_SEEN
             with self._lock:
                 entry = self._threads.get(thread_id)
                 if entry is None or entry["done_at"] is not None or entry["seq"] != seq:
@@ -591,11 +746,13 @@ class WorkingSet:
                 self._undo[thread_id] = (token, self.mono() + UNDO_S)
                 public = _public(thread_id, entry)
         self._changed()
-        try:
-            # Once, so a finished chat is not left unread in its project.
-            self.daemon.activity.seen_thread(thread_id)
-        except Exception as exc:  # noqa: BLE001 — the Done stands
-            LOG.warning("Cannot mark a done chat read (%s)", type(exc).__name__)
+        if observed is not _NO_SEEN:
+            try:
+                # Once, so a finished chat is not left unread in its project;
+                # only the turn this Done saw.
+                self.daemon.activity.seen_thread(thread_id, only_turn=observed)
+            except Exception as exc:  # noqa: BLE001 — the Done stands
+                LOG.warning("Cannot mark a done chat read (%s)", type(exc).__name__)
         return 200, {"thread_id": thread_id, "done": True, "token": token, "undo_s": UNDO_S,
                      "entry": public}
 
@@ -631,8 +788,11 @@ class WorkingSet:
     # -- the timer (D-3) -------------------------------------------------------------------
 
     def sweep(self) -> list[str]:
-        """Take out every thread idle past the limit and eligible. Returns
-        the ids that left."""
+        """Finish an incomplete seed, reconcile, then take out every thread
+        idle past the limit and eligible. Returns the ids that left."""
+        if self.seeded_at is None:
+            self.seed()
+        self.reconcile()
         left: list[str] = []
         pruned = False
         with self._decide:
@@ -673,9 +833,11 @@ class WorkingSet:
     def stop(self) -> None:
         with self._lock:
             self._on = False
-            timer, self._timer = self._timer, None
-        if timer is not None:
-            timer.cancel()
+            timers = (self._timer, self._reconcile_timer)
+            self._timer = self._reconcile_timer = None
+        for timer in timers:
+            if timer is not None:
+                timer.cancel()
 
     def _arm(self, delay: float) -> None:
         try:
@@ -706,23 +868,29 @@ class WorkingSet:
     def seed(self) -> int:
         """Once, when `seeded_at` is absent: every visible chat thread updated
         within the idle limit, and every one with a linked rank 1 to 4 row.
-        Returns how many joined. Adds only; never takes a thread out."""
+        Returns how many joined. Adds only; never takes a thread out. A seed
+        whose inbox read is not whole adds nothing and leaves `seeded_at`
+        unset, so the next sweep (or start) tries again."""
         with self._lock:
             if self._seeded_at is not None:
                 return 0
             limit = timedelta(days=self._idle_days)
         now = self.clock()
         rows = self._strict_rows()
-        linked = {r.get("thread_id") for r in rows or () if blocking(r)}
+        if rows is None:
+            LOG.warning("The working set's seed could not read the inbox; it will try again")
+            return 0
+        linked = _linked(rows)
         found: dict[str, str] = {}
         try:
             ids = self.daemon.stores.threads.ids()
         except Exception:  # noqa: BLE001
-            ids = []
+            LOG.warning("The working set's seed could not list the threads; it will try again")
+            return 0
         for thread_id in ids:
-            if not self._visible_chat(thread_id):
+            thread = self._visible(thread_id)
+            if thread is None:
                 continue
-            thread = self._thread(thread_id)
             updated = parse_time(getattr(thread, "updated", None))
             recent = updated is not None and now - updated < limit
             if recent or thread_id in linked:
@@ -781,8 +949,8 @@ class WorkingSet:
             snapshot = {tid: dict(e) for tid, e in self._threads.items() if e["done_at"] is None}
         entries = {}
         for thread_id, entry in snapshot.items():
-            thread = self._thread(thread_id)
-            if thread is None or not self._visible_chat(thread_id):
+            thread = self._visible(thread_id)
+            if thread is None:
                 continue        # its rows go to needs_you (D-5, D-8)
             entries[thread_id] = {"thread_id": thread_id, "project_id": thread.project_id,
                                   "since": entry["since"], "last": entry["last"], "seq": entry["seq"],

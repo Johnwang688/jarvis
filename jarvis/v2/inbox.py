@@ -248,12 +248,14 @@ def _row(kind, rank, row_id, title, blocks, *, project_id=None, thread_id=None,
 
 # -- the sources ---------------------------------------------------------------
 
-def _approval_rows(daemon, hidden):
+def _approval_rows(daemon, hidden, failures=None):
     out = []
     try:
         pending = daemon.approvals.pending()
     except Exception:  # noqa: BLE001 — a broker that cannot be read shows nothing, never a guess
         LOG.warning("Cannot read pending approvals for the inbox")
+        if failures is not None:
+            failures.append("approvals")
         return out
     for request in pending:
         card = request.to_json()
@@ -347,12 +349,14 @@ def _grace_until(daemon, task):
     return max(deadlines)
 
 
-def _task_rows(daemon, hidden):
+def _task_rows(daemon, hidden, failures=None):
     out = []
     try:
         tasks = daemon.stores.tasks.list()
     except Exception:  # noqa: BLE001
         LOG.warning("Cannot list tasks for the inbox")
+        if failures is not None:
+            failures.append("tasks")
         return out
     for task in tasks:
         if task.project_id in hidden:
@@ -759,7 +763,7 @@ def _check_row(hidden, rec, now, deploy, budget) -> list:
 _MARK_MODES = ("hide", "flag", "ignore")
 
 
-def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]:
+def rows(daemon, *, with_checks: bool = True, marks: str = "hide", failures: list | None = None) -> list[dict]:
     """Every row, ranked (IN-4; ties to the older item). Pure: reads only.
     `with_checks=False` leaves the live checks (and their git) out: `answer`
     finds the row it answers without them, since a check is never answered
@@ -769,7 +773,13 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]
     dismissed (`GET /inbox`, the phone); "flag" keeps them with `hidden`
     set and says of every row whether it is `markable` (`?all=1`);
     "ignore" is the projection alone (`answer`, `mark_row`). A mark applies
-    only to a row whose current rank is 5 or more (`inbox_marks.markable`)."""
+    only to a row whose current rank is 5 or more (`inbox_marks.markable`).
+
+    `failures` (WS-1, the working set's strict read): when a list is given,
+    the name of each source that failed and so showed nothing ("approvals",
+    "questions", "tasks", "missed", "deferred", "decisions", "checks",
+    "pull requests"; "deferred" also when its file is not ours) is appended
+    to it. The rows returned are the same with or without it."""
     if marks not in _MARK_MODES:
         raise ValueError("marks must be hide, flag or ignore")
     from .projects import archived_project_ids
@@ -780,11 +790,12 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]
     out = []
     # One source that fails (a decision file that is not one, review of PR
     # #309) shows nothing of its own and never takes the others down.
-    for name, source in (("approvals", lambda: _approval_rows(daemon, hidden)),
+    for name, source in (("approvals", lambda: _approval_rows(daemon, hidden, failures)),
                          ("questions", lambda: _question_rows(daemon, hidden)),
-                         ("tasks", lambda: _task_rows(daemon, hidden)),
+                         ("tasks", lambda: _task_rows(daemon, hidden, failures)),
                          ("missed", lambda: _missed_rows(daemon)),
-                         ("deferred", lambda: _quiet_defer.rows(daemon, _row)),
+                         ("deferred", lambda: _quiet_defer.rows(daemon, _row, failures)
+                          if failures is not None else _quiet_defer.rows(daemon, _row)),
                          ("decisions", lambda: _decision_rows(daemon, hidden)),
                          ("checks", lambda: _check_rows(daemon, hidden) if with_checks else []),
                          ("pull requests", lambda: _pr_rows(daemon, hidden))):
@@ -792,6 +803,8 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]
             out += source()
         except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
             LOG.warning("Cannot read the inbox's %s (%s)", name, type(exc).__name__)
+            if failures is not None:
+                failures.append(name)
     out = sorted(out, key=_sort_key)
     store = getattr(getattr(daemon, "inbox", None), "marks", None)
     if marks == "ignore" or store is None:
