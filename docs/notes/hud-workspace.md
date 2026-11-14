@@ -1571,8 +1571,11 @@ pane's "Jarvis can drive", Remote mode and `agents_may_drive`.
   download, is refused as needing the owner) and, for what those rules
   CLASSIFY, drive's own reviewer (`act_review.judge`/`decide`: anything but
   allow refuses). One refusal refuses the call and publishes nothing. A
-  refusal never echoes the URL. Budget: 11 pages a turn across calls, and 44
-  a rolling hour for the daemon (`TURN_MAX`, `HOUR_MAX`). Bus record
+  refusal never echoes the URL. Fixed checks run on every URL before any
+  lookup, and lookups before any review. Budget: 11 pages a turn across
+  calls, and 44 a rolling hour for the daemon (`TURN_MAX`, `HOUR_MAX`); the
+  reviewer, 22 URLs a turn and 88 an hour, charged before it is called
+  (`REVIEWS_TURN_MAX`, `REVIEWS_HOUR_MAX`). Bus record
   `browser_open {thread_id, data: {urls, request_id?}}`; the window reports
   as above ("Opened 3 of 3 …").
 - **The HUD** places the record as one batch (`placeAgentBatch`), judging

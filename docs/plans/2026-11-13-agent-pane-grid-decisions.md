@@ -169,8 +169,16 @@ Browser pane: the drive tools need a pane that is already showing.
   - At most 11 pages in one turn, counted across all its calls.
   - At most 44 pages in any rolling hour for the daemon, on the monotonic
     clock.
-  - The budget is checked before judging and charged only when a call
-    publishes, so a refused call costs nothing.
+  - The page budget is checked before judging and charged only when a call
+    publishes, so a refused call costs no pages.
+  - The reviewer is a paid model call with its own budget (delta review of
+    #359; `REVIEWS_TURN_MAX` 22, `REVIEWS_HOUR_MAX` 88): charged for every
+    URL before any is sent, whether the call then opens anything or not.
+    Before this, a chat repeating a call with one URL the reviewer denies
+    paid 11 reviews each time without limit.
+  - The order: every fixed check on every URL first, then the name lookups,
+    then the reviewer. A URL any rule refuses costs no lookup and no review,
+    for it or the other URLs in the call.
 - **The bus record** is `browser_open {thread_id, data: {urls (as judged),
   request_id?}}`. It is placed as one batch with PR A's placement, and the
   report and its wording work as in PR A ("Opened 3 of 3 Browser pane(s) at

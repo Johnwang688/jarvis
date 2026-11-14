@@ -20,9 +20,16 @@ whole call, as text that never repeats the URL:
      (`act_review.judge` and `decide`): anything but its allow is refused the
      same way. No new approval path: this never asks the owner.
 
+The order (delta review of #359): every fixed check on every URL first, then
+the name lookups, then the reviewer, so a URL any rule refuses costs no
+lookup and no model call, for it or its siblings.
+
 The budget (review of #359): at most `TURN_MAX` (11) pages in one turn
 across all its calls, and `HOUR_MAX` (44) in any rolling hour for the
-daemon, on the monotonic clock. Then it publishes one bus record,
+daemon, on the monotonic clock. The reviewer, a paid model call, has its
+own: `REVIEWS_TURN_MAX` (22) and `REVIEWS_HOUR_MAX` (88), charged for every
+URL before any is sent, whether the call then opens anything or not. Then it
+publishes one bus record,
 `browser_open` `{thread_id, data: {urls, request_id?}}`, and waits up to
 three seconds for the first window's counts (`agent_panes.PaneReports`),
 never under the daemon lock.
@@ -85,6 +92,11 @@ HOUR_MAX = 44
 HOUR_S = 3600.0
 # Turns whose counts are kept (oldest forgotten first; a turn is short).
 TURNS_KEPT = 64
+# Drive navigate's reviewer is a paid model call, charged per URL sent to it
+# whether the call then opens anything or not (delta review of #359: refused
+# calls used to pay every review and charge nothing). Twice the page budget.
+REVIEWS_TURN_MAX = 2 * TURN_MAX
+REVIEWS_HOUR_MAX = 2 * HOUR_MAX
 # What a HUD pane stores of a URL (`workspace.ts` URL_MAX).
 URL_MAX = 2048
 RESOLVE_TIMEOUT_S = 3.0
@@ -118,7 +130,7 @@ _RESOLVER = ThreadPoolExecutor(max_workers=2 * OPEN_MAX, thread_name_prefix="bro
 
 
 def judge_public_url(url, *, refused: frozenset[int], resolve=_resolve,
-                     timeout: float = RESOLVE_TIMEOUT_S) -> str:
+                     timeout: float = RESOLVE_TIMEOUT_S, lookup: bool = True) -> str:
     """The URL to open, or `NotPublic`. First the Browser's own URL judge (the
     one agent navigation and the owner's routes use: `policy.judge_url`,
     which refuses other schemes, user names, ambiguous authorities and every
@@ -126,7 +138,8 @@ def judge_public_url(url, *, refused: frozenset[int], resolve=_resolve,
     only, no Jarvis port on any host (`policy.judge_port`), and a host that is
     public: an IP literal of the public class, or a name that is not local
     by its spelling and resolves only to public addresses now. The SOCKS gate
-    still judges every connection the page makes afterwards."""
+    still judges every connection the page makes afterwards. With `lookup`
+    false, every check but the name lookup (no network, no model)."""
     if not isinstance(url, str) or len(url.strip()) > URL_MAX:
         raise NotPublic(f"each URL is text of at most {URL_MAX} characters")
     try:
@@ -165,6 +178,8 @@ def judge_public_url(url, *, refused: frozenset[int], resolve=_resolve,
     bare = host.lower().rstrip(".")
     if "." not in bare or bare.endswith(LOCAL_SUFFIXES) or bare in ("localhost", "local"):
         raise NotPublic(PUBLIC_ONLY)
+    if not lookup:
+        return target
     try:
         addresses = _RESOLVER.submit(resolve, bare, port).result(timeout=timeout)
     except FutureTimeout:
@@ -213,6 +228,11 @@ def review_url(url: str, review=None) -> None:
         raise NotPublic(NEEDS_OWNER)
 
 
+def _refused(n: int, refusal: NotPublic) -> str:
+    # The fixed sentence only: the URL itself is never echoed.
+    return f"Error: URL {n} was refused, so nothing was opened: {refusal}."
+
+
 def _site(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -230,6 +250,8 @@ class BrowserOpens:
         self._budget_lock = threading.Lock()
         self._turns: collections.OrderedDict[tuple, int] = collections.OrderedDict()
         self._hour: collections.deque[float] = collections.deque()
+        self._review_turns: collections.OrderedDict[tuple, int] = collections.OrderedDict()
+        self._review_hour: collections.deque[float] = collections.deque()
         self.reports = reports or getattr(daemon, "agent_pane_reports", None) or PaneReports(daemon)
 
     def _refused_ports(self) -> frozenset[int]:
@@ -260,15 +282,37 @@ class BrowserOpens:
         if over:
             return over
         refused = self._refused_ports()
-        with ThreadPoolExecutor(max_workers=len(urls), thread_name_prefix="browser-open-judge") as pool:
-            futures = [pool.submit(self._judge_one, url, refused) for url in urls]
-            judged = []
+        # 1. Every fixed check on every URL, in order, before any lookup or
+        #    model call: a URL any rule refuses costs nothing and its siblings
+        #    are never looked up or reviewed (delta review of #359).
+        for n, url in enumerate(urls, 1):
+            try:
+                judge_public_url(url, refused=refused, resolve=self.resolve, lookup=False)
+            except NotPublic as refusal:
+                return _refused(n, refusal)
+        # 2. The names, looked up in parallel (no model).
+        judged = []
+        with ThreadPoolExecutor(max_workers=len(urls), thread_name_prefix="browser-open-dns-judge") as pool:
+            futures = [pool.submit(judge_public_url, url, refused=refused, resolve=self.resolve) for url in urls]
             for n, future in enumerate(futures, 1):
                 try:
                     judged.append(future.result())
                 except NotPublic as refusal:
-                    # The fixed sentence only: the URL itself is never echoed.
-                    return f"Error: URL {n} was refused, so nothing was opened: {refusal}."
+                    for other in futures:
+                        other.cancel()
+                    return _refused(n, refusal)
+        # 3. Drive navigate's reviewer, charged for every URL before any is
+        #    sent, whether the call then opens anything or not.
+        over = self._charge_reviews(turn, len(judged))
+        if over:
+            return over
+        with ThreadPoolExecutor(max_workers=len(judged), thread_name_prefix="browser-open-review") as pool:
+            futures = [pool.submit(review_url, target, self.review) for target in judged]
+            for n, future in enumerate(futures, 1):
+                try:
+                    future.result()
+                except NotPublic as refusal:
+                    return _refused(n, refusal)
         # The turn may have ended while names were looked up.
         with self.daemon._lock:
             why_not, _ = refuse_desk_caller(self.daemon, self.closed, caller, NOT_AT_DESK, STOPPING)
@@ -279,11 +323,24 @@ class BrowserOpens:
             return over
         return self._publish_and_wait(thread_id, judged)
 
-    def _judge_one(self, url, refused) -> str:
-        """The URL judge with drive navigate's fixed rules, then its reviewer."""
-        target = judge_public_url(url, refused=refused, resolve=self.resolve)
-        review_url(target, self.review)
-        return target
+    def _charge_reviews(self, turn: tuple, n: int) -> str | None:
+        """Count `n` reviewer calls against this turn's `REVIEWS_TURN_MAX` and
+        the daemon's rolling `REVIEWS_HOUR_MAX`, or a refusal (nothing counted)
+        when they would pass either. Charged before the calls are made."""
+        with self._budget_lock:
+            now = self.clock()
+            while self._review_hour and now - self._review_hour[0] >= HOUR_S:
+                self._review_hour.popleft()
+            used = self._review_turns.get(turn, 0)
+            if used + n > REVIEWS_TURN_MAX or len(self._review_hour) + n > REVIEWS_HOUR_MAX:
+                return ("Error: too many Browser pages have been checked this way recently, so "
+                        "nothing was opened; open fewer, or try again later.")
+            self._review_turns[turn] = used + n
+            self._review_turns.move_to_end(turn)
+            while len(self._review_turns) > TURNS_KEPT:
+                self._review_turns.popitem(last=False)
+            self._review_hour.extend([now] * n)
+        return None
 
     def _over_budget(self, turn: tuple, n: int, *, charge: bool) -> str | None:
         """A refusal when `n` more pages would pass this turn's `TURN_MAX` or

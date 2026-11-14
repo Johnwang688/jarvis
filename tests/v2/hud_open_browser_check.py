@@ -517,6 +517,71 @@ class Budget(unittest.TestCase):
         import time
         self.assertIs(browser_open.BrowserOpens(SimpleNamespace()).clock, time.monotonic)
 
+    # Delta review of #359: refused calls used to pay every reviewer call and
+    # charge nothing, and one refused URL left its siblings looked up and reviewed.
+
+    @staticmethod
+    def _deny_some(calls):
+        from jarvis.v2.browser import act_review
+        lock = threading.Lock()
+
+        def review(facts, owner_words=""):
+            with lock:
+                calls.append(facts.nav_url)
+            verdict = act_review.DENY if "denied" in facts.nav_url else act_review.ALLOW
+            return act_review.ActVerdict(verdict, act_review.ORDINARY, "x", "model")
+        return review
+
+    def test_review_budget_is_pinned(self):
+        self.assertEqual((browser_open.REVIEWS_TURN_MAX, browser_open.REVIEWS_HOUR_MAX), (22, 88))
+
+    def test_refused_calls_still_spend_a_bounded_number_of_reviews(self):
+        calls = []
+        svc, published = stub_service(stub_session(), review=self._deny_some(calls))
+        urls = [f"https://site{i}.example.net/" for i in range(10)] + ["https://denied.example.net/"]
+        outs = [svc.open(dict(CALLER), urls) for _ in range(30)]
+        self.assertEqual(published, [])
+        self.assertTrue(all(is_refusal(o) for o in outs))
+        self.assertLessEqual(len(calls), browser_open.REVIEWS_TURN_MAX)
+        self.assertTrue(outs[-1].startswith("Error: too many Browser pages have been checked"), outs[-1])
+
+    def test_a_url_the_rules_refuse_means_no_lookup_and_no_review_for_any(self):
+        calls, seen = [], []
+
+        def resolve(name, port):
+            seen.append(name)
+            return [PUBLIC_IP]
+        svc, published = stub_service(stub_session(), resolve=resolve, review=self._deny_some(calls))
+        urls = [f"https://s{i}.example.net/" for i in range(10)] + ["https://ex.example.net/account/delete"]
+        out = svc.open(dict(CALLER), urls)
+        self.assertTrue(out.startswith("Error: URL 11 was refused"), out)
+        self.assertEqual((seen, calls, published), ([], [], []))
+
+    def test_a_failed_lookup_means_no_review(self):
+        calls = []
+        svc, published = stub_service(stub_session(), resolve=resolver({"bad.example.net": ("10.0.0.5",)}),
+                                      review=self._deny_some(calls))
+        out = svc.open(dict(CALLER), [IG, "https://bad.example.net/"])
+        self.assertTrue(out.startswith("Error: URL 2 was refused"), out)
+        self.assertEqual((calls, published), ([], []))
+
+    def test_the_review_hour_is_rolling_across_turns(self):
+        now = [1000.0]
+        calls = []
+        svc, published = stub_service(stub_session(), clock=lambda: now[0], review=self._deny_some(calls))
+        session = svc.daemon._sessions["ab12cd34"]
+        urls = [IG] * 10 + ["https://denied.example.net/"]
+        for n in range(8):
+            session.turn_id = f"{n:032x}"
+            self.assertTrue(svc.open({**CALLER, "turn_id": f"{n:032x}"}, urls).startswith("Error: URL 11"))
+        self.assertEqual(len(calls), 88)
+        session.turn_id = f"{8:032x}"
+        out = svc.open({**CALLER, "turn_id": f"{8:032x}"}, [IG])
+        self.assertTrue(out.startswith("Error: too many Browser pages have been checked"), out)
+        self.assertEqual(len(calls), 88)
+        now[0] += 3600.0
+        self.assertFalse(is_refusal(svc.open({**CALLER, "turn_id": f"{8:032x}"}, [IG])), "an hour later")
+
 
 # --- the agent's tab in the pane registry, the look and the drive (decision D5) ---------------
 
