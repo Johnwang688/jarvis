@@ -17,8 +17,8 @@
 //     duplicate ids and names (first wins, names case-insensitively, built-in names included), entries that
 //     fail the quick per-colour guards (format, checkWash/checkBase unclamped, checkAccent of accent and
 //     codeAccent against the washes); keeps at most MAX_CUSTOM_PRESETS; examines every stored entry. Never
-//     throws. The whole-palette proof is NOT run on load (too slow, Sol round 2); add, restore and apply run
-//     the full checkCustomPreset.
+//     throws. Any hue is allowed (owner 2026-11-14: the amber/red guard and the whole-palette proof are gone);
+//     add, restore and apply run checkCustomPreset.
 //   addCustomPreset(name, colours, storage?), renameCustomPreset(id, name, storage?),
 //   deleteCustomPreset(id, storage?), restoreCustomPreset(preset, index, storage?) each return
 //     { ok: true, presets, preset?, index? } or { ok: false, reason }. Refusals change nothing.
@@ -55,9 +55,9 @@ describe("checkCustomPreset", () => {
   it("passes a preset built from a built-in's colours and a readable code accent", () => {
     expect(checkCustomPreset(entry())).toBeNull();
   });
-  it("refuses an amber accent, an amber code accent, a wash that would need darkening, a bad hex", () => {
-    expect(checkCustomPreset(entry({ accent: AMBER }))).not.toBeNull();
-    expect(checkCustomPreset(entry({ codeAccent: AMBER }))).not.toBeNull();
+  it("accepts an amber accent and code accent; refuses an unreadable code accent, a wash that would need darkening, a bad hex", () => {
+    expect(checkCustomPreset(entry({ accent: AMBER }))).toBeNull();
+    expect(checkCustomPreset(entry({ codeAccent: AMBER }))).toBeNull();
     expect(checkCustomPreset(entry({ codeAccent: "#1a3a4a" }))).not.toBeNull();
     expect(checkCustomPreset(entry({ washes: ["#9fe8ff", NEBULA.washes[1], NEBULA.washes[2]] }))).not.toBeNull();
     expect(checkCustomPreset(entry({ base: "url(x)" }))).not.toBeNull();
@@ -74,7 +74,7 @@ describe("loadCustomPresets", () => {
     const good2 = entry({ id: "c-def", name: "Second" });
     const s = mem([
       entry(),
-      { ...entry({ id: "c-bad1", name: "Amber" }), accent: AMBER },
+      { ...entry({ id: "c-bad1", name: "Amber" }), accent: AMBER }, // kept: any hue
       { ...entry({ name: "Same id" }) },
       entry({ id: "C-UPPER", name: "Bad id" }),
       entry({ id: "c-ghi", name: "mine" }),
@@ -84,7 +84,7 @@ describe("loadCustomPresets", () => {
       null,
       good2,
     ]);
-    expect(loadCustomPresets(s).map((p) => p.id)).toEqual(["c-abc", "c-def"]);
+    expect(loadCustomPresets(s).map((p) => p.id)).toEqual(["c-abc", "c-bad1", "c-def"]);
   });
   it("cleans stored names and caps the list", () => {
     const many = Array.from({ length: MAX_CUSTOM_PRESETS + 5 }, (_, i) => entry({ id: `c-n${i}`, name: `P ${i}` }));
@@ -120,7 +120,7 @@ describe("add / rename / delete / restore", () => {
     const before = s.m[CUSTOM_PRESETS_KEY];
     for (const [name, colours] of [
       ["   ", nebula], ["MINE", nebula], ["aurora", nebula], ["Northern Lights", nebula],
-      ["Hot", { ...nebula, accent: AMBER }], ["Hot2", { ...nebula, codeAccent: AMBER }],
+      ["Hot", { ...nebula, accent: "#101418" }], ["Hot2", { ...nebula, codeAccent: "#101418" }],
     ] as [string, Colours][]) {
       const r = addCustomPreset(name, colours, s);
       expect(r.ok, name).toBe(false);
@@ -162,7 +162,7 @@ describe("add / rename / delete / restore", () => {
     const s = mem([entry()]);
     expect(restoreCustomPreset(entry(), 0, s).ok).toBe(false);
     expect(restoreCustomPreset(entry({ id: "c-new", name: "mine" }), 0, s).ok).toBe(false);
-    expect(restoreCustomPreset(entry({ id: "c-new", name: "Hot", accent: AMBER }), 0, s).ok).toBe(false);
+    expect(restoreCustomPreset(entry({ id: "c-new", name: "Hot", accent: "#101418" }), 0, s).ok).toBe(false);
     expect(restoreCustomPreset(entry({ id: "c-new", name: "Late" }), 99, s).ok).toBe(true);
     expect(loadCustomPresets(s).map((p) => p.id)).toEqual(["c-abc", "c-new"]);
   });

@@ -46,7 +46,7 @@ function blend(i = 0): CustomPreset {
 it.each(["render", "storage", "presets event", "pressed state"])("cold %s does not prove the stored list or block for a second", async path => {
   const { act, A, P, proof, full, mount } = await setup();
   const list = Array.from({ length: 24 }, (_, i) => blend(i));
-  // Stored appearance may need a proof/fallback of its own; the list never does.
+  // The list never runs a full check (a stored appearance equal to the first entry shows it pressed).
   if (path === "pressed state") localStorage.setItem(A.APPEARANCE_KEY, JSON.stringify(list[0]));
   if (path === "render" || path === "pressed state") localStorage.setItem(P.CUSTOM_PRESETS_KEY, JSON.stringify(list));
   const start = performance.now();
@@ -61,7 +61,7 @@ it.each(["render", "storage", "presets event", "pressed state"])("cold %s does n
   expect(full).not.toHaveBeenCalled();
   expect(proof).not.toHaveBeenCalled();
   expect(host.querySelectorAll(".appearance-custom")).toHaveLength(24);
-  for (const p of list) expect(q(`custom-${p.id}`)?.getAttribute("aria-pressed")).toBe("false");
+  for (const p of list) expect(q(`custom-${p.id}`)?.getAttribute("aria-pressed")).toBe(path === "pressed state" ? "true" : "false");
   expect(elapsed, `${path} blocked for ${Math.round(elapsed)} ms`).toBeLessThan(1000);
 });
 
@@ -84,7 +84,7 @@ it.each(["render", "storage", "presets event"])("bounds cold panel %s with a quo
   expect(elapsed, `panel ${path}: blocked for ${Math.round(elapsed)} ms`).toBeLessThan(1000);
 }, 30_000);
 
-it("cold click after quick-only load refuses a blend without applying it or marking it pressed", async () => {
+it("cold click after quick-only load applies a warm blend and marks it pressed (the blend proof is gone, owner 2026-11-14)", async () => {
   const { act, A, P, proof, full, mount } = await setup();
   localStorage.setItem(P.CUSTOM_PRESETS_KEY, JSON.stringify([blend()]));
   const { installAppearance } = await import("../lib/appearanceApply");
@@ -95,17 +95,18 @@ it("cold click after quick-only load refuses a blend without applying it or mark
   await act(async () => q("custom-c-blend0")!.click());
   expect(full).toHaveBeenCalledTimes(1);
   expect(proof).toHaveBeenCalledTimes(1);
-  expect(localStorage.getItem(A.APPEARANCE_KEY)).toBe(before.appearance);
-  expect(document.documentElement.getAttribute("style")).toBe(before.css);
-  expect(q("custom-note")?.textContent).toMatch(/./);
-  expect(q("custom-c-blend0")!.getAttribute("aria-pressed")).toBe("false");
+  expect(localStorage.getItem(A.APPEARANCE_KEY)).not.toBe(before.appearance);
+  expect(JSON.parse(localStorage.getItem(A.APPEARANCE_KEY)!).washes).toEqual(blend().washes);
+  expect(document.documentElement.getAttribute("style")).not.toBe(before.css);
+  expect(q("custom-note")?.textContent ?? "").toBe("");
+  expect(q("custom-c-blend0")!.getAttribute("aria-pressed")).toBe("true");
 });
 
 it("unsafe formats and quick refusals never become swatches or CSS while uppercase safe colours apply normalized", async () => {
   const { act, A, P, mount } = await setup();
   const base: CustomPreset = { ...A.DEFAULT_COLOURS, id: "c-safe", name: "Safe", accent: "#E8EDF3", codeAccent: "#C4A8FF" };
   const bad: CustomPreset[] = [];
-  const values = ["url(x)", "#aabbcc;--evil:red", "#abcdef\n", "#abc", "#ffffff", A.AMBER];
+  const values = ["url(x)", "#aabbcc;--evil:red", "#abcdef\n", "#abc", "#ffffff"]; // (amber is no longer refused: owner 2026-11-14)
   for (const value of values) {
     for (const slot of ["accent", "base", "codeAccent", "wash0", "wash1", "wash2"]) {
       // White accents are safe; white backgrounds/washes require clamping and must be refused as presets.

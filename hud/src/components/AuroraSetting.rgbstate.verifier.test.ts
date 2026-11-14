@@ -56,10 +56,11 @@ it("storage records matching a preset never press it while RGB is on", async () 
   await external({ rgb: "true", accent: "#c4a8ff" });
   expect(host.querySelectorAll('[aria-pressed="true"]').length).toBe(0);
 });
-it("storage event rechecks hostile code accents before applying them", async () => {
+it("storage event rechecks stored code accents before applying them (a hostile accent is the default, an amber code accent is kept)", async () => {
   await external({ rgb: "true", accent: "url(x)", codeAccent: "#fbbf24", washes: ["#ff0000", "#ffaa00", "#ffff00"] });
-  expect(resolveColours(loadAppearance()).codeAccent).toBe("#6fc3df");
-  expect(document.documentElement.style.getPropertyValue("--code-accent") || "#6fc3df").toBe("#6fc3df");
+  expect(resolveColours(loadAppearance()).accent).toBe("#6fc3df");
+  expect(resolveColours(loadAppearance()).codeAccent).toBe("#fbbf24");
+  expect(document.documentElement.style.getPropertyValue("--code-accent")).toBe("#fbbf24");
 });
 
 it("wash picks recheck the code accent and refuse a newly unreadable combination", async () => {

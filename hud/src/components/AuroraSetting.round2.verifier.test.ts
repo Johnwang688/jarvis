@@ -2,8 +2,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { AuroraSetting, SETTLE_MS } from "./AuroraSetting";
 import {
-  APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_APPEARANCE, DEFAULT_CODE_ACCENT, DEFAULT_COLOURS,
-  checkAccent, checkPalette, loadAppearance, resolveColours, rgbWashes,
+  APPEARANCE_KEY, COLOUR_PRESETS, DEFAULT_APPEARANCE, DEFAULT_CODE_ACCENT,
+  checkAccent, loadAppearance, resolveColours, rgbWashes,
 } from "../lib/appearance";
 import { applyAppearance, installAppearance } from "../lib/appearanceApply";
 
@@ -55,8 +55,7 @@ function shownAndApplied(expected: string) {
   expect(document.documentElement.style.getPropertyValue("--code-accent") || DEFAULT_CODE_ACCENT, "CSS").toBe(expected);
 }
 
-it("fixture is safe statically but its code accent is valid only with RGB on", () => {
-  expect(checkPalette(GRAY, DEFAULT_COLOURS.base)).toBeNull();
+it("fixture's code accent is valid only with RGB on", () => {
   expect(checkAccent(RGB_ONLY, GRAY).ok).toBe(false);
   expect(checkAccent(RGB_ONLY, rgbWashes(0)).ok).toBe(true);
 });
@@ -129,7 +128,7 @@ it("storage events recompute the code display without rewriting a dormant prefer
     shownAndApplied(rgb ? RGB_ONLY : DEFAULT_CODE_ACCENT);
   }
   await external({ rgb: true, washes: GRAY, codeAccent: "#fbbf24" });
-  shownAndApplied(DEFAULT_CODE_ACCENT);
+  shownAndApplied("#fbbf24"); // amber is a colour like any other (owner 2026-11-14)
 });
 
 it("wash commits check the applied fallback and re-resolve the preserved code colour", async () => {

@@ -4,22 +4,19 @@
 //
 // Stored in `localStorage['jarvis.hud.presets']` as a JSON array, through lib/storage.ts (a blocked or throwing
 // storage is "nothing stored"). Nothing stored is trusted: every read validates each entry (shape, id, name,
-// and the quick per-colour guards: each wash and the background as `checkWash`/`checkBase` would pass it
-// unclamped, worked out without the clamp (`darkUnclamped`), the accent and the code accent through
-// `checkAccent` against the preset's own washes), and every write stores the
-// cleaned list, so an entry this HUD does not understand is dropped rather than carried. The whole-palette
-// proof (`checkPalette`, inside `checkPreset`) is too slow to run over a stored list (Sol round 2: seconds for
-// 24 near-band palettes), so it runs on one preset at a time: the one being added or restored, and the one
-// being applied (the Settings panel calls `checkCustomPreset` at the click and refuses with a note). No read,
-// rename, delete or panel refresh ever proves the stored list. Only `#rrggbb` ever leaves this module as a colour,
-// lower-cased. A name is plain text for React to render: control, format and bidi characters are removed.
+// and the per-colour guards: each wash and the background as `checkWash`/`checkBase` would pass it unclamped,
+// worked out without the clamp (`darkUnclamped`), the accent and the code accent through `checkAccent`
+// against the preset's own washes), and every write stores the cleaned list, so an entry this HUD does not
+// understand is dropped rather than carried. Any hue is allowed, amber and red included (owner 2026-11-14).
+// Only `#rrggbb` ever leaves this module as a colour, lower-cased. A name is plain text for React to render:
+// control, format and bidi characters are removed.
 //
 // A rename or delete of an id another window already removed is a refusal, not a crash. Every successful write
 // fires PRESETS_EVENT on `window` (the `storage` event covers other windows).
 
 import {
-  BASE_MAX_LUMINANCE, COLOUR_PRESETS, WASH_CHROMA_FLOOR, WASH_MAX_LUMINANCE, checkAccent, checkBase, checkPreset, checkWash,
-  impersonatesMeaning, normHex, type Colours, type Refusal,
+  BASE_MAX_LUMINANCE, COLOUR_PRESETS, WASH_MAX_LUMINANCE, checkAccent, checkBase, checkPreset, checkWash,
+  normHex, type Colours, type Refusal,
 } from "./appearance";
 import { luminance } from "./oklch";
 import { readKey, writeKey, type StorageArg } from "./storage";
@@ -70,15 +67,12 @@ function normaliseColours(v: unknown): Colours | null {
 }
 
 /**
- * `checkWash`/`checkBase` passing a colour unclamped (`ok`, not `clamped`), without paying for the clamp.
- * checkDark refuses a colour in the amber/red band, then clamps it: `clampLuminance` returns the colour itself
- * exactly when its luminance is at most the cap (otherwise a darker colour, at most the cap, so never the
- * same one), and an unchanged colour meets the same band test again. So "passes unclamped" is exactly: not in
- * the band, and luminance at most the cap. The clamp's 30-step bisection only ever produced a value this
- * module refuses anyway (Sol round 3: seconds over a quota-sized list of over-bright colours).
+ * `checkWash`/`checkBase` passing a colour unclamped (`ok`, not `clamped`), without paying for the clamp:
+ * `clampLuminance` returns the colour itself exactly when its luminance is at most the cap, so "passes
+ * unclamped" is exactly: luminance at most the cap.
  */
 function darkUnclamped(hex: string, cap: number): boolean {
-  return !impersonatesMeaning(hex, WASH_CHROMA_FLOOR) && luminance(hex) <= cap;
+  return luminance(hex) <= cap;
 }
 
 /** One read's verdicts per colour (and per accent against its washes), so repeated colours cost nothing. */
@@ -96,9 +90,9 @@ function remembered(memo: QuickMemo | undefined, key: string, judge: () => boole
 const QUICK_REFUSED: Refusal = { ok: false, reason: "A preset colour is not allowed." };
 
 /**
- * The quick per-colour guards (no whole-palette proof): every wash and the background pass unclamped, and the
- * accent and the code accent are readable and clear of amber and red against the preset's own washes. A
- * handful of colour conversions per colour, so it may run over every stored entry on each read.
+ * The per-colour guards: every wash and the background pass unclamped, and the accent and the code accent are
+ * readable against the preset's own washes. A handful of colour conversions per colour, so it may run over
+ * every stored entry on each read.
  *
  * With `memo` (a read over the stored list), a refusal is a fixed one and verdicts are shared across entries
  * for that read only. Without it (the one preset being added, restored or applied), the refusal is the
@@ -128,13 +122,12 @@ function darkReason(r: ReturnType<typeof checkWash>, what: string): Refusal {
 }
 
 // The full check repeats for the same colours (Undo, clicking one preset again): its verdict is remembered.
-// Only full verdicts live here; the quick guards never write to it, so it can never hold an unproved "safe".
+// Only full verdicts live here; the quick guards never write to it.
 const verdicts = new Map<string, Refusal | null>();
 
 /**
  * null when the preset's colours may be applied as they stand, else the first refusal: the quick guards, then
- * the whole-palette proof (checkPreset). The proof can take a while, so this runs on ONE preset at a time
- * (the one being added, restored or applied), never over the stored list.
+ * checkPreset. This runs on ONE preset at a time (the one being added, restored or applied).
  */
 export function checkCustomPreset(p: CustomPreset): Refusal | null {
   const c = normaliseColours(p);
@@ -142,7 +135,6 @@ export function checkCustomPreset(p: CustomPreset): Refusal | null {
   const key = [c.accent, ...c.washes, c.base, c.codeAccent].join(",");
   const hit = verdicts.get(key);
   if (hit !== undefined) return hit;
-  // A doomed colour set is refused by the quick guards before the proof is paid for.
   const verdict = quickCheck(c) ?? checkPreset({ id: "custom", name: "custom", accent: c.accent, washes: c.washes, base: c.base });
   if (verdicts.size >= 512) verdicts.clear();
   verdicts.set(key, verdict);
@@ -158,7 +150,7 @@ interface ReadState {
 
 /**
  * A stored or offered entry as a clean preset, or null: the id well formed, the name and colours normalised,
- * and the quick guards passed. The whole-palette proof is not run here (see checkCustomPreset).
+ * and the quick guards passed.
  *
  * With `read` (loadCustomPresets), an entry whose id or name that read already accepted is null too, found
  * before any colour work: such an entry is dropped whatever its colours, so the order changes no result.
@@ -177,9 +169,8 @@ function cleanEntry(e: unknown, read?: ReadState): CustomPreset | null {
 /**
  * The valid entries in stored order (at most MAX_CUSTOM_PRESETS). Every stored entry is examined, so a valid
  * preset is kept however many malformed ones come before it; each costs only the quick guards, a repeated
- * colour nothing after its first verdict, and a repeated id or name no colour work at all. Entries that
- * pass them but fail the whole-palette proof are kept here and refused when applied. Never throws; a corrupt
- * or unreadable record is an empty list.
+ * colour nothing after its first verdict, and a repeated id or name no colour work at all.
+ * Never throws; a corrupt or unreadable record is an empty list.
  */
 export function loadCustomPresets(storage?: Store | null): CustomPreset[] {
   try {

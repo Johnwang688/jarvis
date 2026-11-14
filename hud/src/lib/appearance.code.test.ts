@@ -28,11 +28,11 @@ describe("codeAccent in the colour model", () => {
     expect(parseAppearance(JSON.stringify({ codeAccent: "url(x)" })).codeAccent).toBeUndefined();
   });
 
-  it("resolves independently of the accent, through the same guard, and survives RGB mode", () => {
+  it("resolves independently of the accent, through the same rule (any hue, 3:1 on the glass), and survives RGB mode", () => {
     expect(resolveColours({ accent: "#e8edf3" }).codeAccent).toBe(DEFAULT_CODE_ACCENT);
     expect(resolveColours({ codeAccent: LAVENDER }).codeAccent).toBe(LAVENDER);
     expect(resolveColours({ codeAccent: LAVENDER }).accent).toBe(DEFAULT_ACCENT);
-    expect(resolveColours({ codeAccent: AMBER }).codeAccent).toBe(DEFAULT_CODE_ACCENT);
+    expect(resolveColours({ codeAccent: AMBER }).codeAccent).toBe(AMBER); // any hue (owner 2026-11-14)
     expect(resolveColours({ codeAccent: "#1a3a4a" }).codeAccent).toBe(DEFAULT_CODE_ACCENT); // too dark
     const rgb = resolveColours({ rgb: true, codeAccent: LAVENDER });
     expect(rgb.codeAccent).toBe(LAVENDER);

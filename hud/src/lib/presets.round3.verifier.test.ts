@@ -50,7 +50,7 @@ it.each(["duplicate", "clamped wash", "clamped base", "gamut-clamped wash", "gam
     ...(shape === "clamped base" ? { base: "#ffffff" } : {}),
     ...(shape === "gamut-clamped wash" ? { washes: ["#00ffff", ...good.washes.slice(1)] } : {}),
     ...(shape === "gamut-clamped base" ? { base: "#00ffff" } : {}),
-    ...(shape === "late code refusal" ? { codeAccent: A.AMBER } : {}),
+    ...(shape === "late code refusal" ? { codeAccent: "#101418" } : {}), // unreadable on the glass
   };
   const s = memory([...Array(shape.startsWith("gamut") ? 20_000 : 12_000).fill(bad), good]);
   // < 5 MiB even in UTF-16, inside an ordinary localStorage quota.
@@ -78,25 +78,12 @@ it.each(["add", "rename", "delete", "restore"])("bounds cold %s with a quota-siz
   expect(elapsed, `${action}: blocked for ${Math.round(elapsed)} ms on ${20_000} quick refusals`).toBeLessThan(1000);
 }, 30_000);
 
-it.each(["add", "restore"])("a quick-only load cannot cache a safe verdict for a proof refusal before %s", async action => {
-  const P = await import("./presets");
-  const unsafe = proofOnly(1)[0];
-  const source = memory([unsafe]);
-  expect(P.loadCustomPresets(source)).toEqual([unsafe]);
-  const s = memory([]), before = s.getItem();
-  const result = action === "add" ? P.addCustomPreset("Offered", unsafe, s) : P.restoreCustomPreset(unsafe, 0, s);
-  expect(result.ok).toBe(false);
-  expect(P.checkCustomPreset(unsafe)).not.toBeNull();
-  expect(s.getItem()).toBe(before);
-  expect(s.setItem).not.toHaveBeenCalled();
-});
-
 it("a cached safe verdict cannot exempt a changed code accent or wash", async () => {
   const A = await import("./appearance");
   const P = await import("./presets");
   const p: CustomPreset = { ...A.DEFAULT_COLOURS, id: "c-safe", name: "Safe" };
   expect(P.checkCustomPreset(p)).toBeNull();
-  expect(P.checkCustomPreset({ ...p, codeAccent: A.AMBER })).not.toBeNull();
+  expect(P.checkCustomPreset({ ...p, codeAccent: "#101418" })).not.toBeNull();
   expect(P.checkCustomPreset({ ...p, washes: [A.AMBER, p.washes[1], p.washes[2]] })).not.toBeNull();
 });
 
@@ -125,7 +112,7 @@ it.each(["add", "rename", "delete", "restore"])("%s retains all valid rows behin
   const A = await import("./appearance");
   const P = await import("./presets");
   const list = Array.from({ length: 23 }, (_, i) => ({ ...A.DEFAULT_COLOURS, id: `c-v${i.toString(36)}`, name: `Valid ${i}` }));
-  const noise = Array.from({ length: 160 }, (_, i) => i % 2 ? { ...list[0], id: "bad" } : { ...list[0], codeAccent: A.AMBER });
+  const noise = Array.from({ length: 160 }, (_, i) => i % 2 ? { ...list[0], id: "bad" } : { ...list[0], codeAccent: "#101418" });
   const s = memory([...noise, ...list.flatMap(p => [p, p])]);
   const fresh = { ...A.DEFAULT_COLOURS, id: "c-new", name: "New" };
   const result = action === "add" ? P.addCustomPreset(fresh.name, fresh, s)

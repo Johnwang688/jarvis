@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACCENT_CHROMA_FLOOR, AMBER, BASE_MAX_LUMINANCE, COLOUR_PRESETS, DEFAULT_APPEARANCE, DEFAULT_COLOURS, RGB_ACCENT, RGB_BASE, WASH_CHROMA_FLOOR, WASH_MAX_LUMINANCE, accentContrast, checkPreset, colourProps, impersonatesMeaning, parseAppearance, resolveColours, rgbWashes } from "./appearance";
+import { AMBER, BASE_MAX_LUMINANCE, COLOUR_PRESETS, DEFAULT_APPEARANCE, DEFAULT_COLOURS, RGB_ACCENT, RGB_BASE, WASH_MAX_LUMINANCE, accentContrast, checkPreset, colourProps, parseAppearance, resolveColours, rgbWashes } from "./appearance";
 import { luminance } from "./oklch";
 import { rgbPalette } from "../aurora/rgb";
 
@@ -20,14 +20,16 @@ describe("independent colour boundaries", () => {
       expect(accentContrast(RGB_ACCENT, washes)).toBeGreaterThanOrEqual(3);
     }
   });
-  it.each([false, null, 0, 1, "true", "false", [], {}])("only boolean true can bypass the warm-colour guard: %j", rgb => {
+  it.each([false, null, 0, 1, "true", "false", [], {}])("only boolean true selects RGB mode (any other value keeps the stored colours): %j", rgb => {
     const raw = { rgb, accent: AMBER, codeAccent: AMBER, washes: ["#c04010", "#ff7a00", "#ffcc00"], base: "#ff0000" };
     for (const record of [raw, parseAppearance(JSON.stringify(raw))]) {
       const c = resolveColours(record as any);
-      expect(c).toEqual(DEFAULT_COLOURS);
-      expect(impersonatesMeaning(c.accent, ACCENT_CHROMA_FLOOR)).toBe(false);
-      expect(impersonatesMeaning(c.codeAccent, ACCENT_CHROMA_FLOOR)).toBe(false);
-      for (const w of c.washes) expect(impersonatesMeaning(w, WASH_CHROMA_FLOOR)).toBe(false);
+      expect(c.accent).toBe(AMBER);
+      expect(c.accent).not.toBe(RGB_ACCENT);
+      expect(c.codeAccent).toBe(AMBER);
+      expect(c.base).not.toBe(RGB_BASE);
+      for (const w of c.washes) expect(luminance(w)).toBeLessThanOrEqual(WASH_MAX_LUMINANCE);
+      expect(luminance(c.base)).toBeLessThanOrEqual(BASE_MAX_LUMINANCE);
     }
   });
   it.each(["url(x)", "var(--red)", "red", "#fff", "#12345678", "#c0aef5;--evil:red", "#c0aef5\n", "#c0aef5\r"]) ("hostile codeAccent cannot reach an opaque CSS colour: %j", codeAccent => {
@@ -35,9 +37,9 @@ describe("independent colour boundaries", () => {
     expect(c.codeAccent).toHaveLength(7);
     expect(colourProps(c)["--code-accent"]).toBe(DEFAULT_COLOURS.codeAccent);
   });
-  it("RGB never exempts the independent code accent from the meaning guard", () => {
-    for (const codeAccent of [AMBER, "#f87171", "#ff9900"]) {
-      expect(resolveColours({ rgb: true, codeAccent }).codeAccent).toBe(DEFAULT_COLOURS.codeAccent);
+  it("RGB keeps the independent code accent, any hue (owner 2026-11-14)", () => {
+    for (const codeAccent of [AMBER, "#ffd700", "#ff9900"]) {
+      expect(resolveColours({ rgb: true, codeAccent }).codeAccent).toBe(codeAccent);
     }
   });
   it("all shipped presets still pass the complete static guard", () => {
