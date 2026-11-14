@@ -4,8 +4,9 @@
 //
 // Stored in `localStorage['jarvis.hud.presets']` as a JSON array, through lib/storage.ts (a blocked or throwing
 // storage is "nothing stored"). Nothing stored is trusted: every read validates each entry (shape, id, name,
-// and the quick per-colour guards: each wash and the background unclamped through `checkWash`/`checkBase`, the
-// accent and the code accent through `checkAccent` against the preset's own washes), and every write stores the
+// and the quick per-colour guards: each wash and the background as `checkWash`/`checkBase` would pass it
+// unclamped, worked out without the clamp (`darkUnclamped`), the accent and the code accent through
+// `checkAccent` against the preset's own washes), and every write stores the
 // cleaned list, so an entry this HUD does not understand is dropped rather than carried. The whole-palette
 // proof (`checkPalette`, inside `checkPreset`) is too slow to run over a stored list (Sol round 2: seconds for
 // 24 near-band palettes), so it runs on one preset at a time: the one being added or restored, and the one
@@ -16,7 +17,11 @@
 // A rename or delete of an id another window already removed is a refusal, not a crash. Every successful write
 // fires PRESETS_EVENT on `window` (the `storage` event covers other windows).
 
-import { COLOUR_PRESETS, checkAccent, checkBase, checkPreset, checkWash, normHex, type Colours, type Refusal } from "./appearance";
+import {
+  BASE_MAX_LUMINANCE, COLOUR_PRESETS, WASH_CHROMA_FLOOR, WASH_MAX_LUMINANCE, checkAccent, checkBase, checkPreset, checkWash,
+  impersonatesMeaning, normHex, type Colours, type Refusal,
+} from "./appearance";
+import { luminance } from "./oklch";
 import { readKey, writeKey, type StorageArg } from "./storage";
 
 export const CUSTOM_PRESETS_KEY = "jarvis.hud.presets";
@@ -65,23 +70,61 @@ function normaliseColours(v: unknown): Colours | null {
 }
 
 /**
+ * `checkWash`/`checkBase` passing a colour unclamped (`ok`, not `clamped`), without paying for the clamp.
+ * checkDark refuses a colour in the amber/red band, then clamps it: `clampLuminance` returns the colour itself
+ * exactly when its luminance is at most the cap (otherwise a darker colour, at most the cap, so never the
+ * same one), and an unchanged colour meets the same band test again. So "passes unclamped" is exactly: not in
+ * the band, and luminance at most the cap. The clamp's 30-step bisection only ever produced a value this
+ * module refuses anyway (Sol round 3: seconds over a quota-sized list of over-bright colours).
+ */
+function darkUnclamped(hex: string, cap: number): boolean {
+  return !impersonatesMeaning(hex, WASH_CHROMA_FLOOR) && luminance(hex) <= cap;
+}
+
+/** One read's verdicts per colour (and per accent against its washes), so repeated colours cost nothing. */
+type QuickMemo = Map<string, boolean>;
+
+function remembered(memo: QuickMemo | undefined, key: string, judge: () => boolean): boolean {
+  if (!memo) return judge();
+  const hit = memo.get(key);
+  if (hit !== undefined) return hit;
+  const v = judge();
+  memo.set(key, v);
+  return v;
+}
+
+const QUICK_REFUSED: Refusal = { ok: false, reason: "A preset colour is not allowed." };
+
+/**
  * The quick per-colour guards (no whole-palette proof): every wash and the background pass unclamped, and the
  * accent and the code accent are readable and clear of amber and red against the preset's own washes. A
- * handful of colour conversions, so it may run over every stored entry on each read.
+ * handful of colour conversions per colour, so it may run over every stored entry on each read.
+ *
+ * With `memo` (a read over the stored list), a refusal is a fixed one and verdicts are shared across entries
+ * for that read only. Without it (the one preset being added, restored or applied), the refusal is the
+ * guard's own reason, worked out only once the colour is known to fail.
  */
-function quickCheck(c: Colours): Refusal | null {
+function quickCheck(c: Colours, memo?: QuickMemo): Refusal | null {
   for (const w of c.washes) {
-    const r = checkWash(w);
-    if (!r.ok) return r;
-    if (r.clamped) return { ok: false, reason: r.note ?? "A preset colour would need darkening." };
+    if (!remembered(memo, `w${w}`, () => darkUnclamped(w, WASH_MAX_LUMINANCE))) return memo ? QUICK_REFUSED : darkReason(checkWash(w), "colour");
   }
-  const b = checkBase(c.base);
-  if (!b.ok) return b;
-  if (b.clamped) return { ok: false, reason: b.note ?? "A preset background would need darkening." };
-  const a = checkAccent(c.accent, c.washes);
-  if (!a.ok) return a;
-  const code = checkAccent(c.codeAccent, c.washes);
-  return code.ok ? null : code;
+  if (!remembered(memo, `b${c.base}`, () => darkUnclamped(c.base, BASE_MAX_LUMINANCE))) return memo ? QUICK_REFUSED : darkReason(checkBase(c.base), "background");
+  const washes = c.washes.join("");
+  for (const accent of [c.accent, c.codeAccent]) {
+    if (memo) {
+      if (!remembered(memo, `a${accent}${washes}`, () => checkAccent(accent, c.washes).ok)) return QUICK_REFUSED;
+    } else {
+      const a = checkAccent(accent, c.washes);
+      if (!a.ok) return a;
+    }
+  }
+  return null;
+}
+
+/** The refusal for a wash or background that does not pass unclamped (the guard's reason, or its darkening note). */
+function darkReason(r: ReturnType<typeof checkWash>, what: string): Refusal {
+  if (!r.ok) return r;
+  return { ok: false, reason: r.note ?? `A preset ${what} would need darkening.` };
 }
 
 // The full check repeats for the same colours (Undo, clicking one preset again): its verdict is remembered.
@@ -106,24 +149,35 @@ export function checkCustomPreset(p: CustomPreset): Refusal | null {
   return verdict;
 }
 
+/** What one read of the stored list has already accepted, and its per-colour verdicts. */
+interface ReadState {
+  ids: Set<string>;
+  names: Set<string>;
+  memo: QuickMemo;
+}
+
 /**
  * A stored or offered entry as a clean preset, or null: the id well formed, the name and colours normalised,
  * and the quick guards passed. The whole-palette proof is not run here (see checkCustomPreset).
+ *
+ * With `read` (loadCustomPresets), an entry whose id or name that read already accepted is null too, found
+ * before any colour work: such an entry is dropped whatever its colours, so the order changes no result.
  */
-function cleanEntry(e: unknown): CustomPreset | null {
+function cleanEntry(e: unknown, read?: ReadState): CustomPreset | null {
   if (typeof e !== "object" || e === null || Array.isArray(e)) return null;
   const id = (e as { id?: unknown }).id;
-  if (typeof id !== "string" || !ID_RE.test(id)) return null;
+  if (typeof id !== "string" || !ID_RE.test(id) || read?.ids.has(id)) return null;
   const name = cleanPresetName((e as { name?: unknown }).name);
-  if (!name) return null;
+  if (!name || read?.names.has(fold(name))) return null;
   const c = normaliseColours(e);
-  if (!c || quickCheck(c)) return null;
+  if (!c || quickCheck(c, read?.memo)) return null;
   return { id, name, ...c };
 }
 
 /**
  * The valid entries in stored order (at most MAX_CUSTOM_PRESETS). Every stored entry is examined, so a valid
- * preset is kept however many malformed ones come before it; each costs only the quick guards. Entries that
+ * preset is kept however many malformed ones come before it; each costs only the quick guards, a repeated
+ * colour nothing after its first verdict, and a repeated id or name no colour work at all. Entries that
  * pass them but fail the whole-palette proof are kept here and refused when applied. Never throws; a corrupt
  * or unreadable record is an empty list.
  */
@@ -139,14 +193,13 @@ export function loadCustomPresets(storage?: Store | null): CustomPreset[] {
     }
     if (!Array.isArray(parsed)) return [];
     const out: CustomPreset[] = [];
-    const ids = new Set<string>();
-    const names = new Set<string>(BUILTIN_NAMES);
+    const read: ReadState = { ids: new Set(), names: new Set(BUILTIN_NAMES), memo: new Map() };
     for (const e of parsed) {
       if (out.length >= MAX_CUSTOM_PRESETS) break;
-      const p = cleanEntry(e);
-      if (!p || ids.has(p.id) || names.has(fold(p.name))) continue;
-      ids.add(p.id);
-      names.add(fold(p.name));
+      const p = cleanEntry(e, read);
+      if (!p) continue;
+      read.ids.add(p.id);
+      read.names.add(fold(p.name));
       out.push(p);
     }
     return out;
