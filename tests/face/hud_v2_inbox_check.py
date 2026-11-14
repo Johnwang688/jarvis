@@ -1051,7 +1051,10 @@ def _aurora_shot(page, name):
 
 
 def _aurora_checks(page, mock, check, until):
-    # The mock's `inbox: true` project (p1), named as the real one is.
+    # The mock's `inbox: true` project (p1) is named "Inbox" here on purpose
+    # (WS-0): the collision case, where the catch-all keeps its old name
+    # because another project holds "Unsorted". It is the worst lookalike for
+    # the owner Inbox row, so the aurora must still be on the owner row only.
     inbox_project = next(p for p in mock.world["projects"] if p.get("inbox"))
     was = inbox_project["name"]
     inbox_project["name"] = "Inbox"
