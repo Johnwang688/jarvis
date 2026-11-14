@@ -5,14 +5,17 @@
 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, type PaneLayout } from "./layout";
-import { AGENT_OPEN_MAX, agentRequestId, drawnCell, gridFor, placeAgentPanes, RULE, type AgentAsk } from "./agentpanes";
+import {
+  AGENT_OPEN_MAX, agentBrowserUrl, agentPageMayReuse, agentRequestId, drawnCell, gridFor, placeAgentPanes, RULE, type AgentAsk,
+} from "./agentpanes";
+import { browserFront } from "./browserowner";
 import {
   balancedRows, gridTree, isLeaf, leaves, MAX_ACROSS, MAX_DOWN, normalize, parseTree, rectsOf, storeTree,
   type LayoutNode, type StoredNode,
 } from "./splittree";
 import {
-  defaultWorkspace, fitWorkspace, orderOf, parseWorkspace, PANE_MIN_H, PANE_MIN_W, PANE_NOS, setPreset, showSubagent,
-  subagentSpec, type PaneNo, type Workspace,
+  agentBrowserSpec, copySpec, defaultWorkspace, fitWorkspace, workspaceStorage, orderOf, parseWorkspace, PANE_MIN_H, PANE_MIN_W, PANE_NOS,
+  setBrowserUrl, setPreset, showAgentBrowser, showSubagent, submitBrowserUrl, subagentSpec, type PaneNo, type Workspace,
 } from "./workspace";
 
 const FOLDED: PaneLayout = { ...DEFAULT_LAYOUT, leftCollapsed: true, rightCollapsed: true };
@@ -266,5 +269,142 @@ describe("agentRequestId", () => {
     for (const bad of ["A".repeat(32), "a".repeat(31), "a".repeat(33), 5, null, undefined, "zz".repeat(16)]) {
       expect(agentRequestId(bad)).toBeNull();
     }
+  });
+});
+
+// ---- hud_open_browser (PR B, decisions D2) -----------------------------------------------
+
+describe("agentBrowserUrl: the window judges each page again", () => {
+  it("takes a public http(s) page, canonical", () => {
+    expect(agentBrowserUrl("https://www.instagram.com/")).toBe("https://www.instagram.com/");
+    expect(agentBrowserUrl("  https://Instagram.com/explore?x=1  ")).toBe("https://instagram.com/explore?x=1");
+    expect(agentBrowserUrl("http://93.184.216.34/")).toBe("http://93.184.216.34/");
+  });
+
+  it("refuses this machine, the home network, Jarvis, other schemes and tricks", () => {
+    for (const bad of [
+      "http://localhost:8402/", "http://127.0.0.1/", "http://127.1.2.3:3000/", "http://0.0.0.0:5173/",
+      "http://app.localhost/", "http://[::1]:8402/", "http://[fe80::1]/", "http://2130706433/", "http://0x7f.1/",
+      "http://10.0.0.5/", "http://192.168.1.1/", "http://172.16.0.1/", "http://172.31.255.1/", "http://169.254.169.254/",
+      "http://100.64.0.1/", "http://224.0.0.1/", "http://router/", "http://nas.local/", "http://printer.lan/",
+      "http://x.internal/", "file:///etc/passwd", "javascript:alert(1)", "data:text/html,hi", "ftp://example.com/",
+      "https://instagram.com@127.0.0.1:8402/", "https://user:pw@instagram.com/", "about:blank", "",
+      "https://instagram.com/\u0000", "https://" + "a".repeat(2050) + ".com/", 5, null,
+    ]) expect(agentBrowserUrl(bad), String(bad).slice(0, 60)).toBeNull();
+  });
+});
+
+describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is the agent's, never the owner's", () => {
+  const PORTS = { hud: 8405, api: 8402, workshop: 8403, self: 8405, frameHardened: true };
+
+  it("a new pane: Browser view, default profile, one Remote tab marked the agent's, with no handle yet", () => {
+    const spec = agentBrowserSpec("https://www.instagram.com/", "abc123");
+    expect(spec).toEqual({
+      view: "browser", projectId: null, terminalId: null, browserUrl: "https://www.instagram.com/",
+      browser: { active: "abc123", tabs: [{ id: "abc123", url: "https://www.instagram.com/", mode: "remote",
+        source: { kind: "agent" } }] },
+    });
+    // No browserProfile (the default, never Private), no see/drive keys (their defaults), no remoteTabId
+    // (the window's `ensure` creates it through `restore`, never the owner's `navigate`).
+    expect(spec.browserProfile).toBeUndefined();
+    expect("see" in spec || "drive" in spec).toBe(false);
+  });
+
+  it("the daemon is told the tab is the agent's (source agent, never null = the owner's navigation)", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, tree: gridTree([P(1), P(2)], [2])!, panes: ws0.panes.map((p, i) =>
+      i === 1 ? agentBrowserSpec("https://www.instagram.com/", "abc123") : p) };
+    const front = browserFront(ws, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS);
+    const pane = front.panes.find((p) => p.pane_id === 2)!;
+    expect(pane.profile).toBe("p-11111111");
+    expect(pane.tabs).toEqual([{ id: "abc123", mode: "remote", tab_id: null, source: { kind: "agent" } }]);
+    // What this pins: a tab without the mark would be reported as the owner's own (null).
+    const owners = { ...ws, panes: ws.panes.map((p, i) => i === 1
+      ? { ...p, browser: { ...p.browser!, tabs: p.browser!.tabs.map(({ source: _s, ...t }) => t) } } : p) };
+    expect(browserFront(owners, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS)
+      .panes.find((p) => p.pane_id === 2)!.tabs[0].source).toBeNull();
+  });
+
+  it("see and drive keep a new pane's defaults: reported on, the daemon still gates drive (D5)", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, tree: gridTree([P(1), P(2)], [2])!, panes: ws0.panes.map((p, i) =>
+      i === 1 ? agentBrowserSpec("https://www.instagram.com/", "abc123") : p) };
+    const pane = browserFront(ws, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS)
+      .panes.find((p) => p.pane_id === 2)!;
+    expect([pane.see, pane.drive]).toEqual([true, true]);
+    // The owner's switches still win: off is stored and reported off.
+    const off = { ...ws, panes: ws.panes.map((p, i) => i === 1 ? { ...p, drive: false as const } : p) };
+    expect(browserFront(off, [P(1), P(2)], false, "a".repeat(32), "p-11111111", P(1), 1, PORTS)
+      .panes.find((p) => p.pane_id === 2)!.drive).toBe(false);
+  });
+
+  it("the agent mark survives storage and a split's copy; a forged one is unknown, never the owner's", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, panes: ws0.panes.map((p, i) => i === 0 ? agentBrowserSpec("https://a.example.com/", "abc123") : p) };
+    const back = parseWorkspace(JSON.stringify(workspaceStorage(ws)));
+    expect(back.panes[0].browser!.tabs[0].source).toEqual({ kind: "agent" });
+    expect(copySpec(ws.panes[0]).browser!.tabs[0].source).toEqual({ kind: "agent" });
+    const forged = { ...ws, panes: ws.panes.map((p, i) => i === 0
+      ? { ...p, browser: { ...p.browser!, tabs: [{ ...p.browser!.tabs[0], source: { kind: "agent", owner: true } }] } } : p) };
+    expect(parseWorkspace(JSON.stringify(workspaceStorage(forged as Workspace))).panes[0].browser!.tabs[0].source)
+      .toEqual({ kind: "unknown" });
+  });
+
+  it("only the owner's own address-bar Enter turns it into the owner's tab", () => {
+    const ws0 = defaultWorkspace();
+    const ws = { ...ws0, panes: ws0.panes.map((p, i) => i === 0 ? agentBrowserSpec("https://a.example.com/", "abc123") : p) };
+    expect(setBrowserUrl(ws, P(1), "https://a.example.com/next").panes[0].browser!.tabs[0].source).toEqual({ kind: "agent" });
+    expect(submitBrowserUrl(ws, P(1), "https://b.example.com/").panes[0].browser!.tabs[0].source).toBeUndefined();
+  });
+
+  it("an existing pane keeps what it held, gains an active Remote tab, and focus stays", () => {
+    const three = setPreset(defaultWorkspace(), "cols3");
+    const next = showAgentBrowser(three, P(3), "https://www.instagram.com/");
+    expect(next.panes[2].view).toBe("browser");
+    expect(next.panes[2].projectId).toBe(three.panes[2].projectId);
+    const tabs = next.panes[2].browser!.tabs;
+    expect(tabs.at(-1)).toMatchObject({ url: "https://www.instagram.com/", mode: "remote", source: { kind: "agent" } });
+    expect(next.panes[2].browser!.active).toBe(tabs.at(-1)!.id);
+    expect(next.focused).toBe(three.focused);
+    // Never a Private pane (D2).
+    const priv = { ...three, panes: three.panes.map((p, i) => i === 2 ? { ...p, browserProfile: "private" } : p) };
+    expect(showAgentBrowser(priv, P(3), "https://www.instagram.com/")).toBe(priv);
+  });
+
+  it("three pages from a one-pane window: a grid of four, each new pane a Remote page, the chat first", () => {
+    const one = defaultWorkspace();
+    const pages = ["https://www.instagram.com/", "https://www.instagram.com/explore/", "https://www.instagram.com/reels/"];
+    const out = placeAgentPanes(one, fitAt(one, 1920, 1052), [], pages.map((url) => ({
+      show: (w: Workspace, n: PaneNo) => showAgentBrowser(w, n, url), spec: agentBrowserSpec(url) })));
+    expect(out.grid).toEqual([4]);
+    expect(orderOf(out.ws)).toEqual([1, 2, 3, 4]);
+    expect(out.ws.focused).toBe(1);
+    for (const [i, n] of [2, 3, 4].entries()) {
+      const tab = out.ws.panes[n - 1].browser!.tabs[0];
+      expect(tab).toMatchObject({ url: pages[i], mode: "remote", source: { kind: "agent" } });
+      expect(tab.remoteTabId).toBeUndefined();
+    }
+  });
+});
+
+describe("agentPageMayReuse: which free panes a page may take (review of #359)", () => {
+  const DEF = "p-11111111";
+  it("a pane on the default profile, with room, not already showing an agent-opened page", () => {
+    expect(agentPageMayReuse({ view: "chat", projectId: null, terminalId: null }, DEF)).toBe(true);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: DEF }, DEF)).toBe(true);
+  });
+  it("never another named profile or Private: every page opens in the default profile", () => {
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "p-22222222" }, DEF)).toBe(false);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "private" }, DEF)).toBe(false);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "private" }, null)).toBe(false);
+  });
+  it("never a pane whose active tab an agent opened (a turn's earlier calls), nor one with 12 tabs", () => {
+    expect(agentPageMayReuse(agentBrowserSpec("https://www.instagram.com/"), DEF)).toBe(false);
+    const owners = { ...agentBrowserSpec("https://a.example.com/", "abc123") };
+    owners.browser = { active: "abc123", tabs: owners.browser!.tabs.map(({ source: _s, ...t }) => t) };
+    expect(agentPageMayReuse(owners, DEF)).toBe(true);
+    const full = { view: "browser" as const, projectId: null, terminalId: null,
+      browser: { active: "t00000", tabs: Array.from({ length: 12 }, (_, i) => ({ id: `t${String(i).padStart(5, "0")}`, url: "https://a.example.com/" })) } };
+    expect(agentPageMayReuse(full, DEF)).toBe(false);
   });
 });

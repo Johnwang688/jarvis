@@ -27,9 +27,18 @@ class ResolvedSource:
     An unknown/legacy source is a refusal, not an owner-entered URL. A terminal
     source additionally requires current terminal readability at capture time;
     a display label or a client-supplied terminal ID never grants that access.
+
+    `agent` (2026-11-13, decision D5): a page a chat opened with
+    `hud_open_browser` (`browser_open.py`). It is looked at and driven exactly
+    as an owner pane an agent navigated with its own `goto` is (`look.py`,
+    `drive.py`: the pane's see and drive switches, Remote, `agents_may_drive`),
+    and it grants nothing more than `owner` does. It is never the owner's own
+    navigation: the window makes such a tab through `restore`, which opens no
+    loopback port, and a report can never turn it back into `owner` (only
+    the owner's address route does, below).
     """
 
-    kind: Literal["owner", "terminal", "thread", "unknown"]
+    kind: Literal["owner", "agent", "terminal", "thread", "unknown"]
     entry_id: str | None = None
     terminal_id: str | None = None
     thread_id: str | None = None
@@ -260,6 +269,8 @@ class BrowserPanes:
             _bad()
         if value == {"kind": "unknown"}:
             return ResolvedSource("unknown")
+        if value == {"kind": "agent"}:
+            return ResolvedSource("agent")
         _shape(value, ("kind", "entryId"))
         if value["kind"] != "dev_server":
             _bad()

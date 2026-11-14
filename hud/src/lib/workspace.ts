@@ -152,9 +152,13 @@ function uneven(preset: Preset): boolean {
 
 export const BROWSER_TABS_MAX = 12;
 /** Privacy provenance, distinct from the optional auto-open display label.
- * Missing/invalid legacy provenance is unknown, never an owner disclosure. */
-export type BrowserSource = { kind: "dev_server"; entryId: string } | { kind: "unknown" };
+ * Missing/invalid legacy provenance is unknown, never an owner disclosure.
+ * `agent` (2026-11-13, decision D5): a page a chat opened (`hud_open_browser`),
+ * looked at and driven like an owner pane an agent navigated, never the
+ * owner's own navigation (lib/workspace `agentBrowserSpec`). */
+export type BrowserSource = { kind: "dev_server"; entryId: string } | { kind: "agent" } | { kind: "unknown" };
 function parseBrowserSource(raw: unknown): BrowserSource {
+  if (isObj(raw) && raw.kind === "agent" && Object.keys(raw).length === 1) return { kind: "agent" };
   return isObj(raw) && raw.kind === "dev_server" && typeof raw.entryId === "string"
     && /^ds_[0-9a-f]{8}$/.test(raw.entryId)
     ? { kind: "dev_server", entryId: raw.entryId } : { kind: "unknown" };
@@ -677,6 +681,44 @@ export function showSubagent(ws: Workspace, pane: PaneNo, ref: SubagentRef, focu
   const panes = ws.panes.map((p, i) => (i === pane - 1
     ? { ...p, view: "subagent" as View, subagent: clean } : p)) as Panes;
   return { ...ws, panes, focused: focus ? pane : ws.focused };
+}
+
+/**
+ * A chat's `hud_open_browser` page (2026-11-13, decisions D2 and D5): one
+ * Remote tab at `url`, marked as the agent's (`source: {kind: "agent"}`): the
+ * daemon resolves it as `agent`, which the chat may look at and, with this
+ * pane's "Jarvis can drive" and `agents_may_drive` on, drive, exactly as an
+ * owner pane it navigated with its own `goto`. No Remote handle yet: the
+ * window's `ensure` creates it through `restore`, which is never the owner's
+ * navigation and admits no loopback port. The default (named) profile; see
+ * and drive at their defaults. The owner's own address-bar Enter makes it
+ * his (`submitBrowserUrl`). `url` was judged by the caller (lib/agentpanes
+ * `agentBrowserUrl`).
+ */
+export const AGENT_BROWSER_SOURCE: BrowserSource = { kind: "agent" };
+export function agentBrowserSpec(url: string, id: string = browserTabId()): PaneSpec {
+  return mirrorBrowser({ view: "browser", projectId: null, terminalId: null },
+    { tabs: [{ id, url, mode: "remote", source: { ...AGENT_BROWSER_SOURCE } }], active: id });
+}
+
+/**
+ * An existing pane shows a chat's `hud_open_browser` page: a new active
+ * Remote tab at `url` (the agent's, as `agentBrowserSpec`) beside the
+ * tabs it already had, and the Browser view. What it held stays in its spec.
+ * Focus never moves. Unchanged for a Private pane (D2: never Private) or one
+ * whose tabs are full.
+ */
+export function showAgentBrowser(ws: Workspace, pane: PaneNo, url: string): Workspace {
+  if (!isPaneNo(pane) || ws.panes[pane - 1].browserProfile === "private") return ws;
+  const added = addBrowserTab(ws, pane, url, { mode: "remote", source: { ...AGENT_BROWSER_SOURCE } });
+  if (added === ws) return ws;
+  const panes = added.panes.map((p, i) => {
+    if (i !== pane - 1) return p;
+    const next: PaneSpec = { ...p, view: "browser" };
+    delete next.subagent;
+    return next;
+  }) as Panes;
+  return { ...added, panes, focused: ws.focused };
 }
 
 /** The spec a split opens for sub-agent `ref`. */

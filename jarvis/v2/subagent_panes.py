@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from .agent_panes import REPORT_WAIT_S, PaneReports
+from .agent_panes import REPORT_WAIT_S, PaneReports, refuse_desk_caller
 from .subagents import LIVE, valid_sid
 
 NOT_IN_CHAT = "Error: hud_open_subagents works only inside a Jarvis HUD chat."
@@ -58,26 +58,9 @@ class SubagentPanes:
     def _refuse_caller(self, caller) -> tuple[str | None, Any]:
         """Under the daemon lock: `decisions.OwnerPosts._refuse_caller`'s
         checks (the live session, its exact turn, no relayed turn, not
-        stopped, an owner chat, Claude or Codex, the owner at the desk)."""
-        from .model import ProviderName, Role
-        daemon = self.daemon
-        if self.closed or daemon._stopping:
-            return STOPPING, None
-        session = daemon._sessions.get(caller["thread_id"])
-        if (session is None or session.worker is None or session.handle is None
-                or session.turn_id != caller["turn_id"]):
-            return NOT_AT_DESK, None
-        if getattr(session, "relay_turn", None) is not None:
-            return NOT_AT_DESK, None
-        if session.cancelled.is_set() or session.closing or session.retired or session.lost:
-            return "Error: this turn was stopped, so it opens nothing more.", None
-        if session.brief.role != Role.CHAT or session.brief.task_id is not None:
-            return NOT_AT_DESK, None
-        if session.thread.provider not in (ProviderName.CLAUDE, ProviderName.CODEX):
-            return NOT_AT_DESK, None
-        if session.desk.slot.get("present") is not True:
-            return NOT_AT_DESK, None
-        return None, session
+        stopped, an owner chat, Claude or Codex, the owner at the desk).
+        Shared with `hud_open_browser` (`agent_panes.refuse_desk_caller`)."""
+        return refuse_desk_caller(self.daemon, self.closed, caller, NOT_AT_DESK, STOPPING)
 
     def open(self, caller: dict | None, which: list | None) -> str:
         """Ask every HUD window to show this chat's sub-agents `which` (each a

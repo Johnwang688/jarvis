@@ -23,22 +23,73 @@
 import { balancedRows, gridTree, minH as treeMinH, minW as treeMinW, MAX_ACROSS, MAX_DOWN, MAX_LEAVES, shapeKey } from "./splittree";
 import { orderOf, PANE_MIN_H, PANE_MIN_W, PANE_NOS, type PaneNo, type PaneSpec, type Workspace, type WorkspaceFit } from "./workspace";
 import type { SubagentRef } from "./subagents";
+import { isLoopbackHost, judgeBrowserUrl } from "./browser";
 
 /** The most panes one ask may open: the HUD draws twelve and one shows the chat. */
 export const AGENT_OPEN_MAX = 11;
 /** The most asks a window holds waiting (behind a card, Settings or a busy pointer). */
 export const AGENT_BATCHES_MAX = 8;
 
-/** One thing a chat asked to show in a pane. */
-export type AgentItem = { kind: "subagent"; ref: SubagentRef };
+/** One thing a chat asked to show in a pane: its own sub-agent, or a public page (`hud_open_browser`). */
+export type AgentItem = { kind: "subagent"; ref: SubagentRef } | { kind: "browser"; url: string };
 
 /** One bus record's ask: placed together, reported together. */
 export interface AgentBatch {
   /** The daemon's request id, the window's report is keyed by; null from an older daemon (nothing is reported). */
   requestId: string | null;
   threadId: string;
+  /** What this window will place: the record's items it judged sound. */
   items: AgentItem[];
+  /** How many the record named (at most 11): what the report's counts add up to. */
+  total: number;
   at: number;
+}
+
+/**
+ * A page `hud_open_browser` may open here, judged again in the window
+ * (defense in depth: the daemon judged it first, with DNS): an absolute
+ * http(s) URL of at most 2048 characters, no control characters, no user
+ * name or password, and a host that is not this machine (`isLoopbackHost`,
+ * and nothing `judgeBrowserUrl` would frame as a local server), not an IP
+ * literal of a private, link-local, CGNAT or IPv6 address, not one label
+ * and not a local-network name. The canonical `href`, or null.
+ */
+export function agentBrowserUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (!text || text.length > 2048 || /[\x00-\x1f\x7f]/.test(text)) return null;
+  let url: URL;
+  try { url = new URL(text); } catch { return null; }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return null;
+  if (url.href.length > 2048) return null;
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!host || isLoopbackHost(host) || judgeBrowserUrl(url.href).ok) return null;
+  if (host.startsWith("[") || host.includes(":")) return null;
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) return null;
+    return url.href;
+  }
+  if (!host.includes(".") || /\.(localhost|local|lan|home|internal|intranet|corp|localdomain|arpa)$/.test(host)) return null;
+  return url.href;
+}
+
+/**
+ * Whether a free drawn pane may take a `hud_open_browser` page (review of
+ * #359): only a pane on the default profile (`defaultProfile`, the first
+ * named one; a pane with none set uses it), so every page opens in the owner's
+ * default profile, never Private or another named one; never one whose tabs
+ * are full; and never one whose active tab is already an agent-opened page,
+ * so a turn's later calls cannot reuse what its earlier ones opened (the
+ * daemon also caps a turn at 11 pages and the hour at 44).
+ */
+export function agentPageMayReuse(spec: PaneSpec, defaultProfile: string | null): boolean {
+  if ((spec.browserProfile ?? defaultProfile) !== defaultProfile || spec.browserProfile === "private") return false;
+  const tabs = spec.browser?.tabs ?? [];
+  if (tabs.length >= 12) return false;
+  return tabs.find((t) => t.id === spec.browser?.active)?.source?.kind !== "agent";
 }
 
 /** A request id as the daemon makes them (32 hex characters), else null. */

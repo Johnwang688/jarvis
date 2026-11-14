@@ -43,6 +43,35 @@ _WINDOW = re.compile(r"[0-9a-f]{32}")
 KEYS = ("window", "request_id", "placed", "not_placed")
 
 
+STOPPED_TURN = "Error: this turn was stopped, so it opens nothing more."
+
+
+def refuse_desk_caller(daemon, closed: bool, caller: dict, not_at_desk: str, stopping: str):
+    """Under the daemon lock, for every tool that opens owner panes
+    (`hud_open_subagents`, `hud_open_browser`): `(refusal, None)` or
+    `(None, session)`. As `decisions.OwnerPosts._refuse_caller`: the live
+    session, its exact turn, no relayed turn, not stopped, an owner chat (no
+    task), Claude or Codex, the owner at the desk."""
+    from .model import ProviderName, Role
+    if closed or daemon._stopping:
+        return stopping, None
+    session = daemon._sessions.get(caller["thread_id"])
+    if (session is None or session.worker is None or session.handle is None
+            or session.turn_id != caller["turn_id"]):
+        return not_at_desk, None
+    if getattr(session, "relay_turn", None) is not None:
+        return not_at_desk, None
+    if session.cancelled.is_set() or session.closing or session.retired or session.lost:
+        return STOPPED_TURN, None
+    if session.brief.role != Role.CHAT or session.brief.task_id is not None:
+        return not_at_desk, None
+    if session.thread.provider not in (ProviderName.CLAUDE, ProviderName.CODEX):
+        return not_at_desk, None
+    if session.desk.slot.get("present") is not True:
+        return not_at_desk, None
+    return None, session
+
+
 class ReportRefused(Exception):
     """A fixed refusal: no URL, name or count from the body in its text."""
 

@@ -693,6 +693,10 @@ class Daemon:
         self.agent_pane_reports = PaneReports(self)
         from .subagent_panes import SubagentPanes
         self.subagent_panes = SubagentPanes(self)
+        # `hud_open_browser` (browser_open.py): public pages in new Remote
+        # panes, judged here first; installed and stopped with the above.
+        from .browser_open import BrowserOpens
+        self.browser_opens = BrowserOpens(self)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -783,6 +787,7 @@ class Daemon:
             self.chat_relay.install()
             self.owner_posts.install()
             self.subagent_panes.install()
+            self.browser_opens.install()
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
@@ -3218,6 +3223,7 @@ class Daemon:
             self.owner_posts.stop()
             # Nor opens panes.
             self.subagent_panes.stop()
+            self.browser_opens.stop()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
             # in the log rather than reading as still waiting after a restart —

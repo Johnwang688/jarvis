@@ -150,7 +150,8 @@ class BrowserLook:
         if source.kind=="unknown":raise LookRefused(SOURCE_UNKNOWN)
         if source.kind=="terminal" and not self.daemon.terminals.readable_source(source.terminal_id):
             raise LookRefused(SOURCE_OFF)
-        if source.kind not in ("owner","terminal","thread"):raise LookRefused(SOURCE_UNKNOWN)
+        # `agent`: a page a chat opened (hud_open_browser, D5), as an owner pane it navigated.
+        if source.kind not in ("owner","agent","terminal","thread"):raise LookRefused(SOURCE_UNKNOWN)
         if self.daemon.browser.input_held():
             raise LookRefused("an approval card is waiting; look again after it is answered")
 

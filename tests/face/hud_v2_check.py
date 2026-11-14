@@ -3409,6 +3409,15 @@ def main():
             finally:
                 remote_mock.stop()
 
+            # hud_open_browser (2026-11-13, D2-D5): agent-opened Remote panes, restore never navigate.
+            from tests.face.hud_v2_agent_browser_check import agent_browser_checks
+            agent_browser_mock = MockDaemon(0).start()
+            try:
+                agent_browser_checks(browser, agent_browser_mock, f"http://127.0.0.1:{agent_browser_mock.port}",
+                                     check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                agent_browser_mock.stop()
+
             from tests.face.hud_v2_browser_controls_check import controls_checks
             controls_mock = MockDaemon(0).start()
             try:
