@@ -342,9 +342,7 @@ describe("resolving a stored record", () => {
     expect(c.washes[2]).toBe(DEFAULT_WASHES[2]);
     expect(luminance(c.washes[1])).toBeLessThanOrEqual(WASH_MAX_LUMINANCE);
     expect(luminance(c.base)).toBeLessThanOrEqual(BASE_MAX_LUMINANCE);
-    // The editor's colour is read by name, not enumerated (resolveColours): the five-colour palette is the rest.
-    expect(resolveColours({})).toEqual({ accent: DEFAULT_COLOURS.accent, washes: DEFAULT_COLOURS.washes, base: DEFAULT_COLOURS.base });
-    expect(resolveColours({}).codeAccent).toBe(DEFAULT_COLOURS.codeAccent);
+    expect(resolveColours({})).toEqual(DEFAULT_COLOURS);
   });
   it("parse keeps only well-formed #rrggbb, and a corrupt record falls back to the defaults", () => {
     expect(parseAppearance('{"accent":"#C0AEF5","base":"#0c1418","washes":["#112233","#445566","#778899"]}')).toEqual({

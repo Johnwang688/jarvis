@@ -336,7 +336,7 @@ export function AuroraSetting() {
             {notes["code-accent"].kind === "refused" ? "Not applied: " : ""}{notes["code-accent"].text}
           </p>
         )}
-        <p className="appearance-note clamped">
+        <p className="appearance-help">
           Colours the editor's function names, cursor and selections and the terminal's cyan. It is separate from the accent and stays put when a preset or RGB changes the rest.
         </p>
       </div>

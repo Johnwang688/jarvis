@@ -662,13 +662,9 @@ export function resolveColours(a: Partial<Pick<Appearance, "accent" | "washes" |
     const accent = checkAccent(a.accent, mix.washes);
     out = { accent: accent.ok ? accent.value : DEFAULT_ACCENT, washes: mix.washes as [string, string, string], base: mix.base };
   }
+  // The editor and terminal colour, judged like the accent against the washes that will be shown.
   const code = checkAccent(a.codeAccent, out.washes);
-  const colours = out as Colours;
-  // Not enumerable on purpose: the object stays the palette (accent, washes, base) to anything that compares
-  // or spreads it (presets, matchingPreset, the acceptance tests' toEqual); the editor's colour is read by
-  // name (`c.codeAccent`, colourProps).
-  Object.defineProperty(colours, "codeAccent", { value: code.ok ? code.value : DEFAULT_CODE_ACCENT, enumerable: false });
-  return colours;
+  return { ...out, codeAccent: code.ok ? code.value : DEFAULT_CODE_ACCENT };
 }
 
 // ---- the accent family, derived in OKLCH ------------------------------------------------------------------

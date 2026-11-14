@@ -6,7 +6,7 @@
 // white, and every wash keeps the D-8 luminance cap so text stays readable.
 import { describe, expect, it } from "vitest";
 import {
-  BASE_MAX_LUMINANCE, COLOUR_PRESETS, DEFAULT_APPEARANCE, RGB_ACCENT, RGB_BASE, WASH_MAX_LUMINANCE,
+  BASE_MAX_LUMINANCE, COLOUR_PRESETS, DEFAULT_CODE_ACCENT, DEFAULT_APPEARANCE, RGB_ACCENT, RGB_BASE, WASH_MAX_LUMINANCE,
   checkAccent, checkPreset, clampRgbSpeed, parseAppearance, resolveColours, rgbWashes, saveAppearance,
   APPEARANCE_KEY,
 } from "./appearance";
@@ -88,7 +88,7 @@ describe("RGB colour model", () => {
 
   it("resolveColours under RGB: white accent, the phase-0 washes and the RGB base, whatever else is stored", () => {
     const c = resolveColours({ rgb: true, accent: "#c4a8ff", washes: ["#5b3fb8", "#7a3aa8", "#3a46b8"], base: "#0d0b1a" });
-    expect(c).toEqual({ accent: RGB_ACCENT, washes: rgbWashes(0), base: RGB_BASE });
+    expect(c).toEqual({ accent: RGB_ACCENT, washes: rgbWashes(0), base: RGB_BASE, codeAccent: DEFAULT_CODE_ACCENT });
     // RGB off: the stored colours come back untouched.
     expect(resolveColours({ rgb: false, accent: "#c4a8ff" }).accent).toBe("#c4a8ff");
   });

@@ -210,7 +210,7 @@ describe("whole-palette guard: the known misses, and ordinary palettes", () => {
     expect(checkAccent("#ababab", clamped).ok).toBe(false);
     expect(checkAccent("#ababab", DEFAULT_WASHES).ok).toBe(true);
     const c = resolveColours({ accent: "#ababab", washes });
-    expect(c).toEqual({ accent: "#ababab", washes: [...DEFAULT_WASHES], base: DEFAULT_BASE });
+    expect(c).toEqual({ accent: "#ababab", washes: [...DEFAULT_WASHES], base: DEFAULT_BASE, codeAccent: DEFAULT_ACCENT });
     // An accent that is bad on its own still falls back.
     expect(resolveColours({ accent: AMBER, washes }).accent).toBe(DEFAULT_ACCENT);
   });
