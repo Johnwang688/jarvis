@@ -1548,9 +1548,16 @@ that way.
 
 ### `hud_open_browser`: a chat opens public pages in new Remote panes (2026-11-13)
 
-Decisions D2–D5 in the same plan file. The owner asked a chat to "pull up
+Decisions D2–D6 in the same plan file. The owner asked a chat to "pull up
 instagram in the browser" in three panels; no tool could open a Browser
 pane.
+
+**What this allows, plainly (D6).** Opening does not depend on the global
+`agents_may_drive` switch. With driving switched off, a chat can still load
+any public page that passes the rules below in the owner's default profile
+(signed in as he is there) and read it while that pane's "Jarvis can see"
+is on, which is the default. Clicking and typing there still need the
+pane's "Jarvis can drive", Remote mode and `agents_may_drive`.
 
 - **Tool and service** (`jarvis/v2/tools/hud_open_browser.py`,
   `jarvis/v2/browser_open.py`). 1–11 URLs, bound as `hud_open_subagents`
@@ -1558,17 +1565,27 @@ pane.
   again after the lookups). Every URL is judged daemon-side first
   (`judge_public_url`: `policy.judge_url`, then http(s), no Jarvis port on
   any host, a public IP literal or a name not local by its spelling that
-  resolves only to public addresses); one refusal refuses the call and
-  publishes nothing. Bus record `browser_open {thread_id, data: {urls,
-  request_id?}}`; the window reports as above ("Opened 3 of 3 …").
+  resolves only to public addresses), then drive `navigate`'s own fixed
+  rules (`act_rules.pre_judge`: H2's credential in the address refuses; an
+  ASK floor, such as a login/OAuth, account deletion, payment or executable
+  download, is refused as needing the owner) and, for what those rules
+  CLASSIFY, drive's own reviewer (`act_review.judge`/`decide`: anything but
+  allow refuses). One refusal refuses the call and publishes nothing. A
+  refusal never echoes the URL. Budget: 11 pages a turn across calls, and 44
+  a rolling hour for the daemon (`TURN_MAX`, `HOUR_MAX`). Bus record
+  `browser_open {thread_id, data: {urls, request_id?}}`; the window reports
+  as above ("Opened 3 of 3 …").
 - **The HUD** places the record as one batch (`placeAgentBatch`), judging
   each URL again (`lib/agentpanes.ts` `agentBrowserUrl`: no loopback, no
   private/link-local/CGNAT/IPv6 literal, no one-label or local-network name;
   refused ones count as not placed). A new pane is `agentBrowserSpec`: a
   Browser view on the default profile with one Remote tab, `source {kind:
   "agent"}`, no Remote handle; see and drive at their defaults. A reused pane
-  gains an active tab (`showAgentBrowser`); never a Private pane or one with
-  12 tabs. Focus never moves.
+  gains an active tab (`showAgentBrowser`), and only a pane on the default
+  profile may be reused (`agentPageMayReuse`: never Private or another named
+  profile, never 12 tabs, never one already showing an agent-opened page), so
+  every page opens in the default profile and a turn's later calls cannot
+  reuse its earlier ones. Focus never moves.
 - **Never the owner's navigation.** The pane's `ensure` makes the tab with
   `POST /browser/tabs` (no URL) and `/restore`, never `/navigate`, so no
   loopback port is admitted (BR-1a/BR-1c, L2).

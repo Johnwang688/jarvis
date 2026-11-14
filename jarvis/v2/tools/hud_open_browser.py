@@ -10,9 +10,11 @@ Codex owner chats are offered it through the session catalog
 `permit` decides (`jarvis-session-delegate`). `EXPLICIT_ONLY`, so no v1
 surface holds it; the fast path never does; never in `mcp_catalog.MCP_TOOLS`.
 Not `PARALLEL_SAFE`, not dangerous: it asks the owner's window to show
-public pages, judged first. The chat may then look at and drive them under
-the usual switches, as a pane it navigated with its own `goto` (decision
-D5); it admits no loopback port and never takes focus.
+public pages, judged first (drive navigate's rules and reviewer included).
+Opening does not depend on `agents_may_drive` (D6); the chat may read them
+when the pane's see is on and drive them under the usual switches, as a
+pane it navigated with its own `goto` (D5); it admits no loopback port and
+never takes focus.
 """
 from __future__ import annotations
 
@@ -32,7 +34,10 @@ def hud_open_browser(
     """Open public web pages in the owner's HUD, each in its own Remote
     Browser pane, when the owner asks to see them there. Only public
     http(s) pages: a loopback, home-network or Jarvis address refuses the
-    whole call. The HUD uses existing panes that hold no unsaved work (never
+    whole call, and so does one the Browser would ask the owner about (a
+    login, an account change, a payment, a download): go there with the
+    Browser's own navigate instead, which asks. At most 11 pages a turn.
+    The HUD uses existing panes that hold no unsaved work (never
     the one showing this chat or the one the owner is in), then lays the
     window out as a grid, and never moves the owner's focus. The result says
     how many opened. Only during a turn the owner started at the HUD in this

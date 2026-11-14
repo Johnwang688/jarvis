@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, type PaneLayout } from "./layout";
 import {
-  AGENT_OPEN_MAX, agentBrowserUrl, agentRequestId, drawnCell, gridFor, placeAgentPanes, RULE, type AgentAsk,
+  AGENT_OPEN_MAX, agentBrowserUrl, agentPageMayReuse, agentRequestId, drawnCell, gridFor, placeAgentPanes, RULE, type AgentAsk,
 } from "./agentpanes";
 import { browserFront } from "./browserowner";
 import {
@@ -384,5 +384,27 @@ describe("agentBrowserSpec / showAgentBrowser: a Remote tab that is the agent's,
       expect(tab).toMatchObject({ url: pages[i], mode: "remote", source: { kind: "agent" } });
       expect(tab.remoteTabId).toBeUndefined();
     }
+  });
+});
+
+describe("agentPageMayReuse: which free panes a page may take (review of #359)", () => {
+  const DEF = "p-11111111";
+  it("a pane on the default profile, with room, not already showing an agent-opened page", () => {
+    expect(agentPageMayReuse({ view: "chat", projectId: null, terminalId: null }, DEF)).toBe(true);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: DEF }, DEF)).toBe(true);
+  });
+  it("never another named profile or Private: every page opens in the default profile", () => {
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "p-22222222" }, DEF)).toBe(false);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "private" }, DEF)).toBe(false);
+    expect(agentPageMayReuse({ view: "browser", projectId: null, terminalId: null, browserProfile: "private" }, null)).toBe(false);
+  });
+  it("never a pane whose active tab an agent opened (a turn's earlier calls), nor one with 12 tabs", () => {
+    expect(agentPageMayReuse(agentBrowserSpec("https://www.instagram.com/"), DEF)).toBe(false);
+    const owners = { ...agentBrowserSpec("https://a.example.com/", "abc123") };
+    owners.browser = { active: "abc123", tabs: owners.browser!.tabs.map(({ source: _s, ...t }) => t) };
+    expect(agentPageMayReuse(owners, DEF)).toBe(true);
+    const full = { view: "browser" as const, projectId: null, terminalId: null,
+      browser: { active: "t00000", tabs: Array.from({ length: 12 }, (_, i) => ({ id: `t${String(i).padStart(5, "0")}`, url: "https://a.example.com/" })) } };
+    expect(agentPageMayReuse(full, DEF)).toBe(false);
   });
 });

@@ -74,7 +74,7 @@ import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard"
 import { frameKey } from "./lib/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { driving } from "./state/driving";
-import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentBrowserUrl, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
+import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentBrowserUrl, agentPageMayReuse, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
 import { WINDOW_ID } from "./lib/windowId";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -2732,12 +2732,7 @@ export default function App() {
     const total = Math.max(batch.total, batch.items.length);
     if (!asks.length) return { placed: shown, notPlaced: total - shown, changed: false };
     let free = agentFreePanes(batch.threadId);
-    if (pages) {
-      free = free.filter((n) => {
-        const spec = lay.ws.panes[n - 1];
-        return spec.browserProfile !== "private" && (spec.browser?.tabs.length ?? 0) < BROWSER_TABS_MAX;
-      });
-    }
+    if (pages) free = free.filter((n) => agentPageMayReuse(lay.ws.panes[n - 1], browser.profiles[0]?.id ?? null));
     const got = lay.placeAgent(free, asks);
     if (got === null) return null;
     const placed = got.filter((n) => n !== null).length;

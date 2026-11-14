@@ -1,44 +1,73 @@
 """Opening public web pages in new Remote Browser panes of the owner's HUD, on
 a chat's word (owner, 2026-11-13: "open 3 other panels in the HUD and pull up
-instagram in the browser in them"; decisions D2–D4 of
+instagram in the browser in them"; decisions D2-D6 of
 `docs/plans/2026-11-13-agent-pane-grid-decisions.md`).
 
 `hud_open_browser` (`tools/hud_open_browser.py`) reaches this service and
-nothing else. It judges every URL here first, refusing the whole call as text
-if any one is not a public http(s) page (`judge_public_url`), then publishes
-one bus record, `browser_open` `{thread_id, data: {urls, request_id?}}`, and
-waits up to three seconds for the first window's counts
-(`agent_panes.PaneReports`), never under the daemon lock.
+nothing else. Every URL is judged here first and one refusal refuses the
+whole call, as text that never repeats the URL:
+
+  1. the Browser's URL judge and this tool's public-only rule
+     (`judge_public_url`: http(s), no Jarvis port on any host, a public IP
+     literal, or a name not local by its spelling that resolves only to
+     public addresses);
+  2. drive `navigate`'s own fixed rules, the same function it calls
+     (`act_rules.pre_judge` on `navigate_facts`): H2's credential in the
+     address and H7's belt refuse; an ASK floor (a login or OAuth, an account
+     deletion, a payment, an executable download) needs the owner, so it is
+     refused with `NEEDS_OWNER` (go there with `hud_browser_act`, which asks);
+  3. drive `navigate`'s own reviewer for what those rules CLASSIFY
+     (`act_review.judge` and `decide`): anything but its allow is refused the
+     same way. No new approval path: this never asks the owner.
+
+The budget (review of #359): at most `TURN_MAX` (11) pages in one turn
+across all its calls, and `HOUR_MAX` (44) in any rolling hour for the
+daemon, on the monotonic clock. Then it publishes one bus record,
+`browser_open` `{thread_id, data: {urls, request_id?}}`, and waits up to
+three seconds for the first window's counts (`agent_panes.PaneReports`),
+never under the daemon lock.
 
 Each HUD window places the panes as one batch (`lib/agentpanes.ts`, as
 `hud_open_subagents`): existing free panes first, then a balanced grid,
 never the chat's own pane, the focused or keyboard pane, a pane an agent is
-driving or one holding work, never moving focus. Each new pane is a Browser
-view on the default (named, never Private) profile with one Remote tab at
-its URL, marked **the agent's** (`source: {kind: "agent"}`, decision D5:
-the chat may look at it and, with that pane's "Jarvis can drive" and
-`agents_may_drive` on, drive it, exactly as an owner pane it navigated with
-its own `goto`; `browser/panes.py` `ResolvedSource`), and created through
-the window's restore path, which is never the owner's own navigation: it
-admits no loopback port in the gate (BR-1a/BR-1c and amendment 2's L2). The
-window judges each URL again and refuses loopback.
+driving or one holding work, never moving focus. **Every page opens in the
+owner's default named profile**: a new pane has no profile of its own (the
+default), and a free pane is reused only when it is on the default profile,
+never Private or another named one, never one whose tabs are full and never
+one already showing a page an agent opened (`agentPageMayReuse`, so a
+turn's later calls cannot reuse its earlier ones' panes). Each page is one
+Remote tab marked **the agent's** (`source: {kind: "agent"}`), created
+through the window's restore path, which is never the owner's own
+navigation: it admits no loopback port in the gate (BR-1a/BR-1c and
+amendment 2's L2). The window judges each URL again and refuses loopback.
+
+**What the chat may then do** (D5, D6): opening does not depend on the
+global `agents_may_drive` switch or any pane's drive switch. The chat may
+read an opened page whenever that pane's "Jarvis can see" is on (it is by
+default); clicking and typing there still need the pane's "Jarvis can
+drive", Remote mode and `agents_may_drive`, as on any owner pane. So with
+driving off, a chat can still load any public page that passes the rules
+above in the owner's default profile, signed in as he is there, and read it.
 
 What it cannot do: open a loopback, LAN, link-local or Jarvis address, any
-scheme but http(s), a Private pane, a Direct frame, take focus, close a pane,
-or touch a pane's see/drive switches. Bound as `hud_open_subagents` is: a
-turn the owner started at the HUD in this Claude or Codex chat, the
-conversation itself, checked by the tool and again here under the daemon
-lock (`agent_panes.refuse_desk_caller`).
+scheme but http(s), an address drive navigate would refuse or ask about, a
+Private pane, a Direct frame, take focus, close a pane, or touch a pane's
+see/drive switches. Bound as `hud_open_subagents` is: a turn the owner
+started at the HUD in this Claude or Codex chat, the conversation itself,
+checked by the tool and again here under the daemon lock
+(`agent_panes.refuse_desk_caller`).
 """
 from __future__ import annotations
 
+import collections
 import ipaddress
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from urllib.parse import urlsplit
 
 from .agent_panes import REPORT_WAIT_S, PaneReports, refuse_desk_caller
-from .browser import policy
+from .browser import act_review, act_rules, policy
 
 NOT_IN_CHAT = "Error: hud_open_browser works only inside a Jarvis HUD chat."
 NOT_AT_DESK = ("Error: Browser panes can be opened only during a turn the owner started at the "
@@ -49,6 +78,13 @@ STOPPING = "Error: Jarvis is stopping, so no panes are opened."
 
 # The HUD draws at most 12 panes; one shows this chat.
 OPEN_MAX = 11
+# The budget (review of #359): at most this many pages in one turn, across
+# every call it makes, and this many in any rolling hour for the daemon.
+TURN_MAX = 11
+HOUR_MAX = 44
+HOUR_S = 3600.0
+# Turns whose counts are kept (oldest forgotten first; a turn is short).
+TURNS_KEPT = 64
 # What a HUD pane stores of a URL (`workspace.ts` URL_MAX).
 URL_MAX = 2048
 RESOLVE_TIMEOUT_S = 3.0
@@ -60,6 +96,11 @@ LOCAL_SUFFIXES = (".localhost", ".local", ".lan", ".home", ".internal", ".intran
 
 PUBLIC_ONLY = ("only public http or https web pages open this way (no loopback, home network, "
                "Jarvis or other private address)")
+# An address drive `navigate` would ask the owner about (an ASK floor: a
+# login or OAuth, an account deletion, a payment, an executable download), or
+# one its reviewer does not clear: never opened unasked.
+NEEDS_OWNER = ("that page needs the owner's OK; open a Browser pane and go there with the Browser's "
+               "own navigate (hud_browser_act), which asks the owner first")
 
 
 class NotPublic(ValueError):
@@ -104,6 +145,16 @@ def judge_public_url(url, *, refused: frozenset[int], resolve=_resolve,
         raise NotPublic(policy.MALFORMED_SENTENCE) from None
     if policy.judge_port(port, refused=refused) is not None:
         raise NotPublic(policy.JARVIS_PORT_SENTENCE)
+    # Drive `navigate`'s own fixed rules, the same function it calls (H2: a
+    # credential in the address; H7's belt; the ASK floors). REFUSE is its
+    # fixed sentence; an ASK floor needs the owner, so it is not opened here.
+    pre = act_rules.pre_judge(navigate_facts(target))
+    if pre.kind == act_rules.REFUSE:
+        raise NotPublic(pre.reason or "the Browser's rules refuse that address")
+    if pre.kind == act_rules.ASK:
+        raise NotPublic(NEEDS_OWNER)
+    if pre.kind not in (act_rules.ALLOW, act_rules.CLASSIFY):
+        raise NotPublic(NEEDS_OWNER)
     kind, address = policy.host_kind(host)
     if kind == "literal":
         if policy.address_class(address) != "public":
@@ -132,16 +183,53 @@ def judge_public_url(url, *, refused: frozenset[int], resolve=_resolve,
     return target
 
 
+def navigate_facts(url: str) -> act_rules.Facts:
+    """A `navigate` to `url` from a new tab, as drive's `_facts` builds one for
+    `act_rules.pre_judge`: every state fact (H3-H12) at its passing value,
+    because opening is not driving (D6: `agents_may_drive` and the pane's
+    drive switch govern clicks and typing, not this) and the budget is this
+    service's own (`TURN_MAX`, `HOUR_MAX`)."""
+    return act_rules.Facts(
+        action="navigate", nav_url=url, url="about:blank", card_pending=False, paused=False,
+        owner_has_input=False, owner_input_age_s=None, agents_may_drive=True, pane_can_drive=True,
+        pane_can_see=True, private=False, tab_drawn=True, direct_mode=False, url_refused=False,
+        other_driver=False, judged_this_turn=0, actions_this_hour=0, strict_profile=False, at_desk=True,
+        depth=0, sub_agent=False)
+
+
+def review_url(url: str, review=None) -> None:
+    """Drive `navigate`'s reviewer for an address its fixed rules CLASSIFY
+    (every ordinary one): `act_review.judge` and `act_review.decide`, exactly
+    as drive calls them. Anything but `allow` (an ask, a deny, no model, a
+    timeout) is `NotPublic(NEEDS_OWNER)`: this path never asks the owner."""
+    facts = navigate_facts(url)
+    pre = act_rules.pre_judge(facts)
+    if pre.kind == act_rules.ALLOW:
+        return
+    if pre.kind != act_rules.CLASSIFY:
+        raise NotPublic(NEEDS_OWNER)
+    verdict = (review or act_review.judge)(facts, "")
+    if act_review.decide(pre, verdict) != act_review.ALLOW:
+        raise NotPublic(NEEDS_OWNER)
+
+
 def _site(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
 
 
 class BrowserOpens:
-    def __init__(self, daemon, reports: PaneReports | None = None, *, resolve=_resolve):
+    def __init__(self, daemon, reports: PaneReports | None = None, *, resolve=_resolve, review=None,
+                 clock=time.monotonic):
         self.daemon = daemon
         self.closed = True
         self.resolve = resolve
+        # Drive navigate's reviewer (`act_review.judge` unless a test scripts one).
+        self.review = review
+        self.clock = clock
+        self._budget_lock = threading.Lock()
+        self._turns: collections.OrderedDict[tuple, int] = collections.OrderedDict()
+        self._hour: collections.deque[float] = collections.deque()
         self.reports = reports or getattr(daemon, "agent_pane_reports", None) or PaneReports(daemon)
 
     def _refused_ports(self) -> frozenset[int]:
@@ -167,21 +255,59 @@ class BrowserOpens:
             thread_id = session.thread.id
         # Judged outside the daemon lock (a name is looked up), every one
         # before anything is published: one refusal refuses the whole call.
+        turn = (thread_id, caller["turn_id"])
+        over = self._over_budget(turn, len(urls), charge=False)
+        if over:
+            return over
         refused = self._refused_ports()
         with ThreadPoolExecutor(max_workers=len(urls), thread_name_prefix="browser-open-judge") as pool:
-            futures = [pool.submit(judge_public_url, url, refused=refused, resolve=self.resolve) for url in urls]
+            futures = [pool.submit(self._judge_one, url, refused) for url in urls]
             judged = []
             for n, future in enumerate(futures, 1):
                 try:
                     judged.append(future.result())
                 except NotPublic as refusal:
+                    # The fixed sentence only: the URL itself is never echoed.
                     return f"Error: URL {n} was refused, so nothing was opened: {refusal}."
         # The turn may have ended while names were looked up.
         with self.daemon._lock:
             why_not, _ = refuse_desk_caller(self.daemon, self.closed, caller, NOT_AT_DESK, STOPPING)
             if why_not is not None:
                 return why_not
+        over = self._over_budget(turn, len(judged), charge=True)
+        if over:
+            return over
         return self._publish_and_wait(thread_id, judged)
+
+    def _judge_one(self, url, refused) -> str:
+        """The URL judge with drive navigate's fixed rules, then its reviewer."""
+        target = judge_public_url(url, refused=refused, resolve=self.resolve)
+        review_url(target, self.review)
+        return target
+
+    def _over_budget(self, turn: tuple, n: int, *, charge: bool) -> str | None:
+        """A refusal when `n` more pages would pass this turn's `TURN_MAX` or
+        the daemon's rolling `HOUR_MAX`, else None (and, with `charge`, they
+        are counted). Checked before judging and charged after, under one
+        lock, so two calls cannot both pass on the same room."""
+        with self._budget_lock:
+            now = self.clock()
+            while self._hour and now - self._hour[0] >= HOUR_S:
+                self._hour.popleft()
+            used = self._turns.get(turn, 0)
+            if used + n > TURN_MAX:
+                return (f"Error: one turn opens at most {TURN_MAX} Browser pages; this turn has "
+                        f"already asked for {used}, so nothing more was opened.")
+            if len(self._hour) + n > HOUR_MAX:
+                return (f"Error: at most {HOUR_MAX} Browser pages open this way in an hour, and "
+                        "that many have been, so nothing was opened; try again later.")
+            if charge:
+                self._turns[turn] = used + n
+                self._turns.move_to_end(turn)
+                while len(self._turns) > TURNS_KEPT:
+                    self._turns.popitem(last=False)
+                self._hour.extend([now] * n)
+        return None
 
     def _publish_and_wait(self, thread_id: str, urls: list[str]) -> str:
         from .model import utcnow

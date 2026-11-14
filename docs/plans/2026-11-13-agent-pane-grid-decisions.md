@@ -54,6 +54,19 @@ Browser pane: the drive tools need a pane that is already showing.
   both on. It still never opens a loopback port or a LAN address. This
   replaces PR B's first draft, which marked these tabs `unknown` so that no
   agent could look at or drive them.
+- **D6. Opening is separate from driving** (owner, 2026-11-13, "Yes, opening
+  is separate (Recommended)").
+  - `hud_open_browser` works whatever the global `agents_may_drive` switch
+    says.
+  - The chat may read an opened page when that pane's "Jarvis can see" is
+    on, which it is by default.
+  - Clicking and typing still need the pane's "Jarvis can drive", Remote
+    mode and `agents_may_drive`.
+  - **In plain words: with driving switched off, a chat can still load any
+    public page in the owner's default profile, signed in as he is there,
+    and read it.** "Any public page" means any page that passes the rules
+    below. The only exceptions are pages drive navigate would refuse or ask
+    about.
 
 ## How PR A implements D1 and D3 (`claude/agent-pane-grid`)
 
@@ -112,7 +125,7 @@ Browser pane: the drive tools need a pane that is already showing.
    count. `splitVerdict` and `autoSplit` still check the nominal halves;
    that is out of this PR's scope.
 
-## How PR B implements D2–D5 (`claude/hud-open-browser`)
+## How PR B implements D2–D6 (`claude/hud-open-browser`)
 
 - **The tool and the service.** The tool is `hud_open_browser(urls)`: 1 to
   11 URLs (`jarvis/v2/tools/hud_open_browser.py`). The service is
@@ -131,21 +144,52 @@ Browser pane: the drive tools need a pane that is already showing.
   3. An IP literal must be in the public class (`policy.address_class`).
   4. A name must not look local: one label, or a suffix such as `.local`,
      `.lan`, `.internal`, `.home.arpa`, `.test` or `.example`.
-  5. A name must resolve, right now, only to public addresses. Lookups run
+  5. Drive `navigate`'s own fixed rules (review of #359), using the same
+     function: `act_rules.pre_judge` on `browser_open.navigate_facts`, a
+     navigate from a new tab with every state fact passing.
+     - REFUSE refuses with its fixed sentence: H2 (a credential in the
+       address) or H7's belt. This runs before any DNS lookup, so a
+       credential never reaches a resolver or a model.
+     - An ASK floor (a login or OAuth, an account deletion, a payment, an
+       executable download) refuses with `NEEDS_OWNER`, which tells the
+       chat to open a pane and go there with `hud_browser_act`'s navigate,
+       which asks the owner.
+  6. A name must resolve, right now, only to public addresses. Lookups run
      in parallel, off the daemon lock, within 3 s.
+  7. What those rules CLASSIFY (every ordinary address) goes to drive
+     `navigate`'s own reviewer: `act_review.judge`, then `act_review.decide`.
+     Anything but `allow` (an ask, a deny, no reviewer model, a timeout)
+     refuses with `NEEDS_OWNER`. This is not a new approval path: this tool
+     never asks the owner.
 
+  A refusal names the URL's position ("URL 2") and a fixed sentence. It
+  never echoes the URL, and a refused URL never reaches the bus or a tab.
   The SOCKS gate still judges every connection the page makes afterwards.
+- **The budget** (review of #359; `browser_open.TURN_MAX`, `HOUR_MAX`):
+  - At most 11 pages in one turn, counted across all its calls.
+  - At most 44 pages in any rolling hour for the daemon, on the monotonic
+    clock.
+  - The budget is checked before judging and charged only when a call
+    publishes, so a refused call costs nothing.
 - **The bus record** is `browser_open {thread_id, data: {urls (as judged),
   request_id?}}`. It is placed as one batch with PR A's placement, and the
   report and its wording work as in PR A ("Opened 3 of 3 Browser pane(s) at
   instagram.com …").
 - **Each new pane** (`lib/workspace.ts` `agentBrowserSpec`):
-  - It is a Browser view on the default named profile, never Private.
+  - It is a Browser view with no profile of its own, so it uses the
+    owner's default named profile; never Private.
   - It has one Remote tab at the URL, with `source {kind: "agent"}` and no
     Remote handle yet.
   - See and drive start at their defaults; the tool never touches them.
   - A reused pane (`showAgentBrowser`) gains an active tab and keeps its
-    spec. A Private pane, or one with 12 tabs, is never reused.
+    spec. Which free panes a page may take is decided by
+    `agentPageMayReuse` (review of #359):
+    - only a pane on the default profile, so **every page opens in the
+      default profile** (I chose this over documenting that a reused pane
+      keeps another named profile);
+    - never Private, and never a pane whose tabs are full;
+    - never a pane whose active tab is already an agent-opened page. A
+      turn's later calls therefore cannot reuse its earlier calls' panes.
 - **The window judges each URL again** (`lib/agentpanes.ts`
   `agentBrowserUrl`). It refuses loopback (`isLoopbackHost`, and anything
   `judgeBrowserUrl` would frame as a local server), private, link-local,
@@ -188,5 +232,16 @@ Browser pane: the drive tools need a pane that is already showing.
    agent-opened `POST /browser/tabs` from the owner's. The defenses are the
    daemon's URL judge (no loopback reaches the record), the window's second
    judge, and tests that pin restore and never navigate.
-4. **Private panes and panes with 12 tabs are never reused**, and nothing is
-   ever opened in a Direct frame.
+4. **Only default-profile panes are reused**, never Private, another named
+   profile, a pane with 12 tabs or a pane showing an agent-opened page.
+   Nothing is ever opened in a Direct frame.
+5. **CLASSIFY goes to drive navigate's own reviewer.** It is not refused
+   outright: drive's fixed rules CLASSIFY every ordinary navigate, so
+   refusing CLASSIFY would refuse every page, Instagram included. The
+   reviewer's "allow" is the only way through, as in drive. Its ask, its
+   deny, a missing model and a timeout all refuse, with a sentence that sends
+   the chat to the asking path. The reviewer's owner-words context is empty,
+   the strictest choice.
+6. **The open path does not read `agents_may_drive`** (D6). It builds the
+   drive facts with the drive switches passing. Reading still needs the
+   pane's see switch, and driving needs all the usual switches.

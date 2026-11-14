@@ -76,6 +76,22 @@ export function agentBrowserUrl(raw: unknown): string | null {
   return url.href;
 }
 
+/**
+ * Whether a free drawn pane may take a `hud_open_browser` page (review of
+ * #359): only a pane on the default profile (`defaultProfile`, the first
+ * named one; a pane with none set uses it), so every page opens in the owner's
+ * default profile, never Private or another named one; never one whose tabs
+ * are full; and never one whose active tab is already an agent-opened page,
+ * so a turn's later calls cannot reuse what its earlier ones opened (the
+ * daemon also caps a turn at 11 pages and the hour at 44).
+ */
+export function agentPageMayReuse(spec: PaneSpec, defaultProfile: string | null): boolean {
+  if ((spec.browserProfile ?? defaultProfile) !== defaultProfile || spec.browserProfile === "private") return false;
+  const tabs = spec.browser?.tabs ?? [];
+  if (tabs.length >= 12) return false;
+  return tabs.find((t) => t.id === spec.browser?.active)?.source?.kind !== "agent";
+}
+
 /** A request id as the daemon makes them (32 hex characters), else null. */
 export function agentRequestId(raw: unknown): string | null {
   return typeof raw === "string" && /^[0-9a-f]{32}$/.test(raw) ? raw : null;

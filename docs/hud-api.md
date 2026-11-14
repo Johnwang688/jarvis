@@ -3527,8 +3527,12 @@ word, and decides nothing: it is only what the chat is told.
 
 **Bus record** `browser_open` (`hud_open_browser`, decisions D2–D5): `{thread_id,
 data: {urls: [url, …], request_id?}}`, 1–11 URLs as the daemon judged them
-(public http(s) only). The window judges each again, places the record as
-one batch, and reports as above. Each page becomes a Remote tab with
+(public http(s) only, and only what drive navigate's rules and reviewer
+allow; at most 11 a turn and 44 an hour). The window judges each again,
+places the record as one batch (reusing only free panes on the default
+profile that are not already showing an agent-opened page), and reports as
+above. Opening ignores `agents_may_drive` (D6): with driving off, the chat
+can still load such a page and read it while the pane's see switch is on. Each page becomes a Remote tab with
 `source {kind: "agent"}` and no handle, made by `POST /browser/tabs` without
 a URL and then `POST /browser/tabs/{id}/restore` (never `navigate`: no
 loopback port is opened).

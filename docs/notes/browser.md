@@ -2765,8 +2765,18 @@ workspace side: `hud-workspace.md`, "`hud_open_browser`".
 
 - A chat's `hud_open_browser` opens public pages only. Two judges refuse
   anything else: the daemon's `browser_open.judge_public_url` and the
-  window's `agentBrowserUrl`. Each page opens in a new Remote tab whose
-  source is `{kind: "agent"}`.
+  window's `agentBrowserUrl`.
+- **Drive navigate's rules and reviewer apply** (review of #359):
+  `act_rules.pre_judge` on a navigate's facts, then `act_review` for
+  CLASSIFY. A REFUSE, an ASK floor, or anything the reviewer does not allow
+  refuses the whole call; the open path never asks the owner.
+- **The budget:** 11 pages a turn and 44 a rolling hour.
+- Each page opens in a Remote tab, in the default profile, whose source is
+  `{kind: "agent"}`.
+- **D6.** Opening ignores `agents_may_drive`. With driving off, a chat can
+  still load any public page that passes these rules in the owner's default
+  profile and read it while the pane's see switch is on. Clicking and
+  typing still need drive.
 - **The port gate.** The window makes the tab with `POST /browser/tabs`
   (no URL) and then `/restore`, never `/navigate`. That makes it not the
   owner's navigation, so no loopback port is admitted (BR-1a/BR-1c, L2).
