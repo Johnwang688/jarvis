@@ -24,6 +24,13 @@ TEST -> MUTATION
   another chat's sub-agents reachable          Choice.test_only_this_chats_own_records_are_read
   words on the bus                             Choice.test_the_bus_carries_ids_only
   no cap                                       Choice.test_at_most_eleven
+  (report back, 2026-11-13)
+  wait under the daemon lock                   ReportBack.test_the_wait_holds_no_daemon_lock
+  no deadline / wall clock                     ReportBack.test_the_wait_is_bounded_on_the_monotonic_clock,
+                                               ReportBack.test_the_production_clock_is_monotonic
+  a second window overrides the first          ReportBack.test_the_first_window_wins_and_bad_reports_are_refused
+  route not owner-only / no strict Host        ReportRoute.test_no_one_else_reaches_it
+  any window id accepted                       ReportRoute.test_refusals (not live: 409)
 """
 from __future__ import annotations
 
@@ -42,9 +49,10 @@ sys.path.insert(0, str(HERE))
 
 import chat_send_check as CS  # noqa: E402  (its harness and hook helpers only)
 import mcp_session_check as M  # noqa: E402  (helpers only; not its setUpModule)
+import editor_files_check as EF  # noqa: E402  (its Daemonised world only, for the route)
 from jarvis import config, runtime, tools  # noqa: E402
 config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
-from jarvis.v2 import bridge, session_tools, subagent_panes  # noqa: E402
+from jarvis.v2 import agent_panes, bridge, session_tools, subagent_panes  # noqa: E402
 from jarvis.v2.model import PermissionProfile, ProviderName, Role  # noqa: E402
 from jarvis.v2.provider import Brief, Decision, UserMessage  # noqa: E402
 
@@ -164,16 +172,27 @@ def stub_session(**over):
     return SimpleNamespace(**values)
 
 
-def stub_service(session, rows_by_thread):
+def stub_service(session, rows_by_thread, windows=(), on_publish=None):
+    """`windows`: the live owner windows (none by default: the call then
+    publishes without a request id and does not wait). `on_publish(record,
+    reports)` runs as each record is published, as a window would answer."""
     published = []
     seen = []
+    live = set(windows)
 
     def listing(thread_id):
         seen.append(thread_id)
         return [dict(r) for r in rows_by_thread.get(thread_id, [])]
+
+    def publish(record):
+        published.append(record)
+        if on_publish is not None:
+            on_publish(record, svc.reports)
     daemon = SimpleNamespace(_lock=threading.RLock(), _stopping=False, _sessions={"ab12cd34": session},
-                             bus=SimpleNamespace(publish=published.append),
-                             subagents=SimpleNamespace(list=listing))
+                             bus=SimpleNamespace(publish=publish),
+                             subagents=SimpleNamespace(list=listing),
+                             hud_window_count=lambda: len(live),
+                             hud_window_live=lambda w: w in live)
     svc = subagent_panes.SubagentPanes(daemon)
     svc.closed = False
     return svc, published, seen
@@ -272,8 +291,16 @@ class Choice(unittest.TestCase):
         record = published[0]
         self.assertEqual(set(record), {"kind", "thread_id", "at", "data"})
         self.assertEqual((record["kind"], record["thread_id"]), ("subagent_open", "ab12cd34"))
-        self.assertEqual(record["data"], {"sids": [sid(1)]})
+        self.assertEqual(record["data"], {"sids": [sid(1)]}, "no window open: no request id")
         self.assertNotIn("SENTINEL", repr(record))
+        self.assertIn("No HUD window is open", out)
+        svc, published, _ = stub_service(stub_session(), {"ab12cd34": [row(sid(1), "SENTINEL-name-9f")]},
+                                         windows=[WINDOW], on_publish=answer(1, 0))
+        svc.open(dict(CALLER), None)
+        data = published[0]["data"]
+        self.assertEqual(set(data), {"sids", "request_id"})
+        self.assertRegex(data["request_id"], r"^[0-9a-f]{32}$")
+        self.assertNotIn("SENTINEL", repr(published[0]))
 
     def test_at_most_eleven(self):
         self.assertEqual(subagent_panes.OPEN_MAX, 11)
@@ -287,6 +314,223 @@ class Choice(unittest.TestCase):
                 out, published, _ = self.open(rows, bad)
                 self.assertTrue(is_refusal(out), out)
                 self.assertEqual(published, [])
+
+
+# --- the window's report back (agent_panes.py, 2026-11-13) ----------------------------------
+
+WINDOW = "a" * 32
+OTHER_WINDOW = "b" * 32
+
+
+def answer(placed, not_placed, window=WINDOW, delay=0.0, seen=None):
+    """An `on_publish` that answers as a window would, from another thread."""
+    def go(record, reports):
+        def post():
+            if delay:
+                import time
+                time.sleep(delay)
+            body = {"window": window, "request_id": record["data"]["request_id"], "placed": placed,
+                    "not_placed": not_placed}
+            try:
+                got = reports.report(body)
+            except agent_panes.ReportRefused as refusal:
+                got = refusal
+            if seen is not None:
+                seen.append(got)
+        threading.Thread(target=post, daemon=True).start()
+    return go
+
+
+class FastClock:
+    """A monotonic clock that moves a second per read: a wait times out at once."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        self.now += 1.0
+        return self.now
+
+
+class ReportBack(unittest.TestCase):
+    rows = {"ab12cd34": [row(sid(n), f"w{n}") for n in range(3)]}
+
+    def test_every_one_shown(self):
+        svc, published, _ = stub_service(stub_session(), self.rows, windows=[WINDOW], on_publish=answer(3, 0))
+        out = svc.open(dict(CALLER), None)
+        self.assertTrue(out.startswith("Shown 3 of 3 sub-agent(s) in HUD panes"), out)
+        self.assertEqual(svc.reports._waiting, {}, "the id is forgotten after the answer")
+
+    def test_partial_says_how_many_had_no_room(self):
+        svc, _, _ = stub_service(stub_session(), self.rows, windows=[WINDOW], on_publish=answer(2, 1, delay=0.05))
+        out = svc.open(dict(CALLER), None)
+        self.assertTrue(out.startswith("Shown 2 of 3"), out)
+        self.assertIn("no room for 1", out)
+        self.assertFalse(is_refusal(out))
+
+    def test_no_reply_says_so_and_a_late_answer_is_refused(self):
+        svc, published, _ = stub_service(stub_session(), self.rows, windows=[WINDOW])
+        svc.reports.clock = FastClock()
+        out = svc.open(dict(CALLER), None)
+        self.assertIn("No HUD window replied within 3 seconds", out)
+        self.assertIn("Asked the HUD to open 3", out)
+        late = {"window": WINDOW, "request_id": published[0]["data"]["request_id"], "placed": 3, "not_placed": 0}
+        with self.assertRaises(agent_panes.ReportRefused) as caught:
+            svc.reports.report(late)
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_the_production_clock_is_monotonic(self):
+        """The wait's deadline is on the monotonic clock by default, the one
+        every service builds (review of PR #358, LOW 3: the test below
+        injects its clock, so a wall-clock default survived it)."""
+        import time
+        self.assertIs(agent_panes.PaneReports(SimpleNamespace()).clock, time.monotonic)
+        svc, _, _ = stub_service(stub_session(), self.rows)
+        self.assertIs(svc.reports.clock, time.monotonic)
+
+    def test_the_wait_is_bounded_on_the_monotonic_clock(self):
+        svc, _, _ = stub_service(stub_session(), self.rows, windows=[WINDOW])
+        reads = []
+        clock = FastClock()
+
+        def counted():
+            reads.append(1)
+            return clock()
+        svc.reports.clock = counted
+        svc.open(dict(CALLER), None)
+        # 3 s at a second per read: a handful of reads, never a spin or a hang.
+        self.assertLessEqual(len(reads), 6)
+        self.assertEqual(agent_panes.REPORT_WAIT_S, 3.0)
+
+    def test_the_wait_holds_no_daemon_lock(self):
+        held = []
+
+        def probe(record, reports):
+            waiting = threading.Event()
+            real_wait = reports.wait
+
+            def wait(request_id, timeout=agent_panes.REPORT_WAIT_S):
+                waiting.set()
+                return real_wait(request_id, timeout)
+            reports.wait = wait
+
+            def go():
+                # Only once the call is in its wait: a probe that took the lock
+                # before the call reached it would prove nothing.
+                waiting.wait(5)
+                import time
+                time.sleep(0.05)
+                got = svc.daemon._lock.acquire(timeout=1)
+                held.append(got)
+                if got:
+                    svc.daemon._lock.release()
+                reports.report({"window": WINDOW, "request_id": record["data"]["request_id"],
+                                "placed": 3, "not_placed": 0})
+            threading.Thread(target=go, daemon=True).start()
+        svc, _, _ = stub_service(stub_session(), self.rows, windows=[WINDOW], on_publish=probe)
+        out = svc.open(dict(CALLER), None)
+        self.assertEqual(held, [True], "another thread takes the daemon lock while the call waits")
+        self.assertTrue(out.startswith("Shown 3 of 3"), out)
+
+    def test_the_first_window_wins_and_bad_reports_are_refused(self):
+        seen = []
+
+        def two(record, reports):
+            rid = record["data"]["request_id"]
+
+            def status(body):
+                try:
+                    reports.report(body)
+                    return 200
+                except agent_panes.ReportRefused as refusal:
+                    return refusal.status
+            good = {"window": WINDOW, "request_id": rid, "placed": 1, "not_placed": 2}
+            seen.extend([
+                ("not live", status({**good, "window": "c" * 32})),
+                ("bad window", status({**good, "window": "x"})),
+                ("bad id", status({**good, "request_id": "Z" * 32})),
+                ("unknown id", status({**good, "request_id": "d" * 32})),
+                ("bool count", status({**good, "placed": True, "not_placed": 2})),
+                ("too many", status({**good, "placed": 12, "not_placed": 0})),
+                ("negative", status({**good, "placed": -1, "not_placed": 4})),
+                ("not the ask's count", status({**good, "placed": 1, "not_placed": 1})),
+                ("extra key", status({**good, "url": "https://example.com"})),
+                ("missing key", status({k: v for k, v in good.items() if k != "placed"})),
+                ("not a dict", status([good])),
+                ("first", status(good)),
+                ("second window", status({**good, "window": OTHER_WINDOW, "placed": 3, "not_placed": 0})),
+            ])
+        svc, _, _ = stub_service(stub_session(), self.rows, windows=[WINDOW, OTHER_WINDOW], on_publish=two)
+        out = svc.open(dict(CALLER), None)
+        self.assertEqual(dict(seen), {"not live": 409, "bad window": 400, "bad id": 400, "unknown id": 404,
+                                      "bool count": 400, "too many": 400, "negative": 400,
+                                      "not the ask's count": 400, "extra key": 400, "missing key": 400,
+                                      "not a dict": 400, "first": 200, "second window": 409})
+        self.assertTrue(out.startswith("Shown 1 of 3"), out)
+
+    def test_too_many_waiting_publishes_without_an_id_and_does_not_wait(self):
+        svc, published, _ = stub_service(stub_session(), self.rows, windows=[WINDOW])
+        svc.reports._waiting = {f"{n:032x}": agent_panes._Waiting(1) for n in range(agent_panes.PENDING_MAX)}
+        svc.reports.clock = FastClock()
+        out = svc.open(dict(CALLER), None)
+        self.assertNotIn("request_id", published[0]["data"])
+        self.assertIn("No HUD window replied", out)
+
+    def test_a_refused_call_waits_for_nothing(self):
+        svc, published, _ = stub_service(stub_session(desk=SimpleNamespace(slot={"present": False})), self.rows,
+                                         windows=[WINDOW])
+        self.assertTrue(is_refusal(svc.open(dict(CALLER), None)))
+        self.assertEqual((published, svc.reports._waiting), ([], {}))
+
+
+class ReportRoute(EF.Daemonised):
+    """`POST /agent-panes/report` on a real daemon: the owner's window only."""
+
+    def setUp(self):
+        super().setUp()
+        self.window = "e" * 32
+        self.daemon._dev_stream_started(self.window)
+        self.addCleanup(self.daemon._dev_stream_ended, self.window)
+
+    def body(self, rid, **over):
+        out = {"window": self.window, "request_id": rid, "placed": 2, "not_placed": 0}
+        out.update(over)
+        return out
+
+    def test_the_owners_window_answers_a_waiting_ask(self):
+        reports = self.daemon.agent_pane_reports
+        rid = reports.expect(2)
+        self.assertEqual(self.owner("POST", "/agent-panes/report", self.body(rid)), {"ok": True})
+        self.assertEqual(reports.wait(rid, timeout=1), {"placed": 2, "not_placed": 0})
+        self.owner("POST", "/agent-panes/report", self.body(rid), status=404)
+
+    def test_no_one_else_reaches_it(self):
+        reports = self.daemon.agent_pane_reports
+        rid = reports.expect(2)
+        api, face, work = self.daemon.port, self.face, self.daemon.workshop_port
+        for port, headers in ((api, {}), (api, {"Origin": f"http://127.0.0.1:{api}"}),
+                              (face, {}), (face, {"Sec-Fetch-Site": "same-origin"}),
+                              (face, {"Origin": "null"}), (face, {"Origin": f"http://127.0.0.1:{work}"}),
+                              (face, {"Origin": "https://example.com"}),
+                              (face, {"Host": f"evil.example:{face}", "Origin": f"http://evil.example:{face}"})):
+            with self.subTest(port=port, headers=headers):
+                status, payload = self.raw("POST", "/agent-panes/report", headers, port=port, body=self.body(rid))
+                self.assertEqual(status, 403, str(payload)[:200])
+        self.assertIsNotNone(reports._waiting[rid])
+        self.assertIsNone(reports._waiting[rid].answer, "nothing refused reached the waiter")
+        reports.forget(rid)
+
+    def test_refusals(self):
+        reports = self.daemon.agent_pane_reports
+        rid = reports.expect(2)
+        self.owner("POST", "/agent-panes/report", self.body(rid, window="f" * 32), status=409)
+        self.owner("POST", "/agent-panes/report", self.body(rid, placed=1), status=400)
+        self.owner("POST", "/agent-panes/report?x=1", self.body(rid), status=400)
+        self.owner("GET", "/agent-panes/report", status=405)
+        self.owner("POST", "/agent-panes/other", self.body(rid), status=404)
+        self.owner("POST", "/agent-panes/report", self.body(rid))
+        self.owner("POST", "/agent-panes/report", self.body(rid, placed=0, not_placed=2), status=409)
+        reports.forget(rid)
 
 
 # --- through the real daemon and bridge ----------------------------------------------------

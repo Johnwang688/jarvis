@@ -4,12 +4,16 @@ in the panels and then it can open").
 
 `hud_open_subagents` (`tools/hud_subagents.py`) reaches this service and
 nothing else. It publishes one bus record, `subagent_open`, carrying the
-calling chat's thread id and the sids of that chat's own sub-agents, ids
-only. Each HUD window then places them itself (`App.tsx` `openSubagent`,
-`byAgent`): in an existing drawn pane without unsaved work, never the pane
-showing this chat, never the pane the owner has focused, never moving focus;
-else a split; else it says there is no room. What a pane showed before is
-kept in its spec, so the owner switching it back gets it again.
+calling chat's thread id, the sids of that chat's own sub-agents and a
+random request id, ids only. Each HUD window then places them itself, as one
+batch (`App.tsx` `placeAgentBatch`, `lib/agentpanes.ts`; 2026-11-13,
+`docs/plans/2026-11-13-agent-pane-grid-decisions.md`): in existing drawn
+panes without unsaved work, never the pane showing this chat, never the pane
+the owner has focused, never moving focus; then the window laid out once as
+a balanced grid; what does not fit is counted. What a pane showed before is
+kept in its spec, so the owner switching it back gets it again. The window
+posts back how many it showed (`agent_panes.py`), and the call waits up to
+three seconds for the first answer, never under the daemon lock.
 
 What it cannot do: name another chat's sub-agents (the sids come from the
 caller's own thread's records), open anything but a read-only sub-agent
@@ -23,6 +27,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from .agent_panes import REPORT_WAIT_S, PaneReports
 from .subagents import LIVE, valid_sid
 
 NOT_IN_CHAT = "Error: hud_open_subagents works only inside a Jarvis HUD chat."
@@ -43,9 +48,12 @@ def _same(text: str) -> str:
 
 
 class SubagentPanes:
-    def __init__(self, daemon):
+    def __init__(self, daemon, reports: PaneReports | None = None):
         self.daemon = daemon
         self.closed = True
+        # The daemon's one report waiter (agent_panes.py), shared with any
+        # other ask for panes; a stub daemon in a test gets its own.
+        self.reports = reports or getattr(daemon, "agent_pane_reports", None) or PaneReports(daemon)
 
     def _refuse_caller(self, caller) -> tuple[str | None, Any]:
         """Under the daemon lock: `decisions.OwnerPosts._refuse_caller`'s
@@ -119,14 +127,38 @@ class SubagentPanes:
                 return (f"Error: this chat has no sub-agent called {', '.join(missing)[:300]}. "
                         f"Its sub-agents: {names}.")
         chosen = chosen[-OPEN_MAX:]
-        from .model import utcnow
-        self.daemon.bus.publish({"kind": "subagent_open", "thread_id": thread_id, "at": utcnow(),
-                                 "data": {"sids": [r["sid"] for r in chosen]}})
         names = ", ".join(r.get("name") or r["sid"] for r in chosen)
-        return (f"Asked the HUD to open {len(chosen)} sub-agent view(s): {names}. Each window puts "
-                "them in its existing panes that hold no unsaved work (never the pane showing "
-                "this chat or the one the owner is in), splits when none is free, and says so "
-                "when there is no room. Nothing comes back to this chat.")
+        return self._publish_and_wait(thread_id, [r["sid"] for r in chosen], names)
+
+    def _publish_and_wait(self, thread_id: str, sids: list, names: str) -> str:
+        """Publish the ask with a request id, then wait (never under the daemon
+        lock) for the first window's counts (`agent_panes.PaneReports`)."""
+        from .model import utcnow
+        reports = self.reports
+        n = len(sids)
+        windows = reports.windows()
+        request_id = reports.expect(n) if windows != 0 else None
+        data = {"sids": list(sids)}
+        if request_id is not None:
+            data["request_id"] = request_id
+        try:
+            self.daemon.bus.publish({"kind": "subagent_open", "thread_id": thread_id, "at": utcnow(),
+                                     "data": data})
+        except Exception:
+            reports.forget(request_id)
+            raise
+        asked = f"Asked the HUD to open {n} sub-agent view(s): {names}."
+        if windows == 0:
+            return f"{asked} No HUD window is open, so none is shown."
+        answer = reports.wait(request_id)
+        if answer is None:
+            return (f"{asked} No HUD window replied within {REPORT_WAIT_S:g} seconds (a card or "
+                    f"Settings may be open there), so whether all {n} fit is not known.")
+        placed, not_placed = answer["placed"], answer["not_placed"]
+        if not_placed == 0:
+            return f"Shown {placed} of {n} sub-agent(s) in HUD panes: {names}."
+        return (f"Shown {placed} of {n} sub-agent(s) in HUD panes; no room for {not_placed} (the "
+                "window is too small for more panes, or the rest hold the owner's work).")
 
     # -- install / stop (as decisions.OwnerPosts) ---------------------------------------
 

@@ -2039,6 +2039,11 @@ def route(handler, daemon, parts, query):
     if parts[0] == "dev-servers":
         from . import devservers as _devservers
         return _devservers.route(handler, daemon, parts, query)
+    if parts[0] == "agent-panes":
+        # What a window showed of a chat's ask for panes (agent_panes.py):
+        # owner-only and a strict loopback Host, before a body is read.
+        from . import agent_panes as _agent_panes
+        return _agent_panes.route(handler, daemon, parts, query)
     if parts[0] == "browser":
         # The owner's Browser (BR-1a): owner-only and a strict loopback Host
         # on every route, checked before anything else (browser/routes.py),

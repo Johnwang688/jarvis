@@ -687,6 +687,10 @@ class Daemon:
         # `start()`, removed in `stop()`; it holds no answer path.
         from .decisions import OwnerPosts
         self.owner_posts = OwnerPosts(self, self.inbox.decisions, self.inbox.checks)
+        # What a window says it showed of a chat's ask for panes
+        # (agent_panes.py): counts only, owner-only route, first window wins.
+        from .agent_panes import PaneReports
+        self.agent_pane_reports = PaneReports(self)
         from .subagent_panes import SubagentPanes
         self.subagent_panes = SubagentPanes(self)
         from .browser.drive import BrowserDrive
@@ -960,6 +964,16 @@ class Daemon:
         with self._lock:
             self._dev_streams[window] = self._dev_streams.get(window, 0) + 1
             self.browser_panes.window_started(window)
+
+    def hud_window_live(self, window) -> bool:
+        """An owner window holds the event stream it named (`?window=`) now."""
+        with self._lock:
+            return isinstance(window, str) and window in self._dev_streams
+
+    def hud_window_count(self) -> int:
+        """How many owner windows hold an event stream now."""
+        with self._lock:
+            return len(self._dev_streams)
 
     def _dev_stream_ended(self, window):
         with self._lock:

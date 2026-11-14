@@ -29,8 +29,9 @@ def hud_open_subagents(
     own pane, when the owner asks to see them there. Start them in the
     background first so they are still running. The HUD uses existing panes
     that hold no unsaved work (never the one showing this chat or the one the
-    owner is in), splits when none is free, and never moves the owner's
-    focus. Only during a turn the owner started at the HUD in this chat."""
+    owner is in), then lays the window out as a grid for the rest (up to 12
+    panes), and never moves the owner's focus. The result says how many it
+    showed. Only during a turn the owner started at the HUD in this chat."""
     if not runtime.at_desk():
         return NOT_AT_DESK
     if runtime.depth() != 0:

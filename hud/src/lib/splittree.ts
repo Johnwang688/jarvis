@@ -433,6 +433,42 @@ export function presetTree(p: Preset, ids: readonly PaneNo[], edges?: LegacyEdge
   };
 }
 
+/**
+ * A grid of `order` in reading order (2026-11-13, decision D1 of
+ * docs/plans/2026-11-13-agent-pane-grid-decisions.md): `rowCounts` panes per
+ * row, top to bottom, each row its own x node under one y root, like the
+ * presets' grids, so depth first is the reading order. Equal sizes. A row of
+ * one is a bare leaf, one row is the x node alone, one pane is a leaf.
+ *
+ * Null for anything the 4-across / 3-down rule (FS-3) or the ids refuse: no
+ * rows or more than three, a row of none or more than four, counts that do
+ * not add up to `order`, or a repeated id.
+ */
+export function gridTree(order: readonly PaneNo[], rowCounts: readonly number[]): LayoutNode | null {
+  if (rowCounts.length < 1 || rowCounts.length > MAX_DOWN) return null;
+  if (!rowCounts.every((k) => Number.isInteger(k) && k >= 1 && k <= MAX_ACROSS)) return null;
+  if (rowCounts.reduce((a, b) => a + b, 0) !== order.length || new Set(order).size !== order.length) return null;
+  let next = 0;
+  const row = (k: number): LayoutNode => {
+    if (k === 1) return { pane: order[next++] };
+    return { axis: "x", children: Array.from({ length: k }, () => ({ pane: order[next++] })), sizes: equal(k) };
+  };
+  if (rowCounts.length === 1) return row(rowCounts[0]);
+  return { axis: "y", children: rowCounts.map(row), sizes: equal(rowCounts.length) };
+}
+
+/**
+ * `t` panes in `rows` rows, longer rows first (7 in two is 4 over 3, 11 in
+ * three is 4/4/3, 5 in two is 3 over 2: the grid5/grid7 convention). Null
+ * when a row would hold more than four or none.
+ */
+export function balancedRows(t: number, rows: number): number[] | null {
+  if (!Number.isInteger(t) || !Number.isInteger(rows) || rows < 1 || t < rows) return null;
+  const base = Math.floor(t / rows), extra = t % rows;
+  const out = Array.from({ length: rows }, (_, i) => base + (i < extra ? 1 : 0));
+  return out[0] <= MAX_ACROSS ? out : null;
+}
+
 /** Structure only: no ids, no sizes. */
 const structureKey = (n: LayoutNode): string =>
   isLeaf(n) ? "." : `${n.axis}[${n.children.map(structureKey).join(",")}]`;

@@ -18,6 +18,7 @@ The world's `subagents` section (`state(mock)`):
   - `fail`: "thread" or "thread|sid" -> a status to answer instead (404 for a
     gone record, 400 for an older daemon);
   - `reads`, `refused`: what the routes saw;
+  - `reports`: every `POST /agent-panes/report` body that got through;
   - `stops`: every Stop that got through, as (thread, sid); `stop_answer`:
     sid -> (status, body) to answer instead of the daemon's 200 (which,
     like the daemon, marks the listed row `stop: "stopping"`).
@@ -33,7 +34,7 @@ SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
 def state(mock) -> dict:
     return mock.world.setdefault("subagents", {"lists": {}, "transcripts": {}, "fail": {},
                                                "reads": [], "refused": 0, "stops": [],
-                                               "stop_answer": {}})
+                                               "stop_answer": {}, "reports": []})
 
 
 def _owner(h, mock, method: str = "GET") -> bool:
@@ -49,6 +50,8 @@ def _owner(h, mock, method: str = "GET") -> bool:
 
 def handle(h, mock, method: str, path: str) -> bool:
     parts = [p for p in path.split("/") if p]
+    if parts == ["agent-panes", "report"]:
+        return _report(h, mock, method)
     if not (len(parts) >= 3 and parts[0] == "threads" and parts[2] == "subagents"):
         return False
     s = state(mock)
@@ -90,6 +93,27 @@ def handle(h, mock, method: str, path: str) -> bool:
         h._json(body)
         return True
     h._err(404, "not found")
+    return True
+
+
+def _report(h, mock, method) -> bool:
+    """`POST /agent-panes/report` (2026-11-13, `jarvis/v2/agent_panes.py`): the
+    owner's window says how many of a chat's asked-for panes it showed. Owner
+    only, as the daemon's; every body that gets through lands in `reports`."""
+    s = state(mock)
+    if not _owner(h, mock, method):
+        s["refused"] += 1
+        h._err(403, "only the owner can do this, from the HUD")
+        return True
+    if method != "POST":
+        h._err(405, "a report is sent with POST")
+        return True
+    body = h._body()
+    if not isinstance(body, dict) or set(body) != {"window", "request_id", "placed", "not_placed"}:
+        h._err(400, "a report is {window, request_id, placed, not_placed}")
+        return True
+    s.setdefault("reports", []).append(body)
+    h._json({"ok": True})
     return True
 
 

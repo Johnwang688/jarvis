@@ -88,6 +88,9 @@ export const api = {
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/claim", json(body)),
   actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
+  /** How many panes a chat's ask showed in this window (counts only; docs/hud-api.md "Agent panes"). */
+  agentPanesReport: (body: { window: string; request_id: string; placed: number; not_placed: number }) =>
+    req<unknown>("/agent-panes/report", json(body)),
   setBrowserSound: (sound: boolean) => req<unknown>("/browser/settings", patch({ sound })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 
