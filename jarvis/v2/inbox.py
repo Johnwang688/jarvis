@@ -790,9 +790,12 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide", failures: lis
     out = []
     # One source that fails (a decision file that is not one, review of PR
     # #309) shows nothing of its own and never takes the others down.
-    for name, source in (("approvals", lambda: _approval_rows(daemon, hidden, failures)),
+    # With no `failures` list every source is called exactly as before.
+    for name, source in (("approvals", lambda: _approval_rows(daemon, hidden, failures)
+                          if failures is not None else _approval_rows(daemon, hidden)),
                          ("questions", lambda: _question_rows(daemon, hidden)),
-                         ("tasks", lambda: _task_rows(daemon, hidden, failures)),
+                         ("tasks", lambda: _task_rows(daemon, hidden, failures)
+                          if failures is not None else _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
                          ("deferred", lambda: _quiet_defer.rows(daemon, _row, failures)
                           if failures is not None else _quiet_defer.rows(daemon, _row)),
