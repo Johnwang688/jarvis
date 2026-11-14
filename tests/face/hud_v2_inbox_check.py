@@ -1136,10 +1136,30 @@ def _aurora_body(page, mock, check, until, inbox_id):
     # the layers the isolated row paints over its own inset shadow.
     row.click()
     until(lambda: "sel" in (row.get_attribute("class") or ""), timeout=3)
-    check("selected, the accent bar stays visible: the layers start 2px in, the bar is the accent",
-          _pseudo(page, OWNER_ROW, "::before", "left") == "2px"
-          and "rgb(111, 195, 223)" in row.evaluate("e => getComputedStyle(e).boxShadow"),
-          row.evaluate("e => getComputedStyle(e).boxShadow"))
+    check("selected, a stationary 2px accent strip sits above the moving band (computed style)",
+          _pseudo(page, OWNER_ROW, "::after", "backgroundColor") == "rgb(111, 195, 223)"
+          and _pseudo(page, OWNER_ROW, "::after", "width") == "2px"
+          and _pseudo(page, OWNER_ROW, "::after", "animationName") == "none",
+          str(_pseudo(page, OWNER_ROW, "::after", "backgroundColor")))
+    # The painted pixel, not the style: freeze the wave at several times and read the bar's pixels from a
+    # screenshot. The band slides under the bar, so every sample must be exactly the accent.
+    from io import BytesIO
+    from PIL import Image
+    page.mouse.move(700, 500)
+    box = row.bounding_box()
+    samples = []
+    for t in (0, 700, 1500, 2300, 3100, 4000, 5200, 5900):
+        page.evaluate("""(t) => { for (const a of document.getAnimations()) {
+          if (a.animationName === 'aurora-drift') { a.pause(); a.currentTime = t; } } }""", t)
+        png = page.screenshot(clip={"x": box["x"], "y": box["y"] + box["height"] / 2 - 1, "width": 2, "height": 2})
+        im = Image.open(BytesIO(png)).convert("RGB")
+        samples.append(im.getpixel((0, 0)))
+        samples.append(im.getpixel((1, 1)))
+    page.evaluate("() => { for (const a of document.getAnimations()) if (a.animationName === 'aurora-drift') a.play(); }")
+    check("and painted, the bar's pixels are exactly the accent at every moment of the wave "
+          "[mutation: the band painted over the bar]",
+          all(abs(px[0] - 111) <= 1 and abs(px[1] - 195) <= 1 and abs(px[2] - 223) <= 1 for px in samples),
+          str(sorted(set(samples))[:4]))
 
     # No layout shift: the same box with and without the aurora, nothing overflows.
     boxes = page.evaluate("""(sel) => {

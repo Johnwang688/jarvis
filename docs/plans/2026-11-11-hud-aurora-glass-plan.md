@@ -29,7 +29,7 @@ Lead calls inside those answers (open to the owner in review):
 - **L-1 Stirring.** The pointer stirs the fluid, as a finger does in the Bible app. On by default, with a setting to turn it off. A passive `pointermove` listener on `window` only: it never calls `preventDefault`, never takes focus, and gets nothing while the pointer is over a Browser frame (the frame owns those events).
 - **L-2 Fallback style.** The Bible app's lighter flow shader is kept as the fallback for no-GPU machines (and as a setting). Reduced motion shows one still frame.
 - **L-3 Cool text.** The warm cream text tokens move to cool neutrals so they sit right over a cool aurora. Every text/background pair stays at WCAG AA (the Graphite rule).
-- **L-4 Inbox row.** The owner Inbox row keeps its own aurora band and sparkle (2026-10-25 exception). AG-1's browser review checks that it still stands out over the moving background.
+- **L-4 Inbox row.** The owner Inbox row keeps its own aurora band and sparkle (2026-10-25 exception; superseded 2026-11-14: it is now an RGB rainbow wave with no sparks, see `docs/notes/hud-workspace.md`). AG-1's browser review checks that it still stands out over the moving background.
 
 ## 2. What stays fixed
 

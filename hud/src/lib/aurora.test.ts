@@ -101,8 +101,12 @@ describe("the aurora tokens", () => {
     expect(stops[stops.length - 1][0]).toBe("--aurora-red");
     const half = stops.findIndex(([, pos]) => Math.abs(pos - 50) < 0.01);
     expect(half, "a stop at 50%").toBeGreaterThan(0);
-    const first = stops.slice(0, half).map(([n]) => n), second = stops.slice(half, -1).map(([n]) => n);
-    expect(second).toEqual(first);
+    const first = stops.slice(0, half), second = stops.slice(half, -1);
+    expect(second.map(([n]) => n)).toEqual(first.map(([n]) => n));
+    // Positions too: the second period is the first shifted by exactly 50%.
+    second.forEach(([, pos], i) => expect(pos, `stop ${i} of the second period`).toBeCloseTo(first[i][1] + 50, 1));
+    // An exactly horizontal gradient, so a -50% translate lands on the same pixels (no jump at the wrap).
+    expect(grad).toMatch(/^\s*90deg\s*,/);
     expect(body).toMatch(/width:\s*200%/);
     // Every stop is opaque in the sense of never fully transparent: no on/off.
     expect(grad).not.toMatch(/transparent/);
@@ -180,14 +184,21 @@ describe("the aurora's motion", () => {
       expect(body).not.toMatch(/animation/);
     }
     // No ::after layer, no twinkle: a flash is not a wave.
-    expect(text).not.toMatch(/ownerinbox\.aurora(?:\.sel)?::after/);
+    expect(text).not.toMatch(/ownerinbox\.aurora::after/);   // only the selected bar has an ::after
     expect(text).not.toMatch(/aurora-twinkle/);
     expect(text).not.toMatch(/--aurora-spark/);
   });
 
-  it("leaves the selection bar and the focus ring above the layers it paints", () => {
-    const sel = rules(/button\.tree-row\.ownerinbox\.aurora\.sel::before/).join(";");
-    expect(sel).toMatch(/left:\s*2px/);
+  it("paints a stationary 2px accent bar above the moving band when selected; the focus ring stays an outline", () => {
+    const bar = rules(/^\s*button\.tree-row\.ownerinbox\.aurora\.sel::after\s*$/).join(";");
+    expect(bar).toMatch(/position:\s*absolute/);
+    expect(bar).toMatch(/left:\s*0/);
+    expect(bar).toMatch(/width:\s*2px/);
+    expect(bar).toMatch(/background:\s*var\(--accent\)/);
+    expect(bar).toMatch(/z-index:\s*-1/);   // after ::before at the same z-index, so above it
+    expect(bar).not.toMatch(/animation|transform/);
+    // The bar is only on the selected row.
+    expect(text).not.toMatch(/ownerinbox\.aurora::after/);
     const focus = rules(/^\s*button\.tree-row\.ownerinbox\.aurora:focus-visible\s*$/).join(";");
     expect(focus).toMatch(/outline:\s*1px solid var\(--accent\)/);
     expect(focus).toMatch(/outline-offset:\s*-1px/);

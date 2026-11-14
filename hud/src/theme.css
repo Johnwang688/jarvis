@@ -2235,8 +2235,8 @@ button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--acc
    Compositor-only: transform on the band, an absolutely placed pseudo-element
    clipped by the row, so nothing moves the layout and no script runs. The
    isolated row paints the band over its own background and inset shadows, so
-   its selection bar is left 2px clear and its focus ring is an outline, which
-   paints above it. */
+   its selection bar is a stationary 2px strip painted above the band and its
+   focus ring is an outline, which paints above both. */
 button.tree-row.ownerinbox.aurora { position: relative; isolation: isolate; overflow: hidden; background: var(--bg-1); }
 /* AG-1 (owner, 2026-11-11): on the bright aurora sidebar the row sits on an opaque --bg-1 slab, so its
    own band reads as the row's and not as more sidebar. Hover and selected keep their tints. */
@@ -2245,8 +2245,9 @@ button.tree-row.ownerinbox.aurora.sel { background: linear-gradient(var(--select
 button.tree-row.ownerinbox.aurora::before {
   content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 200%;
   z-index: -1; pointer-events: none;
-  /* Two identical periods of the whole wheel, so a -50% shift lands where it started. */
-  background: linear-gradient(100deg,
+  /* Two identical periods of the whole wheel at exactly 90deg (a horizontal period is exactly 50% of the
+     layer, so a -50% shift lands on the same pixels and the loop has no jump at the wrap). */
+  background: linear-gradient(90deg,
     var(--aurora-red) 0%, var(--aurora-amber) 4.17%, var(--aurora-yellow) 8.33%, var(--aurora-green) 16.67%,
     var(--aurora-cyan) 25%, var(--aurora-blue) 33.33%, var(--aurora-magenta) 41.67%, var(--aurora-red) 50%,
     var(--aurora-amber) 54.17%, var(--aurora-yellow) 58.33%, var(--aurora-green) 66.67%,
@@ -2256,7 +2257,12 @@ button.tree-row.ownerinbox.aurora::before {
 }
 button.tree-row.ownerinbox.aurora[data-aurora="pending"]::before { opacity: 0.55; }
 .ownerinbox.aurora .badge.inboxcount { background: var(--bg-1); }
-button.tree-row.ownerinbox.aurora.sel::before { left: 2px; }
+/* Selected: a stationary 2px accent bar painted ABOVE the moving band (the band slides under it, so the bar
+   reads exactly --accent at every moment). It is the ::after layer, after ::before at the same z-index. */
+button.tree-row.ownerinbox.aurora.sel::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px;
+  z-index: -1; pointer-events: none; background: var(--accent);
+}
 button.tree-row.ownerinbox.aurora:focus-visible {
   box-shadow: none; outline: 1px solid var(--accent); outline-offset: -1px;
 }
