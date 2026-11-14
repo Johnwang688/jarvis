@@ -845,6 +845,56 @@ class OwnerOnly(Base):
             for needle in self.INBOX_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
 
+    # The owner's working set (WS-1): which threads are in the Inbox and when
+    # one leaves, by Done or the idle timer. No tool, MCP catalog entry,
+    # session tool, Discord or CLI module names its routes, the module, its
+    # store, its file or the functions behind them. `files.py` names the
+    # module in SELF_PROTECTED (those lines are set aside) and the file in
+    # `_protected_state_paths` (that body is set aside).
+    WORKING_NAME = re.compile(r"working_?set|working_changed", re.I)
+    WORKING_SOURCE = (r"""/working["'/?]""", r"\bv2\.working\b", r"jarvis\.v2\.working",
+                      r"from \.+working\b", r"from \.+ import [^\n]*\bworking\b", r"import working\b",
+                      r"\bworking\.(?:route|WorkingSet|done|undo|sweep|seed)\b", r"WorkingSet",
+                      r"daemon\.working\b", r"working\.json", r"set_idle_days", r"working_changed")
+
+    def test_no_tool_or_cli_reaches_the_working_set(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, decisions, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        import jarvis.__main__ as cli
+        from jarvis.v2 import mcp_session, owner_ops, checks
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
+        self.assertTrue({"terminal_read", "chat_send", "owner_post", "run_command"} <= reachable, reachable)
+        for name in sorted(reachable):
+            self.assertIsNone(self.WORKING_NAME.search(name), name)
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, cli, owner_ops,
+                   mcp_session, decisions, checks]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        # Every file of the v2 tools package too, read from disk (importing
+        # them would register tools as a side effect other checks see).
+        package = Path(v2tools.__file__).parent
+        tool_files = sorted(package.glob("*.py"))
+        self.assertIn(package / "owner_post.py", tool_files)
+        for path in tool_files:
+            for needle in self.WORKING_SOURCE:
+                self.assertIsNone(re.search(needle, path.read_text()), f"{path.name} names {needle}")
+        from jarvis.v2.discord import gateway, linker, project_commands
+        sources += [gateway, linker, project_commands]
+        from jarvis.tools import files
+        exempt = inspect.getsource(files._protected_state_paths)
+        for module in {m for m in sources if m is not None}:
+            text = self._without_self_protected_paths(module, inspect.getsource(module))
+            if module is files:
+                self.assertIn(exempt, text)
+                text = text.replace(exempt, "")
+            for needle in self.WORKING_SOURCE:
+                self.assertIsNone(re.search(needle, text), f"{module.__name__} names {needle}")
+
     # A live check's result (inbox B2, IN-6): written only by the owner's
     # step route. No tool, MCP catalog entry, session tool, Discord or CLI
     # module names the route, the function behind it or the store's mark.
@@ -1062,13 +1112,19 @@ class OwnerOnly(Base):
                                    ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1"}),
                                    # PM-E: a PR's Fix and its Cancel.
                                    ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1", "head": "1" * 40, "card": "0" * 64}),
-                                   ("POST", "/inbox/pr/fix/cancel", {"id": "pr:o/r#1"})):
+                                   ("POST", "/inbox/pr/fix/cancel", {"id": "pr:o/r#1"}),
+                                   # WS-1: the owner's working set, its Done, Undo and idle limit.
+                                   ("GET", "/working", None), ("GET", "/working/settings", None),
+                                   ("POST", "/working/settings", {"idle_days": 5}),
+                                   ("POST", "/working/0000beef/done", {"seq": 0}),
+                                   ("POST", "/working/0000beef/undo", {"token": "a" * 24})):
 
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)
                 self.request(method, path, body, 403, origin=f"http://127.0.0.1:{self.daemon.port}")
         self.assertEqual(self.owner("GET", "/inbox"), [])
+        self.assertEqual(self.owner("GET", "/working")["entries"], [])
 
     def test_the_routes_refuse_every_client_but_the_hud(self):
         thread = self.chat()

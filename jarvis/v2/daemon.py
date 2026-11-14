@@ -523,6 +523,13 @@ class Daemon:
         from .inbox import Inbox
         self.inbox = Inbox(self)
         self.bus.observe(self.inbox.observe)
+        # The owner's working set (working.py, WS-1): the chat threads in
+        # the Inbox. Its store is loaded here, then its observer follows
+        # every record after the two above (D-11); `start` seeds it once and
+        # arms its idle timer.
+        from .working import WorkingSet
+        self.working = WorkingSet(self)
+        self.bus.observe(self.working.observe)
         # The daemon owns the broker (design §6 layer 5). Its two callbacks
         # publish on the same bus every surface already reads, so a HUD, a
         # Discord thread and the escape hatch all learn about a pending
@@ -797,6 +804,9 @@ class Daemon:
             # A snooze that ends brings its row back (inbox B4): one timer for
             # the earliest, re-armed on each mark write.
             self.inbox.start_snoozes()
+            # The working set (WS-1, D-11): after the inbox sources are up,
+            # seeded once, then its idle timer (first sweep a few minutes on).
+            self.working.start()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -3198,6 +3208,9 @@ class Daemon:
         inbox = getattr(self, "inbox", None)
         if inbox is not None:
             inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
+        working = getattr(self, "working", None)
+        if working is not None:
+            working.stop()                      # the working set's idle timer (WS-1)
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
@@ -3559,6 +3572,11 @@ def _handler(daemon):
             # The owner inbox: owner-only on every path (inbox.route).
             from . import inbox as _inbox
             mounted = _inbox.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
+            # The owner's working set (WS-1): owner-only on every path.
+            from . import working as _working
+            mounted = _working.route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
             # The phone's pairing window and paired passkeys: owner-only on

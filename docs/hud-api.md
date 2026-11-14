@@ -3827,3 +3827,35 @@ The rules are in `docs/notes/control-plane.md`, "The owner inbox routes"; the de
   {"error"}` when the row is no longer waiting; `400` for a task row, an unknown kind or a bad body.
 - **`inbox_changed`** on `/events`: `{ids, reason}`, never text. The HUD reads `GET /inbox` again on
   every one, whatever `ids` holds.
+
+## Additions 2026-11-14 (the owner's working set — WS-1)
+
+The rules are in `docs/notes/control-plane.md`, "The working set (WS-1)"; the plan is
+`docs/plans/2026-11-14-inbox-working-set-plan.md`. Every route is owner-only (`403` otherwise),
+never on the phone's listener. No HUD view uses them yet (WS-2).
+
+- **`GET /working`** → `{entries, needs_you, count, pending}`.
+  - `entries`: the chat threads in the working set, newest `last` first, each `{thread_id,
+    project_id, since, last, seq, status, rows, why_not}`. `status` is the sidebar's
+    (`activity.thread_status`). `rows` are the `GET /inbox?all=1` rows whose `thread_id` is this
+    thread. `why_not` is why Done would be refused as of this read (`null`: it would not), a hint
+    only: Done checks again.
+  - `needs_you`: every other row of the same read (pull requests, tasks, rows without a thread, rows
+    of an archived or deleted thread or one out of the set). Every row appears exactly once,
+    in `entries[].rows` or here.
+  - `count` / `pending`: the sidebar count and amber, computed as `waitingCount` / `anyPending`
+    (visible rows of rank 1 to 5; any row of rank 1 or 2).
+- **`POST /working/{id}/done`** `{seq}`: `seq` is the entry's as drawn. `200 {thread_id, done: true,
+  token, undo_s: 10, entry}`; the chat is also marked read. `409 {error, entry}` when the chat is not
+  in the set, its `seq` moved on (redraw from `entry`), or it may not leave now (`error` says why: a
+  rank 1 to 4 row waits on it, a turn is running, it waits on an answer, or the inbox could not be
+  read). `400` for a bad id or body.
+- **`POST /working/{id}/undo`** `{token}`: the `token` Done returned, within `undo_s` seconds
+  (the HUD's toast shows 5). `200 {thread_id, done: false, entry}`; `409 {error, entry}` for any
+  other token, after the deadline, or after a daemon restart.
+- **`GET /working/settings`** → `{idle_days, min: 1, max: 30, default: 3}`; **`POST
+  /working/settings`** `{idle_days}` (a whole number from 1 to 30, else `400`).
+- An `entry` in a response is `{thread_id, in, since, last, seq, done_at, done_seq, reason}`
+  (`reason`: `done`, `idle` or `archived` once out); never the token.
+- **`working_changed`** on `/events`: exactly `{"kind": "working_changed"}`, no ids or data. Read
+  `GET /working` again on every one.
