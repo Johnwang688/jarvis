@@ -2175,6 +2175,34 @@ the "Inbox" project where unplaced chat lands.
     - the selection bar covered;
     - the aurora on the Inbox project row (face only).
 
+**Superseded 2026-11-14: the RGB wave.** The owner replaced this band with a
+keyboard-style rainbow wave, on the owner Inbox row only (not the "Inbox"
+project row, the Inbox page or the global aurora/RGB mode in
+`lib/appearance.ts`). Where the list above differs, this paragraph wins.
+
+- **Full rainbow, saturated, amber and red included, on this row only.** The
+  `--aurora-*` tokens are now seven stops (red, amber, yellow, green, cyan,
+  blue, magenta), at most 0.5 alpha over `--bg-1`. One gradient of two
+  identical periods, translated by -50% (`aurora-drift`, 6 s a pass), so every
+  point cycles through every hue. The "low saturation" and "not warm" rules
+  no longer apply to this row.
+- **Smooth, never flashing.** The only keyframe is a `transform` translation:
+  no opacity pulse, no on/off. The sparks and `aurora-twinkle` are gone (a
+  twinkle is a flash), so there is no `::after` layer.
+- **Always animating, calm included.** `data-aurora="calm"` no longer stops
+  it. Still true: the `[inert]` rule pauses it under the approval card;
+  `prefers-reduced-motion: reduce` gives a still tint; pending dims the band
+  (opacity 0.55) so amber stays the loudest thing, and the count keeps its
+  opaque `--bg-1` chip.
+- **Kept:** row text at least 4.5:1 over every blend in rest, hover and
+  selected; the band never brighter than the text; the 2px selection bar left
+  clear; the focus outline; layout untouched; compositor-only, no script.
+- **Tests:** `hud/src/lib/aurora.test.ts` now pins the whole wheel covered,
+  saturation, the two-period gradient, always animating, no sparks, a
+  transform-only keyframe, AA, the opaque chip, and the inert and
+  reduced-motion stops; `hud_v2_inbox_check.py` section `aurora` checks the
+  same in Chromium.
+
 ## Settings > Phone > Notifications (phone C6 / P-6, 2026-10-28)
 
 A block at the end of Settings > Phone (`components/PhoneNotifications.tsx`,

@@ -77,7 +77,7 @@ describe("the glass tokens", () => {
     expect(decl.get("--amber-line")).toBe("rgba(251, 191, 36, 0.55)");
     expect(decl.get("--red")).toBe("#f87171");
     expect(decl.get("--green")).toBe("#6dd08f");
-    for (const t of ["--aurora-teal", "--aurora-green", "--aurora-violet", "--aurora-rose", "--aurora-spark", "--aurora-drift"]) {
+    for (const t of ["--aurora-red", "--aurora-amber", "--aurora-yellow", "--aurora-green", "--aurora-cyan", "--aurora-blue", "--aurora-magenta", "--aurora-drift"]) {
       expect(decl.has(t), t).toBe(true);
     }
     expect(decl.get("--radius-btn")).toBe("4px");

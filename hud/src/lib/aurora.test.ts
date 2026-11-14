@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import css from "../theme.css?raw";
-import { contrast, hueSat, isWarm } from "./editorTheme";
+import { contrast, hueSat } from "./editorTheme";
 
-// The owner inbox row's aurora (owner, 2026-10-25): an owner-approved
-// exception to the old Graphite look's one sparing accent. These checks recompute, from
-// theme.css itself, what the exception promised: dim, low-saturation hues
-// outside the amber/red band, the row's text AA over every blend, never
+// The owner inbox row's RGB wave (owner, 2026-10-25; replaced by a rainbow wave
+// 2026-11-14). An owner-approved exception to the Graphite look's one sparing
+// accent. These checks recompute, from theme.css itself, what the exception
+// promises: the whole hue wheel covered (amber and red included, this row
+// only), always moving (calm too), the row's text AA over every blend, never
 // brighter than the text, the amber count still amber on an opaque chip, and
 // motion that reduced-motion and the approval veil both stop.
 
@@ -40,8 +41,8 @@ function over(top: RGBA, under: RGBA): RGBA {
 const hex = (c: RGBA) => "#" + c.slice(0, 3).map((n) => Math.round(n).toString(16).padStart(2, "0")).join("");
 const opaque = (c: RGBA) => hex([c[0], c[1], c[2], 1]);
 
-const BAND = ["--aurora-teal", "--aurora-green", "--aurora-violet", "--aurora-rose"] as const;
-const ALL = [...BAND, "--aurora-spark"] as const;
+const BAND = ["--aurora-red", "--aurora-amber", "--aurora-yellow", "--aurora-green", "--aurora-cyan", "--aurora-blue", "--aurora-magenta"] as const;
+const ALL = BAND;
 
 /** Every background the row's text can sit on: the pane, hovered or
  * selected, under each band hue at full strength (where two stops meet the
@@ -58,24 +59,53 @@ function rowBackgrounds(): string[] {
 }
 
 describe("the aurora tokens", () => {
-  it("are declared on :root as colours, with the drift duration", () => {
+  it("are declared on :root as colours, with the cycle duration", () => {
     for (const t of ALL) expect(() => token(t), t).not.toThrow();
     expect(decl.get("--aurora-drift")).toMatch(/^\d+(\.\d+)?s$/);
     const drift = parseFloat(decl.get("--aurora-drift")!);
-    expect(drift).toBeGreaterThanOrEqual(8);   // "slowly shifting": 8-12 s a pass
-    expect(drift).toBeLessThanOrEqual(12);
+    expect(drift).toBeGreaterThanOrEqual(3);   // a keyboard wave, not a strobe
+    expect(drift).toBeLessThanOrEqual(12);     // and not a crawl
   });
 
-  it("the band is a band, not a fill: at most 0.5 alpha (raised for the bright aurora sidebar, owner 2026-11-11)", () => {
+  it("the band is a band, not a fill: at most 0.5 alpha", () => {
     for (const t of BAND) expect(token(t)[3], t).toBeLessThanOrEqual(0.5);
   });
 
-  it("the band is low saturation and never amber or red, so pending and error keep their meanings", () => {
+  it("is saturated and covers the whole wheel, amber and red included (owner 2026-11-14)", () => {
+    const hues: number[] = [];
     for (const t of BAND) {
-      const colour = opaque(token(t));
-      expect(hueSat(colour).s, t).toBeLessThanOrEqual(0.75);
-      expect(isWarm(colour), `${t} ${colour} is in the amber/red band`).toBe(false);
+      const { h, s } = hueSat(opaque(token(t)));
+      expect(s, t).toBeGreaterThanOrEqual(0.8);
+      hues.push(h);
     }
+    // Every third of the wheel holds a stop, so no hue family is skipped.
+    for (let from = 0; from < 360; from += 120) {
+      expect(hues.some((h) => h >= from && h < from + 120), `no stop in ${from}-${from + 120}`).toBe(true);
+    }
+    expect(hues.some((h) => h <= 20 || h >= 340), "red").toBe(true);
+    expect(hues.some((h) => h >= 25 && h <= 65), "amber/yellow").toBe(true);
+    // No gap between neighbouring stops wider than 90 degrees.
+    const sorted = [...hues].sort((a, b) => a - b);
+    for (let i = 0; i < sorted.length; i++) {
+      const next = i + 1 < sorted.length ? sorted[i + 1] : sorted[0] + 360;
+      expect(next - sorted[i], "hue gap").toBeLessThanOrEqual(90);
+    }
+  });
+
+  it("the gradient uses every stop, in two identical periods that both start and end on red", () => {
+    const body = /button\.tree-row\.ownerinbox\.aurora::before\s*\{([^}]*)\}/.exec(text)![1];
+    const grad = /linear-gradient\(([\s\S]*?)\);/.exec(body)![1];
+    const stops = [...grad.matchAll(/var\((--aurora-[a-z]+)\)\s*([\d.]+)%/g)].map((m) => [m[1], Number(m[2])] as const);
+    for (const t of BAND) expect(stops.some(([n]) => n === t), t).toBe(true);
+    expect(stops[0][0]).toBe("--aurora-red");
+    expect(stops[stops.length - 1][0]).toBe("--aurora-red");
+    const half = stops.findIndex(([, pos]) => Math.abs(pos - 50) < 0.01);
+    expect(half, "a stop at 50%").toBeGreaterThan(0);
+    const first = stops.slice(0, half).map(([n]) => n), second = stops.slice(half, -1).map(([n]) => n);
+    expect(second).toEqual(first);
+    expect(body).toMatch(/width:\s*200%/);
+    // Every stop is opaque in the sense of never fully transparent: no on/off.
+    expect(grad).not.toMatch(/transparent/);
   });
 
   it("keeps the row's text AA over every blend, and the band never brighter than the text", () => {
@@ -109,21 +139,22 @@ describe("the aurora's motion", () => {
   const rules = (selector: RegExp) =>
     [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((m) => selector.test(m[1])).map((m) => m[2]);
 
-  it("animates only transform and opacity (compositor-friendly, no layout)", () => {
-    for (const name of ["aurora-drift", "aurora-twinkle"]) {
+  it("animates only transform: a pure sweep, no brightness pulse, no layout", () => {
+    for (const name of ["aurora-drift"]) {
       const kf = new RegExp(`@keyframes ${name}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(text);
       expect(kf, name).not.toBeNull();
       const props = [...kf![1].matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1]);
       expect(props.length, name).toBeGreaterThan(0);
-      for (const p of props) expect(["transform", "opacity"], `${name}: ${p}`).toContain(p);
+      // The wave is a pure translation: no opacity (no brightness pulse, no on/off).
+      for (const p of props) expect(["transform"], `${name}: ${p}`).toContain(p);
     }
   });
 
-  it("the moving layers are absolutely placed and clipped by the row", () => {
+  it("the moving layer is absolutely placed and clipped by the row", () => {
     const row = rules(/^\s*button\.tree-row\.ownerinbox\.aurora\s*$/).join(";");
     expect(row).toMatch(/position:\s*relative/);
     expect(row).toMatch(/overflow:\s*hidden/);
-    for (const pseudo of ["::before", "::after"]) {
+    for (const pseudo of ["::before"]) {
       const body = rules(new RegExp(`^\\s*button\\.tree-row\\.ownerinbox\\.aurora${pseudo}\\s*$`)).join(";");
       expect(body, pseudo).toMatch(/position:\s*absolute/);
       expect(body, pseudo).toMatch(/pointer-events:\s*none/);
@@ -135,24 +166,28 @@ describe("the aurora's motion", () => {
     const mine = blocks.find((b) => b.includes("ownerinbox.aurora"));
     expect(mine).toBeDefined();
     expect(mine).toMatch(/button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::before\s*\{[^}]*animation:\s*none/);
-    expect(mine).toMatch(/button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::after\s*\{[^}]*animation:\s*none[^}]*display:\s*none/);
     expect(mine).not.toMatch(/::before\s*\{[^}]*(display:\s*none|background:\s*none)/);
   });
 
-  it("is still with nothing waiting: the calm band does not animate", () => {
-    const calm = rules(/^\s*button\.tree-row\.ownerinbox\.aurora\[data-aurora="calm"\]::before\s*$/).join(";");
-    expect(calm).toMatch(/animation:\s*none/);
-    // The sparks run only in the live state.
-    const sparks = rules(/^\s*button\.tree-row\.ownerinbox\.aurora::after\s*$/).join(";");
-    expect(sparks).toMatch(/display:\s*none/);
-    expect(sparks).not.toMatch(/animation/);
+  it("always animates, the calm state included (owner 2026-11-14), with no sparks and no pulsing", () => {
+    expect(text).not.toMatch(/data-aurora="calm"/);
+    const band = rules(/^\s*button\.tree-row\.ownerinbox\.aurora::before\s*$/).join(";");
+    expect(band).toMatch(/animation:\s*aurora-drift\s+var\(--aurora-drift\)\s+linear\s+infinite/);
+    // Only the pending state touches the band's own rules, and only to dim it.
+    const states = [...text.matchAll(/button\.tree-row\.ownerinbox\.aurora\[data-aurora="([a-z]+)"\]::before\s*\{([^}]*)\}/g)];
+    for (const [, name, body] of states) {
+      expect(name).toBe("pending");
+      expect(body).not.toMatch(/animation/);
+    }
+    // No ::after layer, no twinkle: a flash is not a wave.
+    expect(text).not.toMatch(/ownerinbox\.aurora(?:\.sel)?::after/);
+    expect(text).not.toMatch(/aurora-twinkle/);
+    expect(text).not.toMatch(/--aurora-spark/);
   });
 
   it("leaves the selection bar and the focus ring above the layers it paints", () => {
     const sel = rules(/button\.tree-row\.ownerinbox\.aurora\.sel::before/).join(";");
     expect(sel).toMatch(/left:\s*2px/);
-    const sparks = rules(/button\.tree-row\.ownerinbox\.aurora\.sel::after/).join(";");
-    expect(sparks).toMatch(/left:\s*2px/);
     const focus = rules(/^\s*button\.tree-row\.ownerinbox\.aurora:focus-visible\s*$/).join(";");
     expect(focus).toMatch(/outline:\s*1px solid var\(--accent\)/);
     expect(focus).toMatch(/outline-offset:\s*-1px/);
@@ -161,7 +196,5 @@ describe("the aurora's motion", () => {
   it("pauses under the approval card (everything outside the veil is inert)", () => {
     const paused = rules(/\[inert\] button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::before/).join(";");
     expect(paused).toMatch(/animation-play-state:\s*paused/);
-    const sparks = rules(/\[inert\] button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::after/).join(";");
-    expect(sparks).toMatch(/animation-play-state:\s*paused/);
   });
 });

@@ -100,16 +100,16 @@ What it pins, one section each (each names the mutation it is meant to catch):
             waiting" [a link to any URL; innerHTML; empty as nothing waiting]
   older     an older daemon (404) shows no count and says the inbox is not
             available, never "nothing waiting" [404 read as empty]
-  aurora    the owner's aurora (2026-10-25) is on the owner Inbox row only,
-            never the "Inbox" project's (the mock's `inbox: true` project,
-            named Inbox for the section); a still tint with nothing waiting
-            (no animation at all), drifting with sparks while something
-            waits, its keyframes only transform/opacity, dimmed and spark-free
-            while the amber count is pending, which stays amber on an opaque
-            chip; it moves no layout; it pauses under the approval card and
-            resumes after; prefers-reduced-motion leaves a static tint with
-            no animation [no reduced-motion rule; no veil pause; the aurora
-            on the project row]. `JARVIS_AURORA_SHOTS=<dir>` also saves the
+  aurora    the owner's RGB wave (2026-11-14, replacing the 2026-10-25
+            aurora) is on the owner Inbox row only, never the "Inbox"
+            project's (the mock's `inbox: true` project, named Inbox for the
+            section); a full-rainbow band that is always moving, with nothing
+            waiting too, and has no sparks; its keyframe only transform,
+            dimmed while the amber count is pending, which stays amber on an
+            opaque chip; it moves no layout; it pauses under the approval card
+            and resumes after; prefers-reduced-motion leaves a still tint
+            [calm still; no reduced-motion rule; no veil pause; the aurora on
+            the project row]. `JARVIS_AURORA_SHOTS=<dir>` also saves the
             sidebar, calm, waiting and pending, as PNGs there.
 
 Run alone (after `cd hud && npm ci --ignore-scripts && npm run build`):
@@ -1042,7 +1042,7 @@ def _aurora_shot(page, name):
     where = os.environ.get("JARVIS_AURORA_SHOTS")
     if not where:
         return
-    time.sleep(1.2)     # some drift, and a spark, into the frame
+    time.sleep(1.2)     # some wave into the frame
     box = page.locator("#sidebar").bounding_box()
     path = Path(where) / f"hud-aurora-{name}.png"
     page.screenshot(path=str(path), clip={"x": box["x"], "y": box["y"], "width": box["width"],
@@ -1079,11 +1079,14 @@ def _aurora_body(page, mock, check, until, inbox_id):
           and _pseudo(page, project, "::before", "animationName") in ("none", None)
           and _pseudo(page, project, "::after", "animationName") in ("none", None)
           and "gradient" not in (_pseudo(page, project, "::before", "backgroundImage") or ""))
-    check("with nothing waiting it is a still tint: no animation on either layer, no sparks "
-          "[mutation: calm animates]",
-          _pseudo(page, OWNER_ROW, "::before", "animationName") == "none"
-          and _pseudo(page, OWNER_ROW, "::after", "animationName") == "none"
-          and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
+    check("with nothing waiting the wave still moves, a full-rainbow gradient with no sparks "
+          "[mutation: calm static]",
+          _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift"
+          and _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "running"
+          and _pseudo(page, OWNER_ROW, "::after", "content") in ("none", "normal", None)
+          and all(c in (_pseudo(page, OWNER_ROW, "::before", "backgroundImage") or "")
+                  for c in ("rgba(255, 56, 56", "rgba(255, 150, 20", "rgba(50, 240, 110", "rgba(80, 110, 255"))
+          and "transparent" not in (_pseudo(page, OWNER_ROW, "::before", "backgroundImage") or ""))
     frames = page.evaluate("""() => {
       const out = {};
       for (const sheet of document.styleSheets) {
@@ -1097,23 +1100,22 @@ def _aurora_body(page, mock, check, until, inbox_id):
       }
       return out;
     }""")
-    check("the shipped keyframes animate only transform (the band) and opacity (the sparks) "
+    check("the shipped keyframe animates only transform: a pure sweep, no pulse "
           "[mutation: a background-position drift]",
-          frames == {"aurora-drift": ["transform"], "aurora-twinkle": ["opacity"]}, str(frames))
+          frames == {"aurora-drift": ["transform"]}, str(frames))
     check("the row's text is --text, unchanged",
           row.locator(".nm").evaluate("e => getComputedStyle(e).color") == TEXT)
     check("the title is unchanged", page.title() == TITLE, page.title())
     _aurora_shot(page, "calm")
 
-    # Something waits, nothing pending: the drift and the sparks.
+    # Something waits, nothing pending: the wave.
     _reset(mock, [prop_row(), task_row()])
     mock_inbox.changed(mock)
     until(lambda: _count(page) == "2" and _aurora_state(page) == "live", timeout=4)
-    check("while something waits (not pending) the band drifts and the sparks twinkle",
+    check("while something waits (not pending) the same wave runs, one pass every 6s, at full strength",
           _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift"
-          and _pseudo(page, OWNER_ROW, "::before", "animationDuration") == "11s"
-          and _pseudo(page, OWNER_ROW, "::after", "animationName") == "aurora-twinkle"
-          and _pseudo(page, OWNER_ROW, "::after", "display") == "block")
+          and _pseudo(page, OWNER_ROW, "::before", "animationDuration") == "6s"
+          and float(_pseudo(page, OWNER_ROW, "::before", "opacity")) == 1)
     _aurora_shot(page, "waiting")
 
     # Pending (a rank-2 question): the amber count reads exactly as before.
@@ -1125,10 +1127,9 @@ def _aurora_body(page, mock, check, until, inbox_id):
           badge.evaluate("e => getComputedStyle(e).color") == AMBER
           and badge.evaluate("e => getComputedStyle(e).backgroundColor") == BG_1,
           badge.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor].join(' / ')"))
-    check("and the aurora steps back: dimmed band, still drifting, no sparks",
+    check("and the wave steps back: dimmed band, still moving",
           float(_pseudo(page, OWNER_ROW, "::before", "opacity")) < 1
-          and _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift"
-          and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
+          and _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift")
     _aurora_shot(page, "pending")
 
     # Selected (a pane shows the inbox): the 2px accent bar is left clear of
@@ -1137,7 +1138,6 @@ def _aurora_body(page, mock, check, until, inbox_id):
     until(lambda: "sel" in (row.get_attribute("class") or ""), timeout=3)
     check("selected, the accent bar stays visible: the layers start 2px in, the bar is the accent",
           _pseudo(page, OWNER_ROW, "::before", "left") == "2px"
-          and _pseudo(page, OWNER_ROW, "::after", "left") == "2px"
           and "rgb(111, 195, 223)" in row.evaluate("e => getComputedStyle(e).boxShadow"),
           row.evaluate("e => getComputedStyle(e).boxShadow"))
 
@@ -1162,8 +1162,7 @@ def _aurora_body(page, mock, check, until, inbox_id):
     until(lambda: cardloc.count() == 1, timeout=4)
     until(lambda: page.evaluate(f"() => !!document.querySelector('{OWNER_ROW}').closest('[inert]')"), timeout=3)
     check("under the approval card the aurora pauses [mutation: no veil pause]",
-          _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "paused"
-          and _pseudo(page, OWNER_ROW, "::after", "animationPlayState") == "paused",
+          _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "paused",
           str(_pseudo(page, OWNER_ROW, "::before", "animationPlayState")))
     page.keyboard.press("Escape")
     until(lambda: cardloc.count() == 0, timeout=4)
@@ -1180,9 +1179,6 @@ def _aurora_body(page, mock, check, until, inbox_id):
         check("under prefers-reduced-motion the band does not animate [mutation: no reduced-motion rule]",
               _pseudo(page, OWNER_ROW, "::before", "animationName") == "none",
               str(_pseudo(page, OWNER_ROW, "::before", "animationName")))
-        check("nor do the sparks, which are gone",
-              _pseudo(page, OWNER_ROW, "::after", "animationName") == "none"
-              and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
         check("the tint stays, still: the gradient is there, unmoved",
               "gradient" in (_pseudo(page, OWNER_ROW, "::before", "backgroundImage") or "")
               and _pseudo(page, OWNER_ROW, "::before", "transform") in ("none", "matrix(1, 0, 0, 1, 0, 0)"),
