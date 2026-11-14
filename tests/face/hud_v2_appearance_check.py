@@ -300,6 +300,46 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         check("RGB off: the stored Nebula colours come back and the code colour stays", _token(page, "--code-accent") == LAVENDER)
         page.locator('[data-testid="appearance-reset"]').click()
         until(lambda: _token(page, "--code-accent") == DEFAULT_ACCENT, timeout=3)
+        # ---- custom presets: save the current colours + editor colour, apply, rename, delete with Undo -------
+        page.locator('[data-testid="appearance-preset-orchid"]').click()
+        _pick(page, "appearance-code-accent", LAVENDER)
+        until(lambda: _token(page, "--code-accent") == LAVENDER, timeout=3)
+        page.locator('[data-testid="appearance-save-preset"]').click()
+        page.locator('[data-testid="appearance-preset-name"]').fill("Night drive")
+        page.locator('[data-testid="appearance-preset-name"]').press("Enter")
+        until(lambda: page.locator('[data-testid^="appearance-custom-c-"]').count() == 1, timeout=3)
+        custom = page.locator('[data-testid^="appearance-custom-c-"]').first
+        cid = custom.get_attribute("data-testid")[len("appearance-custom-"):]
+        stored_list = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.presets')") or "[]")
+        check("Save as preset stores the six colours under its name, and the new button is pressed",
+              len(stored_list) == 1 and stored_list[0]["name"] == "Night drive" and stored_list[0]["accent"] == "#e48cf5"
+              and stored_list[0]["codeAccent"] == LAVENDER and custom.get_attribute("aria-pressed") == "true", str(stored_list))
+        page.locator('[data-testid="appearance-preset-graphite"]').click()
+        _pick(page, "appearance-code-accent", DEFAULT_ACCENT)
+        until(lambda: _token(page, "--code-accent") == DEFAULT_ACCENT, timeout=3)
+        custom.click()
+        until(lambda: _token(page, "--accent") == "#e48cf5" and _token(page, "--code-accent") == LAVENDER, timeout=3)
+        check("clicking it applies the accent, aurora, background and editor colour", _token(page, "--wash-1") == "#7a2f9a")
+        custom.hover()
+        if shots:
+            page.screenshot(path=str(Path(shots) / "preset-custom.png"))
+        page.locator(f'[data-testid="appearance-custom-rename-{cid}"]').click()
+        page.locator(f'[data-testid="appearance-custom-name-{cid}"]').fill("Plum night")
+        page.locator(f'[data-testid="appearance-custom-name-{cid}"]').press("Enter")
+        until(lambda: "Plum night" in custom.inner_text(), timeout=3)
+        check("rename in place changes the shown and stored name",
+              json.loads(page.evaluate("localStorage.getItem('jarvis.hud.presets')"))[0]["name"] == "Plum night")
+        page.locator(f'[data-testid="appearance-custom-delete-{cid}"]').click()
+        until(lambda: page.locator('[data-testid="appearance-custom-undo"]').count() == 1, timeout=3)
+        gone = page.locator('[data-testid^="appearance-custom-c-"]').count() == 0
+        page.locator('[data-testid="appearance-custom-undo"]').click()
+        until(lambda: page.locator('[data-testid^="appearance-custom-c-"]').count() == 1, timeout=3)
+        check("delete removes it, Undo brings it back", gone)
+        page.locator('[data-testid="appearance-reset"]').click()
+        until(lambda: _token(page, "--code-accent") == DEFAULT_ACCENT, timeout=3)
+        check("Reset colours keeps the custom preset", page.locator('[data-testid^="appearance-custom-c-"]').count() == 1)
+        page.evaluate("localStorage.removeItem('jarvis.hud.presets')")
+
         # Put the hand-picked record back: the reload checks below expect it.
         page.evaluate("([k, v]) => { localStorage.setItem(k, v); window.dispatchEvent(new Event('hud-appearance-change')); }",
                       [APPEARANCE, json.dumps(hand_picked)])
