@@ -86,7 +86,7 @@ def autoopen_checks(browser, check, until, guard, init_script):
               ("GET", "/browser/settings", {"extra": True}),
               ("PATCH", "/browser/settings", {"agents_may_drive": True}),
               ("POST", "/browser/act", {})]))
-    sections = (_split, _behind, _quiet, _down_split, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _pane_ids, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
+    sections = (_split, _behind, _quiet, _down_split, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _pane_ids, _toolbar_use, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
     for section in sections:
         if os.environ.get("AUTO_ONLY") and os.environ["AUTO_ONLY"] not in section.__name__: continue
         mock = MockDaemon(0).start()
@@ -418,6 +418,44 @@ def _pane_ids(browser, context, page, mock, f, check, until, guard, init):
           now[9]["browser"]["active"] == "ten001" and url.evaluate("(e) => document.activeElement === e"),
           str(now[9]["browser"]))
     check("FS2: and the placement sends its receipt", bool(mock.posted("/dev-servers/" + entry.id + "/placed")))
+
+
+def _toolbar_use(browser, context, page, mock, f, check, until, guard, init):
+    # As _pane_ids, but the owner's last pointer is on pane 10's own toolbar
+    # (its view menu, `pane-10-view-select` inside `pane-10-view`). The window
+    # once read such a control's testid as "no pane", so the use went
+    # unrecorded and the automatic tab went to pane 2 by slot order. It reads
+    # the pane's section now (App.tsx), so pane 10 is the Browser last used.
+    configure(page, mock, until, "grid4", ("chat", "browser", "chat", "chat"), 1000)
+    page.set_viewport_size({"width": 1000, "height": 800})
+    state = _ws(page)["ws"]
+    if len(state["panes"]) < 12:
+        check("toolbar use: the window holds twelve pane ids", False, str(len(state["panes"])))
+        return
+    state["order"], state["kept"], state["focused"] = [1, 2, 3, 10], [4], 1
+    for n, name in ((1, "two"), (9, "ten")):
+        tab = f"{name}001"
+        state["panes"][n] = {"view": "browser", "projectId": None, "terminalId": None,
+                             "browser": {"tabs": [{"id": tab, "url": f"http://localhost:{mock.dev_port}/{name}"}], "active": tab}}
+    _set_ws(page, json.dumps(state))
+    _boot(page, mock, None, until, reload=True)
+    menu = page.locator(_pane(10, '[data-testid="pane-10-view-select"]'))
+    check("toolbar use setup: 2×2 drawn whole, pane 10 compact with its view menu",
+          _ws(page)["fit"]["panes"] == [1, 2, 3, 10] and menu.count() == 1, f'{_ws(page)["fit"]["panes"]} {menu.count()}')
+    box = menu.bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.keyboard.press("Escape")
+    until(lambda: _ws(page)["ws"]["focused"] == 10)
+    page.wait_for_timeout(200)  # past the pointer's quiet interval
+    entry = f.add(mock.dev_port + 1)
+    until(lambda: len(tabs(page)) == 3)
+    now = panes(page)
+    check("a pointer on a pane's own toolbar counts as using that pane: the automatic tab goes to pane 10, not pane 2",
+          len(now[9]["browser"]["tabs"]) == 2 and len(now[1]["browser"]["tabs"]) == 1,
+          str([now[1].get("browser"), now[9].get("browser")]))
+    check("toolbar use: behind pane 10's page, which stays selected",
+          now[9]["browser"]["active"] == "ten001" and now[9]["view"] == "browser", str(now[9]["browser"]))
+    check("toolbar use: the placement sends its receipt", bool(mock.posted("/dev-servers/" + entry.id + "/placed")))
 
 
 def _lease(browser, context, page, mock, f, check, until, guard, init):
