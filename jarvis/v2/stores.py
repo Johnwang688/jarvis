@@ -296,7 +296,13 @@ class ProjectStore(_Store[model.Project]):
             stored = previous if self.path(obj.id).exists() else None
             if previous and previous.inbox and not obj.inbox:
                 raise StoreError("The catch-all project cannot become an ordinary project")
-            others = [p for p in self.list() if p.id != obj.id]
+            # The cross-project reservation scan is strict (one unreadable record
+            # raises), so it runs only when a reservation is at stake: the
+            # catch-all itself, or a name that is "Unsorted" or "Inbox". An
+            # ordinary name never scans, so a corrupt neighbour cannot block
+            # it; a reservation-relevant save then fails closed (refused).
+            relevant = obj.inbox or name_key(obj.name) in (name_key(UNSORTED_NAME), name_key(LEGACY_INBOX_NAME))
+            others = [p for p in self.list() if p.id != obj.id] if relevant else []
             clash = any(name_key(p.name) == name_key(UNSORTED_NAME) for p in others)
             if obj.inbox:
                 if obj.root != str(Path.home()):
@@ -340,7 +346,20 @@ class ProjectStore(_Store[model.Project]):
     def inbox_name_reserved(self, but: str | None = None) -> bool:
         """`_fallback_reserved` over the stored projects (`but` left out)."""
         with _lock:
-            return self._fallback_reserved([p for p in self.list() if p.id != but])
+            return self._fallback_reserved([p for p in self._snapshot() if p.id != but])
+
+    def _snapshot(self) -> list[model.Project]:
+        """Every readable project: a record that cannot be read is skipped, as
+        `daemon.safe_list` does, so a naming helper never fails on one."""
+        found = []
+        for project_id in self.ids():
+            try:
+                project = self.get(project_id)
+            except StoreError:
+                continue
+            if project is not None:
+                found.append(project)
+        return found
 
     def _name_clash(self, obj: model.Project) -> bool:
         """Whether another project, archived or not, is named "Unsorted"."""

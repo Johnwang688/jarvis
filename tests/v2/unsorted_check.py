@@ -168,6 +168,22 @@ class Store(unittest.TestCase):
         with self.assertRaises(StoreError):
             self.projects.save(replace(third, name="inbox"))
 
+    def test_a_corrupt_neighbour_never_blocks_an_ordinary_name(self):
+        # review of ff9095e5: the strict cross-project scan ran on every save.
+        mine = self.projects.create("Mine", str(self.root))
+        bad = self.projects.create("Broken", str(self.root))
+        self.projects.path(bad.id).write_text("{")
+        created = self.projects.create("Fresh", str(self.root))
+        self.projects.save(replace(mine, name="Renamed"))
+        self.projects.save(replace(self.projects.get(created.id), always_ask=["x"]))
+        self.assertEqual(self.projects.get(mine.id).name, "Renamed")
+        self.assertEqual(P.project_names_taken(self.stores).count("Unsorted"), 1)
+        # A reservation-relevant save fails closed, deliberately: it cannot see the neighbour.
+        with self.assertRaises(StoreError):
+            self.projects.create("Inbox", str(self.root))
+        with self.assertRaises(StoreError):
+            self.projects.inbox()
+
     def test_inbox_is_free_for_ordinary_projects_otherwise(self):
         self.projects.inbox()                                 # Unsorted
         self.assertNotIn("Inbox", P.project_names_taken(self.stores))
@@ -201,6 +217,14 @@ class Wire(Base):
             self.restart()
         self.assertEqual(self.stores.projects.get(found.id).name, "Inbox")
         self.assertEqual(self.stores.projects.get(self.other.id).name, "unsorted")
+
+    def test_a_corrupt_neighbour_does_not_block_http_edits(self):
+        bad = self.stores.projects.create("Broken", str(self.repo_b))
+        self.stores.projects.path(bad.id).write_text("{")
+        made = self.request("POST", "/projects", {"name": "Fresh", "root": str(self.repo_b)}, 201)
+        self.assertEqual(made["name"], "Fresh")
+        self.request("PATCH", f"/projects/{self.other.id}", {"name": "Renamed"}, 200, owner=True)
+        self.request("PATCH", f"/projects/{self.other.id}", {"profile": "ask"}, 200, owner=True)
 
     def test_post_projects_never_makes_a_second_inbox(self):
         rewrite(self.stores, self.other.id, name="Unsorted")
