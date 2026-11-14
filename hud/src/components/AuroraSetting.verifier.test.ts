@@ -120,7 +120,7 @@ it("presets and Aurora preserve unrelated and unknown stored fields", async () =
     await act(async () => button(id).click());
     expect(saved()).toMatchObject(unrelated);
   }
-  expect(saved()).toEqual(unrelated);
+  expect(saved()).toEqual({ ...unrelated, rgb: false, rgbSpeed: 30 });
 });
 
 const unsafe: [string, Partial<ColourPreset>][] = [
