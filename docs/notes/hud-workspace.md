@@ -1517,10 +1517,34 @@ that way.
   and tells the chat "Shown 11 of 11 …", "Shown 7 of 11 …; no room for 4",
   or that no window replied (or none is open). A short window also shows
   "No room for N more panes" once.
+- **Review of PR #358** (the independent verifier, 2026-11-13):
+  - *The keyboard stays with the owner* (MED 1). The grid can shrink the
+    owner's pane under COMPACT_W, which swaps its view strip for a menu and
+    unmounts a focused button, so focus fell to `<body>` while `focused`
+    stayed. `Layout.tsx` `placeAgent` now records the pane holding the
+    keyboard (`keyboardPane`: the pane's `section`, not a control inside it)
+    and, if focus is lost once the change has drawn, gives it back to that
+    pane's own target: its message box, else the pane (`keepKeyboard`). It
+    never focuses a Browser frame (R-1), never acts under a card, and leaves
+    focus that moved elsewhere alone. A composer in a shrunk pane keeps
+    focus and its words. The same section-not-control fix applies to
+    `agentFreePanes`' keyboard-pane check.
+  - *Cells as drawn* (LOW 2). `gridFor` counts the 1px rule the workspace
+    draws between panes (`Workspace.tsx` `boxStyle`, `agentpanes.ts`
+    `drawnCell`: `(length + 1) / k − 1`). At an exact 1440 × 600 centre,
+    twelve cells would be drawn 359.25 × 199.3, so that window now gets six.
+    **`splitVerdict` and `autoSplit` share the omission** (`half =
+    px.width / 2` is nominal, not drawn); left as it was, with only the grid
+    path fixed.
+  - *The clock is pinned* (LOW 3). A test asserts that the production
+    default is `time.monotonic`.
 - Tests: `hud/src/lib/agentpanes.test.ts` (gridTree, balancedRows, gridFor,
   placement incl. the 11-from-1 4×3 case, the narrow case, never a hidden id,
-  a fit property); `tests/v2/hud_subagents_check.py` `ReportBack`,
-  `ReportRoute`; `tests/face/hud_v2_subagents_check.py` section 10.
+  a fit property, the drawn cells); `tests/v2/hud_subagents_check.py`
+  `ReportBack` (incl. the pinned clock), `ReportRoute`;
+  `tests/face/hud_v2_subagents_check.py` section 10 (incl. the keyboard on a
+  shrunk pane's view button, a composer in a shrunk pane, drawn cells at an
+  exact fit).
 
 ## Native sub-agents: the owner's Stop on one child (SV-4, 2026-10-15)
 

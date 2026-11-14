@@ -97,3 +97,9 @@ Browser pane: the drive tools need a pane that is already showing.
    request id and says that no window is open.
 5. **Re-laying the grid resets pane sizes to equal**, as ⊞ does (FS-8). The
    owner's dragged edges are not kept.
+6. **The grid keeps the owner's keyboard and counts the drawn rules** (review
+   of #358). If the re-layout unmounts the focused control in the owner's pane,
+   focus goes back to that pane's message box or to the pane itself, never to a
+   frame. The fit checks the cells as drawn, so the 1px rules between panes
+   count. `splitVerdict` and `autoSplit` still check the nominal halves;
+   that is out of this PR's scope.

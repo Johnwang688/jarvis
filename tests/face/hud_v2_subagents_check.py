@@ -906,6 +906,62 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         check("and says there was no room for the rest",
               "No room for" in page.locator('[data-testid="error"]').inner_text())
 
+        # Review of PR #358 (the independent verifier's cases, folded in).
+        drawn_cells = lambda: page.locator('[data-testid^="pane-"][data-slot]').evaluate_all(
+            "els => els.filter(e => e.offsetParent !== null).map(e => { const r = e.getBoundingClientRect();"
+            " return [r.width, r.height]; })")
+        TWO_CHATS = json.dumps({"preset": "cols2", "focused": 2, "panes": [{"view": "chat"}, {"view": "chat"}]})
+
+        def batch(rid):
+            s["reports"] = []
+            mock.emit("subagent_open", {"sids": many, "request_id": rid}, thread_id="c1", project_id="p1", at=at(72))
+            until(lambda: len(s["reports"]) == 1)
+            return s["reports"][0]
+
+        # MED 1: the owner's keyboard is on pane 2's view button; the grid
+        # shrinks pane 2 under COMPACT_W, which unmounts that strip.
+        _fresh(page, mock, until, TWO_CHATS, size=(2400, 1000))
+        open_thread(1, "c1")
+        button = page.locator(_pane(2, '[data-testid="tab-chat"]'))
+        button.focus()
+        until(lambda: button.evaluate("e => e === document.activeElement"))
+        report = batch("4" * 32)
+        until(lambda: len(ws()["order"]) == 1 + 1 + report["placed"])
+        time.sleep(0.3)
+        where = page.evaluate("""() => ({tag: document.activeElement.tagName,
+            pane2: !!document.activeElement.closest('[data-testid="pane-2"]')})""")
+        check("a batch that shrinks the owner's pane keeps the keyboard in it (never <body>, never a frame)",
+              ws()["focused"] == 2 and where["pane2"] and where["tag"] not in ("BODY", "IFRAME")
+              and report["placed"] == 10, f"{where} focused={ws()['focused']} {report}")
+
+        # And a composer in the shrunk pane keeps focus and every typed word.
+        _fresh(page, mock, until, TWO_CHATS, size=(2400, 1000))
+        open_thread(1, "c1")
+        _box(page, 2).click()
+        _box(page, 2).fill("words still being typed")
+        until(lambda: ws()["focused"] == 2)
+        batch("5" * 32)
+        time.sleep(0.3)
+        check("a composer in the shrunk pane keeps focus and its text",
+              _box(page, 2).evaluate("e => e === document.activeElement")
+              and _box(page, 2).input_value() == "words still being typed")
+
+        # LOW 2: at an exact nominal fit (a 1440 x 600 centre) twelve cells
+        # would be drawn 359.25 x 199.3 once the rules between panes are
+        # counted: the grid takes only what is drawn at full size.
+        _fresh(page, mock, until, ONE, size=(1992, 628))
+        fit = page.evaluate("window.__hud.workspace().fit")
+        open_thread(1, "c1")
+        report = batch("6" * 32)
+        until(lambda: len(ws()["order"]) == 1 + report["placed"])
+        time.sleep(0.2)
+        cells = drawn_cells()
+        check("at an exact nominal fit every drawn cell is at least 360 x 200 (rules counted)",
+              (fit["width"], fit["height"]) == (1440, 600) and report["placed"] < 11
+              and len(cells) == 1 + report["placed"]
+              and all(w >= 360 and h >= 200 for w, h in cells),
+              f"fit={fit['width']}x{fit['height']} placed={report['placed']} {cells}")
+
         check("the HUD's reads were never refused by the owner gate", s["refused"] == 0)
         check("no page errors", not errors, "; ".join(errors[:3]))
     finally:

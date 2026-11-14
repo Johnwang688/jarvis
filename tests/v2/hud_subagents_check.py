@@ -26,7 +26,8 @@ TEST -> MUTATION
   no cap                                       Choice.test_at_most_eleven
   (report back, 2026-11-13)
   wait under the daemon lock                   ReportBack.test_the_wait_holds_no_daemon_lock
-  no deadline / wall clock                     ReportBack.test_the_wait_is_bounded_on_the_monotonic_clock
+  no deadline / wall clock                     ReportBack.test_the_wait_is_bounded_on_the_monotonic_clock,
+                                               ReportBack.test_the_production_clock_is_monotonic
   a second window overrides the first          ReportBack.test_the_first_window_wins_and_bad_reports_are_refused
   route not owner-only / no strict Host        ReportRoute.test_no_one_else_reaches_it
   any window id accepted                       ReportRoute.test_refusals (not live: 409)
@@ -377,6 +378,15 @@ class ReportBack(unittest.TestCase):
         with self.assertRaises(agent_panes.ReportRefused) as caught:
             svc.reports.report(late)
         self.assertEqual(caught.exception.status, 404)
+
+    def test_the_production_clock_is_monotonic(self):
+        """The wait's deadline is on the monotonic clock by default, the one
+        every service builds (review of PR #358, LOW 3: the test below
+        injects its clock, so a wall-clock default survived it)."""
+        import time
+        self.assertIs(agent_panes.PaneReports(SimpleNamespace()).clock, time.monotonic)
+        svc, _, _ = stub_service(stub_session(), self.rows)
+        self.assertIs(svc.reports.clock, time.monotonic)
 
     def test_the_wait_is_bounded_on_the_monotonic_clock(self):
         svc, _, _ = stub_service(stub_session(), self.rows, windows=[WINDOW])

@@ -155,6 +155,39 @@ export interface LayoutControl {
   incarnation: Readonly<Partial<Record<PaneNo, number>>>;
 }
 
+/** The pane (an id) whose subtree holds the keyboard now, or null. */
+export function keyboardPane(): PaneNo | null {
+  const el = document.activeElement;
+  if (!el || el === document.body) return null;
+  // The section itself (`pane-2`), not a control inside it (`pane-2-view`, `pane-2-close`, …).
+  const pane = el.closest<HTMLElement>('section[data-testid^="pane-"]');
+  const m = /^pane-(\d+)$/.exec(pane?.dataset.testid ?? "");
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= 12 ? (n as PaneNo) : null;
+}
+
+/**
+ * A layout change the owner did not make (a chat's batch of panes) must not
+ * drop the keyboard: if it was in pane `pane` and, once the change has drawn,
+ * nothing holds it any more (the element unmounted, focus fell to `<body>`),
+ * it goes back to that pane's own focus target — its message box, else the
+ * pane — never a Browser frame (R-1), and not while a card is up
+ * (`blocked`). Focus that moved anywhere else meanwhile is left alone.
+ */
+export function keepKeyboard(pane: PaneNo, blocked: () => boolean, frames = 4) {
+  requestAnimationFrame(() => {
+    const el = document.activeElement;
+    const lost = !el || el === document.body || !el.isConnected;
+    // Not lost (yet): look again for a few frames, while the change draws.
+    if (!lost) { if (frames > 0) keepKeyboard(pane, blocked, frames - 1); return; }
+    if (blocked()) return;
+    const box = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
+    if (!box || box.offsetParent === null) return;
+    const input = box.querySelector<HTMLElement>('[data-testid="input"]');
+    (input && !(input as HTMLTextAreaElement).disabled ? input : box).focus({ preventScroll: true });
+  });
+}
+
 /**
  * Focus pane `pane` (an id) for the keyboard: its message box when it has
  * one, else the pane itself. A pane a split just made may not be drawn yet
@@ -358,9 +391,14 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     const at = now.current;
     const out = placeAgentPanesOf(at.ws, at.fit, free, asks);
     if (out.ws === at.ws) return out.placed;
+    // Where the keyboard is now: the grid can shrink the owner's pane under
+    // COMPACT_W, which swaps its view strip for a menu and unmounts the
+    // button holding focus (review of PR #358, MED 1).
+    const holder = keyboardPane();
     // Panes move under a pointer that has not moved: no frame counts it as a gesture.
     layoutMoved();
     setWs((w) => (w === at.ws ? out.ws : placeAgentPanesOf(w, at.fit, free, asks).ws));
+    if (holder !== null) keepKeyboard(holder, () => blockedRef.current);
     return out.placed;
   }, []);
   const splitVerdict = useCallback((source: PaneNo, axis: Axis, dirty: readonly PaneNo[] = []) => {

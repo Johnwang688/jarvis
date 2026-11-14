@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, type PaneLayout } from "./layout";
-import { AGENT_OPEN_MAX, agentRequestId, gridFor, placeAgentPanes, type AgentAsk } from "./agentpanes";
+import { AGENT_OPEN_MAX, agentRequestId, drawnCell, gridFor, placeAgentPanes, RULE, type AgentAsk } from "./agentpanes";
 import {
   balancedRows, gridTree, isLeaf, leaves, MAX_ACROSS, MAX_DOWN, normalize, parseTree, rectsOf, storeTree,
   type LayoutNode, type StoredNode,
@@ -87,12 +87,37 @@ describe("gridFor: fewest rows that fit the measured centre", () => {
   it("a wide window gets columns; a narrow one more rows; none when nothing fits", () => {
     expect(gridFor(4, 1500, 900)).toEqual([4]);
     expect(gridFor(4, 1000, 900)).toEqual([2, 2]);
-    expect(gridFor(12, 4 * PANE_MIN_W, 3 * PANE_MIN_H)).toEqual([4, 4, 4]);
-    expect(gridFor(12, 4 * PANE_MIN_W - 1, 900)).toBeNull();
-    expect(gridFor(12, 1500, 3 * PANE_MIN_H - 1)).toBeNull();
+    // The least centre that draws twelve cells of 360 x 200 once the 1px
+    // rules are counted: 4 x 361 - 1 by 3 x 201 - 1 (review of PR #358, LOW 2).
+    expect(gridFor(12, 4 * (PANE_MIN_W + RULE) - RULE, 3 * (PANE_MIN_H + RULE) - RULE)).toEqual([4, 4, 4]);
+    expect(gridFor(12, 4 * (PANE_MIN_W + RULE) - RULE - 0.5, 900)).toBeNull();
+    expect(gridFor(12, 1500, 3 * (PANE_MIN_H + RULE) - RULE - 0.5)).toBeNull();
     expect(gridFor(7, 1500, 300)).toBeNull();
     expect(gridFor(3, 1200, 300)).toEqual([3]);
     expect(gridFor(13, NaN, NaN)).toBeNull();
+  });
+
+  it("the exact nominal fit (1440 x 600) no longer passes: its cells would be drawn 359.25 x 199.3", () => {
+    expect(drawnCell(1440, 4)).toBeCloseTo(359.25);
+    expect(drawnCell(600, 3)).toBeCloseTo(199.333, 2);
+    expect(gridFor(12, 1440, 600)).toBeNull();
+    expect(gridFor(6, 1440, 600)).toEqual([3, 3]);
+  });
+
+  it("every placed grid's cells, as the workspace draws them (rules counted), are at least 360 x 200", () => {
+    const one = defaultWorkspace();
+    // Default side panes, the verifier's window: 1992 x 628 gives a 1440 x 600 centre.
+    for (const [w, h] of [[1992, 628], [1995, 631], [2400, 1000], [1600, 900], [1300, 700]] as const) {
+      const fit = fitWorkspace(DEFAULT_LAYOUT, one, w, h);
+      const out = placeAgentPanes(one, fit, [], asks(11));
+      const after = fitWorkspace(DEFAULT_LAYOUT, out.ws, w, h);
+      for (const n of after.panes) {
+        // components/Workspace.tsx boxStyle: f * (length + 1px) - 1px.
+        const r = after.boxes[n]!.rect;
+        expect(r.width * (after.width + RULE) - RULE, `${w}x${h} pane ${n} width`).toBeGreaterThanOrEqual(PANE_MIN_W - 1e-9);
+        expect(r.height * (after.height + RULE) - RULE, `${w}x${h} pane ${n} height`).toBeGreaterThanOrEqual(PANE_MIN_H - 1e-9);
+      }
+    }
   });
 });
 

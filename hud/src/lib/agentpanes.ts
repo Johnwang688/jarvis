@@ -21,7 +21,7 @@
 // more pane changes nothing.
 
 import { balancedRows, gridTree, minH as treeMinH, minW as treeMinW, MAX_ACROSS, MAX_DOWN, MAX_LEAVES, shapeKey } from "./splittree";
-import { orderOf, PANE_NOS, type PaneNo, type PaneSpec, type Workspace, type WorkspaceFit } from "./workspace";
+import { orderOf, PANE_MIN_H, PANE_MIN_W, PANE_NOS, type PaneNo, type PaneSpec, type Workspace, type WorkspaceFit } from "./workspace";
 import type { SubagentRef } from "./subagents";
 
 /** The most panes one ask may open: the HUD draws twelve and one shows the chat. */
@@ -61,9 +61,22 @@ export interface AgentPlacement {
 }
 
 /**
+ * The rule the workspace draws between panes (components/Workspace.tsx
+ * `boxStyle`): every fraction is of the area plus one rule and each pane
+ * gives one back, so `k` equal panes across `length` px are drawn
+ * `(length + RULE) / k - RULE` px each (review of PR #358, LOW 2).
+ */
+export const RULE = 1;
+
+/** The px `k` equal panes are drawn across `length` px, rules taken out. */
+export const drawnCell = (length: number, k: number): number => (length + RULE) / k - RULE;
+
+/**
  * Panes per row for `t` panes that fit `width` x `height` (the centre's px;
  * NaN, an unmeasured window, is not checked), fewest rows first; null when no
- * grid of `t` fits.
+ * grid of `t` fits. Each cell is at least PANE_MIN_W x PANE_MIN_H **as
+ * drawn** (`drawnCell`: the rules between panes counted), and the tree's own
+ * minimum (a lone column: MAIN_MIN) holds too.
  */
 export function gridFor(t: number, width: number, height: number): number[] | null {
   if (!Number.isInteger(t) || t < 1 || t > MAX_LEAVES) return null;
@@ -71,8 +84,10 @@ export function gridFor(t: number, width: number, height: number): number[] | nu
     const rows = balancedRows(t, r);
     const tree = rows && gridTree(PANE_NOS.slice(0, t), rows);
     if (!rows || !tree) continue;
-    const wideEnough = !Number.isFinite(width) || treeMinW(tree) <= width;
-    const tallEnough = !Number.isFinite(height) || treeMinH(tree) <= height;
+    const wideEnough = !Number.isFinite(width)
+      || (treeMinW(tree) <= width && drawnCell(width, Math.max(...rows)) >= PANE_MIN_W);
+    const tallEnough = !Number.isFinite(height)
+      || (treeMinH(tree) <= height && drawnCell(height, rows.length) >= PANE_MIN_H);
     if (wideEnough && tallEnough) return rows;
   }
   return null;

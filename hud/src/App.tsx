@@ -2670,7 +2670,8 @@ export default function App() {
   const agentFreePanes = (threadId: string): PaneNo[] => {
     const lay = layoutNow.current;
     const chatPane = chatPaneOf(threadId);
-    const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
+    // The pane's section, not a control inside it (`pane-2-view` would read as no pane).
+    const active = document.activeElement?.closest<HTMLElement>('section[data-testid^="pane-"]');
     const keyboard = paneOfTestId(active?.dataset.testid);
     return lay.fit.panes.filter((n) => {
       if (n === chatPane || n === lay.ws.focused || n === keyboard) return false;
