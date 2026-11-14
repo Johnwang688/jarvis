@@ -96,8 +96,13 @@ is refused. Another project's event does not count.
 
 **Stopping.** `stop` closes the set for good: the timers are cancelled, a
 running reconcile or sweep is waited for (`STOP_JOIN_S` each), and every
-commit checks the closed flag under the store lock, so nothing changes
-membership after `stop` returns.
+section that changes membership (activity, reconcile, the sweep's pruning
+and exits, seeding, Done, Undo, and the archive, restore and delete
+handlers) checks the closed flag under the store lock first, so nothing
+changes membership after `stop` returns.
+
+A move bumps the thread's generation too (it changes which project guards
+it), without bumping `seq`.
 
 **The signal (D-5).** `working_changed` carries no ids and no data: `/events`
 is not owner-checked. Its timing can still hint at membership (it follows a
@@ -550,6 +555,8 @@ class WorkingSet:
             ids = self._project_threads(record.get("project_id"))
         changed = moved = False
         with self._lock:
+            if self._closed:
+                return
             for tid in ids:
                 moved |= self._take_out(tid, "archived", now)
                 changed |= self._forget_token(tid)
@@ -573,6 +580,8 @@ class WorkingSet:
             ids = self._project_threads(record.get("project_id"))
         changed = False
         with self._lock:
+            if self._closed:
+                return
             for tid in ids:
                 changed |= self._forget_token(tid)
             if changed:
@@ -596,6 +605,8 @@ class WorkingSet:
             ids |= {tid for tid in known if self._thread(tid) is None}
         changed = False
         with self._lock:
+            if self._closed:
+                return
             for thread_id in ids:
                 if self._threads.pop(thread_id, None) is not None:
                     changed = True
@@ -606,6 +617,14 @@ class WorkingSet:
             self._changed()
 
     def _redraw_on(self, kind, record) -> None:
+        if kind == "thread_moved":
+            # A move changes which project's generation guards the thread:
+            # a change checked before it (in the old project) is dropped
+            # when it commits. Not activity: `seq` is not bumped.
+            thread_id = record.get("thread_id")
+            with self._lock:
+                if isinstance(thread_id, str):
+                    self._gen[thread_id] = self._gen.get(thread_id, 0) + 1
         members = self.members()
         if kind == "project_updated":
             if members:
@@ -718,22 +737,31 @@ class WorkingSet:
             self._reconcile_again = False
             me = threading.current_thread()
             self._workers.add(me)
+        released = False
         try:
             while True:
                 try:
                     self.reconcile()
                 except Exception:  # noqa: BLE001
                     LOG.exception("working set: a reconcile failed")
+                # The last look for a pending event and the release of the
+                # worker are one step under the lock: an event after it finds
+                # no worker and arms a new timer; one before it is run here.
                 with self._lock:
                     if self._reconcile_again and not self._closed:
                         self._reconcile_again = False
                         continue
+                    self._reconciling = False
+                    self._reconcile_again = False
+                    self._workers.discard(me)
+                    released = True
                     break
         finally:
-            with self._lock:
-                self._reconciling = False
-                self._reconcile_again = False
-                self._workers.discard(me)
+            if not released:        # only if the loop itself raised
+                with self._lock:
+                    self._reconciling = False
+                    self._reconcile_again = False
+                    self._workers.discard(me)
 
     def reconcile(self) -> list[str]:
         """Bring in every visible chat thread with a linked rank 1 to 4 row
@@ -878,6 +906,8 @@ class WorkingSet:
         with self._decide:
             now = self.clock()
             with self._lock:
+                if self._closed:
+                    return []
                 limit = timedelta(days=self._idle_days)
                 seqs = {tid: e["seq"] for tid, e in self._threads.items()
                         if e["done_at"] is None and now - parse_time(e["last"]) >= limit}

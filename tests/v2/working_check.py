@@ -1500,5 +1500,178 @@ class RoundThree(Base):
         self.assertFalse(self.ws.entry(tid)["in"], "an archived thread stays out; its rows go to needs_you")
 
 
+# -- review of #365, round 4: the worker's exit, moves, the closed flag everywhere ------------------
+
+
+class TrapLock:
+    """An RLock that runs `armed` once, on the worker's thread, right after
+    that thread next fully releases it: the gap between two critical
+    sections (round 4, item 1)."""
+
+    def __init__(self):
+        self.inner = threading.RLock()
+        self.armed = None
+        self.owner = None
+
+    def __enter__(self):
+        return self.inner.__enter__()
+
+    def __exit__(self, *exc):
+        out = self.inner.__exit__(*exc)
+        callback = self.armed
+        if (callback is not None and threading.current_thread() is self.owner
+                and not self.inner._is_owned()):
+            self.armed = None
+            callback()
+        return out
+
+
+class RoundFour(Base):
+    member = RoundThree.member
+    linked_deferral = RoundThree.linked_deferral
+    private_set = RoundThree.private_set
+
+    def move_then_archive(self, thread_id, target):
+        """The thread moves to `target`, then `target` is archived."""
+        stored = self.stores.threads.get(thread_id)
+        stored.project_id = target.id
+        self.stores.threads.save(stored)
+        self.daemon.bus.publish({"kind": "thread_moved", "thread_id": thread_id, "project_id": target.id,
+                                 "data": {"thread_id": thread_id, "to_project_id": target.id}})
+        project = self.stores.projects.get(target.id)
+        project.archived = "2026-11-14T00:00:00+00:00"
+        self.stores.projects.save(project)
+        self.daemon.bus.publish({"kind": "project_archived", "project_id": target.id,
+                                 "data": {"project_id": target.id}})
+
+    def restore(self, project):
+        stored = self.stores.projects.get(project.id)
+        stored.archived = None
+        self.stores.projects.save(stored)
+        self.daemon.bus.publish({"kind": "project_restored", "project_id": project.id,
+                                 "data": {"project_id": project.id}})
+
+    # 1. an event at the worker's exit is not lost ---------------------------------------------
+
+    def test_an_event_at_the_workers_exit_is_not_lost(self):
+        guard = patch.object(working, "RECONCILE_S", 0.01)
+        guard.start()
+        self.addCleanup(guard.stop)
+        ws = working.WorkingSet(self.daemon, clock=self.clock, mono=self.clock.mono)
+        trap = TrapLock()
+        ws._lock = trap
+        ws.start()
+        self.addCleanup(ws.stop)
+        tid = self.thread().id
+        real, runs = ws.reconcile, []
+
+        def reconcile():
+            out = real()
+            if not runs:
+                # The deferral lands and its event arrives right after this
+                # worker's next critical section: its last pending check.
+                trap.owner = threading.current_thread()
+
+                def late_event():
+                    self.linked_deferral(tid, "dfr0000030")
+                    ws.observe({"kind": "inbox_changed"})
+                trap.armed = late_event
+            runs.append(1)
+            return out
+        with patch.object(ws, "reconcile", reconcile):
+            ws.observe({"kind": "inbox_changed"})
+            eventually(lambda: trap.armed is None and runs)
+            eventually(lambda: ws.entry(tid) is not None and ws.entry(tid)["in"])
+        self.assertGreaterEqual(len(runs), 2, "the late event was run, by a rerun or a new worker")
+
+    # 2. a move is a lifecycle event --------------------------------------------------------------
+
+    def test_activity_across_a_move_and_an_archive_cannot_rejoin(self):
+        tid = self.member()
+        self.done(tid)
+        real, fired = self.ws._visible, []
+
+        def moved_meanwhile(thread_id):
+            seen = real(thread_id)                  # visible in Calc: passes
+            if thread_id == tid and not fired:
+                fired.append(1)
+                self.move_then_archive(tid, self.other)
+            return seen
+        with patch.object(self.ws, "_visible", moved_meanwhile):
+            self.publish("relay_in", tid, data={})
+        self.assertTrue(fired)
+        self.assertFalse(self.is_in(tid), "an archived thread does not rejoin")
+        self.restore(self.other)
+        self.assertFalse(self.is_in(tid), "restoring its new project shows no stale membership")
+
+    def test_a_move_bumps_no_seq(self):
+        tid = self.member()
+        seq = self.seq(tid)
+        self.call("PATCH", f"/threads/{tid}", {"project_id": self.other.id})
+        self.assertEqual(self.seq(tid), seq)
+        self.publish("relay_in", tid, data={})
+        self.assertEqual(self.seq(tid), seq + 1, "activity after the move counts as before")
+
+    # 4. the same project's archive (Sol's surviving mutant) -------------------------------------
+
+    def test_activity_across_its_own_projects_archive_cannot_rejoin(self):
+        tid = self.member()
+        self.done(tid)
+        real, fired = self.ws._visible, []
+
+        def archived_meanwhile(thread_id):
+            seen = real(thread_id)
+            if thread_id == tid and not fired:
+                fired.append(1)                     # Calc itself is archived mid-flight
+                project = self.stores.projects.get(self.project.id)
+                project.archived = "2026-11-14T00:00:00+00:00"
+                self.stores.projects.save(project)
+                self.daemon.bus.publish({"kind": "project_archived", "project_id": self.project.id,
+                                         "data": {"project_id": self.project.id}})
+            return seen
+        with patch.object(self.ws, "_visible", archived_meanwhile):
+            self.publish("relay_in", tid, data={})
+        self.assertTrue(fired)
+        self.assertFalse(self.is_in(tid))
+        self.restore(self.project)
+        self.assertFalse(self.is_in(tid), "restore does not rejoin")
+
+    # 3. the closed flag in the lifecycle handlers and before pruning -------------------------
+
+    def test_an_archive_paused_across_stop_changes_nothing(self):
+        ws = self.private_set()
+        tid = self.thread().id
+        ws.observe({"kind": "user_message", "thread_id": tid, "project_id": self.project.id})
+        self.assertTrue(ws.entry(tid)["in"])
+        gate, entered = threading.Event(), threading.Event()
+        real = ws._project_threads
+
+        def slow(project_id):
+            out = real(project_id)
+            entered.set()
+            gate.wait(5)
+            return out
+        with patch.object(ws, "_project_threads", slow):
+            archiver = threading.Thread(target=ws.observe, args=(
+                {"kind": "project_archived", "project_id": self.project.id, "data": {}},))
+            archiver.start()
+            self.assertTrue(entered.wait(2))
+            ws.stop()
+            gate.set()
+            archiver.join(5)
+        self.assertTrue(ws.entry(tid)["in"], "no membership change after stop returned")
+
+    def test_a_sweep_after_stop_prunes_nothing(self):
+        ws = self.private_set()
+        tid = self.thread().id
+        ws.observe({"kind": "user_message", "thread_id": tid, "project_id": self.project.id})
+        with ws._lock:
+            ws._take_out(tid, "done", working._iso(self.clock()))
+        self.clock.advance(days=40)
+        ws.stop()
+        self.assertEqual(ws.sweep(), [])
+        self.assertIsNotNone(ws.entry(tid), "an old entry is not pruned after stop")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

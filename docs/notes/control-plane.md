@@ -2413,8 +2413,10 @@ The daemon half of "the Inbox is your working set of threads" (plan
   reads and a failed reconcile (retried on the next event or sweep) can
   stretch the time to recovery, with no fixed bound. The row is drawn in
   `needs_you` throughout. `stop()` closes the set: timers cancelled, a
-  running worker waited for (5 s each), and every commit checks the closed
-  flag, so no membership change follows it.
+  running worker waited for (5 s each), and every section that changes
+  membership (activity, reconcile, the sweep's pruning and exits, seeding,
+  Done, Undo, and the archive, restore and delete handlers) checks the
+  closed flag first, so no membership change follows it.
 - **Leaving.** The hourly sweep (first run 5 minutes after start) takes out
   threads idle past the limit (default 3 days, 1 to 30, `POST
   /working/settings`). Done needs the `seq` the HUD drew (else 409 with the
@@ -2429,7 +2431,8 @@ The daemon half of "the Inbox is your working set of threads" (plan
   Archive, restore and delete bump a lifecycle generation (per thread, and
   per project) and clear any `done_token`: activity, a reconcile or a seed
   checked before the event is dropped, an Undo from before it is refused,
-  and another project's event drops nothing.
+  and another project's event drops nothing. A move bumps the thread's
+  generation too (not its `seq`).
 - **Seeding.** Once, at start. A seed whose inbox read failed, or that
   could not read a thread, adds nothing and keeps no `seeded_at`; the next
   sweep tries again. An empty seed with
