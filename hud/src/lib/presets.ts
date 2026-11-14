@@ -4,9 +4,13 @@
 //
 // Stored in `localStorage['jarvis.hud.presets']` as a JSON array, through lib/storage.ts (a blocked or throwing
 // storage is "nothing stored"). Nothing stored is trusted: every read validates each entry (shape, id, name,
-// colours through the same guards a built-in passes: `checkPreset` for the five colours and `checkAccent` for
-// the code accent against the preset's own washes), and every write stores the cleaned list, so an entry this
-// HUD does not understand is dropped rather than carried. Only `#rrggbb` ever leaves this module as a colour,
+// and the quick per-colour guards: each wash and the background unclamped through `checkWash`/`checkBase`, the
+// accent and the code accent through `checkAccent` against the preset's own washes), and every write stores the
+// cleaned list, so an entry this HUD does not understand is dropped rather than carried. The whole-palette
+// proof (`checkPalette`, inside `checkPreset`) is too slow to run over a stored list (Sol round 2: seconds for
+// 24 near-band palettes), so it runs on one preset at a time: the one being added or restored, and the one
+// being applied (the Settings panel calls `checkCustomPreset` at the click and refuses with a note). No read,
+// rename, delete or panel refresh ever proves the stored list. Only `#rrggbb` ever leaves this module as a colour,
 // lower-cased. A name is plain text for React to render: control, format and bidi characters are removed.
 //
 // A rename or delete of an id another window already removed is a refusal, not a crash. Every successful write
@@ -60,55 +64,69 @@ function normaliseColours(v: unknown): Colours | null {
   return { accent, washes: washes as [string, string, string], base, codeAccent };
 }
 
-// The guards are pure and the palette proof can take a few ms, so a verdict is remembered for a colour set.
+/**
+ * The quick per-colour guards (no whole-palette proof): every wash and the background pass unclamped, and the
+ * accent and the code accent are readable and clear of amber and red against the preset's own washes. A
+ * handful of colour conversions, so it may run over every stored entry on each read.
+ */
+function quickCheck(c: Colours): Refusal | null {
+  for (const w of c.washes) {
+    const r = checkWash(w);
+    if (!r.ok) return r;
+    if (r.clamped) return { ok: false, reason: r.note ?? "A preset colour would need darkening." };
+  }
+  const b = checkBase(c.base);
+  if (!b.ok) return b;
+  if (b.clamped) return { ok: false, reason: b.note ?? "A preset background would need darkening." };
+  const a = checkAccent(c.accent, c.washes);
+  if (!a.ok) return a;
+  const code = checkAccent(c.codeAccent, c.washes);
+  return code.ok ? null : code;
+}
+
+// The full check repeats for the same colours (Undo, clicking one preset again): its verdict is remembered.
+// Only full verdicts live here; the quick guards never write to it, so it can never hold an unproved "safe".
 const verdicts = new Map<string, Refusal | null>();
 
-/** null when the preset's colours may be applied as they stand, else the first refusal. */
+/**
+ * null when the preset's colours may be applied as they stand, else the first refusal: the quick guards, then
+ * the whole-palette proof (checkPreset). The proof can take a while, so this runs on ONE preset at a time
+ * (the one being added, restored or applied), never over the stored list.
+ */
 export function checkCustomPreset(p: CustomPreset): Refusal | null {
   const c = normaliseColours(p);
   if (!c) return { ok: false, reason: "A preset needs six colours written as #rrggbb." };
   const key = [c.accent, ...c.washes, c.base, c.codeAccent].join(",");
   const hit = verdicts.get(key);
   if (hit !== undefined) return hit;
-  // The cheap per-colour guards run first, so a doomed colour set is refused before the palette proof
-  // (inside checkPreset) is paid for; nothing that fails a guard is kept either way.
-  let verdict: Refusal | null = null;
-  for (const w of c.washes) {
-    const r = checkWash(w);
-    if (!r.ok) { verdict = r; break; }
-    if (r.clamped) { verdict = { ok: false, reason: r.note ?? "A preset colour would need darkening." }; break; }
-  }
-  if (!verdict) {
-    const b = checkBase(c.base);
-    if (!b.ok) verdict = b;
-    else if (b.clamped) verdict = { ok: false, reason: b.note ?? "A preset background would need darkening." };
-  }
-  if (!verdict) {
-    const a = checkAccent(c.accent, c.washes);
-    if (!a.ok) verdict = a;
-  }
-  if (!verdict) {
-    const code = checkAccent(c.codeAccent, c.washes);
-    if (!code.ok) verdict = code;
-  }
-  if (!verdict) verdict = checkPreset({ id: "custom", name: "custom", accent: c.accent, washes: c.washes, base: c.base });
+  // A doomed colour set is refused by the quick guards before the proof is paid for.
+  const verdict = quickCheck(c) ?? checkPreset({ id: "custom", name: "custom", accent: c.accent, washes: c.washes, base: c.base });
   if (verdicts.size >= 512) verdicts.clear();
   verdicts.set(key, verdict);
   return verdict;
 }
 
-/** A stored or offered entry as a clean preset, or null. Name and colours are normalised; the id must be well formed. */
-function cleanEntry(e: unknown, id: unknown = typeof e === "object" && e !== null ? (e as { id?: unknown }).id : undefined): CustomPreset | null {
+/**
+ * A stored or offered entry as a clean preset, or null: the id well formed, the name and colours normalised,
+ * and the quick guards passed. The whole-palette proof is not run here (see checkCustomPreset).
+ */
+function cleanEntry(e: unknown): CustomPreset | null {
   if (typeof e !== "object" || e === null || Array.isArray(e)) return null;
+  const id = (e as { id?: unknown }).id;
   if (typeof id !== "string" || !ID_RE.test(id)) return null;
   const name = cleanPresetName((e as { name?: unknown }).name);
+  if (!name) return null;
   const c = normaliseColours(e);
-  if (!name || !c) return null;
-  const p: CustomPreset = { id, name, ...c };
-  return checkCustomPreset(p) ? null : p;
+  if (!c || quickCheck(c)) return null;
+  return { id, name, ...c };
 }
 
-/** The valid entries in stored order. Never throws; a corrupt or unreadable record is an empty list. */
+/**
+ * The valid entries in stored order (at most MAX_CUSTOM_PRESETS). Every stored entry is examined, so a valid
+ * preset is kept however many malformed ones come before it; each costs only the quick guards. Entries that
+ * pass them but fail the whole-palette proof are kept here and refused when applied. Never throws; a corrupt
+ * or unreadable record is an empty list.
+ */
 export function loadCustomPresets(storage?: Store | null): CustomPreset[] {
   try {
     const raw = readKey(CUSTOM_PRESETS_KEY, storage);
@@ -123,9 +141,7 @@ export function loadCustomPresets(storage?: Store | null): CustomPreset[] {
     const out: CustomPreset[] = [];
     const ids = new Set<string>();
     const names = new Set<string>(BUILTIN_NAMES);
-    // At most this many raw entries are examined, however many are stored, so a hostile list cannot hold the
-    // thread: a list this HUD wrote has at most MAX_CUSTOM_PRESETS, and the rest is slack for dropped entries.
-    for (const e of parsed.slice(0, MAX_CUSTOM_PRESETS * 2)) {
+    for (const e of parsed) {
       if (out.length >= MAX_CUSTOM_PRESETS) break;
       const p = cleanEntry(e);
       if (!p || ids.has(p.id) || names.has(fold(p.name))) continue;
@@ -232,6 +248,9 @@ export function restoreCustomPreset(preset: CustomPreset, index: number, storage
   if (list.some((p) => p.id === clean.id)) return refuse("That preset is already back.");
   const problem = nameProblem(clean.name, list);
   if (problem) return refuse(problem);
+  // The one preset coming back gets the full check, last (the stored list is never re-proved).
+  const bad = checkCustomPreset(clean);
+  if (bad) return refuse(bad.reason);
   const at = Number.isFinite(index) ? Math.min(list.length, Math.max(0, Math.trunc(index))) : list.length;
   const next = [...list.slice(0, at), clean, ...list.slice(at)];
   const failed = commit(next, storage);

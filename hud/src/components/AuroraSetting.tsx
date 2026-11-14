@@ -21,6 +21,9 @@
 // accent, three washes, background and editor & terminal colour. A custom preset applies like a built-in one and
 // also sets the editor & terminal colour; only these have a pencil (rename in place) and a x (delete, with Undo
 // for 10 s). The controls are always in the DOM and focusable; CSS only fades them in on hover and focus.
+// The list is read with the quick per-colour guards only; the whole-palette proof runs on the one preset
+// clicked (checkCustomPreset in applyCustom), which a refusal stops with a note. Nothing here (render,
+// pressed state, the storage/event refresh) ever runs the full check over the list.
 //
 // "Editor & terminal" is its own colour (`codeAccent`), judged exactly like the accent by the same settle and
 // commit path. Presets, Aurora and RGB never change it and it stays enabled under RGB; Reset clears it.
