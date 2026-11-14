@@ -2492,6 +2492,17 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
 .appearance-preset-swatch.rgb { background: linear-gradient(90deg, #d9534f, #e0a030, #8fbf3f, #3fbf9f, #3f7fdf, #9f5fdf, #d95fa0); }
 .appearance-preset-swatch > .appearance-preset-accent { flex: 0 0 8px; margin-left: 3px; border-radius: 2px; }
 .appearance-colour { margin: 6px 0; }
+/* Custom presets: a preset button with a pencil (rename) and a x (delete) beside it. The two controls are always
+   in the DOM and focusable; only their opacity changes (hover, keyboard focus inside, or no hover at all). */
+.appearance-custom { display: inline-flex; align-items: center; gap: 2px; }
+.appearance-custom-editing { cursor: text; }
+.appearance-custom-name { width: 12ch; max-width: 40vw; padding: 1px 4px; font: inherit; color: var(--text); background: transparent; border: 1px solid var(--border-strong); border-radius: 4px; }
+.appearance-custom-act { padding: 0 5px; line-height: 20px; font-size: 13px; opacity: 0; transition: opacity 0.12s; }
+.appearance-custom:hover .appearance-custom-act, .appearance-custom:focus-within .appearance-custom-act, .appearance-custom-act:focus-visible { opacity: 1; }
+@media (hover: none) { .appearance-custom-act { opacity: 1; } }
+.appearance-custom-bar { margin: 6px 0; }
+.appearance-custom-bar input[type="text"] { padding: 2px 6px; font: inherit; color: var(--text); background: transparent; border: 1px solid var(--border-strong); border-radius: 4px; }
+.appearance-custom-undo { color: var(--text-muted); }
 .appearance-colour input[type="color"] { width: 40px; height: 22px; padding: 0; vertical-align: middle; border: 1px solid var(--border-strong); background: none; cursor: pointer; }
 .appearance-colour code { font-family: var(--mono); word-spacing: normal; color: var(--text-muted); }
 .appearance-note { margin: 2px 0 0; font-size: 12px; }
