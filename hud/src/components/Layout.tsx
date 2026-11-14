@@ -44,6 +44,7 @@ import { terminals, usePanelDot } from "./Terminal";
 import type { Tabs } from "../lib/buffers";
 import { presetTree, rectsOf, type Axis } from "../lib/splittree";
 import { layoutMoved } from "../state/frameguard";
+import { placeAgentPanes as placeAgentPanesOf, type AgentAsk } from "../lib/agentpanes";
 
 export interface LayoutControl {
   zoom: number;
@@ -136,6 +137,13 @@ export interface LayoutControl {
   close: (pane: PaneNo, then?: PaneNo | null) => void;
   /** Whether pane `source` can be split along `axis` in this window now (`dirty`: ids holding an unsaved edit). */
   splitVerdict: (source: PaneNo, axis: Axis, dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  /**
+   * A chat's ask for panes, as one batch (lib/agentpanes `placeAgentPanes`):
+   * the drawn panes in `free` first, then the window laid out once as a
+   * balanced grid. Never moves focus. Per ask, the pane it went to or null;
+   * null when the window is blocked (a card is up).
+   */
+  placeAgent: (free: readonly PaneNo[], asks: readonly AgentAsk[]) => (PaneNo | null)[] | null;
   /** Where a split the owner did not ask for would go from `source` (right, else down), or null (lib/workspace `autoSplit`). */
   autoSplit: (source: PaneNo, held?: readonly PaneNo[]) => { axis: Axis; id: PaneNo } | null;
   /**
@@ -345,6 +353,16 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     const at = now.current;
     return autoSplitOf(at.ws, at.fit, source, held);
   }, []);
+  const placeAgent = useCallback((free: readonly PaneNo[], asks: readonly AgentAsk[]) => {
+    if (blockedRef.current) return null;
+    const at = now.current;
+    const out = placeAgentPanesOf(at.ws, at.fit, free, asks);
+    if (out.ws === at.ws) return out.placed;
+    // Panes move under a pointer that has not moved: no frame counts it as a gesture.
+    layoutMoved();
+    setWs((w) => (w === at.ws ? out.ws : placeAgentPanesOf(w, at.fit, free, asks).ws));
+    return out.placed;
+  }, []);
   const splitVerdict = useCallback((source: PaneNo, axis: Axis, dirty: readonly PaneNo[] = []) => {
     const at = now.current;
     return splitVerdictOf(at.ws, at.fit, source, axis, dirty);
@@ -480,7 +498,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     setPreset, setView, setSubagent, showSubagent, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee, setBrowserDrive,
     setTerminal, forgetTerminal, renameTerminal, moveEdge,
-    equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplit, incarnation,
+    equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplit, placeAgent, incarnation,
   };
 }
 

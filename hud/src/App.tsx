@@ -74,6 +74,8 @@ import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard"
 import { frameKey } from "./lib/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { driving } from "./state/driving";
+import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
+import { WINDOW_ID } from "./lib/windowId";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, GeneralSettings, RoutingSettings, VoicePicker } from "./components/Pickers";
@@ -138,7 +140,7 @@ import { inMonaco, maxWidth } from "./lib/layout";
 import { chordSecond } from "./lib/editorkeys";
 import {
   PANE_NOS, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, presetOfWs, show as showOf, slotOf, splitTitle,
-  subagentSpec, type PaneNo, type PaneSpec, type View,
+  showSubagent as showSubagentIn, subagentSpec, type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
 import type { Axis } from "./lib/splittree";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -1944,16 +1946,24 @@ export default function App() {
           // thread id and its own children's sids, nothing else. Each is
           // placed as a row's click would be, but never moving focus, never
           // into the focused pane, and only once any card is gone.
+          // One record is one batch (lib/agentpanes): free panes first, then
+          // the window laid out once as a grid. Its request id (random, the
+          // daemon's) is how this window says how many it showed.
           if (tid && Array.isArray(data.sids)) {
-            for (const sid of data.sids.slice(0, 11)) {
+            const refs: SubagentRef[] = [];
+            for (const sid of data.sids.slice(0, AGENT_OPEN_MAX)) {
               const ref = { threadId: tid, sid };
-              if (validSid(sid) && !agentOpens.current.some((o) => sameRef(o.ref, ref))) {
-                agentOpens.current = [...agentOpens.current, { ref, at: Date.now() }].slice(-11);
-              }
+              if (validSid(sid) && !refs.some((r) => sameRef(r, ref))) refs.push(ref);
             }
-            // Placed after this window's next commit, never from here: the
-            // layout read here may not show the last placement yet.
-            setAgentOpenTick((t) => t + 1);
+            if (refs.length) {
+              agentOpens.current = [...agentOpens.current, {
+                requestId: agentRequestId(data.request_id), threadId: tid, at: Date.now(),
+                items: refs.map((ref) => ({ kind: "subagent" as const, ref })),
+              }].slice(-AGENT_BATCHES_MAX);
+              // Placed after this window's next commit, never from here: the
+              // layout read here may not show the last placement yet.
+              setAgentOpenTick((t) => t + 1);
+            }
           }
           break;
         default:
@@ -2575,65 +2585,39 @@ export default function App() {
 
   /** The sub-agent pane opened (or reused) last: where a child goes when no split fits. */
   const lastSubPane = useRef<PaneNo | null>(null);
-  /** A chat's `hud_open_subagents` sids, waiting to be placed (`drainAgentOpens`). */
-  const agentOpens = useRef<{ ref: SubagentRef; at: number }[]>([]);
+  /** A chat's asks for panes (`hud_open_subagents`), one batch per bus record, waiting to be placed (`drainAgentOpens`). */
+  const agentOpens = useRef<AgentBatch[]>([]);
   /**
-   * A row's click (or Enter), a card's link, a nested row in a pane, or the
-   * chat's own `hud_open_subagents` (`byAgent`): the child's live transcript
-   * in a read-only pane. The pane already showing it gets focus (a click
-   * only); else an existing drawn pane takes it (the owner's ask,
+   * A row's click (or Enter), a card's link or a nested row in a pane: the
+   * child's live transcript in a read-only pane. The pane already showing it
+   * gets focus; else an existing drawn pane takes it (the owner's ask,
    * 2026-11-12) — never the pane showing the chat that spawned it, never
    * the focused one, never one already showing a sub-agent, never one with
    * unsaved work (an Editor's unsaved edit, words or files in a chat's box),
    * and what it held stays in its spec, so switching it back shows it again;
    * else a split beside that chat (the focused pane when no pane shows it);
    * else the last sub-agent pane shows it instead; else the window says
-   * there is no room. Never under a card. `byAgent` never moves focus: a
-   * chat asking cannot move where the owner is working.
+   * there is no room. Never under a card. A chat's own ask is a batch
+   * (`placeAgentBatch`), never this.
    */
-  const openSubagent = useCallback((ref: SubagentRef, opts: { byAgent?: boolean } = {}): "placed" | "none" | "full" => {
-    const byAgent = opts.byAgent === true;
+  const openSubagent = useCallback((ref: SubagentRef): "placed" | "none" | "full" => {
     if (crashedRef.current || blockedNow.current) return "none";
     const lay = layoutNow.current;
-    const at = live.current;
     const drawnSub = (n: PaneNo | null): n is PaneNo => n !== null && lay.fit.panes.includes(n)
       && lay.ws.panes[n - 1].view === "subagent";
     const showing = lay.fit.panes.find((n) => drawnSub(n) && sameRef(lay.ws.panes[n - 1].subagent, ref));
     if (showing !== undefined) {
-      if (!byAgent) {
-        lay.focus(showing);
-        focusPaneElement(showing);
-      }
+      lay.focus(showing);
+      focusPaneElement(showing);
       return "none";
     }
-    const chatPane = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "chat"
-      && shownThread(at.chats[n], pendingThread.current[n]) === ref.threadId);
-    // An existing pane, in reading order (the owner's ask, 2026-11-12).
-    // Task, Diff, Inbox and Review views hold typed answers, notes, steers
-    // and picks inside themselves, out of this window's sight, and lose them
-    // when they unmount: never taken (review of the change, MED 1).
-    const unsaved = (n: PaneNo): boolean => {
-      const spec = lay.ws.panes[n - 1];
-      if (KEEPS_OWN_WORK.has(spec.view) || dirtyNow(n)) return true;
-      const c = at.chats[n];
-      return spec.view === "chat" && (!!c.input.trim() || c.files.length > 0 || c.restore.length > 0);
-    };
-    // The chat asking never takes where the owner is: the focused pane, the
-    // one holding the keyboard, or a Browser pane an agent is driving.
-    const inUse = (n: PaneNo): boolean => {
-      if (n === lay.ws.focused) return true;
-      if (!byAgent) return false;
-      const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
-      if (paneOfTestId(active?.dataset.testid) === n) return true;
-      const b = lay.ws.panes[n - 1].browser;
-      return driving.active(b?.tabs.find((t) => t.id === b?.active)?.remoteTabId, Date.now());
-    };
+    const chatPane = chatPaneOf(ref.threadId);
     const take = lay.fit.panes.find((n) => n !== chatPane && lay.ws.panes[n - 1].view !== "subagent"
-      && !inUse(n) && !unsaved(n));
+      && n !== lay.ws.focused && !paneHoldsWork(n));
     if (take !== undefined) {
-      lay.showSubagent(take, ref, !byAgent);
+      lay.showSubagent(take, ref, true);
       lastSubPane.current = take;
-      if (!byAgent) focusPaneElement(take);
+      focusPaneElement(take);
       return "placed";
     }
     const source = chatPane ?? (lay.fit.panes.includes(lay.ws.focused) ? lay.ws.focused : lay.fit.panes[0]);
@@ -2645,35 +2629,92 @@ export default function App() {
       const id = allocate(lay.ws, dirty, holdingIds());
       if (id !== null) {
         if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
-        lay.split(source, axis, id, subagentSpec(ref), { focus: !byAgent });
+        lay.split(source, axis, id, subagentSpec(ref), { focus: true });
         lastSubPane.current = id;
-        if (!byAgent) focusPaneElement(id);
+        focusPaneElement(id);
         return "placed";
       }
     }
     // Reusing a sub-agent pane is the owner's click alone: a chat asking for
     // more than fit would replace its own children one after another, or
     // another chat's the owner opened (review of the change, MED 2).
-    const reuse = byAgent ? undefined : [lastSubPane.current, ...lay.fit.panes].find(drawnSub);
+    const reuse = [lastSubPane.current, ...lay.fit.panes].find(drawnSub);
     if (reuse !== undefined) {
-      lay.showSubagent(reuse, ref, !byAgent);
+      lay.showSubagent(reuse, ref, true);
       lastSubPane.current = reuse;
-      if (!byAgent) focusPaneElement(reuse);
+      focusPaneElement(reuse);
       return "placed";
     }
-    // A chat's ask says it once per drain (`drainAgentOpens`), not per child.
-    if (!byAgent) dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
+    dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
     return "full";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releasePane, dispatch]);
-  // The bus handler is set up once; it reaches the current opener here.
-  const openSubagentNow = useRef(openSubagent);
-  openSubagentNow.current = openSubagent;
   /**
-   * A chat's asks, one placement per layout: each choice reads the layout
-   * the last one drew (the effect below runs again once it has), so two
-   * children never land in one pane. Under a card they wait; one already
-   * shown, or with no room, places nothing and the next goes on.
+   * Pane `n` holds work an ask must never take: a Task, Diff, Inbox or Review
+   * view (they hold typed answers, notes, steers and picks inside
+   * themselves, out of this window's sight, and lose them when they unmount;
+   * review of the change, MED 1), an unsaved edit, or words, files or
+   * handed-back words in a chat's box.
+   */
+  const paneHoldsWork = (n: PaneNo): boolean => {
+    const spec = layoutNow.current.ws.panes[n - 1];
+    if (KEEPS_OWN_WORK.has(spec.view) || dirtyNow(n)) return true;
+    const c = live.current.chats[n];
+    return spec.view === "chat" && (!!c.input.trim() || c.files.length > 0 || c.restore.length > 0);
+  };
+  /**
+   * The drawn panes a chat's ask may take, in reading order (D3): never the
+   * pane showing that chat, the focused pane, the one holding the keyboard, a
+   * Browser pane an agent is driving, a sub-agent pane, or one holding work.
+   */
+  const agentFreePanes = (threadId: string): PaneNo[] => {
+    const lay = layoutNow.current;
+    const chatPane = chatPaneOf(threadId);
+    const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
+    const keyboard = paneOfTestId(active?.dataset.testid);
+    return lay.fit.panes.filter((n) => {
+      if (n === chatPane || n === lay.ws.focused || n === keyboard) return false;
+      const spec = lay.ws.panes[n - 1];
+      if (spec.view === "subagent" || paneHoldsWork(n)) return false;
+      const b = spec.browser;
+      return !driving.active(b?.tabs.find((t) => t.id === b?.active)?.remoteTabId, Date.now());
+    });
+  };
+  /**
+   * One chat's ask, as a batch (lib/agentpanes): a child already shown stays
+   * where it is and counts as shown; the rest take the free panes, then the
+   * window is laid out once as a grid. Never moves focus. Null while the
+   * window cannot change (a card).
+   */
+  const placeAgentBatch = (batch: AgentBatch): { placed: number; notPlaced: number; changed: boolean } | null => {
+    if (crashedRef.current || blockedNow.current) return null;
+    const lay = layoutNow.current;
+    let shown = 0;
+    const asks: AgentAsk[] = [];
+    for (const item of batch.items) {
+      const ref = item.ref;
+      const there = lay.fit.panes.some((n) => lay.ws.panes[n - 1].view === "subagent"
+        && sameRef(lay.ws.panes[n - 1].subagent, ref));
+      if (there) shown++;
+      else asks.push({ show: (w, n) => showSubagentIn(w, n, ref, false), spec: subagentSpec(ref) });
+    }
+    if (!asks.length) return { placed: shown, notPlaced: 0, changed: false };
+    const got = lay.placeAgent(agentFreePanes(batch.threadId), asks);
+    if (got === null) return null;
+    const placed = got.filter((n) => n !== null).length;
+    const last = [...got].reverse().find((n): n is PaneNo => n !== null);
+    if (last !== undefined) lastSubPane.current = last;
+    return { placed: shown + placed, notPlaced: batch.items.length - shown - placed, changed: placed > 0 };
+  };
+  // The bus handler is set up once; it reaches the current placement here.
+  const placeAgentBatchNow = useRef(placeAgentBatch);
+  placeAgentBatchNow.current = placeAgentBatch;
+  /**
+   * A chat's asks, one batch per layout: each reads the layout the last one
+   * drew (the effect below runs again once it has), so two children never
+   * land in one pane. Under a card, Settings or a busy pointer they wait.
+   * After each batch the window tells the daemon how many it showed, counts
+   * only (`api.agentPanesReport`).
    */
   const [agentOpenTick, setAgentOpenTick] = useState(0);
   const agentOpenRetry = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2694,15 +2735,21 @@ export default function App() {
       }
       return;
     }
-    let full = false;
     while (agentOpens.current.length) {
       const [first, ...rest] = agentOpens.current;
+      const out = placeAgentBatchNow.current(first);
+      if (out === null) return;
       agentOpens.current = rest;
-      const got = openSubagentNow.current(first.ref, { byAgent: true });
-      if (got === "placed") return;
-      if (got === "full") full = true;
+      if (out.notPlaced > 0) {
+        dispatch({ type: "notice", text: out.notPlaced === 1 ? "No room for another pane: close one or use ⊞"
+          : `No room for ${out.notPlaced} more panes: close some or use ⊞` });
+      }
+      if (first.requestId !== null) {
+        void api.agentPanesReport({ window: WINDOW_ID, request_id: first.requestId, placed: out.placed,
+          not_placed: out.notPlaced }).catch(() => undefined);
+      }
+      if (out.changed) return;
     }
-    if (full) dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
   };
   useEffect(() => () => { if (agentOpenRetry.current !== null) clearTimeout(agentOpenRetry.current); }, []);
   // After every commit that could matter: the layout the last placement drew,

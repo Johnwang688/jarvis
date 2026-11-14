@@ -1483,6 +1483,45 @@ chat pane taken over" (plan §D5).
   section 9. Sections 3 and SV-4 give both chats unsent words so they still
   test the split and reuse path.
 
+### A chat's ask is one batch, laid out as a grid, and reported (2026-11-13)
+
+Decisions: `docs/plans/2026-11-13-agent-pane-grid-decisions.md` (D1, D3).
+This supersedes the "one per layout, split beside the chat" placement above
+for a chat's ask; the owner's own row click is unchanged. The owner's 11
+sub-agents had drawn 3 lopsided panes and dropped 8 silently: halving the
+chat's pane stops at 360 px or three down, and a 4×3 window is unreachable
+that way.
+
+- **One bus record is one batch** (`App.tsx` `placeAgentBatch`,
+  `lib/agentpanes.ts` `placeAgentPanes`, `Layout.tsx` `placeAgent`). A child
+  already shown counts as shown. The rest take the free drawn panes in
+  reading order (`agentFreePanes`: never the chat's pane, the focused or
+  keyboard pane, a Browser pane an agent drives, a sub-agent pane, or one
+  holding work, `paneHoldsWork`). What is left re-lays the window **once**:
+  a balanced grid (`splittree.ts` `gridTree`, `balancedRows`) of every drawn
+  pane in its reading order and then the new ones, T = min(12, drawn + left,
+  drawn + free ids), at most 3 rows of at most 4, each cell at least
+  PANE_MIN_W × PANE_MIN_H at the px the centre is drawn now (never by
+  folding a side pane or the panel), fewest rows first, longer rows first
+  (7 = 4/3, 11 = 4/4/3). If even the largest grid that fits is short, what
+  fits is placed and the rest counted. Only free ids: a pane ⊞ hid keeps its
+  id and spec. A window already dropping panes (or a stale fit) takes free
+  panes only. Focus never moves; sizes go to equal, as ⊞ does. Batches still
+  wait behind a card, Settings or a busy pointer, one batch per commit.
+- **Report back.** The record carries the daemon's random `request_id`.
+  After each batch the window posts counts only, `{window, request_id,
+  placed, not_placed}`, to `POST /agent-panes/report` (`jarvis/v2/
+  agent_panes.py`; `docs/hud-api.md` "Agent panes"): owner-only, strict
+  loopback Host, a live owner window, first window wins. `SubagentPanes`
+  waits up to 3 s (monotonic, active deadline, never under the daemon lock)
+  and tells the chat "Shown 11 of 11 …", "Shown 7 of 11 …; no room for 4",
+  or that no window replied (or none is open). A short window also shows
+  "No room for N more panes" once.
+- Tests: `hud/src/lib/agentpanes.test.ts` (gridTree, balancedRows, gridFor,
+  placement incl. the 11-from-1 4×3 case, the narrow case, never a hidden id,
+  a fit property); `tests/v2/hud_subagents_check.py` `ReportBack`,
+  `ReportRoute`; `tests/face/hud_v2_subagents_check.py` section 10.
+
 ## Native sub-agents: the owner's Stop on one child (SV-4, 2026-10-15)
 
 API: `docs/hud-api.md` "`POST /threads/{id}/subagents/{sid}/stop`"; daemon

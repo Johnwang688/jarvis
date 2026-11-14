@@ -26,7 +26,12 @@ enforcing the owner-only rule on both sub-agent routes. What it pins:
      Codex's hover help states its caveat; "Can't stop" says why; a refusal
      shows the daemon's sentence; under a card it is disabled and a click
      sends nothing; the thread's own Stop on a Claude chat says it also
-     stops background sub-agents (Codex's does not).
+     stops background sub-agents (Codex's does not);
+  9. existing panes first, and a chat's own `subagent_open` (never the focused
+     pane, never focus moved, never a Task or Inbox pane, waits under a card);
+ 10. eleven at once (2026-11-13): one 4x3 grid with the chat in slot 1, each
+     cell at least the minimum size, the window's counts posted to
+     `/agent-panes/report`; a narrower window places what fits and says so.
 
 Run: PLAYWRIGHT_BROWSERS_PATH=… PYTHONPATH=. .venv/bin/python tests/face/hud_v2_subagents_check.py
 """
@@ -846,6 +851,60 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: card.count() == 0)
         until(lambda: view_of(2) == "subagent")
         check("once the card is gone it is placed", shows(2) == "cl:toolu_alpha")
+
+        # 10. Eleven at once (2026-11-13, decisions D1): one balanced grid with
+        # the chat first, never the chat's pane halved until three fit; and the
+        # window says how many it showed (counts only, to the owner route).
+        ONE = json.dumps({"preset": "single", "focused": 1, "panes": [{"view": "chat"}]})
+        many = [f"cl:toolu_g{n:02d}" for n in range(1, 12)]
+        s["lists"]["c1"] = [r for r in s["lists"]["c1"] if r["sid"] not in many] + [
+            row(sid, name=f"grid child {n}") for n, sid in enumerate(many, 1)]
+        for sid in many:
+            s["transcripts"][f"c1|{sid}"] = {"subagent": row(sid), "truncated": False, "messages": []}
+        rects = lambda: page.evaluate("""() => { const f = window.__hud.workspace().fit;
+            return f.panes.map(n => [n, f.boxes[n].rect, f.boxes[n].px]); }""")
+        _fresh(page, mock, until, ONE, size=(2400, 1000))
+        open_thread(1, "c1")
+        _box(page, 1).click()
+        s["reports"] = []
+        rid = "1" * 32
+        mock.emit("subagent_open", {"sids": many, "request_id": rid}, thread_id="c1", project_id="p1", at=at(70))
+        until(lambda: len(ws()["order"]) == 12)
+        until(lambda: len(s["reports"]) == 1)
+        order = ws()["order"]
+        got = rects()
+        tops = sorted({round(r["top"], 4) for _, r, _ in got})
+        per_row = [sum(1 for _, r, _ in got if round(r["top"], 4) == t) for t in tops]
+        check("hud_open_subagents with eleven: one 4x3 grid of twelve, the chat in slot 1",
+              order[0] == 1 and per_row == [4, 4, 4] and view_of(1) == "chat"
+              and sorted(shows(n) for n in order[1:]) == sorted(many), f"{order} {per_row}")
+        check("every pane of the grid is at least the minimum pane size",
+              all(px["width"] >= 360 and px["height"] >= 200 for _, _, px in got),
+              str([(n, round(px["width"]), round(px["height"])) for n, _, px in got]))
+        check("the grid never moved the owner's focus or keyboard",
+              ws()["focused"] == 1 and page.evaluate("!!document.activeElement.closest('[data-testid=\"pane-1\"]')"))
+        report = s["reports"][0]
+        check("the window reports 11 of 11, counts only, keyed by the daemon's request id",
+              report["request_id"] == rid and (report["placed"], report["not_placed"]) == (11, 0)
+              and len(report["window"]) == 32 and set(report) == {"window", "request_id", "placed", "not_placed"},
+              str(report))
+        page.screenshot(path=str(SHOTS / "grid-eleven.png"))
+
+        # A narrower window: what fits is placed, the rest counted and said.
+        _fresh(page, mock, until, ONE, size=(1600, 900))
+        open_thread(1, "c1")
+        _box(page, 1).click()
+        s["reports"] = []
+        mock.emit("subagent_open", {"sids": many, "request_id": "2" * 32}, thread_id="c1", project_id="p1", at=at(71))
+        until(lambda: len(s["reports"]) == 1)
+        report = s["reports"][0]
+        drawn = len(ws()["order"])
+        check("a narrow window places what fits and reports the rest as not placed",
+              1 < drawn < 12 and report["placed"] == drawn - 1 and report["not_placed"] == 11 - (drawn - 1)
+              and ws()["focused"] == 1 and all(px["width"] >= 360 and px["height"] >= 200 for _, _, px in rects()),
+              f"{drawn} {report}")
+        check("and says there was no room for the rest",
+              "No room for" in page.locator('[data-testid="error"]').inner_text())
 
         check("the HUD's reads were never refused by the owner gate", s["refused"] == 0)
         check("no page errors", not errors, "; ".join(errors[:3]))

@@ -3502,6 +3502,29 @@ label (`subagent_sid`, only to a callback that takes the keyword); it is an
 id matching the sid pattern or nothing, never a word the model chose, and
 no layer reads it. A private (Browser) card's projection leaves it out.
 
+## Agent panes: a chat's ask and the window's report (2026-11-13)
+
+Decisions: `docs/plans/2026-11-13-agent-pane-grid-decisions.md`.
+
+**Bus record** `subagent_open` (`hud_open_subagents`): `{thread_id, data:
+{sids: [sid, …], request_id?}}`, at most 11 sids, ids only. `request_id` is
+32 lowercase hex characters, random, made by the daemon; absent when no
+owner window holds an event stream (then the call does not wait) or too
+many asks already wait. The window places the whole record as one batch
+(`docs/notes/hud-workspace.md`, "A chat's ask is one batch").
+
+    POST /agent-panes/report   {window, request_id, placed, not_placed} -> {"ok": true}
+
+Owner-only (`projects.owner_only`, checked first), on a strict loopback
+`Host` (403 otherwise; the API listener every tool's client uses always gets
+403). Exactly those four keys; `window` is the 32-hex id the window put on
+`GET /events?window=` and must hold that stream now (409 otherwise);
+`placed` and `not_placed` are integers 0–11 adding up to the panes the ask
+named (400 otherwise). An id nothing waits for (unknown, or the 3 s wait
+already over) is 404; a second window's answer is 409 (the first wins). No
+query string. The body carries counts and ids only, never a URL, name or
+word, and decides nothing: it is only what the chat is told.
+
 ## Additions 2026-10-16: owner pickers for native select, date and colour controls (B-PICKERS)
 
 Chrome's screencast never draws a `<select>`, date, time, datetime-local,
