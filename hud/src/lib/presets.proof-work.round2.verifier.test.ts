@@ -87,7 +87,10 @@ beforeEach(() => vi.resetModules()); // Model a newly opened settings window, wi
 
 it.each(["load", "add", "rename", "restore"])("bounds cold %s work when every cheap guard passes but the palette proof refuses", async action => {
   const P = await import("./presets");
-  const list = entries(rejected);
+  // Orchestrator rewrite (2026-11-14): these rows pass the quick guards load runs, so 24 of them fill the list
+  // and add/restore are rightly refused as full. Add and restore get 23, leaving room, so the time bound is
+  // still measured with proof-only entries stored.
+  const list = entries(action === "add" || action === "restore" ? rejected.slice(0, P.MAX_CUSTOM_PRESETS - 1) : rejected);
   expect(list.length).toBeLessThanOrEqual(P.MAX_CUSTOM_PRESETS * 2);
   for (const p of list) {
     for (const w of p.washes) expect(checkWash(w)).toMatchObject({ok:true, clamped:false});
