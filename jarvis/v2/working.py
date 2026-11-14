@@ -51,11 +51,16 @@ to 4 is always in.** Two halves keep it:
     thread-scoped record: a quiet-hours deferral is settled by the broker
     and announced only by `inbox_changed`, so it does not bump `seq`, and
     can land while a Done or a sweep is deciding, or just after. Every
-    `inbox_changed` arms one debounced `reconcile` (`RECONCILE_S`, off the
-    publish thread; also run at the start of each sweep): one read, and
+    `inbox_changed` schedules a `reconcile` `RECONCILE_S` later, off the
+    publish thread (also run at the start of each sweep): one read, and
     every visible chat thread with a linked rank 1 to 4 row that is out (or
-    has no entry) is brought in, its `seq` bumped. So the invariant can be
-    broken for at most the debounce, and heals itself.
+    has no entry) is brought in, its `seq` bumped. At most one reconcile
+    worker runs; events while it runs make it run once more. The invariant
+    heals itself, but `RECONCILE_S` is only the scheduling delay: waiting
+    for the decision lock, the source reads and a reconcile whose read
+    failed (retried on the next event or sweep) can stretch the time to
+    recovery, with no fixed bound. The row is drawn in `needs_you`
+    meanwhile.
 
 Two ways to leave:
 
@@ -83,10 +88,16 @@ reconcile above brings its thread back.
 **Lifecycle (D-8).** Archiving a thread or its project takes it out
 (reason "archived"; its rows show in `needs_you`). Restore does not rejoin.
 Delete drops the entry. A move or rename publishes `working_changed` only.
-Archive, restore and delete bump a lifecycle generation (per thread; one
-counter for every project event) and clear any `done_token`, so activity
-that passed the visibility check before the event is dropped, and an Undo
-from before it is refused.
+Archive, restore and delete bump a lifecycle generation (per thread, and
+per project for a project's events) and clear any `done_token`, so a
+change that passed the visibility check before the event (activity, a
+reconcile, a seed) is dropped when it commits, and an Undo from before it
+is refused. Another project's event does not count.
+
+**Stopping.** `stop` closes the set for good: the timers are cancelled, a
+running reconcile or sweep is waited for (`STOP_JOIN_S` each), and every
+commit checks the closed flag under the store lock, so nothing changes
+membership after `stop` returns.
 
 **The signal (D-5).** `working_changed` carries no ids and no data: `/events`
 is not owner-checked. Its timing can still hint at membership (it follows a
@@ -96,9 +107,10 @@ derivable anyway. The HUD reads `GET /working` (owner-only) again.
 **Startup (D-11).** `Daemon.__init__` loads the store and registers the
 observer; `Daemon.start` seeds once (when `seeded_at` is absent: every
 visible chat thread updated within the idle limit, and every one with a
-linked rank 1 to 4 row) and arms the timer. A seed whose inbox read failed
-is incomplete: nothing is added, `seeded_at` stays unset, and the next
-sweep tries again. A seed that adds nothing to a store with no file writes
+linked rank 1 to 4 row) and arms the timer. A seed whose inbox read failed,
+or that could not read one of the threads (told apart from a thread that is
+gone or hidden), is incomplete: nothing is added, `seeded_at` stays unset,
+and the next sweep tries again. A seed that adds nothing to a store with no file writes
 nothing (no `<data>/inbox/` folder is made at an empty start), so
 `seeded_at` is then remembered in memory only.
 
@@ -131,6 +143,7 @@ FIRST_SWEEP_S = 300.0           # the first sweep, after the inbox sources are u
 SWEEP_S = 3600.0                # then hourly
 RECONCILE_S = 0.25              # an `inbox_changed` burst becomes one reconcile
 UNDO_S = 10.0                   # the daemon's Undo window; the HUD's toast shows 5 s
+STOP_JOIN_S = 5.0               # how long `stop` waits for a running reconcile or sweep
 BLOCKING_MAX_RANK = 4           # IN-8: a linked row of rank 1 to 4 holds a thread in
 COUNTED_MAX_RANK = 5            # `waitingCount` (hud/src/lib/inbox.ts)
 PENDING_MAX_RANK = 2            # `anyPending`
@@ -271,10 +284,14 @@ class WorkingSet:
         self._undo: dict[str, tuple[str, float]] = {}   # thread id -> (token, monotonic deadline)
         self._chat: dict[str, bool] = {}                # thread id -> a chat thread (never changes)
         self._gen: dict[str, int] = {}                  # thread id -> lifecycle generation
-        self._project_gen = 0                           # every project archive, restore, delete
+        self._pgen: dict[str, int] = {}                 # project id -> lifecycle generation
         self._timer = None
         self._reconcile_timer = None
+        self._reconciling = False                       # one reconcile worker at a time
+        self._reconcile_again = False                   # an event came while it ran: once more
+        self._workers: set = set()                      # threads running a reconcile or a sweep
         self._on = False
+        self._closed = False                            # `stop` ran: no membership write after it
         self._load()
 
     # -- the file -------------------------------------------------------------------
@@ -387,23 +404,44 @@ class WorkingSet:
             known = self._chat[thread.id] = role == "chat" and not thread.task_id
         return known
 
-    def _visible(self, thread_id):
-        """The thread when it is a chat thread (never a task's, D-7) that is
-        neither archived nor in an archived project (D-8), else None. Called
-        with no lock of ours held."""
-        thread = self._thread(thread_id)
+    def _check_visible(self, thread_id):
+        """(thread, read): the thread when it is a chat thread (never a
+        task's, D-7) that is neither archived nor in an archived project
+        (D-8), else None; `read` is False when the thread record could not be
+        read (told apart from a thread that is missing or not visible).
+        Called with no lock of ours held."""
+        try:
+            thread = self.daemon.stores.threads.get(thread_id)
+        except (StoreError, ValueError):
+            return None, False
         if thread is None or not self._is_chat(thread) or thread.archived:
-            return None
+            return None, True
         from .projects import is_archived
-        return None if is_archived(self.daemon.stores, thread.project_id) else thread
+        return (None if is_archived(self.daemon.stores, thread.project_id) else thread), True
+
+    def _visible(self, thread_id):
+        return self._check_visible(thread_id)[0]
 
     def _visible_chat(self, thread_id) -> bool:
         return self._visible(thread_id) is not None
 
-    def _generation(self, thread_id) -> tuple[int, int]:
-        """Under `_lock`: the lifecycle generation an in-flight change must
-        still see when it commits."""
-        return self._gen.get(thread_id, 0), self._project_gen
+    def _generations(self) -> tuple[dict, dict]:
+        """Under `_lock`: every lifecycle generation, copied, taken before a
+        visibility check."""
+        return dict(self._gen), dict(self._pgen)
+
+    def _unchanged(self, before, thread_id, project_id) -> bool:
+        """Under `_lock`: no archive, restore or delete of this thread or of
+        its project since `before` (a change to another project does not
+        count)."""
+        threads, projects = before
+        return (self._gen.get(thread_id, 0) == threads.get(thread_id, 0)
+                and self._pgen.get(project_id, 0) == projects.get(project_id, 0))
+
+    def _bump_project(self, project_id) -> None:
+        """Under `_lock`."""
+        if isinstance(project_id, str):
+            self._pgen[project_id] = self._pgen.get(project_id, 0) + 1
 
     # -- the bus (D-2, D-8) ---------------------------------------------------------------
 
@@ -440,16 +478,18 @@ class WorkingSet:
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
             if data.get("op") not in SUBAGENT_OPS:
                 return
-        # The generation before the visibility check: an archive, restore or
-        # delete that lands after the check (and before the write) bumps it,
-        # and this record is then dropped rather than rejoining.
+        # The generations before the visibility check: an archive, restore or
+        # delete of this thread or its project that lands after the check
+        # (and before the write) bumps one, and this record is then dropped
+        # rather than rejoining. Another project's event does not count.
         with self._lock:
-            generation = self._generation(thread_id)
-        if not self._visible_chat(thread_id):
+            before = self._generations()
+        thread = self._visible(thread_id)
+        if thread is None:
             return
         now = _iso(self.clock())
         with self._lock:
-            if self._generation(thread_id) != generation:
+            if self._closed or not self._unchanged(before, thread_id, thread.project_id):
                 return
             entry = self._threads.get(thread_id)
             if entry is None:
@@ -506,7 +546,7 @@ class WorkingSet:
             ids = [thread_id]
         else:
             with self._lock:
-                self._project_gen += 1
+                self._bump_project(record.get("project_id"))
             ids = self._project_threads(record.get("project_id"))
         changed = moved = False
         with self._lock:
@@ -529,7 +569,7 @@ class WorkingSet:
             ids = [thread_id]
         else:
             with self._lock:
-                self._project_gen += 1
+                self._bump_project(record.get("project_id"))
             ids = self._project_threads(record.get("project_id"))
         changed = False
         with self._lock:
@@ -547,7 +587,7 @@ class WorkingSet:
                         self._gen[tid] = self._gen.get(tid, 0) + 1
         else:
             with self._lock:
-                self._project_gen += 1
+                self._bump_project(record.get("project_id"))
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
             removed = data.get("removed_thread_ids")
             ids = {i for i in removed if isinstance(i, str)} if isinstance(removed, list) else set()
@@ -643,9 +683,16 @@ class WorkingSet:
 
     def _arm_reconcile(self) -> None:
         """From the observer: one reconcile `RECONCILE_S` from now, off the
-        publish thread, however many `inbox_changed` arrive meanwhile."""
+        publish thread. At most one worker at a time: an event that arrives
+        while one is armed is folded into it, and one that arrives while one
+        runs makes it run once more when it finishes."""
         with self._lock:
-            if not self._on or self._reconcile_timer is not None:
+            if not self._on or self._closed:
+                return
+            if self._reconciling:
+                self._reconcile_again = True
+                return
+            if self._reconcile_timer is not None:
                 return
             try:
                 timer = self._timer_factory(RECONCILE_S, self._reconcile_tick)
@@ -654,17 +701,39 @@ class WorkingSet:
                 LOG.warning("Cannot arm a working set reconcile (%s)", type(exc).__name__)
                 return
             self._reconcile_timer = timer
-        timer.start()
+        try:
+            timer.start()
+        except Exception as exc:  # noqa: BLE001 — never wedge the slot: the next event retries
+            with self._lock:
+                if self._reconcile_timer is timer:
+                    self._reconcile_timer = None
+            LOG.warning("Cannot start a working set reconcile (%s)", type(exc).__name__)
 
     def _reconcile_tick(self) -> None:
         with self._lock:
             self._reconcile_timer = None
-            if not self._on:
+            if not self._on or self._closed or self._reconciling:
                 return
+            self._reconciling = True
+            self._reconcile_again = False
+            me = threading.current_thread()
+            self._workers.add(me)
         try:
-            self.reconcile()
-        except Exception:  # noqa: BLE001
-            LOG.exception("working set: a reconcile failed")
+            while True:
+                try:
+                    self.reconcile()
+                except Exception:  # noqa: BLE001
+                    LOG.exception("working set: a reconcile failed")
+                with self._lock:
+                    if self._reconcile_again and not self._closed:
+                        self._reconcile_again = False
+                        continue
+                    break
+        finally:
+            with self._lock:
+                self._reconciling = False
+                self._reconcile_again = False
+                self._workers.discard(me)
 
     def reconcile(self) -> list[str]:
         """Bring in every visible chat thread with a linked rank 1 to 4 row
@@ -677,15 +746,22 @@ class WorkingSet:
             rows, _whole = self._read_rows()
             linked = _linked(rows)
             with self._lock:
-                wanted = {tid: self._generation(tid) for tid in linked
-                          if tid not in self._threads or self._threads[tid]["done_at"] is not None}
-            visible = [tid for tid in sorted(wanted) if self._visible_chat(tid)]
+                before = self._generations()
+                wanted = [tid for tid in sorted(linked)
+                          if tid not in self._threads or self._threads[tid]["done_at"] is not None]
+            visible = {}
+            for tid in wanted:
+                thread = self._visible(tid)
+                if thread is not None:
+                    visible[tid] = thread.project_id
             if not visible:
                 return []
             now = _iso(self.clock())
             with self._lock:
-                for thread_id in visible:
-                    if self._generation(thread_id) != wanted[thread_id]:
+                if self._closed:
+                    return []
+                for thread_id, project_id in visible.items():
+                    if not self._unchanged(before, thread_id, project_id):
                         continue
                     entry = self._threads.get(thread_id)
                     if entry is None:
@@ -734,6 +810,8 @@ class WorkingSet:
                                  "entry": self.entry(thread_id)}
                 if why is not None:
                     return 409, {"error": why, "entry": _public(thread_id, entry)}
+                if self._closed:
+                    return 503, {"error": "Jarvis is stopping; nothing changed"}
                 before = dict(entry)
                 token = secrets.token_urlsafe(18)
                 entry.update(done_at=_iso(self.clock()), done_seq=seq, done_token=token, reason="done")
@@ -772,6 +850,8 @@ class WorkingSet:
             if not self.mono() < held[1]:
                 self._undo.pop(thread_id, None)
                 return 409, {"error": "too late to undo", "entry": _public(thread_id, entry)}
+            if self._closed:
+                return 503, {"error": "Jarvis is stopping; nothing changed"}
             before = dict(entry)
             entry.update(done_at=None, done_seq=None, done_token=None, reason=None)
             try:
@@ -807,6 +887,8 @@ class WorkingSet:
                     pruned = True
             why = self.why_not(sorted(seqs)) if seqs else {}
             with self._lock:
+                if self._closed:
+                    return []
                 stamp = _iso(now)
                 for thread_id, seq in seqs.items():
                     entry = self._threads.get(thread_id)
@@ -831,13 +913,23 @@ class WorkingSet:
         self._arm(FIRST_SWEEP_S)
 
     def stop(self) -> None:
+        """Closed for good: the timers are cancelled, a running reconcile or
+        sweep is waited for (at most `STOP_JOIN_S` each), and every commit
+        checks the closed flag under the store lock, so no membership change
+        is made after this returns, even by a worker that outlived the wait."""
         with self._lock:
             self._on = False
+            self._closed = True
             timers = (self._timer, self._reconcile_timer)
             self._timer = self._reconcile_timer = None
+            workers = [w for w in self._workers if w is not threading.current_thread()]
         for timer in timers:
             if timer is not None:
                 timer.cancel()
+        for worker in workers:
+            join = getattr(worker, "join", None)
+            if callable(join):
+                join(STOP_JOIN_S)
 
     def _arm(self, delay: float) -> None:
         try:
@@ -855,12 +947,17 @@ class WorkingSet:
 
     def _tick(self) -> None:
         with self._lock:
-            if not self._on:
+            if not self._on or self._closed:
                 return
+            me = threading.current_thread()
+            self._workers.add(me)
         try:
             self.sweep()
         except Exception:  # noqa: BLE001
             LOG.exception("working set: a sweep failed")
+        finally:
+            with self._lock:
+                self._workers.discard(me)
         self._arm(SWEEP_S)
 
     # -- seeding (D-11) ---------------------------------------------------------------------
@@ -881,26 +978,35 @@ class WorkingSet:
             LOG.warning("The working set's seed could not read the inbox; it will try again")
             return 0
         linked = _linked(rows)
-        found: dict[str, str] = {}
+        found: dict[str, tuple[str, str]] = {}
         try:
             ids = self.daemon.stores.threads.ids()
         except Exception:  # noqa: BLE001
             LOG.warning("The working set's seed could not list the threads; it will try again")
             return 0
+        with self._lock:
+            before = self._generations()
         for thread_id in ids:
-            thread = self._visible(thread_id)
+            thread, read = self._check_visible(thread_id)
+            if not read:
+                # Not a thread that is gone or hidden: one that could not be
+                # read. The seed is incomplete; the next sweep tries again.
+                LOG.warning("The working set's seed could not read a thread; it will try again")
+                return 0
             if thread is None:
                 continue
             updated = parse_time(getattr(thread, "updated", None))
             recent = updated is not None and now - updated < limit
             if recent or thread_id in linked:
-                found[thread_id] = _iso(updated) if updated is not None else _iso(now)
+                found[thread_id] = (_iso(updated) if updated is not None else _iso(now), thread.project_id)
         stamp = _iso(now)
         added = 0
         with self._lock:
-            if self._seeded_at is not None:
+            if self._seeded_at is not None or self._closed:
                 return 0
-            for thread_id, last in found.items():
+            for thread_id, (last, project_id) in found.items():
+                if not self._unchanged(before, thread_id, project_id):
+                    continue        # archived, restored or deleted since the check
                 if thread_id not in self._threads:
                     self._threads[thread_id] = {"since": stamp, "last": last, "seq": 0, "done_at": None,
                                                 "done_seq": None, "done_token": None, "reason": None}

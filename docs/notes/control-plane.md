@@ -2405,10 +2405,16 @@ The daemon half of "the Inbox is your working set of threads" (plan
   name other than tasks, missed, decisions, checks and pull requests). A
   quiet-hours deferral arrives with no thread-scoped record (the broker
   publishes only `inbox_changed`), so it can land while a Done or sweep is
-  deciding, or just after: every `inbox_changed` arms one reconcile 0.25 s
-  later, off the publish thread (and each sweep starts with one), which
-  brings back in any visible chat thread with a linked rank 1 to 4 row. The
-  invariant can be broken for at most that debounce.
+  deciding, or just after: every `inbox_changed` schedules a reconcile
+  0.25 s later, off the publish thread (and each sweep starts with one),
+  which brings back in any visible chat thread with a linked rank 1 to 4
+  row. One reconcile worker at a time; events while it runs make it run
+  once more. 0.25 s is only the scheduling delay: lock waits, the source
+  reads and a failed reconcile (retried on the next event or sweep) can
+  stretch the time to recovery, with no fixed bound. The row is drawn in
+  `needs_you` throughout. `stop()` closes the set: timers cancelled, a
+  running worker waited for (5 s each), and every commit checks the closed
+  flag, so no membership change follows it.
 - **Leaving.** The hourly sweep (first run 5 minutes after start) takes out
   threads idle past the limit (default 3 days, 1 to 30, `POST
   /working/settings`). Done needs the `seq` the HUD drew (else 409 with the
@@ -2420,11 +2426,13 @@ The daemon half of "the Inbox is your working set of threads" (plan
   and writes only if unchanged. A failed write rolls memory back (503).
 - **Lifecycle.** Archive (thread or project) takes a thread out; restore
   does not rejoin; delete drops the entry; move and rename only redraw.
-  Archive, restore and delete bump a lifecycle generation and clear any
-  `done_token`: activity checked before the event is dropped, and an Undo
-  from before it is refused.
-- **Seeding.** Once, at start. A seed whose inbox read failed adds nothing
-  and keeps no `seeded_at`; the next sweep tries again. An empty seed with
+  Archive, restore and delete bump a lifecycle generation (per thread, and
+  per project) and clear any `done_token`: activity, a reconcile or a seed
+  checked before the event is dropped, an Undo from before it is refused,
+  and another project's event drops nothing.
+- **Seeding.** Once, at start. A seed whose inbox read failed, or that
+  could not read a thread, adds nothing and keeps no `seeded_at`; the next
+  sweep tries again. An empty seed with
   no file writes nothing.
 - **Routes**, owner-only through `projects.owner_only` before anything
   else: `GET /working`, `POST /working/<id>/done`, `POST

@@ -1171,7 +1171,7 @@ class ReviewFixes(Base):
 
     def test_activity_in_flight_across_an_archive_is_dropped(self):
         tid = self.thread().id
-        real = self.ws._visible_chat
+        real = self.ws._visible
 
         def archived_meanwhile(thread_id):
             seen = real(thread_id)                          # visible: passes
@@ -1181,7 +1181,7 @@ class ReviewFixes(Base):
             self.daemon.bus.publish({"kind": "thread_archived", "thread_id": thread_id,
                                      "project_id": self.project.id, "data": {}})
             return seen
-        with patch.object(self.ws, "_visible_chat", archived_meanwhile):
+        with patch.object(self.ws, "_visible", archived_meanwhile):
             self.publish("relay_in", tid, data={})
         self.assertIsNone(self.ws.entry(tid), "the record from before the archive does not join")
 
@@ -1289,6 +1289,215 @@ class ReviewFixes(Base):
             self.publish("relay_in", tid, data={})          # logged, memory stands
         self.assertEqual(path.read_bytes(), on_disk, "nothing over the cap was written")
         self.assertTrue(self.is_in(tid))
+
+
+# -- review of #365, round 3: workers, project scope, seeding, timer start --------------------------
+
+
+class FlakyStartTimer(FakeTimer):
+    """A timer whose first `start` raises (round 3, item 5)."""
+    failed = []
+
+    def start(self):
+        if not FlakyStartTimer.failed:
+            FlakyStartTimer.failed.append(1)
+            raise RuntimeError("can't start new thread")
+        self.started = True
+
+
+class RoundThree(Base):
+    def member(self):
+        tid = self.thread().id
+        self.publish("user_message", tid, data={})
+        self.publish("turn_finished", tid, turn_id="t1", data={"stop": "end"})
+        return tid
+
+    def linked_deferral(self, thread_id, req_id):
+        req = ApprovalRequest(tool="Bash", args={"command": "x"}, command="x", provider="claude",
+                              thread_id=thread_id)
+        req.req_id = req_id
+        self.daemon.inbox.deferred.add(req, None)       # the row, with no record on the bus
+
+    def private_set(self):
+        """A working set of its own on the test daemon, started, fed by hand
+        (never through the bus), with a fast reconcile debounce."""
+        guard = patch.object(working, "RECONCILE_S", 0.01)
+        guard.start()
+        self.addCleanup(guard.stop)
+        ws = working.WorkingSet(self.daemon, clock=self.clock, mono=self.clock.mono)
+        ws.start()
+        self.addCleanup(ws.stop)
+        return ws
+
+    def blocked(self, ws):
+        """Hold every reconcile inside its read until `gate` is set; count the
+        reconciles started."""
+        gate, entered, started = threading.Event(), threading.Event(), []
+        real_read, real_reconcile = ws._read_rows, ws.reconcile
+
+        def read():
+            entered.set()
+            gate.wait(5)
+            return real_read()
+
+        def reconcile():
+            started.append(threading.current_thread().name)
+            return real_reconcile()
+        for name, value in (("_read_rows", read), ("reconcile", reconcile)):
+            guard = patch.object(ws, name, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        return gate, entered, started
+
+    # 1. one worker, coalesced, fenced by stop -----------------------------------------------
+
+    def test_events_during_a_reconcile_coalesce_into_one_rerun(self):
+        ws = self.private_set()
+        gate, entered, started = self.blocked(ws)
+        ws.observe({"kind": "inbox_changed"})
+        self.assertTrue(entered.wait(2))
+        for _ in range(5):
+            ws.observe({"kind": "inbox_changed"})
+            time.sleep(0.03)            # each past the debounce
+        self.assertEqual(len(started), 1, "one worker at a time")
+        gate.set()
+        eventually(lambda: not ws._reconciling)
+        time.sleep(0.1)
+        self.assertEqual(len(started), 2, "the events while it ran: exactly one more run")
+
+    def test_stop_fences_a_running_reconcile(self):
+        ws = self.private_set()
+        tid = self.thread().id
+        self.linked_deferral(tid, "dfr0000020")
+        gate, entered, started = self.blocked(ws)
+        ws.observe({"kind": "inbox_changed"})
+        self.assertTrue(entered.wait(2))
+        for _ in range(3):
+            ws.observe({"kind": "inbox_changed"})
+            time.sleep(0.03)
+        threading.Timer(0.2, gate.set).start()      # the read finishes while stop waits
+        ws.stop()
+        workers_at_return = set(getattr(ws, "_workers", {"(none tracked)"}))
+        self.assertIsNone(ws.entry(tid), "a reconcile that read before stop writes nothing after it")
+        time.sleep(0.3)
+        self.assertIsNone(ws.entry(tid), "nor later")
+        self.assertEqual(workers_at_return, set(), "stop waited for the running worker")
+        self.assertEqual(len(started), 1, "no queued or re-run reconcile after stop")
+        ws.observe({"kind": "inbox_changed"})
+        time.sleep(0.1)
+        self.assertEqual((len(started), ws._reconcile_timer), (1, None), "closed: nothing is armed")
+
+    # 5. a timer that cannot start never wedges the slot ----------------------------------------
+
+    def test_a_reconcile_timer_that_cannot_start_does_not_wedge(self):
+        FakeTimer.made, FlakyStartTimer.failed = [], []
+        ws = working.WorkingSet(self.daemon, clock=self.clock, mono=self.clock.mono,
+                                timer_factory=FlakyStartTimer)
+        ws._on = True
+        ws.observe({"kind": "inbox_changed"})
+        self.assertIsNone(ws._reconcile_timer, "the slot is free again")
+        ws.observe({"kind": "inbox_changed"})
+        self.assertEqual(len(FakeTimer.made), 2)
+        self.assertTrue(FakeTimer.made[-1].started, "the next event armed one that runs")
+
+    # 2. another project's archive does not drop activity ------------------------------------
+
+    def test_another_projects_archive_does_not_drop_activity(self):
+        tid = self.member()
+        self.done(tid)
+        real, fired = self.ws._visible, []
+
+        def other_archived(thread_id):
+            seen = real(thread_id)
+            if not fired:
+                fired.append(1)         # project "Other" is archived mid-flight
+                project = self.stores.projects.get(self.other.id)
+                project.archived = "2026-11-14T00:00:00+00:00"
+                self.stores.projects.save(project)
+                self.daemon.bus.publish({"kind": "project_archived", "project_id": self.other.id,
+                                         "data": {"project_id": self.other.id}})
+            return seen
+        with patch.object(self.ws, "_visible", other_archived):
+            self.publish("relay_in", tid, data={})
+        self.assertTrue(fired)
+        self.assertTrue(self.is_in(tid), "a relay into Calc still brings its thread back")
+
+    # 3. seeding cannot undo an archive ---------------------------------------------------------
+
+    def test_seeding_cannot_undo_an_archive(self):
+        now = datetime.now(timezone.utc)
+        thread = self.thread()
+        stored = self.stores.threads.get(thread.id)
+        stored.updated = now.isoformat()
+        self.stores.threads.save(stored)
+        clock = Clock()
+        clock.now = now
+        ws = working.WorkingSet(self.daemon, clock=clock, mono=clock.mono)
+        ws._seeded_at = None
+        real_get, fired, seeding = self.stores.threads.get, [], []
+
+        def get(thread_id):
+            out = real_get(thread_id)
+            if seeding and thread_id == thread.id and not fired:
+                fired.append(1)         # archived and restored after the seed's check
+                ws.observe({"kind": "thread_archived", "thread_id": thread.id, "project_id": self.project.id})
+                ws.observe({"kind": "thread_restored", "thread_id": thread.id, "project_id": self.project.id})
+            return out
+        with patch.object(self.stores.threads, "get", get):
+            seeding.append(1)
+            ws.seed()
+        self.assertTrue(fired)
+        self.assertNotIn(thread.id, ws.members(), "restore does not rejoin, seeding included")
+
+    # 4. an unreadable thread leaves the seed incomplete ---------------------------------------
+
+    def test_an_unreadable_thread_leaves_the_seed_incomplete(self):
+        from jarvis.v2.stores import StoreError
+        now = datetime.now(timezone.utc)
+        thread = self.thread()
+        stored = self.stores.threads.get(thread.id)
+        stored.updated = now.isoformat()
+        self.stores.threads.save(stored)
+        clock = Clock()
+        clock.now = now
+        ws = working.WorkingSet(self.daemon, clock=clock, mono=clock.mono)
+        ws._seeded_at = None
+        real_get = self.stores.threads.get
+
+        def get(thread_id):
+            if thread_id == thread.id:
+                raise StoreError("unreadable")
+            return real_get(thread_id)
+        with patch.object(self.stores.threads, "get", get):
+            self.assertEqual(ws.seed(), 0)
+        self.assertIsNone(ws.seeded_at, "incomplete: no marker")
+        self.assertEqual(ws.members(), [])
+        ws.sweep()                      # readable again: the retry seeds it
+        self.assertIsNotNone(ws.seeded_at)
+        self.assertEqual(ws.members(), [thread.id])
+
+    # 7. reconcile's own archive-race guard (Sol's surviving mutant) -----------------------------
+
+    def test_reconcile_never_brings_back_a_thread_archived_meanwhile(self):
+        tid = self.member()
+        self.done(tid)
+        self.linked_deferral(tid, "dfr0000021")
+        real, fired = self.ws._visible, []
+
+        def archived_meanwhile(thread_id):
+            seen = real(thread_id)
+            if thread_id == tid and not fired:
+                fired.append(1)
+                stored = self.stores.threads.get(tid)
+                stored.archived = "2026-11-14T00:00:00+00:00"
+                self.stores.threads.save(stored)
+                self.daemon.bus.publish({"kind": "thread_archived", "thread_id": tid,
+                                         "project_id": self.project.id, "data": {}})
+            return seen
+        with patch.object(self.ws, "_visible", archived_meanwhile):
+            self.assertEqual(self.ws.reconcile(), [])
+        self.assertTrue(fired)
+        self.assertFalse(self.ws.entry(tid)["in"], "an archived thread stays out; its rows go to needs_you")
 
 
 if __name__ == "__main__":
