@@ -16,6 +16,7 @@ What is pinned, each written to bite:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -237,6 +238,35 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: _token(page, "--base") not in ("#0a1116", ""), timeout=3)
         check("a bright base is clamped dark", _token(page, "--base") != "#808080"
               and page.locator('[data-testid="appearance-base-note"]').count() == 1)
+
+        # ---- presets: one click sets all five colours, through the same guards -------------------------
+        presets = page.evaluate("""() => [...document.querySelectorAll('[data-testid^="appearance-preset-"]')]
+          .map((b) => b.dataset.testid.slice('appearance-preset-'.length))""")
+        check("Settings shows the nine colour presets, Aurora first", len(presets) == 9 and presets[0] == "aurora", str(presets))
+        shots = os.environ.get("JARVIS_PRESET_SHOTS")
+        hand_picked = _stored(page)
+        for pid in presets[1:] + presets[:1]:
+            page.locator(f'[data-testid="appearance-preset-{pid}"]').click()
+            until(lambda: page.locator(f'[data-testid="appearance-preset-{pid}"]').get_attribute("aria-pressed") == "true", timeout=3)
+            pressed = page.locator('[data-testid^="appearance-preset-"][aria-pressed="true"]').count()
+            hexes = [page.locator(f'[data-testid="appearance-{s}-hex"]').inner_text() for s in ("accent", "wash-1", "wash-2", "wash-3", "base")]
+            tokens = [_token(page, t) for t in ("--accent", "--wash-1", "--wash-2", "--wash-3", "--base")]
+            notes = page.locator('.appearance-note').count()
+            if pid == "aurora":
+                st = _stored(page)
+                check("Aurora clears the stored colours and every inline token, like Reset",
+                      _inline(page) == "" and not any(k in st for k in ("accent", "washes", "base"))
+                      and tokens[0] == DEFAULT_ACCENT and pressed == 1, f"{_inline(page)[:120]} {st}")
+            else:
+                check(f"the {pid} preset applies all five colours (tokens match the readouts), one button pressed, no notes",
+                      tokens == hexes and _stored(page).get("accent") == hexes[0] and pressed == 1 and notes == 0,
+                      f"{tokens} {hexes} pressed={pressed} notes={notes}")
+            if shots:
+                page.screenshot(path=str(Path(shots) / f"preset-{pid}.png"))
+        # Put the hand-picked record back: the reload checks below expect it.
+        page.evaluate("([k, v]) => { localStorage.setItem(k, v); window.dispatchEvent(new Event('hud-appearance-change')); }",
+                      [APPEARANCE, json.dumps(hand_picked)])
+        until(lambda: _token(page, "--accent") == "#a0c4ff", timeout=3)
         check("the aurora layer still has its canvas, undisturbed", page.locator("#aurora canvas").count() == 1)
 
         # ---- reload: a saved record applies --------------------------------------------------------------
