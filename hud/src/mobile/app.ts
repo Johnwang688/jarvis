@@ -152,7 +152,7 @@ export const STILL_ANSWERING = "Your earlier answer to this is still being sentâ
 /** WS-5c Â§5.4: the Always route's words when the rule changed since it was read (`remote_answer.RULE_CHANGED`). */
 export const RULE_CHANGED = "the rule changed: read it again";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
-const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open"]);
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open", "m-project-head"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
@@ -561,6 +561,7 @@ export class PhoneApp {
       card.rule = null;
     }
     if (this.tab === "inbox") this.renderInbox();
+    else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
     // M5: the row a task's "Answer it in the Inbox" asked for, once the read redrew it.
     const pending = this.pendingRow;
     this.pendingRow = null;
@@ -603,6 +604,7 @@ export class PhoneApp {
     }
     this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
+    else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
   /** The working read, after the debounce (a burst of events is one read). */

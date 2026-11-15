@@ -726,9 +726,14 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     # -- Chats ---------------------------------------------------------------------------
     page.locator('[data-testid="m-tab-chats"]').click()
     until(lambda: page.locator('[data-testid="m-chat"]').count() >= 1, timeout=8)
+    # Activity reads can replace the head between Playwright calls. Read both
+    # properties in one browser turn, without holding a detached element.
+    project_head = page.evaluate("""() => {
+        const head = document.querySelector('[data-testid="m-project-head"]');
+        return {expanded: head?.getAttribute('aria-expanded'), height: head?.getBoundingClientRect().height ?? 0};
+    }""")
     check("RD-5 Chats: a project needing the owner starts open, with a 48px fold head",
-          page.locator('[data-testid="m-project-head"]').first.get_attribute("aria-expanded") == "true"
-          and page.locator('[data-testid="m-project-head"]').first.bounding_box()["height"] >= 48)
+          project_head["expanded"] == "true" and project_head["height"] >= 48)
     check("P-3 Chats: the five most recent chats of the project, the rest behind Show more",
           page.locator('[data-testid="m-chat"]').count() == 5
           and page.locator('[data-testid="m-more"]').inner_text() == "Show 2 more")
