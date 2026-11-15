@@ -2378,8 +2378,13 @@ header: its click folds the list, and the page opens from the "Needs you" line.
   served text) and the row's title; amber only for rank 1 and 2. A click opens today's Inbox page
   (where answering happens), not the row's thread.
 - **Done.** The thread menu opened from an Inbox row also offers Done: disabled with the entry's
-  `why_not` while it is ineligible. It posts the entry's drawn `seq`; a 200 shows a 5 s Undo toast
-  that posts the daemon's `token` (the response field is `token`); a 409 is read again with no
+  `why_not` while it is ineligible. Since 2026-11-15 (owner) each Inbox row also has a ✓, shown on
+  hover or focus, that does the same in one press; while ineligible it is `aria-disabled` (not
+  `disabled`, so the click neither opens the row nor loses its reason), posts nothing and names the
+  `why_not`. Either posts the entry's drawn `seq`; a 200 shows a "Marked Done" toast fixed at the
+  bottom left of the window, with the title, Undo (posts the daemon's `token`; the response field is
+  `token`) and ×, for 15 s or until × (which posts nothing). The daemon's Undo window
+  (`working.UNDO_S`) is 20 s so an Undo at the toast's last moment lands. A 409 is read again with no
   message; anything else is a short note. Drag onto a project reuses the tree's own drag state
   and move.
 - **Tests.** `hud/src/state/working.test.ts`, `hud/src/lib/working.test.ts`;

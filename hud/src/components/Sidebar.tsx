@@ -169,7 +169,7 @@ export const Sidebar = memo(function Sidebar(props: {
       saveSectionOpen(!o);
       return !o;
     });
-  // Done's Undo toast: the entry's title and the daemon's token, for UNDO_TOAST_MS.
+  // Done's "Marked Done" toast: the entry's title and the daemon's token, for UNDO_TOAST_MS.
   const [undo, setUndo] = useState<{ id: string; token: string; title: string } | null>(null);
   // Projects whose full chat list the owner asked for (remembered, not stored on the server).
   const [showAll, setShowAll] = useState<Record<string, boolean>>(() => loadShowMore());
@@ -395,6 +395,7 @@ export const Sidebar = memo(function Sidebar(props: {
           onPick={props.onPickThread}
           onOpenInbox={props.onOpenInbox}
           onMenu={(e, id) => openMenu(e, id, null, true)}
+          onDone={markDone}
           onDragStart={(e, id) => {
             e.dataTransfer.setData("text/plain", id);
             e.dataTransfer.effectAllowed = "move";
@@ -445,10 +446,18 @@ export const Sidebar = memo(function Sidebar(props: {
           {note.text}
         </div>
       ) : null}
+      {/* "Marked Done", bottom left of the window, for UNDO_TOAST_MS or until its × (owner, 2026-11-15).
+          Keyed by the token, so a second Done restarts the countdown bar. */}
       {undo ? (
-        <div className="workingtoast" data-testid="working-toast" role="status">
-          <span className="nm">Done: {undo.title}</span>
-          <button type="button" data-testid="working-undo" onClick={() => undoDone(undo)}>Undo</button>
+        <div className="workingtoast" key={undo.token} data-testid="working-toast" role="status">
+          <span className="wt-text">
+            <span className="wt-head">Marked Done</span>
+            <span className="nm" data-testid="working-toast-title" title={undo.title}>{undo.title}</span>
+          </span>
+          <button type="button" className="wt-undo" data-testid="working-undo" onClick={() => undoDone(undo)}>Undo</button>
+          <button type="button" className="wt-close" data-testid="working-toast-close" aria-label="Dismiss"
+                  title="Dismiss" onClick={() => setUndo(null)}>×</button>
+          <span className="wt-bar" aria-hidden="true" style={{ animationDuration: `${UNDO_TOAST_MS}ms` }} />
         </div>
       ) : null}
       <div className="scroll" data-testid="sidebar">

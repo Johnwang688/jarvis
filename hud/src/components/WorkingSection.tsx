@@ -18,7 +18,9 @@
 //       as its row in the project tree (the Sidebar's activity store), its
 //       title, a hint naming what waits on it (a click opens the page at that thread), and a chip
 //       with its project's name. Its title is a real button (Tab, Enter, Space); a click
-//       anywhere on the row opens it like a tree row.
+//       anywhere on the row opens it like a tree row. A ✓ (shown on hover or focus) marks it Done
+//       in one press; while the daemon's last read says Done would be refused it does nothing and
+//       says why.
 // A row that waits on a thread is drawn on that thread only, never also in the Needs-you rows.
 
 import { memo, useEffect, useRef } from "react";
@@ -52,6 +54,8 @@ export interface WorkingSectionProps {
   /** Opens the Needs you page; with a thread id, at that thread's group. */
   onOpenInbox: (threadId?: string) => void;
   onMenu: (e: React.MouseEvent, id: string) => void;
+  /** The row's ✓: Done for that thread (the Sidebar posts it and shows the Undo toast). */
+  onDone: (id: string) => void;
   onDragStart: (e: React.DragEvent, id: string) => void;
   onDragEnd: () => void;
 }
@@ -204,6 +208,22 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
                   {chip ? (
                     <span className="wchip" data-testid={`working-chip-${t.id}`} title={`Project: ${chip}`}>{chip}</span>
                   ) : null}
+                  {/* aria-disabled, not disabled: a disabled button swallows the click, which would
+                      then open the row instead of doing nothing, and hides its reason from hover. */}
+                  <button
+                    type="button"
+                    className="wdone"
+                    data-testid={`working-done-${t.id}`}
+                    aria-disabled={e.why_not ? "true" : undefined}
+                    title={e.why_not ? `Can't mark done: ${e.why_not}` : "Mark done (it stays in its project)"}
+                    aria-label={e.why_not ? `${label.text}: can't mark done, ${e.why_not}` : `Mark ${label.text} done`}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      if (!e.why_not) p.onDone(t.id);
+                    }}
+                  >
+                    ✓
+                  </button>
                   <button
                     type="button"
                     className="menu"

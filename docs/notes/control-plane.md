@@ -2477,7 +2477,7 @@ owner decisions".
   current entry), then writes `done_at`, `done_seq` and a random
   `done_token` in one step and marks read only the last turn it observed
   (`Activity.seen_thread(only_turn=)`), so a reply that finished since stays
-  unread; Undo needs that token within 10 s of the daemon's monotonic clock.
+  unread; Undo needs that token within 20 s (since 2026-11-15; the HUD toast shows 15 s) of the daemon's monotonic clock.
   A decision re-reads `seq` under the store lock after its eligibility read
   and writes only if unchanged. A failed write rolls memory back (503).
 - **Lifecycle.** Archive (thread or project) takes a thread out; restore

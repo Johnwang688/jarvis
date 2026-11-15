@@ -24,7 +24,13 @@ What it pins, one section each (each names the mutation it is meant to catch):
   done      Done is disabled with the daemon's `why_not` while the entry is not
             eligible and posts nothing; an eligible one posts its drawn `seq`,
             shows an Undo toast, Undo posts the daemon's token and the row
-            returns; the toast goes by itself after 5 s [skip the seq; no toast]
+            returns; the toast goes by itself after 15 s [skip the seq; no toast]
+  quickdone (2026-11-15) each row's ✓ shows on hover and marks it Done in one
+            press with its drawn seq, without opening the thread; "Marked Done"
+            shows bottom left of the window with the title, Undo and ×; × closes
+            it and posts no Undo; an ineligible row's ✓ posts nothing, opens
+            nothing and names the reason [✓ opens the row; toast in the sidebar
+            flow; × posts an Undo]
   conflict  a 409 (the entry moved on) re-reads silently: no toast, no error
             note, the row redrawn with its new seq [error toast on 409]
   live      a `working_changed` event re-reads the list, once [no refresh]
@@ -359,10 +365,10 @@ def _done_checks(page, mock, check, until):
     page.locator('[data-testid="tmenu-done"]').click()
     until(lambda: page.locator('[data-testid="working-toast"]').count() == 1, timeout=3)
     t0 = time.time()
-    gone = until(lambda: page.locator('[data-testid="working-toast"]').count() == 0, timeout=7)
+    gone = until(lambda: page.locator('[data-testid="working-toast"]').count() == 0, timeout=18)
     took = time.time() - t0
-    check("the toast goes by itself after about 5 s, with no Undo posted",
-          bool(gone) and 3.5 < took < 6.5 and len(_st(mock)["undo_posts"]) == 1, f"{took:.1f}s")
+    check("the toast goes by itself after about 15 s, with no Undo posted [mutation: 5 s toast]",
+          bool(gone) and 13.5 < took < 16.5 and len(_st(mock)["undo_posts"]) == 1, f"{took:.1f}s")
     _st(mock)["entries"].append(mock_working.entry("t1", project_id="p1", last=THREADS["t1"][2]))
     _st(mock)["undone"].clear()
     mock_working.changed(mock)
@@ -375,6 +381,56 @@ def _done_checks(page, mock, check, until):
     note = page.locator('[data-testid="rename-note"]')
     check("any other failure is a short message, and the row stays",
           "could not be saved" in note.inner_text() and "t6" in _rows(page) and page.locator('[data-testid="working-toast"]').count() == 0)
+
+
+def _quickdone_checks(page, mock, check, until):
+    _open(page, mock, until)
+    until(lambda: len(_rows(page)) == 6, timeout=4)
+    row = page.locator('[data-testid="working-row"][data-id="t1"]')
+    tick = page.locator('[data-testid="working-done-t1"]')
+    opacity = lambda: float(tick.evaluate("e => getComputedStyle(e).opacity"))
+    page.mouse.move(800, 450)
+    time.sleep(0.15)
+    check("the ✓ is out of the way until the row is hovered", opacity() == 0, str(opacity()))
+    row.hover()
+    until(lambda: opacity() == 1, timeout=2)
+    check("and shows on hover", opacity() == 1, str(opacity()))
+    before = _chat(page, 1)["threadId"]
+    tick.click()
+    until(lambda: bool(_st(mock)["done_posts"]), timeout=3)
+    check("one press posts Done with the drawn seq, once [mutation: skip the seq]",
+          _st(mock)["done_posts"] == [("t1", {"seq": 1})], str(_st(mock)["done_posts"]))
+    check("and does not open the thread [mutation: the click reaches the row]",
+          _chat(page, 1)["threadId"] == before, f"{before} -> {_chat(page, 1)['threadId']}")
+    toast = page.locator('[data-testid="working-toast"]')
+    until(lambda: toast.count() == 1, timeout=3)
+    text = toast.inner_text()
+    check("the toast says Marked Done and names the thread", "Marked Done" in text and "desk chat" in text, text)
+    box = toast.bounding_box() or {}
+    vh = page.viewport_size["height"]
+    check("it sits at the bottom left of the window [mutation: in the sidebar's flow]",
+          box and box["x"] < 40 and vh - 40 < box["y"] + box["height"] <= vh, str(box))
+    check("with Undo and a × to close it",
+          page.locator('[data-testid="working-undo"]').count() == 1
+          and page.locator('[data-testid="working-toast-close"]').get_attribute("aria-label") == "Dismiss")
+    until(lambda: "t1" not in _rows(page), timeout=3)
+    _shot(page, "5-marked-done")
+    page.locator('[data-testid="working-toast-close"]').click()
+    time.sleep(0.3)
+    check("× closes the toast and posts no Undo [mutation: × undoes]",
+          toast.count() == 0 and _st(mock)["undo_posts"] == [] and "t1" not in _rows(page), str(_st(mock)["undo_posts"]))
+    # An ineligible row's ✓: nothing posted, nothing opened, and it says why.
+    t2 = page.locator('[data-testid="working-done-t2"]')
+    check("an ineligible row's ✓ carries the daemon's reason",
+          t2.get_attribute("aria-disabled") == "true" and WHY["t2"] in (t2.get_attribute("title") or ""),
+          t2.get_attribute("title") or "")
+    page.locator('[data-testid="working-row"][data-id="t2"]').hover()
+    posts = len(_st(mock)["done_posts"])
+    before = _chat(page, 1)["threadId"]
+    t2.click(force=True)               # Playwright waits on aria-disabled; the owner can still press it
+    time.sleep(0.3)
+    check("and pressing it posts nothing and opens nothing",
+          len(_st(mock)["done_posts"]) == posts and _chat(page, 1)["threadId"] == before and toast.count() == 0)
 
 
 def _conflict_checks(page, mock, check, until):
@@ -982,7 +1038,8 @@ def _menukeys_checks(page, mock, check, until):
     page.keyboard.press("Escape")
 
 
-SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
+SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _quickdone_checks,
+            _conflict_checks,
             _live_checks, _empty_checks, _stale_checks, _inbox_checks, _line_checks, _event_checks, _keys_checks,
             _hint_checks, _page_checks, _settings_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)
 
