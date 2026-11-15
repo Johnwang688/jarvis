@@ -18,7 +18,7 @@ phone:
   - hostile text in a card stays text; nothing is keyboard-defaulted (Enter
     and Space on the card answer nothing); AUTHORIZE and ALWAYS are far
     below DENY; every button at least 44 px tall;
-  - a question answered from its row.
+  - a question answered from its row, and (PX-3a) by one tap on an option, once.
 
 Skipped when `hud/dist` has no phone shell (run `npm run build` in hud/).
 
@@ -221,7 +221,7 @@ def run(browser, check, until):
     # Service workers blocked (P-6 registers one at /m/sw.js): Playwright's
     # routes, which stand in for `tailscale serve` here, do not see the
     # requests of a page a service worker controls.
-    ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True,
+    ctx = browser.new_context(viewport={"width": int(os.environ.get("PX3A_WIDTH", "390")), "height": 844}, ignore_https_errors=True,
                               service_workers="block")
     ctx.route(re.compile(r".*"), lambda route: route.abort())
     ctx.route(re.compile(r"^https://" + re.escape(SHELL_HOST) + r"/"), forward)
@@ -452,6 +452,40 @@ def run(browser, check, until):
         note = page.locator("[data-testid=m-answer-note], [data-testid=m-flash]").all_inner_texts()
         check("P-4 question: Send answers it, the session only",
               runner.calls == [("answer_question", task.id, 0, "postgres")], f"{runner.calls} {note}")
+        # -- PX-3a: one tap on an option answers, once --------------------------------------
+        task2 = daemon.stores.tasks.create(project.id, "add divide")
+        daemon.stores.tasks.save(task2)
+        task2 = daemon.stores.tasks.transition(task2.id, TaskState.CLARIFYING)
+        task2.spec = Spec(goal="g", questions=[OpenQuestion("which scope?", blocking=True,
+                                                            options=["Only user-visible", "Everything"])])
+        daemon.stores.tasks.save(task2)
+        daemon.bus.publish({"kind": "task_status_changed", "task_id": task2.id, "project_id": project.id,
+                            "data": {"task_id": task2.id}})
+        row2 = page.locator(f'[data-testid="m-inbox-row"][data-id="tq:{task2.id}:0"]')
+        until(lambda: row2.count() == 1, timeout=8)
+        chips = row2.locator('[data-testid="m-option"]')
+        until(lambda: chips.count() == 2, timeout=8)
+        boxes = [chips.nth(i).bounding_box() for i in range(2)]
+        check("PX-3a: the options are real buttons at least 48 px tall, inside the screen",
+              all(b and b["height"] >= 48 and b["x"] >= 0 and b["x"] + b["width"] <= page.viewport_size["width"] for b in boxes)
+              and chips.nth(0).evaluate("e => e.tagName") == "BUTTON", str(boxes))
+        check("PX-3a: nothing is sent until a tap", [c for c in runner.calls if c[1] == task2.id] == [])
+        shots = os.environ.get("PX3A_SHOTS", "")
+        if shots:
+            os.makedirs(shots, exist_ok=True)
+            row2.scroll_into_view_if_needed()
+            row2.screenshot(path=os.path.join(shots, f"chips-{page.viewport_size['width']}.png"))
+        chips.nth(0).dblclick()
+        pump(lambda: [c for c in runner.calls if c[1] == task2.id])
+        page.wait_for_timeout(600)
+        mine = [c for c in runner.calls if c[1] == task2.id]
+        check("PX-3a: a double tap on a chip answers the task once, with the option's exact words",
+              mine == [("answer_question", task2.id, 0, "Only user-visible")], str(mine))
+        flash = page.locator('[data-testid="m-flash"]')
+        until(lambda: flash.count() == 1, timeout=8)
+        check("PX-3a: the receipt echoes the option", flash.inner_text() == "Sent: Only user-visible", flash.inner_text())
+        if shots:
+            page.screenshot(path=os.path.join(shots, f"sent-{page.viewport_size['width']}.png"))
         check("P-4: no page errors", not errors, str(errors[:3]))
     finally:
         ctx.close()

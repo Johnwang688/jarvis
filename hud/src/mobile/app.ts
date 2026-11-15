@@ -814,8 +814,9 @@ export class PhoneApp {
     return done(await this.post(path, { assertion }));
   }
 
-  /** A question's or a decision's answer, from its row. Sent once. */
-  async sendAnswer(row: InboxRow, body: Record<string, unknown>): Promise<void> {
+  /** A question's or a decision's answer, from its row. Sent once. `echo` is the option's words as the phone
+   * drew them (PX-3a): the receipt says them, never the server's `note`. */
+  async sendAnswer(row: InboxRow, body: Record<string, unknown>, echo?: string): Promise<void> {
     if (this.answering.has(row.id)) return;
     this.flash = "";
     this.answering.add(row.id);
@@ -830,7 +831,8 @@ export class PhoneApp {
       this.drafts.delete(row.id);
       this.picks.delete(row.id);
       this.withdrawing.delete(row.id);
-      const note = typeof result.body.note === "string" ? result.body.note
+      const note = echo !== undefined ? `Sent: ${echo}`
+        : typeof result.body.note === "string" ? result.body.note
         : row.kind === "proposal" ? "Withdrawn: the task will not start." : "Sent.";
       this.flash = note;
     } else {
@@ -1565,7 +1567,7 @@ export class PhoneApp {
     } else if (this.tab === "inbox") {
       const answers: InboxAnswers = {
         openCard: (row) => this.openCard(row),
-        send: (row, body) => void this.sendAnswer(row, body),
+        send: (row, body, echo) => void this.sendAnswer(row, body, echo),
         retry: (row) => void this.retryDeferred(row),
         busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
         expanded: this.opened,
