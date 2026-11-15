@@ -162,7 +162,7 @@ describe("the phone app's review (MR-11, MR-12)", () => {
     // M9a (phone audit): no review, the tab keeps its slot, off, so Chats and Tasks never move.
     expect([tab(night).hidden, tab(night).disabled]).toEqual([false, true]);
     expect(Array.from(night.root.querySelectorAll("nav.tabs button")).map((b) => b.getAttribute("data-testid")))
-      .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats", "m-tab-tasks"]);
+      .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats"]);
   });
 
   it("tick 2 of 3, confirm: one challenge for exactly those, one passkey, then exactly those ids and tags", async () => {

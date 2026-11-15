@@ -1,0 +1,330 @@
+// PX-2 through the app: the working read's own state and its one retry policy (Sol, findings 3 and 5),
+// the refresh triggers, task seeding (finding 4), and the keyed list under pending sends and refusals.
+import { describe, expect, it, vi } from "vitest";
+import { PhoneApp, WORKING_DEBOUNCE_MS, WORKING_RETRY_MS, type StreamLike } from "./app";
+import type { Got, Posted } from "./net";
+import { mkRow } from "./threads.fixtures";
+
+class FakeStream implements StreamLike {
+  readyState = 0;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  constructor(public url: string) {}
+  open() { this.readyState = 1; this.onopen?.(new Event("open")); }
+  /** The raw SSE text, through onmessage, as the browser delivers it. */
+  raw(text: string) { this.onmessage?.(new MessageEvent("message", { data: text })); }
+  send(value: unknown) { this.raw(JSON.stringify(value)); }
+  close() { this.readyState = 2; }
+}
+
+const ok = (body: unknown): Got => ({ ok: true, body });
+const T1 = "aaaaaaaa", K1 = "11111111";
+
+function harness() {
+  const answers: Record<string, Got | (() => Got)> = {};
+  const asked: string[] = [];
+  const streams: FakeStream[] = [];
+  const timers: { fn: () => void; ms: number }[] = [];
+  const slow = new Map<number, { fn: () => void; ms: number }>();
+  let slowSets = 0, slowClears = 0, slowId = 0;
+  const posts: { path: string; value: unknown }[] = [];
+  const postReplies: Record<string, () => Promise<Posted>> = {};
+  const signedOut = vi.fn();
+  const root = document.createElement("main");
+  document.body.replaceChildren(root);
+  const app = new PhoneApp({
+    root, onSignedOut: signedOut, signOut: async () => {},
+    fetchJson: async (path) => {
+      asked.push(path);
+      const a = answers[path.split("?")[0]];
+      return typeof a === "function" ? a() : a ?? { ok: false, why: "error", status: 404, body: { error: "not found" } };
+    },
+    postJson: async (path, value) => { posts.push({ path, value }); const r = postReplies[path]; return r ? r() : { status: 200, body: {} }; },
+    openStream: (url) => { const s = new FakeStream(url); streams.push(s); return s; },
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    setSlow: (fn, ms) => { slowSets += 1; slow.set(++slowId, { fn, ms }); return slowId; },
+    clearSlow: (h) => { slowClears += 1; slow.delete(h as number); },
+    now: () => Date.parse("2026-11-15T10:30:00Z"),
+  });
+  answers["/m/api/inbox"] = ok({ rows: [], more: false });
+  answers["/m/api/me"] = ok({ signed_in: true });
+  answers["/m/api/review"] = ok({ open: 0 });
+  answers["/m/api/tasks"] = ok({ tasks: [], more: false });
+  answers["/m/api/working"] = ok({ entries: [], more: false, total: 0 });
+  const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+  /** Run every timer the app armed (the debounces); the slow retry timer is fired separately. */
+  const flush = async () => { await settle(); const run = timers.splice(0); for (const t of run) t.fn(); await settle(); };
+  const count = (path: string) => asked.filter((p) => p.split("?")[0] === path).length;
+  const q = (id: string) => root.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+  return { app, root, answers, asked, streams, timers, slow, posts, postReplies, signedOut, settle, flush, count, q,
+    get slowSets() { return slowSets; }, get slowClears() { return slowClears; },
+    fireSlow: async () => { const [id, t] = [...slow.entries()][0]; slow.delete(id); t.fn(); await settle(); } };
+}
+type H = ReturnType<typeof harness>;
+
+async function started(h: H) {
+  h.app.start();
+  await h.settle();
+  h.streams[0].open();
+  await h.settle();
+}
+
+const task = (id: string, state: string, over: Record<string, unknown> = {}) => ({ id, project_id: "99999999", brief: "Build it", state,
+  updated: "2026-11-15T10:00:00Z", status: { step: 1, steps: 3 }, ...over });
+
+describe("the working read's own state (Sol, finding 3)", () => {
+  it("a working 503 says In progress unavailable in the Running band and never turns the app offline", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    h.answers["/m/api/inbox"] = ok({ rows: [mkRow("q:1", 3, { thread_id: T1, detail: { text: "Which?", options: [] } })] });
+    await started(h);
+    expect(h.q("m-working-unavailable")!.textContent).toBe("In progress unavailable");
+    expect(h.app.online).toBe(true);
+    expect(h.q("m-offline")!.hidden).toBe(true);
+    expect(h.root.querySelector('.app[data-stale="true"]')).toBeNull();
+    // The inbox row is still drawn: a failed working read hides nothing.
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
+    expect(h.q("m-conn")!.dataset.state).toBe("live");
+  });
+
+  it("ten working 503s beside inbox 200s: never offline, one retry timer, bounded request counts", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    await started(h);
+    const working0 = h.count("/m/api/working");
+    for (let i = 0; i < 10; i++) {
+      h.streams[0].send({ kind: "inbox_changed", data: { ids: ["q:" + i], reason: "question" } });
+      await h.flush();
+      expect(h.app.online).toBe(true);
+      expect(h.q("m-offline")!.hidden).toBe(true);
+    }
+    // The inbox was read every time; working was not (a retry is waiting): bounded.
+    expect(h.count("/m/api/inbox")).toBeGreaterThanOrEqual(11);
+    expect(h.count("/m/api/working")).toBe(working0);
+    expect(working0).toBeLessThanOrEqual(2);
+    expect(h.slow.size).toBe(1);
+    expect(h.slowSets - h.slowClears).toBe(1);
+    // The one retry fires after 30 s, reads once, fails once, and arms one more.
+    expect([...h.slow.values()][0].ms).toBe(WORKING_RETRY_MS);
+    await h.fireSlow();
+    expect(h.count("/m/api/working")).toBe(working0 + 1);
+    expect(h.slow.size).toBe(1);
+    expect(h.app.online).toBe(true);
+  });
+
+  it("a working success disarms the retry, and the entries show", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = { ok: false, why: "error", status: 409, body: { error: "cannot be read" } };
+    await started(h);
+    expect(h.slow.size).toBe(1);
+    h.answers["/m/api/working"] = ok({ entries: [{ thread_id: T1, project_id: "99999999", project: "Calc", title: "Fix it",
+      status: "working", last: "2026-11-15T10:00:00Z" }], more: false, total: 1 });
+    await h.fireSlow();
+    expect(h.slow.size).toBe(0);
+    expect(h.q("m-working-unavailable")).toBeNull();
+    expect(h.root.querySelector('[data-testid="m-band-running"] [data-key="thread:' + T1 + '"]')).not.toBeNull();
+  });
+
+  it("a malformed working answer is unavailable, not an empty list", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = ok({ nope: true });
+    await started(h);
+    expect(h.q("m-working-unavailable")).not.toBeNull();
+  });
+
+  it("a working 401 signs out", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = { ok: false, why: "signed-out", status: 401 };
+    h.app.start();
+    await h.settle();
+    expect(h.signedOut).toHaveBeenCalled();
+  });
+
+  it("an inbox offline flip still decides offline, and coming back re-reads working at once, cancelling the timer", async () => {
+    const h = harness();
+    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    await started(h);
+    const w = h.count("/m/api/working");
+    expect(h.slow.size).toBe(1);
+    h.app.setOnline(false);
+    expect(h.q("m-offline")!.hidden).toBe(false);
+    h.app.setOnline(true);
+    await h.settle();
+    expect(h.count("/m/api/working")).toBe(w + 1);
+    expect(h.count("/m/api/tasks")).toBeGreaterThan(1);
+    // Cancelled and re-armed: still exactly one retry waiting.
+    expect(h.slow.size).toBe(1);
+    expect(h.slowSets - h.slowClears).toBe(1);
+  });
+});
+
+describe("refresh triggers", () => {
+  it("working_changed, through raw SSE text, reads working once after the 1 s debounce, however many arrive", async () => {
+    const h = harness();
+    await started(h);
+    const w = h.count("/m/api/working");
+    for (let i = 0; i < 6; i++) h.streams[0].raw('{"kind":"working_changed","data":{}}');
+    await h.settle();
+    expect(h.timers.filter((t) => t.ms === WORKING_DEBOUNCE_MS).length).toBe(1);
+    expect(h.count("/m/api/working")).toBe(w);
+    await h.flush();
+    expect(h.count("/m/api/working")).toBe(w + 1);
+  });
+
+  it("a turn starting or finishing reads working; a log growing does not", async () => {
+    const h = harness();
+    await started(h);
+    const w = h.count("/m/api/working");
+    h.streams[0].send({ kind: "thread_changed", data: { thread_id: T1, project_id: null, reason: "text" } });
+    await h.flush();
+    expect(h.count("/m/api/working")).toBe(w);
+    h.streams[0].send({ kind: "thread_changed", data: { thread_id: T1, project_id: null, reason: "turn_started" } });
+    await h.flush();
+    expect(h.count("/m/api/working")).toBe(w + 1);
+    h.streams[0].send({ kind: "thread_changed", data: { thread_id: T1, project_id: null, reason: "turn_finished" } });
+    await h.flush();
+    expect(h.count("/m/api/working")).toBe(w + 2);
+  });
+
+  it("the stream reopening and a resync each re-read inbox, working AND tasks", async () => {
+    const h = harness();
+    await started(h);
+    const before = { i: h.count("/m/api/inbox"), w: h.count("/m/api/working"), t: h.count("/m/api/tasks") };
+    h.streams[0].open();
+    await h.settle();
+    expect([h.count("/m/api/inbox"), h.count("/m/api/working"), h.count("/m/api/tasks")]).toEqual([before.i + 1, before.w + 1, before.t + 1]);
+    h.streams[0].send({ kind: "resync" });
+    await h.settle();
+    expect([h.count("/m/api/inbox"), h.count("/m/api/working"), h.count("/m/api/tasks")]).toEqual([before.i + 2, before.w + 2, before.t + 2]);
+  });
+
+  it("task_changed and a task row's inbox change read tasks without the Tasks view open", async () => {
+    const h = harness();
+    await started(h);
+    const t = h.count("/m/api/tasks");
+    h.streams[0].send({ kind: "task_changed", data: { task_id: K1, project_id: null, reason: "task_status_changed" } });
+    await h.flush();
+    expect(h.count("/m/api/tasks")).toBe(t + 1);
+  });
+});
+
+describe("task seeding (Sol, finding 4)", () => {
+  it("entries=[], rows=[], one running task: it appears under Running", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: false });
+    await started(h);
+    const card = h.root.querySelector<HTMLElement>(`[data-testid="m-band-running"] [data-key="task:${K1}"]`)!;
+    expect(card).not.toBeNull();
+    expect(card.textContent).toContain("Build it");
+    expect(h.q("m-chip-running")!.textContent).toBe("Running · 1");
+  });
+
+  it("tasks more shows its notice under Running and on the Tasks list", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: true });
+    await started(h);
+    expect(h.q("m-tasks-more")!.textContent).toContain("older ones, running ones included, are at the desk");
+    h.q("m-chip-tasks")!.click();
+    await h.settle();
+    expect(h.q("m-tasks-more-list")).not.toBeNull();
+  });
+
+  it("the Tasks chip shows the task list with New task; again clears it; a task opened from the list backs to the list", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running"), task("22222222", "done")], more: false });
+    h.answers[`/m/api/tasks/${K1}`] = ok({ task: task(K1, "running") });
+    await started(h);
+    h.q("m-chip-tasks")!.click();
+    await h.settle();
+    expect(h.q("m-new-task-open")).not.toBeNull();
+    expect(h.root.querySelectorAll('[data-testid="m-task"]').length).toBe(2);
+    expect(h.root.querySelector('[data-testid="m-tab-tasks"]')).toBeNull();
+    h.root.querySelector<HTMLElement>(`[data-testid="m-task"][data-id="${K1}"]`)!.click();
+    await h.settle();
+    expect(h.q("m-task-view")).not.toBeNull();
+    expect(h.q("m-tab-inbox")!.getAttribute("aria-selected")).toBe("true");
+    h.app.show("tasks");
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-task"]').length).toBe(2);
+    h.q("m-chip-tasks")!.click();
+    await h.settle();
+    expect(h.q("m-band-needs")).not.toBeNull();
+  });
+
+  it("a task opened from a Running card backs to the list, not the Tasks filter", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: false });
+    h.answers[`/m/api/tasks/${K1}`] = ok({ task: task(K1, "running") });
+    await started(h);
+    h.root.querySelector<HTMLElement>(`[data-key="task:${K1}"] [data-testid="m-thread-open"]`)!.click();
+    await h.settle();
+    expect(h.q("m-task-view")).not.toBeNull();
+    h.app.show("tasks");
+    await h.settle();
+    expect(h.q("m-band-running")).not.toBeNull();
+    expect(h.q("m-chip-tasks")!.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("the keyed list under a pending send and a refusal", () => {
+  const rowQ = () => mkRow("q:" + T1 + ":1", 2, { thread_id: T1, detail: { text: "Which?", options: [] } });
+
+  it("a pending send keeps its box disabled while an SSE read lands, and sends once", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    const path = `/m/api/inbox/${encodeURIComponent("q:" + T1 + ":1")}/answer`;
+    let release!: (p: Posted) => void;
+    h.postReplies[path] = () => new Promise<Posted>((res) => { release = res; });
+    await started(h);
+    const box = h.q("m-answer-text") as unknown as HTMLTextAreaElement;
+    box.value = "go on";
+    box.dispatchEvent(new Event("input"));
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: ["q:" + T1 + ":1"], reason: "question" } });
+    await h.flush();
+    expect((h.q("m-answer-send") as HTMLButtonElement).disabled).toBe(true);
+    expect((h.q("m-answer-text") as HTMLTextAreaElement).readOnly).toBe(true);
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    expect(h.posts.filter((p) => p.path === path).length).toBe(1);
+    release({ status: 200, body: {} });
+    await h.settle();
+    expect(h.posts.filter((p) => p.path === path).length).toBe(1);
+  });
+
+  it("a refusal note survives a read of an unchanged row", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    const path = `/m/api/inbox/${encodeURIComponent("q:" + T1 + ":1")}/answer`;
+    h.postReplies[path] = async () => ({ status: 409, body: { error: "already answered" } });
+    await started(h);
+    const box = h.q("m-answer-text") as unknown as HTMLTextAreaElement;
+    box.value = "go on";
+    box.dispatchEvent(new Event("input"));
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    expect(h.q("m-answer-note")!.textContent).toContain("Already answered");
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: ["q:" + T1 + ":1"], reason: "question" } });
+    await h.flush();
+    expect(h.q("m-answer-note")!.textContent).toContain("Already answered");
+  });
+});
+
+describe("the inbox read that fails without being offline", () => {
+  it("keeps the last list, names the failure and Retry reads again", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [mkRow("q:1", 3, { detail: { text: "Which?", options: [] } })] });
+    await started(h);
+    h.answers["/m/api/inbox"] = { ok: false, why: "error", status: 500, body: { error: "broken" } };
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: [], reason: "x" } });
+    await h.flush();
+    expect(h.q("m-list-error")!.textContent).toContain("broken");
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
+    h.answers["/m/api/inbox"] = ok({ rows: [] });
+    h.q("m-retry")!.click();
+    await h.settle();
+    expect(h.q("m-list-error")).toBeNull();
+  });
+});

@@ -55,10 +55,12 @@ import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseSecure, type CardState, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import {
-  parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads,
-  type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
+  parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
+  type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
 } from "./model";
-import { chatsView, el, inboxView, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { chatsView, el, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { serialRead, type SerialReader } from "./reader";
+import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
   chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
@@ -103,6 +105,9 @@ export interface AppDeps {
   pushSend?: Send;
   /** P-7's microphone and clip upload (fakes in the tests). */
   talkEnv?: TalkEnv;
+  /** The working read's one retry timer (30 s). A real timer unless a test gives its own: `setTimer` runs at once there. */
+  setSlow?: (fn: () => void, ms: number) => unknown;
+  clearSlow?: (handle: unknown) => void;
 }
 
 export const STREAM_URL = "/m/api/events";
@@ -112,6 +117,11 @@ const OFFLINE: ReadonlySet<number> = new Set([502, 504]);
 const BLUR_REDRAW_MS = 400;
 const CLOSED = 2;
 const DEBOUNCE_MS = 120;
+/** PX-2: the working read follows turn starts and ends, and the inbox, at most once a second. */
+export const WORKING_DEBOUNCE_MS = 1000;
+/** PX-2 (Sol, finding 5): after a failed working read, the one retry waits this long. */
+export const WORKING_RETRY_MS = 30_000;
+const RECENT_KEY = "jarvis.phone.recentAll";
 const RETRY_MS = 4000;
 /** M2 (phone audit): what the card says while it waits on Face ID, then on Jarvis. */
 export const ASKING_FACE_ID = "Asking for Face ID…";
@@ -145,6 +155,20 @@ export class PhoneApp {
   expanded = new Set<string>();
   thread: OpenThread | null = null;
   tasks: TaskView[] | null = null;
+  /** PX-2: the read cut the tasks at its cap (`more`), and the inbox likewise. */
+  tasksMore = false;
+  inboxMore = false;
+  /** PX-2: the In progress list. `null` entries: not read, or the working route failed (its own state, never offline). */
+  entries: WorkingItem[] | null = null;
+  workingState: "loading" | "ok" | "unavailable" = "loading";
+  workingCut = { more: false, total: 0 };
+  /** The strip's filter, Recent's "Show all", and the inbox read's failure line. */
+  filter: Filter = null;
+  recentAll = false;
+  listError: string | null = null;
+  readonly slots = new SlotCache();
+  /** Where "back" from a task goes: the list filter it was opened from. */
+  private taskBack: Filter = "tasks";
   task: OpenTask | null = null;
   stopped = false;
   stream: StreamLike | null = null;
@@ -202,7 +226,13 @@ export class PhoneApp {
   private readonly banner: HTMLElement;
   private readonly conn: HTMLElement;
   private readonly main: HTMLElement;
-  private readonly tabs: Record<Tab, HTMLButtonElement>;
+  private readonly tabs: Record<"inbox" | "review" | "chats", HTMLButtonElement>;
+  private inboxReader!: SerialReader;
+  private workingReader!: SerialReader;
+  private tasksReader!: SerialReader;
+  private workingRetry: unknown = null;
+  private readonly setSlow: (fn: () => void, ms: number) => unknown;
+  private readonly clearSlow: (handle: unknown) => void;
   private logBusy = false;
   /** An open transcript drawn again: where its scroll was ("end": at the newest message). */
   private keepScroll: "end" | number | null = null;
@@ -218,6 +248,12 @@ export class PhoneApp {
     this.openStream = deps.openStream ?? ((url) => new EventSource(url) as unknown as StreamLike);
     this.now = deps.now ?? Date.now;
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.setSlow = deps.setSlow ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearSlow = deps.clearSlow ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    try { this.recentAll = localStorage.getItem(RECENT_KEY) === "1"; } catch { /* no storage: it just does not last */ }
+    this.inboxReader = serialRead(() => this.read("/m/api/inbox"), (r) => this.applyInbox(r));
+    this.workingReader = serialRead(() => this.fetchJson("/m/api/working"), (got) => this.applyWorking(got));
+    this.tasksReader = serialRead(() => this.read("/m/api/tasks"), (r) => this.applyTasks(r));
     const frame = el("div", "app");
     frame.dataset.screen = "app";
     frame.dataset.stale = "false";
@@ -234,14 +270,13 @@ export class PhoneApp {
     this.main = el("main", "main");
     this.main.dataset.testid = "m-main";
     const nav = el("nav", "tabs");
-    const make = (tab: Tab, label: string) => {
+    const make = (tab: "inbox" | "review" | "chats", label: string) => {
       const b = tap(label, () => this.show(tab), "tab", "m-tab-" + tab);
       b.setAttribute("role", "tab");
       nav.append(b);
       return b;
     };
-    this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats"),
-                  tasks: make("tasks", "Tasks") };
+    this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats") };
     this.tabs.review.disabled = true;
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
@@ -266,6 +301,8 @@ export class PhoneApp {
     if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
     void this.loadInbox();
+    void this.loadWorking(true);
+    void this.loadTasks();
     // MR-12: a launch opens on the review when the morning push was the last one.
     void this.loadReview();
     void this.loadMe();
@@ -286,6 +323,9 @@ export class PhoneApp {
     this.talk.dropRetry();
     this.stream?.close();
     this.stream = null;
+    for (const r of [this.inboxReader, this.workingReader, this.tasksReader]) r.invalidate();
+    if (this.workingRetry !== null) this.clearSlow(this.workingRetry);
+    this.workingRetry = null;
   }
 
   private async signOut(): Promise<void> {
@@ -315,11 +355,23 @@ export class PhoneApp {
     return { error: errorWord(got.body) || `could not be read (${got.status})`, status: got.status };
   }
 
-  async loadInbox(): Promise<void> {
-    const r = await this.read("/m/api/inbox");
-    if (!r || !("body" in r)) return;
-    const body = r.body as { rows?: unknown };
+  /** One inbox read at a time, plus one owed (reader.ts). It decides online and offline, as before. */
+  loadInbox(): Promise<void> {
+    return this.inboxReader.trigger();
+  }
+
+  private applyInbox(r: { body: unknown } | { error: string; status: number } | null): void {
+    if (this.stopped || !r) return;
+    if (!("body" in r)) {
+      // Not offline, not signed out: the read itself failed. The last list stays, with the words and a Retry.
+      this.listError = `The Inbox could not be read: ${r.error}`;
+      if (this.tab === "inbox") this.renderInbox();
+      return;
+    }
+    this.listError = null;
+    const body = r.body as { rows?: unknown; more?: unknown };
     this.inbox = parseInbox(body?.rows) ?? [];
+    this.inboxMore = body?.more === true;
     this.renderBadge();
     const card = this.card;
     if (card && !card.busy && !this.inbox.some((row) => row.id === card.rowId)) {
@@ -331,6 +383,47 @@ export class PhoneApp {
     const pending = this.pendingRow;
     this.pendingRow = null;
     if (pending && this.tab === "inbox" && !this.card) this.revealRow(pending);
+  }
+
+  /**
+   * PX-2 (plan C §4.1): the In progress read. **Its failure is its own** (Sol, finding 3): it goes
+   * through `fetchJson`, never `read()`, so a 502/503/504 here never turns the app offline and never
+   * stamps "last read". A 401 still ends the session. One policy for every trigger (Sol, finding 5):
+   * `force` (the list shown, the stream reopened, coming back online, a resync) reads now; the rest
+   * (working_changed, an inbox change, a turn starting or ending) read after a one-second debounce
+   * and, while a retry is waiting, leave the next read to its timer. A failed read arms ONE 30 s
+   * retry timer; a success disarms it.
+   */
+  loadWorking(force = false): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (!force && this.workingRetry !== null) return Promise.resolve();
+    if (force && this.workingRetry !== null) { this.clearSlow(this.workingRetry); this.workingRetry = null; }
+    return this.workingReader.trigger();
+  }
+
+  private applyWorking(got: Got): void {
+    if (this.stopped) return;
+    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
+    const parsed = got.ok ? parseWorkingList(got.body) : null;
+    if (parsed) {
+      this.entries = parsed.entries;
+      this.workingState = "ok";
+      this.workingCut = { more: parsed.more, total: parsed.total };
+      if (this.workingRetry !== null) { this.clearSlow(this.workingRetry); this.workingRetry = null; }
+    } else {
+      this.entries = null;
+      this.workingState = "unavailable";
+      this.workingCut = { more: false, total: 0 };
+      if (this.workingRetry === null) {
+        this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
+      }
+    }
+    if (this.tab === "inbox" && !this.card) this.renderInbox();
+  }
+
+  /** The working read, after the debounce (a burst of events is one read). */
+  private workingSoon(): void {
+    this.later("working", () => void this.loadWorking(false), WORKING_DEBOUNCE_MS);
   }
 
   /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
@@ -1237,15 +1330,21 @@ export class PhoneApp {
     if (atEnd) this.scrollToEnd();
   }
 
-  async loadTasks(): Promise<void> {
-    const r = await this.read("/m/api/tasks");
-    if (!r || !("body" in r)) return;
+  loadTasks(): Promise<void> {
+    return this.tasksReader.trigger();
+  }
+
+  private applyTasks(r: { body: unknown } | { error: string; status: number } | null): void {
+    if (this.stopped || !r || !("body" in r)) return;
     this.tasks = parseTasks(r.body);
-    if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
+    this.tasksMore = (r.body as { more?: unknown } | null)?.more === true;
+    if (this.tab === "inbox" && !this.card) this.renderInbox();
+    else if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
   }
 
   /** Open a task, or read the open one again (its diff too, once shown; its folds kept). */
   async openTask(id: string): Promise<void> {
+    if (this.tab !== "tasks") this.taskBack = this.tab === "inbox" ? this.filter : "tasks";
     this.tab = "tasks";
     if (this.sheet?.kind === "task") this.sheet = null;
     if (this.task?.id !== id) this.task = { id, view: null, diff: null, folds: new Map() };
@@ -1279,12 +1378,17 @@ export class PhoneApp {
   refreshVisible(): void {
     void this.loadInbox();
     void this.loadReview();
+    // PX-2: whenever the list is the view (and it is the first screen), working and tasks are read again
+    // too: the stream reopened, coming back online and a resync all land here (Sol 6, finding 5).
+    if (this.tab === "inbox" || this.tab === "tasks") {
+      void this.loadWorking(true);
+      void this.loadTasks();
+    }
     if (this.tab === "chats") {
       if (this.thread) void this.moreLog();
       void this.loadChats();
     } else if (this.tab === "tasks") {
       if (this.task) void this.openTask(this.task.id);
-      void this.loadTasks();
     }
   }
 
@@ -1331,11 +1435,15 @@ export class PhoneApp {
     if (event.kind === "inbox_changed") {
       this.later("inbox", () => void this.loadInbox());
       this.later("review", () => void this.loadReview());
+      this.workingSoon();
       if (this.card && event.ids.includes(this.card.rowId)) this.later("card", () => void this.loadCard());
-      if (this.tasks !== null && event.ids.some((id) => /^(task|prop|tq):/.test(id))) {
+      if (event.ids.some((id) => /^(task|prop|tq):/.test(id))) {
         this.later("tasks", () => void this.loadTasks());
       }
+    } else if (event.kind === "working_changed") {
+      this.workingSoon();
     } else if (event.kind === "thread_changed") {
+      if (event.reason === "turn_started" || event.reason === "turn_finished") this.workingSoon();
       if (this.thread?.id === event.threadId) this.later("log", () => void this.moreLog());
       if (this.projects !== null) {
         const project = event.projectId;
@@ -1343,16 +1451,16 @@ export class PhoneApp {
         else this.later("chats", () => void this.loadChats());
       }
     } else if (event.kind === "task_changed") {
-      if (this.tasks !== null) this.later("tasks", () => void this.loadTasks());
+      this.later("tasks", () => void this.loadTasks());
       if (this.task?.id === event.taskId) this.later("task", () => void this.openTask(event.taskId));
     } else {
       this.refreshVisible();
     }
   }
 
-  private later(key: string, fn: () => void): void {
+  private later(key: string, fn: () => void, ms = DEBOUNCE_MS): void {
     if (this.timers.has(key)) return;
-    this.timers.set(key, this.setTimer(() => { this.timers.delete(key); if (!this.stopped) fn(); }, DEBOUNCE_MS));
+    this.timers.set(key, this.setTimer(() => { this.timers.delete(key); if (!this.stopped) fn(); }, ms));
   }
 
   // -- online and offline ---------------------------------------------------------------
@@ -1391,23 +1499,36 @@ export class PhoneApp {
   // -- drawing ---------------------------------------------------------------------------
 
   show(tab: Tab): void {
+    // PX-2: Tasks is a filter of the list, not a tab. Asking for it (a task's back, a closed sheet) shows that list.
+    if (tab === "tasks") {
+      this.task = null;
+      this.sheet = null;
+      this.card = null;
+      this.filter = this.taskBack;
+      this.taskBack = "tasks";
+      this.tab = "inbox";
+      this.render();
+      void this.loadInbox();
+      void this.loadTasks();
+      return;
+    }
+    if (tab === "inbox" && this.tab === "tasks") { this.task = null; this.sheet = null; this.filter = null; }
+    else if (tab === "inbox" && this.tab === "inbox" && !this.card) this.filter = null;
     if (tab === "inbox" && this.tab === "inbox" && this.card) this.card = null;
     if (tab === this.tab) {
       // A second tap on the open tab goes back to its list.
       if (tab === "chats") this.thread = null;
-      if (tab === "tasks") this.task = null;
       this.sheet = null;
-    } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : tab === "tasks" ? "task" : "")) {
+    } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : "")) {
       this.sheet = null;
     }
     // Entering the Review tab: nothing ticked, nothing confirmed (review of #329, MED 2).
     if (tab === "review" && this.tab !== "review") this.resetReviewSelection();
     this.tab = tab;
     this.render();
-    if (tab === "inbox") void this.loadInbox();
+    if (tab === "inbox") { void this.loadInbox(); void this.loadWorking(true); void this.loadTasks(); }
     if (tab === "review") void this.loadReview();
     if (tab === "chats" && !this.thread) void this.loadChats();
-    if (tab === "tasks" && !this.task) void this.loadTasks();
   }
 
   private renderBadge(): void {
@@ -1547,8 +1668,11 @@ export class PhoneApp {
 
   render(): void {
     this.wakeForStale();
+    // Before anything is built: a reused card (threadsView) is moved out of the old view as the new one is made, which blurs it.
+    const kept = this.focusedKey();
     for (const [tab, b] of Object.entries(this.tabs) as [Tab, HTMLButtonElement][]) {
-      b.setAttribute("aria-selected", String(tab === this.tab));
+      // A task's own pages belong to the Inbox (Tasks is a filter of it, not a tab).
+      b.setAttribute("aria-selected", String(tab === this.tab || (tab === "inbox" && this.tab === "tasks")));
     }
     this.renderBadge();
     this.renderTabs();
@@ -1615,10 +1739,27 @@ export class PhoneApp {
           rows: this.inbox ?? [],
         },
       };
-      view = inboxView(this.inbox, (row) => {
+      const open = (row: InboxRow) => {
         if (row.thread_id) void this.openThread(row.thread_id);
         else if (row.task_id) void this.openTask(row.task_id);
-      }, answers, this.secure);
+      };
+      const tasksPanel = this.filter === "tasks" ? this.tasksPanel() : null;
+      view = threadsView({
+        rows: this.inbox, entries: this.entries, working: this.workingState, workingCut: this.workingCut,
+        tasks: this.tasks, tasksMore: this.tasksMore, inboxMore: this.inboxMore, filter: this.filter,
+        recentAll: this.recentAll, error: this.listError,
+      }, {
+        answers, openRow: open,
+        openThread: (id) => void this.openThread(id),
+        openTask: (id) => void this.openTask(id),
+        setFilter: (f) => { this.filter = f; this.render(); if (f === "tasks") void this.loadTasks(); },
+        setRecentAll: (all) => {
+          this.recentAll = all;
+          try { localStorage.setItem(RECENT_KEY, all ? "1" : "0"); } catch { /* no storage: it just does not last */ }
+          this.render();
+        },
+        retry: () => { void this.loadInbox(); },
+      }, this.slots, this.now(), tasksPanel, this.secure);
       view.append(this.notify.view());
       if (this.flash) {
         const line = el("p", "m-notice", this.flash);
@@ -1653,7 +1794,7 @@ export class PhoneApp {
       }
     } else if (this.sheet?.kind === "task") {
       view = taskSheetView(this.sheet, this.projects ?? [], this.online, {
-        close: () => { this.sheet = null; this.render(); void this.loadTasks(); },
+        close: () => { this.show("tasks"); },
         submit: () => void this.createTask(),
         change: () => this.render(),
       });
@@ -1682,10 +1823,8 @@ export class PhoneApp {
           inInbox: (index) => !!this.inbox?.some((row) => row.id === `tq:${open.id}:${index}`) })
         : el("p", "empty", this.online ? "Loading…" : "Not read yet: you're offline.");
     } else {
-      view = tasksView(this.tasks, (t) => void this.openTask(t.id));
-      view.prepend(tap("New task", () => this.openNewTask(), "quiet m-new", "m-new-task-open"));
+      view = this.tasksPanel();
     }
-    const kept = this.focusedKey();
     this.main.replaceChildren(view);
     this.rendered = this.tab;
     const keep = this.keepScroll;
@@ -1693,6 +1832,18 @@ export class PhoneApp {
     if (keep === "end") this.scrollToEnd();
     else if (keep !== null) this.main.scrollTop = keep;
     this.moveFocus(kept);
+  }
+
+  /** The Tasks filter's body: today's task list, headed by "New task", and the cap's notice. */
+  private tasksPanel(): HTMLElement {
+    const view = tasksView(this.tasks, (t) => void this.openTask(t.id));
+    if (this.tasksMore) {
+      const more = el("p", "m-band-note", "Showing the newest 200 tasks: older ones, running ones included, are at the desk");
+      more.dataset.testid = "m-tasks-more-list";
+      view.append(more);
+    }
+    view.prepend(tap("New task", () => this.openNewTask(), "quiet m-new", "m-new-task-open"));
+    return view;
   }
 
   private reviewActions(): ReviewActions {
