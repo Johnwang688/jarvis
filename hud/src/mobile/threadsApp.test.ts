@@ -78,7 +78,9 @@ describe("the working read's own state (Sol, finding 3)", () => {
     const h = harness();
     h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
     h.answers["/m/api/inbox"] = ok({ rows: [mkRow("q:1", 3, { thread_id: T1, detail: { text: "Which?", options: [] } })] });
+    const flips = vi.spyOn(h.app, "setOnline");
     await started(h);
+    expect(flips.mock.calls.filter((c) => c[0] === false)).toEqual([]);
     expect(h.q("m-working-unavailable")!.textContent).toBe("In progress unavailable");
     expect(h.app.online).toBe(true);
     expect(h.q("m-offline")!.hidden).toBe(true);
@@ -91,6 +93,7 @@ describe("the working read's own state (Sol, finding 3)", () => {
   it("ten working 503s beside inbox 200s: never offline, one retry timer, bounded request counts", async () => {
     const h = harness();
     h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    const flips = vi.spyOn(h.app, "setOnline");
     await started(h);
     const working0 = h.count("/m/api/working");
     for (let i = 0; i < 10; i++) {
@@ -105,6 +108,7 @@ describe("the working read's own state (Sol, finding 3)", () => {
     expect(working0).toBeLessThanOrEqual(2);
     expect(h.slow.size).toBe(1);
     expect(h.slowSets - h.slowClears).toBe(1);
+    expect(flips.mock.calls.filter((c) => c[0] === false)).toEqual([]);
     // The one retry fires after 30 s, reads once, fails once, and arms one more.
     expect([...h.slow.values()][0].ms).toBe(WORKING_RETRY_MS);
     await h.fireSlow();

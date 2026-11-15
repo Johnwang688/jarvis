@@ -813,7 +813,8 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           and b"STREAM-TEXT-NEVER" not in windows, windows[:300].decode("utf-8", "replace"))
 
     # -- Tasks ---------------------------------------------------------------------------
-    page.locator('[data-testid="m-tab-tasks"]').click()
+    page.locator('[data-testid="m-tab-inbox"]').click()
+    page.locator('[data-testid="m-chip-tasks"]').click()
     until(lambda: page.locator('[data-testid="m-task"]').count() == 2, timeout=8)
     groups = page.locator('[data-testid="m-task-group"]').all_inner_texts()
     check("P-3 Tasks: running first, then blocked", [g.lower() for g in groups] == ["running", "blocked"], str(groups))

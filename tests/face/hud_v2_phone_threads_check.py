@@ -1,0 +1,295 @@
+"""The phone's thread list (plan C, PX-2) in a real headless Chromium.
+
+The built `mobile.html` and its assets are served from `hud/dist` through
+Playwright routes under the listener's own security headers (the CSP is the
+real `REMOTE_POLICY`); the read API is a fake answering per scenario, so no
+daemon, passkey or live port is involved. What it pins, at 375 and 390 px:
+
+  - the three bands in order (Needs you, Running, Recent), with an approval
+    and a question INSIDE their thread's card, a row on a thread the working
+    list does not hold (an archived thread) drawn as its own card, a row with
+    no thread drawn as a row card, and a running task seeded from the tasks
+    read (no entry, no inbox row);
+  - every received inbox row drawn exactly once;
+  - the summary strip (`Needs you · N`, `Running · M`, `Tasks`), and a chip
+    filtering to its band and back;
+  - a working 503 beside inbox 200s: "In progress unavailable" in Running, the
+    app never offline (no banner, the connection dot live), every row still
+    drawn;
+  - the "the rest are at the desk" notice when the working list was cut;
+  - 48 px targets for this package's controls, no sideways scroll at 320, 375
+    and 390, no inline style and no CSP violation;
+  - the approval card still opens from its row with focus on its heading (its
+    DENY/AUTHORIZE gap is pinned by hud_v2_phone_answer_check.py).
+
+Screenshots, when JARVIS_PX2_SHOTS names a directory, are written there.
+Skipped when `hud/dist` has no phone shell (run `npm run build` in hud/).
+
+Run: PYTHONPATH=. .venv/bin/python tests/face/hud_v2_phone_threads_check.py
+"""
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+HOST = "jarvis-box.tail-test.ts.net"
+DIST = REPO / "hud" / "dist"
+HOSTILE = '<img src=x onerror="window.__pwned=7"><b>bold</b>'
+T_NEEDS, T_WORK, T_IDLE, T_FAILED, T_ARCHIVED = "a0000001", "a0000002", "a0000003", "a0000004", "a0000009"
+K_RUN, K_BLOCKED = "b0000001", "b0000002"
+PROJECT = "c0000001"
+
+
+def ago(minutes: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def row(rid, kind, rank, title, detail=None, **over):
+    base = {"id": rid, "kind": kind, "rank": rank, "title": title, "blocks": "", "project_id": None, "thread_id": None,
+            "task_id": None, "asked_at": ago(3), "expires_at": None, "origin": "", "detail": detail or {}}
+    base.update(over)
+    return base
+
+
+def entry(tid, status, title, minutes):
+    return {"thread_id": tid, "project_id": PROJECT, "project": "Calc", "title": title, "status": status, "last": ago(minutes)}
+
+
+def task(tid, state, brief, minutes=10):
+    return {"id": tid, "project_id": PROJECT, "brief": brief, "state": state, "updated": ago(minutes),
+            "status": {"step": 2, "steps": 5}, "plan": [], "spec": {}}
+
+
+def world():
+    rows = [
+        row("appr:r1", "approval", 1, "Claude asks to use Bash",
+            {"tool": "Bash", "command": "npm test", "headline": "Run the test suite"}, thread_id=T_NEEDS),
+        row("q:" + T_NEEDS + ":1", "question", 2, "Claude asks you", {"text": "Which branch should I use?", "options": ["main", "dev"]},
+            thread_id=T_NEEDS),
+        row("q:" + T_ARCHIVED + ":1", "question", 3, "An old chat asks you", {"text": "Still there?", "options": []},
+            thread_id=T_ARCHIVED, origin="Old docs chat"),
+        row("pr:Johnwang688/Calc#12", "pr", 5, "PR #12 is ready to merge", {}),
+        row("tq:" + K_BLOCKED + ":0", "task_question", 2, "A task asks you", {"text": "Rebase?", "options": []}, task_id=K_BLOCKED),
+        row("missed:x1", "missed", 8, "Denied while you slept", {"text": "n", "n": 1}),
+    ]
+    return {
+        "rows": rows,
+        "inbox_more": False,
+        "working": {"entries": [entry(T_NEEDS, "needs_input", "Fix the build " + HOSTILE, 4), entry(T_WORK, "working", "Add multiply", 1),
+                                entry(T_IDLE, "idle", "Notes", 90), entry(T_FAILED, "failed", "Refactor", 200)],
+                    "more": False, "total": 4},
+        "working_status": 200,
+        "tasks": [task(K_RUN, "running", "Implement divide"), task(K_BLOCKED, "blocked", "Needs a rebase")],
+        "answers": [],
+    }
+
+
+def run(browser, check, until, shots=None):
+    print("\nThe phone's thread list (PX-2): bands, cards, the strip, the working route's own state")
+    if not (DIST / "mobile.html").is_file():
+        print("  skip  hud/dist has no phone shell (run npm run build in hud/)")
+        return
+    from jarvis.v2.remote_listener import SECURITY_HEADERS
+    state = world()
+    seen: list[str] = []
+
+    def api(route):
+        request = route.request
+        path = request.url.split(HOST, 1)[1].split("?", 1)[0]
+        seen.append(path)
+        if request.method == "POST":
+            state["answers"].append((path, request.post_data))
+            return route.fulfill(status=200, json={"note": "Sent."})
+        if path == "/m/api/me":
+            return route.fulfill(json={"signed_in": True, "secure": {"ok": True}})
+        if path == "/m/api/inbox":
+            return route.fulfill(json={"rows": state["rows"], "more": state["inbox_more"]})
+        if path == "/m/api/working":
+            if state["working_status"] != 200:
+                return route.fulfill(status=state["working_status"], json={"error": "the In progress list is not running"})
+            return route.fulfill(json=state["working"])
+        if path == "/m/api/tasks":
+            return route.fulfill(json={"tasks": state["tasks"], "more": state.get("tasks_more", False)})
+        if path == "/m/api/events":
+            return route.fulfill(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-store"},
+                                 body="retry: 600000\n: hello\n\n")
+        return route.fulfill(status=404, json={"error": "not found"})
+
+    def serve(route):
+        request = route.request
+        path = request.url.split(HOST, 1)[1].split("?", 1)[0]
+        if path.startswith("/m/api/"):
+            return api(route)
+        rel = "mobile.html" if path in ("/m/", "/m") else path[len("/m/"):] if path.startswith("/m/") else ""
+        target = (DIST / rel).resolve()
+        if not rel or DIST.resolve() not in target.parents and target != DIST.resolve() or not target.is_file():
+            return route.fulfill(status=404, body="no")
+        kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        headers = dict(SECURITY_HEADERS)
+        headers["Content-Type"] = kind
+        return route.fulfill(status=200, headers=headers, body=target.read_bytes())
+
+    def open_page(width, height=2200):
+        ctx = browser.new_context(viewport={"width": width, "height": height}, ignore_https_errors=True, has_touch=False)
+        ctx.route(re.compile(r".*"), lambda r: r.abort())
+        ctx.route(re.compile(r"^https://" + re.escape(HOST) + r"/"), serve)
+        page = ctx.new_page()
+        page.set_default_timeout(10000)
+        problems: list[str] = []
+        page.on("pageerror", lambda e: problems.append(str(e)))
+        page.on("console", lambda m: problems.append(m.text) if "Content Security Policy" in m.text else None)
+        page.goto(f"https://{HOST}/m/")
+        return ctx, page, problems
+
+    def shot(page, name, element=None):
+        if not shots:
+            return
+        target = page.locator(element) if element else page
+        target.screenshot(path=str(Path(shots) / f"{name}.png"))
+
+    for width in (375, 390):
+        state.update(world())
+        ctx, page, problems = open_page(width)
+        tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+        try:
+            until(lambda: tid("m-band-needs").count() == 1 and tid("m-inbox-row").count() >= 1, timeout=10)
+            until(lambda: tid("m-band-running").count() == 1)
+            tag = f"@{width}"
+            order = page.evaluate("Array.from(document.querySelectorAll('section.m-band')).map(s => s.dataset.band)")
+            check(f"PX-2 bands: Needs you, Running, Recent in order {tag}", order == ["needs", "running", "recent"], str(order))
+            check(f"PX-2 summary strip: Needs you · N, Running · M, Tasks {tag}",
+                  tid("m-chip-needs").inner_text() == "Needs you · 5" and tid("m-chip-running").inner_text() == "Running · 2"
+                  and tid("m-chip-tasks").inner_text() == "Tasks",
+                  " / ".join(tid(i).inner_text() for i in ("m-chip-needs", "m-chip-running", "m-chip-tasks")))
+            ids = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-inbox-row]')).map(r => r.dataset.id)")
+            want = sorted(r["id"] for r in state["rows"])
+            check(f"PX-2 IN-8: every received row drawn exactly once {tag}", sorted(ids) == want, f"{sorted(ids)} vs {want}")
+            card = page.locator(f'[data-testid="m-thread"][data-key="thread:{T_NEEDS}"]')
+            inside = card.locator('[data-testid="m-inbox-row"]').evaluate_all("els => els.map(e => e.dataset.id)")
+            check(f"PX-2 an approval and a question sit inside their thread's card {tag}",
+                  inside == ["appr:r1", "q:" + T_NEEDS + ":1"], str(inside))
+            check(f"PX-2 an archived thread's row is its own orphan card, titled from its origin {tag}",
+                  page.locator(f'[data-key="orphan:{T_ARCHIVED}"] .m-thread-title').inner_text() == "Old docs chat")
+            check(f"PX-2 a row with no thread is a row card {tag}", page.locator('[data-key="row:pr:Johnwang688/Calc#12"]').count() == 1)
+            check(f"PX-2 a running task with no row and no entry is under Running {tag}",
+                  page.locator(f'[data-testid="m-band-running"] [data-key="task:{K_RUN}"]').count() == 1)
+            check(f"PX-2 a blocked task's row lands in its task card, under Needs you {tag}",
+                  page.locator(f'[data-testid="m-band-needs"] [data-key="task:{K_BLOCKED}"] [data-id="tq:{K_BLOCKED}:0"]').count() == 1)
+            check(f"PX-2 hostile thread text is text, never markup {tag}",
+                  page.locator("[data-testid=m-main] img, [data-testid=m-main] b").count() == 0
+                  and "<img" in card.inner_text() and not problems, str(problems))
+            check(f"PX-2 the working route answering 200: no unavailable line {tag}", tid("m-working-unavailable").count() == 0)
+            small = page.evaluate("""() => Array.from(document.querySelectorAll('.tap.chip, .m-thread-open, .m-recent-all'))
+                .map(e => [e.dataset.testid, Math.round(e.getBoundingClientRect().height)]).filter(([, h]) => h < 48)""")
+            check(f"PX-2 the strip's chips and thread heads are at least 48 px tall {tag}", not small, str(small))
+            wide = page.evaluate("[document.documentElement.scrollWidth, innerWidth, document.querySelector('main').scrollWidth, document.querySelector('main').clientWidth]")
+            check(f"PX-2 no sideways scroll {tag}", wide[0] <= wide[1] and wide[2] <= wide[3], str(wide))
+            check(f"PX-2 no inline style attribute, no CSP violation {tag}", page.locator("[data-testid=m-main] [style]").count() == 0 and not problems, str(problems))
+            shot(page, f"bands-mixed-{width}")
+            shot(page, f"thread-card-approval-question-{width}", f'[data-testid="m-thread"][data-key="thread:{T_NEEDS}"]')
+            shot(page, f"summary-strip-{width}", '[data-testid="m-strip"]')
+            # A chip filters to its band, and again shows everything.
+            tid("m-chip-running").click()
+            until(lambda: tid("m-band-needs").count() == 0)
+            check(f"PX-2 the Running chip filters to Running, pressed {tag}",
+                  tid("m-band-running").count() == 1 and tid("m-chip-running").get_attribute("aria-pressed") == "true"
+                  and tid("m-chip-needs").inner_text() == "Needs you · 5")
+            tid("m-chip-running").click()
+            until(lambda: tid("m-band-needs").count() == 1)
+            check(f"PX-2 the chip again shows everything {tag}", tid("m-band-recent").count() == 1)
+            # The Tasks chip is a filter, not a tab.
+            check(f"PX-2 Tasks is a chip, not a tab {tag}", tid("m-tab-tasks").count() == 0)
+            tid("m-chip-tasks").click()
+            until(lambda: tid("m-new-task-open").count() == 1)
+            check(f"PX-2 the Tasks chip shows the tasks, headed by New task {tag}", tid("m-task").count() == 2)
+            tid("m-chip-tasks").click()
+            until(lambda: tid("m-band-needs").count() == 1)
+            # The approval's own card still opens from its row (the sheet is PX-4's).
+            page.locator('[data-id="appr:r1"] [data-testid="m-open-card"]').click()
+            until(lambda: tid("m-card-heading").count() == 1)
+            check(f"PX-2 the approval's card still opens, focus on its heading {tag}",
+                  page.evaluate("document.activeElement?.dataset?.testid") == "m-card-heading")
+        finally:
+            ctx.close()
+
+    # -- the working route's own failure: never the offline state ------------------------------
+    for width in (375, 390):
+        state.update(world())
+        state["working_status"] = 503
+        ctx, page, problems = open_page(width)
+        tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+        try:
+            until(lambda: tid("m-working-unavailable").count() == 1, timeout=10)
+            tag = f"@{width}"
+            check(f"PX-2 a working 503: 'In progress unavailable' in the Running band {tag}",
+                  tid("m-band-running").locator('[data-testid="m-working-unavailable"]').inner_text() == "In progress unavailable")
+            check(f"PX-2 a working 503 never shows the offline banner or flips the connection {tag}",
+                  not tid("m-offline").is_visible() and tid("m-conn").inner_text() != "offline"
+                  and page.evaluate("document.querySelector('[data-screen]').dataset.stale") == "false")
+            ids = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-inbox-row]')).map(r => r.dataset.id)")
+            check(f"PX-2 a working 503 hides no row {tag}", sorted(ids) == sorted(r["id"] for r in state["rows"]), str(ids))
+            check(f"PX-2 a working 503: a running task still shows, from the tasks read {tag}",
+                  page.locator(f'[data-key="task:{K_RUN}"]').count() == 1)
+            check(f"PX-2 with working down, the thread's rows fall to orphan cards, still under Needs you {tag}",
+                  page.locator(f'[data-testid="m-band-needs"] [data-key="orphan:{T_NEEDS}"]').count() == 1)
+            shot(page, f"in-progress-unavailable-{width}", '[data-testid="m-band-running"]')
+        finally:
+            ctx.close()
+
+    # -- the rest are at the desk ---------------------------------------------------------------
+    state.update(world())
+    state["working"] = {"entries": [entry(f"d{i:07x}", "idle", f"Chat {i}", 30 + i) for i in range(100)], "more": True, "total": 137}
+    state["inbox_more"] = True
+    ctx, page, problems = open_page(390)
+    tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+    try:
+        until(lambda: tid("m-working-more").count() == 1, timeout=10)
+        check("PX-2 a cut working list says 'Showing 100 of 137: the rest are at the desk'",
+              tid("m-working-more").inner_text() == "Showing 100 of 137: the rest are at the desk", tid("m-working-more").inner_text())
+        check("PX-2 a cut inbox says so too", tid("m-inbox-more").count() == 1)
+        check("PX-2 Recent shows 5, then Show all (N); the rest stay in the page, folded",
+              tid("m-recent-all").inner_text().startswith("Show all (")
+              and page.locator('[data-testid="m-recent-rest"]').evaluate("e => e.hidden") is True)
+        shot(page, "truncation-notice-390", '[data-testid="m-working-more"]')
+        for width in (320,):
+            page.set_viewport_size({"width": width, "height": 800})
+            wide = page.evaluate("[document.documentElement.scrollWidth, innerWidth, document.querySelector('main').scrollWidth, document.querySelector('main').clientWidth]")
+            check(f"PX-2 no sideways scroll at {width}", wide[0] <= wide[1] and wide[2] <= wide[3], str(wide))
+    finally:
+        ctx.close()
+    seen_paths = sorted(set(seen))
+    allowed = {"/m/api/me", "/m/api/inbox", "/m/api/working", "/m/api/tasks", "/m/api/events", "/m/api/review"}
+    stray = [p for p in seen_paths if p.startswith("/m/api/") and p not in allowed and "/answer" not in p and "/detail" not in p]
+    check("PX-2 the app reads only today's routes plus WS-5a's /m/api/working", not stray,
+          str(stray) + " " + json.dumps(seen_paths))
+
+
+def main():
+    from playwright.sync_api import sync_playwright
+    from tests.face import hud_v2_check as v2
+    shots = os.environ.get("JARVIS_PX2_SHOTS")
+    if shots:
+        Path(shots).mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            run(browser, v2.check, v2.until, shots)
+        except Exception as exc:  # noqa: BLE001
+            v2.check("Phone thread list scenario completes", False, f"{type(exc).__name__}: {exc}")
+        finally:
+            browser.close()
+    print(f"{v2.CHECKS} phone thread checks, {len(v2.FAILURES)} failures")
+    return bool(v2.FAILURES)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
