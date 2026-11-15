@@ -2354,3 +2354,31 @@ The owner's answer O-4: the project where chat with no project lands is named
   refuses name and root changes; the migration never goes through it.
 - Tests: `tests/v2/unsorted_check.py` (store, migration, guard), `archive_check.py`,
   `stores_check.py`, `hud/src/lib/projects.test.ts`.
+
+## The Inbox section (WS-2, 2026-11-14)
+
+Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` (D-5, D-6, D-9, D-10). Additive: today's
+Inbox page, its navigation, the aurora row's look, its count and its amber are unchanged
+(`waitingCount`/`anyPending` still come from `state/inbox.ts`, D-6).
+
+- **Store.** `hud/src/state/working.ts` (`WorkingStore`), like `state/inbox.ts`: one `GET /working`
+  in flight, an event heard during a read asks for exactly one more, read on `working_changed`
+  (App.tsx), on every `_connected` and at boot. A failed read keeps the last list; 404/403 means no
+  section is drawn at all (an older daemon). Parsing and D-9's order are in `lib/working.ts`.
+- **Drawing.** `components/WorkingSection.tsx`, directly under the owner Inbox row, rendered by the
+  Sidebar (which reads the store itself so typing never redraws it). Fold choice in localStorage
+  `jarvis.hud.workingSection` (default open, every access in try/catch). The dot is the sidebar's own
+  activity store, so a row matches its project-tree dot; the order is by that label, then `last`.
+  Titles, chips and row titles are text.
+- **Needs you group.** The `needs_you` rows as a kind word (chosen in `lib/working.ts`, never the
+  served text) and the row's title; amber only for rank 1 and 2. A click opens today's Inbox page
+  (where answering happens), not the row's thread.
+- **Done.** The thread menu opened from an Inbox row also offers Done: disabled with the entry's
+  `why_not` while it is ineligible. It posts the entry's drawn `seq`; a 200 shows a 5 s Undo toast
+  that posts the daemon's `token` (the response field is `token`); a 409 is read again with no
+  message; anything else is a short note. Drag onto a project reuses the tree's own drag state
+  and move.
+- **Tests.** `hud/src/state/working.test.ts`, `hud/src/lib/working.test.ts`;
+  `tests/face/hud_v2_working_check.py` with `tests/face/hud_v2_mock_working.py`
+  (`JARVIS_WORKING_SHOTS=<dir>` saves screenshots). Not run against a real daemon: live status
+  belongs in the work checkpoint.

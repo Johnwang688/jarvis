@@ -1257,6 +1257,43 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 
 .movenote { padding: 4px 12px; }
 
+/* ---- the Inbox section under the owner Inbox row (WS-2) ----
+   The chat threads being worked on, a second view of threads that stay in their
+   projects. Rows are the tree's own (.tree-row, .act dots, .badge-like chips);
+   amber is only a pending row's kind word, red only the failed dot. */
+.workingsec { flex: 0 0 auto; margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.workinghead { display: flex; align-items: center; gap: 6px; padding: 1px 12px; color: var(--text-muted); }
+.workinghead .wtoggle {
+  flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); padding: 1px 4px;
+  border: none; background: none; border-radius: var(--radius-btn); word-spacing: normal; }
+.workinghead .wtoggle:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.workinghead .wtoggle:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.workinghead .wlabel { font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; word-spacing: normal; }
+.workinghead .wcount { font: 10px var(--mono); font-variant-numeric: tabular-nums; word-spacing: normal; }
+.workingsec .whead {
+  padding: 3px 12px 1px 26px; font: 600 9px var(--mono); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted); word-spacing: normal; }
+.workingsec .wrow { font-size: 12.5px; }
+.workingsec .wrow:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.workingsec .wkind {
+  flex: 0 0 auto; font: 9px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; color: var(--text-muted);
+  word-spacing: normal; }
+.workingsec .wneed.pending .wkind { color: var(--amber); border-color: var(--amber-line); }
+.workingsec .wneed .nm { flex: 1 1 auto; min-width: 0; }
+.workingsec .wchip {
+  flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong); border-radius: 3px;
+  padding: 0 4px; color: var(--text-muted); word-spacing: normal; }
+.workingsec .wempty { padding: 3px 12px 3px 26px; }
+.workingtoast {
+  display: flex; align-items: center; gap: 8px; margin: 2px 8px; padding: 4px 8px; flex: 0 0 auto;
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  font-size: 12px; color: var(--text); }
+.workingtoast .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workingtoast button { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; color: var(--accent-hi); }
+.threadmenu button.mrow:disabled { opacity: 0.45; cursor: default; }
+
 /* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
 /* The chip never clips: a capped width with overflow hidden used to cut off
    the effort select and default ▾ behind the dictation buttons once the

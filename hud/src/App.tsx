@@ -161,6 +161,7 @@ import { thinkingClock } from "./components/MiniOrb";
 import { InboxView } from "./components/InboxView";
 import { ReviewView } from "./components/ReviewView";
 import { inbox, useInbox } from "./state/inbox";
+import { working } from "./state/working";
 import { review, useReview } from "./state/review";
 import { anyPending, waitingCount } from "./lib/inbox";
 
@@ -1777,6 +1778,11 @@ export default function App() {
           void inbox.refresh();
           void review.refresh();
           break;
+        case "working_changed":
+          // No ids, no data. The working set is the daemon's projection (a
+          // move or a rename publishes it too), so it is read again (state/working.ts).
+          void working.refresh();
+          break;
         case "proposal_reply":
           // A proposal is a system line with a 60-second cancel: the fast path
           // has already answered and a task is about to run. Only in the
@@ -1912,6 +1918,7 @@ export default function App() {
           void refreshActivity();
           // An `inbox_changed` published while the stream was down is gone.
           void inbox.refresh();
+          void working.refresh();
           void review.refresh();
           break;
         case "terminal_attached":
@@ -3276,6 +3283,7 @@ export default function App() {
       }
       void refreshActivity();
       void inbox.refresh();
+      void working.refresh();
       void review.refresh();
       // The cards: merged, never overwritten, and ordered against the stream
       // (review of #330, LOW 3 and NEW-3).
