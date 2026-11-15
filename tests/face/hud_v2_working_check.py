@@ -1,5 +1,5 @@
-"""WS-2 (docs/plans/2026-11-14-inbox-working-set-plan.md, D-5, D-9, D-10): the
-sidebar's Inbox section under the owner Inbox row, against WS-1's routes
+"""WS-2 and WS-3 (docs/plans/2026-11-14-inbox-working-set-plan.md, D-5, D-9, D-10,
+§11): the sidebar's Inbox section under the owner Inbox row (which is its header), against WS-1's routes
 (`GET /working`, `POST /working/<id>/done` and `/undo`, the `working_changed`
 bus record), played by `hud_v2_mock_working.py`.
 
@@ -12,8 +12,10 @@ What it pins, one section each (each names the mutation it is meant to catch):
             your move; newest first within a label), each with the same dot
             the tree shows, its title and its project's name as a chip; the
             aurora row is unchanged [order by time only; no chips]
-  collapse  the chevron folds the list, the choice lasts across a reload, and
-            expanding brings it back [no persistence]
+  collapse  (WS-3) a click on the rainbow Inbox row folds the list and does not open
+            the page, `aria-expanded` follows, Enter and Space work, the choice
+            lasts across a reload, and there is no separate header line
+            [the row opens the page; no persistence; header kept]
   needs     the Needs you group shows the rows that have no thread entry (kind
             word plus title, text only; amber only for a pending rank) and goes
             when there are none; a click opens today's Inbox page [stays
@@ -27,7 +29,10 @@ What it pins, one section each (each names the mutation it is meant to catch):
             note, the row redrawn with its new seq [error toast on 409]
   live      a `working_changed` event re-reads the list, once [no refresh]
   stale     an older daemon (404) has no section and leaves the Inbox row alone
-  inbox     the aurora row still opens today's Inbox page
+  inbox     the Needs you line opens the page, titled Needs you, and the list stays
+  line      (WS-3) the Needs you line shows at 0 as a quiet "Needs you · 0" and
+            still opens the page; with rows it carries the badge's count
+            [hidden at 0]
   event     an `inbox_changed` alone (no `working_changed`) re-reads the list: a
             removed PR leaves Needs you; Done's reason is read again as its menu
             opens [no refresh on inbox_changed; no read on open]
@@ -36,10 +41,15 @@ What it pins, one section each (each names the mutation it is meant to catch):
             focus back to its opener; a disabled Done is described by its reason
             [row without a tab stop; focus left behind]
   hint      a thread with an attached decision says "1 decision" and the hint
-            opens the Inbox page [no hint]
+            opens the Needs you page [no hint]
+  page      (WS-3) a thread's hint ("2 items") opens the Needs you page at that
+            thread's group (focused, scrolled to); the page groups the chat's
+            rows under its name, still lists every row, and the group's link
+            opens the chat; nothing is listed twice in the sidebar [no grouping;
+            hint opens the page only]
   tall      31 threads and a short window: the section stops at 40% of the
             sidebar and scrolls inside, the project tree keeps rows, nothing
-            reaches the orb; collapsed or empty costs its header line
+            reaches the orb; collapsed it costs nothing, empty its lines
             [no max-height / list scroll]
   short     six threads in a short, zoomed window (1920x700 and 560 high, both
             at 160%): at least one whole working row is visible, at least one
@@ -104,6 +114,12 @@ def _shot(page, name: str) -> None:
     d = _shot_dir()
     if d:
         page.locator("#sidebar").screenshot(path=str(d / f"{name}.png"))
+
+
+def _shot_page(page, name: str) -> None:
+    d = _shot_dir()
+    if d:
+        page.screenshot(path=str(d / f"{name}.png"))
 
 
 def _st(mock):
@@ -211,15 +227,25 @@ def _section_checks(page, mock, check, until):
           bool(patched) and patched[-1][2].get("project_id") == "p2", str(patched[-1:]))
 
 
+def _fold(page):
+    return page.locator('[data-testid="owner-inbox"]')
+
+
 def _collapse_checks(page, mock, check, until):
     _open(page, mock, until)
-    toggle = page.locator('[data-testid="working-toggle"]')
-    check("the section starts expanded", toggle.get_attribute("aria-expanded") == "true" and len(_rows(page)) == 6)
-    toggle.click()
+    row = _fold(page)
+    check("the section starts expanded; the rainbow Inbox row says so and names the list it folds",
+          row.get_attribute("aria-expanded") == "true" and len(_rows(page)) == 6
+          and row.get_attribute("aria-controls") == page.locator('[data-testid="working-section"]').get_attribute("id"))
+    check("there is no separate In progress header line any more [mutation: header kept]",
+          page.locator('[data-testid="working-toggle"]').count() == 0 and page.locator(".workinghead").count() == 0)
+    row.click()
     until(lambda: len(_rows(page)) == 0, timeout=2)
-    check("the chevron folds the list, the header stays",
-          page.locator('[data-testid="working-toggle"]').get_attribute("aria-expanded") == "false"
-          and page.locator('[data-testid="working-section"]').count() == 1)
+    check("a click on the rainbow row folds the list and does NOT open the page [mutation: the row opens the page]",
+          _fold(page).get_attribute("aria-expanded") == "false"
+          and page.locator('[data-testid="working-needs-line"]').count() == 0
+          and page.locator(_pane(1)).get_attribute("data-view") == "chat"
+          and page.locator('[data-testid="inbox-view"]').count() == 0)
     stored = page.evaluate("(k) => localStorage.getItem(k)", KEY)
     check("the choice is stored", stored == "0", str(stored))
     _shot(page, "2-collapsed")
@@ -230,11 +256,20 @@ def _collapse_checks(page, mock, check, until):
     mock.await_reconnect(before)
     time.sleep(0.3)
     check("and it lasts across a reload [mutation: no persistence]",
-          page.locator('[data-testid="working-toggle"]').get_attribute("aria-expanded") == "false"
-          and len(_rows(page)) == 0)
-    page.locator('[data-testid="working-toggle"]').click()
+          _fold(page).get_attribute("aria-expanded") == "false" and len(_rows(page)) == 0)
+    _fold(page).click()
     until(lambda: len(_rows(page)) == 6, timeout=2)
-    check("expanding brings the list back", _rows(page) == ORDER and page.evaluate("(k) => localStorage.getItem(k)", KEY) == "1")
+    check("unfolding brings the list back", _rows(page) == ORDER
+          and _fold(page).get_attribute("aria-expanded") == "true"
+          and page.evaluate("(k) => localStorage.getItem(k)", KEY) == "1")
+    # Keyboard: the row is a button, Enter and Space fold, and its focus ring stays.
+    _fold(page).focus()
+    page.keyboard.press("Enter")
+    until(lambda: len(_rows(page)) == 0, timeout=2)
+    page.keyboard.press("Space")
+    until(lambda: len(_rows(page)) == 6, timeout=2)
+    check("Enter and Space on the focused row fold and unfold it, and it keeps focus",
+          page.evaluate("() => document.activeElement && document.activeElement.dataset.testid") == "owner-inbox")
     # Storage that throws must not break the sidebar.
     page.evaluate("(k) => localStorage.removeItem(k)", KEY)
 
@@ -385,11 +420,12 @@ def _empty_checks(page, mock, check, until):
     _st(mock)["entries"] = []
     mock_working.changed(mock)
     until(lambda: page.locator('[data-testid="working-empty"]').count() == 1, timeout=3)
-    check("with nothing in the set the section says so in one muted line",
+    check("with nothing in the set the section says so in one muted line, under the Needs you line",
           page.locator('[data-testid="working-empty"]').inner_text() == "Nothing in progress"
           and page.locator('[data-testid="working-row"]').count() == 0
           and page.locator('[data-testid="working-list"]').count() == 0
-          and page.locator('[data-testid="working-section"]').evaluate("e => e.getBoundingClientRect().height") <= 36)
+          and page.locator('[data-testid="working-needs-line"]').count() == 1
+          and page.locator('[data-testid="working-section"]').evaluate("e => e.getBoundingClientRect().height") <= 72)
 
 
 def _stale_checks(page, mock, check, until):
@@ -404,12 +440,94 @@ def _stale_checks(page, mock, check, until):
 
 def _inbox_checks(page, mock, check, until):
     _open(page, mock, until)
-    page.locator('[data-testid="owner-inbox"]').click()
+    page.locator('[data-testid="working-needs-line"]').click()
     until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
-    check("the aurora row still opens today's Inbox page",
+    check("the Needs you line opens the page, titled Needs you, and the list stays under the row",
           page.locator(_pane(1)).get_attribute("data-view") == "inbox"
-          and "sel" in (page.locator('[data-testid="owner-inbox"]').get_attribute("class") or ""))
-    check("the section stays under it while the page is open", page.locator('[data-testid="working-section"]').count() == 1)
+          and page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you"
+          and "sel" in (page.locator('[data-testid="owner-inbox"]').get_attribute("class") or "")
+          and page.locator('[data-testid="working-section"]').count() == 1
+          and len(_rows(page)) == 6)
+    check("the pane's own label reads Needs you, not Inbox",
+          "needs you" in (page.locator(_pane(1)).get_attribute("aria-label") or "").lower()
+          and "inbox" not in (page.locator(_pane(1)).get_attribute("aria-label") or "").lower())
+
+
+def _line_checks(page, mock, check, until):
+    # With nothing waiting the line is quiet and still opens the page.
+    _open(page, mock, until)
+    line = page.locator('[data-testid="working-needs-line"]')
+    until(lambda: line.count() == 1 and line.inner_text() == "Needs you · 0", timeout=4)
+    check("the Needs you line is shown with nothing waiting, as a quiet 'Needs you · 0' [mutation: hidden at 0]",
+          line.count() == 1 and line.inner_text() == "Needs you · 0"
+          and "quiet0" in (line.get_attribute("class") or "")
+          and page.locator('[data-testid="owner-inbox-count"]').count() == 0)
+    _shot(page, "7-needs-line-0")
+    line.click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
+    check("and at 0 it still opens the Needs you page",
+          page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you")
+    # With rows waiting it carries the count the rainbow badge shows.
+    rows = [{"id": f"pr:r{i}", "kind": "pr", "rank": 5, "title": f"Review PR {i}", "blocks": "", "project_id": "p1",
+             "thread_id": None, "task_id": None, "asked_at": "2026-11-14T09:00:00+00:00", "expires_at": None,
+             "origin": "", "detail": {}} for i in range(3)]
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = rows
+    page.evaluate("(k) => localStorage.removeItem(k)", KEY)
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+    until(lambda: page.locator('[data-testid="owner-inbox-count"]').count() == 1, timeout=4)
+    badge = page.locator('[data-testid="owner-inbox-count"]').inner_text()
+    txt = page.locator('[data-testid="working-needs-line"]').inner_text()
+    check("with rows waiting the line carries the same count as the rainbow badge", txt == f"Needs you · {badge}" and badge == "3",
+          f"{txt} / {badge}")
+    _shot(page, "8-needs-line-n")
+    mock_inbox.state(mock)["rows"] = []
+
+
+def _page_checks(page, mock, check, until):
+    _reset(mock)
+    t6q = {"id": "q:t6:r1", "kind": "question", "rank": 2, "title": "chat t6 is stopped until you answer",
+           "blocks": "chat t6 waits on this", "project_id": "p1", "thread_id": "t6", "task_id": None,
+           "asked_at": "2026-11-14T09:00:00+00:00", "expires_at": None, "origin": "",
+           "detail": {"thread_id": "t6", "req_id": "r1", "text": "Pick one", "options": ["left", "right"]}}
+    t6d = {**t6q, "id": "dec:t6", "kind": "decision", "rank": 3, "title": "which database",
+           "detail": {"decision_id": "d" + "0" * 12, "question": "which?", "options": [{"label": "a"}], "suggested": 0}}
+    pr = {"id": "pr:r1", "kind": "pr", "rank": 5, "title": "Review PR 12", "blocks": "", "project_id": "p1",
+          "thread_id": None, "task_id": None, "asked_at": "2026-11-14T09:00:00+00:00", "expires_at": None,
+          "origin": "", "detail": {}}
+    mock_inbox.state(mock)["rows"] = [t6q, t6d, pr]
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [t6q, t6d]
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    hint = page.locator('[data-testid="working-hint-t6"]')
+    check("a thread with a question and a decision on it says '2 items' on its row, and nowhere else in the sidebar",
+          hint.inner_text() == "2 items" and page.locator('[data-testid="working-need"]').count() == 0,
+          hint.inner_text())
+    _shot(page, "10-hint")
+    hint.click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
+    until(lambda: page.evaluate("() => document.activeElement && document.activeElement.dataset.threadId") == "t6", timeout=3)
+    check("a hint click opens the Needs you page at that thread: its group is focused and scrolled to [mutation: hint opens the page only]",
+          page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you"
+          and page.evaluate("() => document.activeElement.dataset.testid") == "inbox-thread")
+    groups = page.locator('[data-testid="inbox-thread"][data-thread-id="t6"]')
+    check("the page groups the chat's rows under its name, one group per rank group",
+          groups.count() == 2 and groups.first.locator('[data-testid="inbox-thread-name"]').inner_text() == THREADS["t6"][1]
+          and groups.first.locator('[data-testid="inbox-row"]').count() == 1
+          and page.locator('[data-testid="inbox-row"][data-id="pr:r1"]').evaluate(
+              "e => !e.closest('[data-testid=\"inbox-thread\"]')"))
+    check("and lists every row: the chat's two and the PR",
+          page.locator('[data-testid="inbox-row"]').count() == 3)
+    _shot_page(page, "9-page-grouped")
+    page.locator('[data-testid="inbox-thread-open"]').first.click()
+    until(lambda: page.locator(_pane(1)).get_attribute("data-view") == "chat", timeout=3)
+    check("the group's link opens the thread (the pane shows its chat)",
+          page.locator(_pane(1)).get_attribute("data-view") == "chat"
+          and page.locator(f'[data-testid="working-row"][data-id="t6"].sel').count() == 1)
+    mock_inbox.state(mock)["rows"] = []
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +616,7 @@ def _hint_checks(page, mock, check, until):
           hint.inner_text())
     hint.click()
     until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
-    check("the hint opens today's Inbox page, not the thread",
+    check("the hint opens the Needs you page, not the thread",
           page.locator(_pane(1)).get_attribute("data-view") == "inbox")
 
 
@@ -536,10 +654,10 @@ def _tall_checks(page, mock, check, until):
     check("nothing reaches the orb: the section and the project list end above it",
           m["orbTop"] is not None and m["secBottom"] <= m["orbTop"] + 1 and m["listBottom"] <= m["orbTop"] + 1, str(m))
     _shot(page, "5-31-threads")
-    page.locator('[data-testid="working-toggle"]').click()
+    _fold(page).click()
     until(lambda: page.locator('[data-testid="working-list"]').count() == 0, timeout=2)
     h = page.locator('[data-testid="working-section"]').evaluate("e => e.getBoundingClientRect().height")
-    check("collapsed it costs its header line", h <= 36, str(h))
+    check("folded the list costs no room: the rainbow row is its header", h <= 2, str(h))
     page.evaluate("(k) => localStorage.removeItem(k)", KEY)
 
 
@@ -558,6 +676,123 @@ def _zfresh(page, mock, until, size, zoom):
     until(lambda: page.locator('[data-testid="project-p1"]').count() > 0)
     mock.await_reconnect(before)
     time.sleep(0.4)
+
+
+def _q6(thread="t6"):
+    return {"id": f"q:{thread}:r1", "kind": "question", "rank": 2, "title": f"chat {thread} is stopped until you answer",
+            "blocks": f"chat {thread} waits on this", "project_id": "p1", "thread_id": thread, "task_id": None,
+            "asked_at": "2026-11-14T09:00:00+00:00", "expires_at": None, "origin": "",
+            "detail": {"thread_id": thread, "req_id": "r1", "text": "Pick one", "options": ["left", "right"]}}
+
+
+def _focused(page):
+    return page.evaluate("() => document.activeElement && document.activeElement.dataset && document.activeElement.dataset.threadId || null")
+
+
+def _nav_checks(page, mock, check, until):
+    """Review of PR #368 (fix round 1): hint targets and the header's fallbacks."""
+    q = _q6()
+    # 1. A hint newer than the cached inbox rows: the page reads first, then focuses.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = []
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-line"]').inner_text() == "Needs you · 0", timeout=4)
+    page.locator('[data-testid="working-needs-line"]').click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').get_attribute("data-status") == "ready", timeout=4)
+    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 0, timeout=3)
+    mock_inbox.state(mock)["rows"] = [q]                       # the inbox moved on; this window has not heard (no inbox_changed)
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [q]
+    mock_working.changed(mock)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: _focused(page) == "t6", timeout=4)
+    check("a hint newer than the cached inbox rows still lands: the page reads first, then focuses the thread "
+          "[mutation: the target is judged before the read]", _focused(page) == "t6", str(_focused(page)))
+    # 1b. A second hint for the same thread while the page stays mounted is a new request with its own read.
+    mock_inbox.state(mock)["rows"] = []
+    mock_inbox.changed(mock)                                  # the page re-reads: the group (and the focus) is gone
+    until(lambda: page.locator('[data-testid="inbox-thread"]').count() == 0, timeout=4)
+    mock_inbox.state(mock)["rows"] = [q]                      # back again, but this window has not heard
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: _focused(page) == "t6", timeout=4)
+    check("a second hint for the same thread, page still mounted, reads for itself and lands "
+          "[mutation: the earlier read's completion is reused]", _focused(page) == "t6", str(_focused(page)))
+    # 2. A cancelled navigation leaves no target behind.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = [q]
+    mock_inbox.state(mock)["fail"] = (500, "boom")
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [q]
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: page.locator('[data-testid="inbox-error"]').count() == 1, timeout=4)
+    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 0, timeout=3)
+    mock_inbox.state(mock)["fail"] = None
+    mock_inbox.changed(mock)
+    until(lambda: page.locator('[data-testid="owner-inbox-count"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-needs-line"]').click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').get_attribute("data-status") == "ready", timeout=4)
+    until(lambda: page.locator('[data-testid="inbox-thread"]').count() == 1, timeout=4)
+    time.sleep(0.4)
+    check("a hint opened while the inbox could not be read, then abandoned, leaves no target: a later ordinary open "
+          "focuses nothing [mutation: the request survives the page]", _focused(page) is None, str(_focused(page)))
+    # 3. A first /working error, whatever it is, keeps the row an opener.
+    _reset(mock)
+    _st(mock)["fail"] = (500, "boom")
+    _fresh(page, mock, until, SINGLE)
+    time.sleep(0.8)
+    row = page.locator('[data-testid="owner-inbox"]')
+    check("a first /working error (500) leaves the rainbow row a plain button with no list to fold [mutation: folds an empty list]",
+          row.count() == 1 and row.get_attribute("aria-expanded") is None
+          and page.locator('[data-testid="working-section"]').count() == 0
+          and page.locator('[data-testid="working-stale"]').count() == 1)
+    row.click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
+    check("and a click on it opens the Needs you page", page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you")
+    _st(mock)["fail"] = None
+    # 5. An unread inbox is a mark, not a zero.
+    _reset(mock)
+    mock_inbox.state(mock)["fail"] = (500, "boom")
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+    time.sleep(0.5)
+    line = page.locator('[data-testid="working-needs-line"]')
+    check("with the inbox unread the line says so ('Needs you · –'), is still clickable and is not the quiet zero "
+          "[mutation: unknown shown as 0]",
+          line.inner_text() == "Needs you · –" and "quiet0" not in (line.get_attribute("class") or "")
+          and "nothing" not in (line.get_attribute("aria-label") or ""), line.inner_text())
+    mock_inbox.state(mock)["fail"] = None
+    # 9. With a hint on a row, the project chip gives way first and the title keeps its letters.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = [q, {**q, "id": "dec:t6", "kind": "decision", "rank": 3,
+                                          "detail": {"decision_id": "d" + "0" * 12, "question": "which?",
+                                                     "options": [{"label": "a"}], "suggested": 0}}]
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = mock_inbox.state(mock)["rows"]
+    for t in mock.world["threads"]:
+        if t["id"] == "t6":
+            t["title"] = "your move on the long thread with a long title"
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-row"][data-id="t6"]').hover()      # the row's menu button shows on hover and takes room
+    time.sleep(0.2)
+    m = page.evaluate("""() => {
+      const row = document.querySelector('[data-testid="working-row"][data-id="t6"]');
+      const btn = row.querySelector('button.ttl-btn'), chip = row.querySelector('.wchip'), hint = row.querySelector('.whint');
+      return {title: btn.clientWidth, chip: chip ? chip.getBoundingClientRect().width : 0,
+              hint: hint.getBoundingClientRect().width, text: row.querySelector('[data-testid="working-name-t6"]').textContent};
+    }""")
+    check("a hinted row whose title needs the room: the project chip gives way first, to almost nothing, and the hint stays "
+          "whole [mutation: chip does not yield]", m["chip"] < 12 and m["hint"] > 40, str(m))
+    _shot(page, "r1-hint-row")
+    mock_inbox.state(mock)["rows"] = []
 
 
 def _short_metrics(page):
@@ -648,8 +883,8 @@ def _menukeys_checks(page, mock, check, until):
 
 
 SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
-            _live_checks, _empty_checks, _stale_checks, _inbox_checks, _event_checks, _keys_checks,
-            _hint_checks, _tall_checks, _short_checks, _menukeys_checks)
+            _live_checks, _empty_checks, _stale_checks, _inbox_checks, _line_checks, _event_checks, _keys_checks,
+            _hint_checks, _page_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)
 
 
 def working_checks(browser, mock, base, check, until, guard, init_script):

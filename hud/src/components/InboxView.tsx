@@ -85,11 +85,14 @@ import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
   ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, SNOOZES, VERDICTS, approvalReq, briefOf, canMark, checkOf,
-  checkReceipt, clockOf, decisionBody, decisionOf, deferredOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
+  checkReceipt, clockOf, decisionBody, decisionOf, deferredOf, groupByThread, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
   prOf, prUnavailableOf, questionOf, isHidden, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil,
   type CheckDraft, type DeferredAction, type InboxRow, type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
+import { inboxFocus, useInboxFocus } from "../state/inboxFocus";
+import type { Thread } from "../types";
+import { threadLabel } from "../lib/threadTitle";
 import {
   AI_LABEL, WHY_LABEL, previewLine, recordSummary, staleAt, summaryView, summaryWords, toggleLabel, whereParts,
 } from "../lib/approvalSummary";
@@ -126,6 +129,8 @@ export interface InboxViewProps {
   approvals: readonly Pick<ApprovalRequest, "req_id">[];
   /** An approval card is up: everything here is inert and every control off. */
   blocked: boolean;
+  /** The window's chats, for the heading of a thread's group (a chat not in it is just "Chat"). */
+  threads?: readonly Pick<Thread, "id" | "title" | "turns">[];
   onOpenThread: (threadId: string) => void;
   onOpenTask: (taskId: string) => void;
   onAnswer: (rowId: string, body: AnswerBody) => Promise<unknown>;
@@ -735,10 +740,70 @@ export function InboxView(props: InboxViewProps) {
     return brief ? <div className="ir-body"><div className="ir-text" data-testid="inbox-brief">{brief}</div></div> : null;
   };
 
+  const threadById = new Map((props.threads ?? []).map((t) => [t.id, t]));
+  const renderRow = (row: InboxRow) => {
+    const link = linkOf(row);
+    const asked = clockOf(row.asked_at);
+    return (
+          // No handler on the row itself: a click on it answers nothing.
+          <div className="inbox-row" key={row.id} data-testid="inbox-row" data-id={row.id} data-kind={row.kind}
+               data-rank={row.rank} data-tone={tone(row)} data-hidden={isHidden(row) ? "1" : undefined}>
+            <div className="ir-head">
+              <span className="ir-title" data-testid="inbox-title">{row.title}</span>
+              {asked ? <span className="ir-time muted">{asked}</span> : null}
+            </div>
+            {row.blocks ? <div className="ir-blocks muted" data-testid="inbox-blocks">{row.blocks}</div> : null}
+            {row.origin ? <div className="ir-origin" data-testid="inbox-origin">{row.origin}</div> : null}
+            {body(row)}
+            {marks(row)}
+            {errors[row.id] ? <div className="err small" role="alert" data-testid="inbox-row-error">{errors[row.id]}</div> : null}
+            {link ? (
+              <div className="ir-foot">
+                <button type="button" className="quiet ir-link" data-testid="inbox-link" disabled={props.blocked}
+                        onClick={() => open(row)}>
+                  {link.kind === "thread" ? "Open its chat" : "Open its task"}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        );
+  };
+
   const hidden = hiddenRows(rows);
   const groups = groupRows(showHidden ? rows : shownRows(rows));
   const count = waitingCount(rows);
   const visible = shownRows(rows).length;
+
+  // WS-3: a hint on a thread row in the sidebar asks for this page at that thread. The hint comes from a
+  // working list that can be newer than the rows held here, so the request is not judged until a read
+  // started for THAT request has landed (`asked` is a request id, never a thread id: a second hint for the
+  // same thread is a new request with its own read); then the thread's group is scrolled into view and
+  // focused (tabIndex -1: no keyboard rises), and the request is gone, a thread with no group included.
+  // The page claims the request so a slow read cannot expire it, and while the inbox cannot be read the
+  // request waits for it. It never outlives the page: going away drops it, and a newer request replaces it.
+  const wanted = useInboxFocus();
+  const wantedId = wanted?.id ?? null;
+  const [asked, setAsked] = useState<number | null>(null);
+  useEffect(() => {
+    if (!wanted) return;
+    inboxFocus.claim(wanted.id);
+    let live = true;
+    const landed = () => { if (live) setAsked(wanted.id); };
+    void Promise.resolve(props.onReread()).then(landed, landed);
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantedId]);
+  useEffect(() => () => inboxFocus.clear(), []);
+  useEffect(() => {
+    if (!wanted || asked !== wanted.id || status !== "ready") return;
+    const el = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="inbox-thread"]'))
+      .find((e) => e.dataset.threadId === wanted.thread);
+    if (el) {
+      el.scrollIntoView?.({ block: "start" });
+      el.focus({ preventScroll: true });
+    }
+    inboxFocus.clearRequest(wanted.id);
+  }, [wantedId, asked, status, rows]);
 
   // B4: Snooze and Dismiss for a row of rank 5 to 8 (`canMark`), or, for a
   // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.
@@ -775,7 +840,7 @@ export function InboxView(props: InboxViewProps) {
   return (
     <div className="scroll inbox" data-testid="inbox-view" data-status={status} data-reads={props.snapshot.reads}>
       <div className="inbox-head">
-        <h2 className="bar">Inbox</h2>
+        <h2 className="bar" data-testid="inbox-page-title">Needs you</h2>
         <span className="muted small" data-testid="inbox-summary">
           {status === "ready" ? (count ? `${count} waiting on you` : "Nothing waiting on you") : ""}
         </span>
@@ -840,12 +905,12 @@ export function InboxView(props: InboxViewProps) {
         </div>
       ) : null}
       {notice ? <div className="inbox-notice" role="status" data-testid="inbox-notice">{notice}</div> : null}
-      {status === "loading" && !rows.length ? <div className="pad muted" data-testid="inbox-loading">Reading the inbox…</div> : null}
+      {status === "loading" && !rows.length ? <div className="pad muted" data-testid="inbox-loading">Reading what needs you…</div> : null}
       {status === "unavailable" ? (
-        <div className="pad muted" data-testid="inbox-unavailable">The inbox is not available here: {props.snapshot.message}</div>
+        <div className="pad muted" data-testid="inbox-unavailable">Needs you is not available here: {props.snapshot.message}</div>
       ) : null}
       {status === "error" ? (
-        <div className="pad err" data-testid="inbox-error">Could not read the inbox: {props.snapshot.message}</div>
+        <div className="pad err" data-testid="inbox-error">Could not read what needs you: {props.snapshot.message}</div>
       ) : null}
       {status === "ready" && !visible ? (
         <div className="pad muted" data-testid="inbox-empty">Nothing is waiting on you.</div>
@@ -853,30 +918,21 @@ export function InboxView(props: InboxViewProps) {
       {groups.map(({ group, rows: mine }) => (
         <section className="inbox-group" key={group.key} data-testid={`inbox-group-${group.key}`}>
           <h3 className="inbox-gh" data-testid="inbox-group-head">{group.label}</h3>
-          {mine.map((row) => {
-            const link = linkOf(row);
-            const asked = clockOf(row.asked_at);
+          {groupByThread(mine).map((slot) => {
+            if (slot.kind === "row") return renderRow(slot.row);
+            const t = threadById.get(slot.threadId);
+            const name = t ? threadLabel(t).text : "Chat";
             return (
-              // No handler on the row itself: a click on it answers nothing.
-              <div className="inbox-row" key={row.id} data-testid="inbox-row" data-id={row.id} data-kind={row.kind}
-                   data-rank={row.rank} data-tone={tone(row)} data-hidden={isHidden(row) ? "1" : undefined}>
-                <div className="ir-head">
-                  <span className="ir-title" data-testid="inbox-title">{row.title}</span>
-                  {asked ? <span className="ir-time muted">{asked}</span> : null}
+              <div className="inbox-thread" key={`thread:${slot.threadId}`} data-testid="inbox-thread"
+                   data-thread-id={slot.threadId} tabIndex={-1}>
+                <div className="it-head">
+                  <span className="it-name" data-testid="inbox-thread-name">{name}</span>
+                  <button type="button" className="quiet it-open" data-testid="inbox-thread-open" disabled={props.blocked}
+                          aria-label={`Open the chat ${name}`} onClick={() => open(slot.rows[0])}>
+                    Open chat
+                  </button>
                 </div>
-                {row.blocks ? <div className="ir-blocks muted" data-testid="inbox-blocks">{row.blocks}</div> : null}
-                {row.origin ? <div className="ir-origin" data-testid="inbox-origin">{row.origin}</div> : null}
-                {body(row)}
-                {marks(row)}
-                {errors[row.id] ? <div className="err small" role="alert" data-testid="inbox-row-error">{errors[row.id]}</div> : null}
-                {link ? (
-                  <div className="ir-foot">
-                    <button type="button" className="quiet ir-link" data-testid="inbox-link" disabled={props.blocked}
-                            onClick={() => open(row)}>
-                      {link.kind === "thread" ? "Open its chat" : "Open its task"}
-                    </button>
-                  </div>
-                ) : null}
+                {slot.rows.map(renderRow)}
               </div>
             );
           })}

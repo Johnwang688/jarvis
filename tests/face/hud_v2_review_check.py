@@ -107,10 +107,18 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         _fresh(page, mock, until, SINGLE)
         row = page.locator('[data-testid="owner-review"]')
         until(lambda: row.count() == 1, timeout=4)
-        order = page.evaluate("() => [...document.querySelectorAll('#sidebar button.tree-row')].slice(0, 2)"
-                              ".map(b => b.dataset.testid)")
+        order = page.evaluate("() => [...document.querySelectorAll('#sidebar button.tree-row')]"
+                              ".map(b => b.dataset.testid).filter(t => t === 'owner-inbox' || t === 'owner-review')")  # WS-3: the In progress list sits between them
         check("the sidebar's Morning review row sits under the Inbox [mutation: no row]",
               order == ["owner-inbox", "owner-review"], str(order))
+        above = page.evaluate("""() => {
+          const r = document.querySelector('[data-testid="owner-review"]');
+          const p = document.querySelector('[data-testid="project-p1"]');
+          const h = [...document.querySelectorAll('#sidebar h2.bar')].find(e => /projects/i.test(e.textContent));
+          return !!(r && p && h && (r.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING)
+            && (r.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING));
+        }""")
+        check("and it stays above the projects and their header [mutation: the row moves below the project tree]", above)
         until(lambda: page.locator('[data-testid="owner-review-count"]').count() == 1, timeout=4)
         check("its count is the review's open items",
               page.locator('[data-testid="owner-review-count"]').inner_text().strip() == "4")
@@ -223,7 +231,8 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         s["review"] = report()
         mock_inbox.changed(mock, ["defer:b"], "test")
         # #329 MED 2: the desk view mounts with nothing ticked.
-        page.locator('[data-testid="owner-inbox"]').click()
+        until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+        page.locator('[data-testid="working-needs-line"]').click()      # WS-3: the row folds; this line opens the page
         until(lambda: _view(page).count() == 0, timeout=4)
         page.locator('[data-testid="owner-review"]').click()
         until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)

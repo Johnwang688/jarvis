@@ -1913,7 +1913,10 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   (`owner-inbox-count`), amber while a rank 1–2 row waits, none while the
   inbox cannot be read (an older daemon's 404 is never shown as zero). A
   click is `showView("inbox")`: the pane already showing it, else the focused
-  pane, never a pane with an unsaved edit. It answers nothing.
+  pane, never a pane with an unsaved edit. It answers nothing. (Since WS-3 the row
+  folds the In progress list instead, and the page opens from the "Needs you" line
+  under it; the row opens the page itself only where there is no list to fold. See
+  "Needs you (WS-3)" below.)
 - **App badge.** After each read whose count changed, `lib/inbox` `setBadge`:
   `navigator.setAppBadge(count)`, `clearAppBadge()` at 0 (else
   `setAppBadge(0)`), feature-detected, every error swallowed. In a tab Chrome
@@ -2358,8 +2361,9 @@ The owner's answer O-4: the project where chat with no project lands is named
 ## The Inbox section (WS-2, 2026-11-14)
 
 Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` (D-5, D-6, D-9, D-10). Additive: today's
-Inbox page, its navigation, the aurora row's look, its count and its amber are unchanged
-(`waitingCount`/`anyPending` still come from `state/inbox.ts`, D-6).
+Inbox page, the aurora row's look, its count and its amber are unchanged (`waitingCount`/
+`anyPending` still come from `state/inbox.ts`, D-6). WS-3 (below) then made the row the list's
+header: its click folds the list, and the page opens from the "Needs you" line.
 
 - **Store.** `hud/src/state/working.ts` (`WorkingStore`), like `state/inbox.ts`: one `GET /working`
   in flight, an event heard during a read asks for exactly one more, read on `working_changed`
@@ -2382,3 +2386,47 @@ Inbox page, its navigation, the aurora row's look, its count and its amber are u
   `tests/face/hud_v2_working_check.py` with `tests/face/hud_v2_mock_working.py`
   (`JARVIS_WORKING_SHOTS=<dir>` saves screenshots). Not run against a real daemon: live status
   belongs in the work checkpoint.
+
+## Needs you (WS-3, 2026-11-14)
+
+Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` §11 (owner decisions). Presentation only: no
+backend change, and `inbox.rows()`, the phone and the morning review are untouched. The WS-2 notes above
+still hold except where this section replaces them.
+
+- **The rainbow row is the list's header.** `InboxHeadRow` in `components/WorkingSection.tsx` (drawn by
+  `WorkingBlock`, no longer by the Sidebar) keeps the RGB wave, the `waitingCount` badge and amber.
+  A click folds and unfolds the list (the WS-2 localStorage choice); it carries `aria-expanded`,
+  `aria-controls` (the section's id) and its label still names the waiting count. The separate "IN
+  PROGRESS" header line is gone; its chevron (`.wchev`) and the stale `!` moved onto the row. With no
+  list to fold (older daemon, or before the first read) it is a plain button that opens the page, as
+  before. The Sidebar still does not subscribe to the working or inbox stores (render-count test).
+- **A "Needs you" line** (`working-needs-line`) is the section's first line whenever the list is
+  unfolded, at 0 too ("Needs you · 0", muted via `.quiet0`); the count is the row's own, amber while
+  pending; it opens the page. It sits outside `.wlist` so the list's minimum (one whole row) and the
+  tight-window rule are unchanged. The thread-less Needs-you rows stay under it. A folded list is a
+  `hidden` section: it costs no height.
+- **No duplicates.** A needs-you row whose `thread_id` is a thread drawn here is dropped client-side
+  (the daemon already attaches it to the thread, D-5); one whose thread is not drawn (archived)
+  stays listed.
+- **The page is "Needs you"** (`InboxView`, the pane's title and `VIEW_LABEL`). Same rows, groups,
+  answers and marks. Inside each rank group the rows of a chat are gathered under its name
+  (`lib/inbox.ts groupByThread`, same `linkOf` rule as the row's own link) with an "Open chat" button
+  that uses the sidebar's open-thread handler; a chat with rows in two rank groups has a group in each.
+  Rows with no chat (tasks, proposals, PRs) stay as before. Internal names (`ownerinbox`, `inbox` view
+  id, routes, stores) and the phone's "Inbox" are not renamed.
+- **Hints.** The hint on a thread row names the kind ("1 approval", "2 questions", "1 decision", "1
+  check", "3 items" when mixed). Clicking it calls `onOpenInbox(threadId)`; App asks `state/
+  inboxFocus.ts` (a one-slot store, held outside React because the page may mount a render later); the
+  page scrolls to and focuses the first group of that chat once its rows are drawn, then clears the
+  request (a chat with no group just clears it).
+- **Tests.** `Sidebar.needsyou.test.ts`, `InboxView.threads.test.ts`, `lib/working.test.ts`; face
+  checks `hud_v2_working_check.py` (sections `collapse`, `inbox`, `line`, `hint`, `page`) and
+  `hud_v2_inbox_check.py` (`needsyou`). Screenshots: `JARVIS_WORKING_SHOTS=<dir>`.
+- **Review of PR #368 (fix round 1).** A hint's target waits for a read started for it before it is
+  judged absent (the working list can be newer than the cached rows), then clears; it never outlives its
+  navigation (an ordinary open clears it, the page going away clears it, 15 s expires it:
+  `state/inboxFocus.ts`). The header row is always the same element in `WorkingBlock`, so its focus
+  survives the first read; it folds only once a read has landed (`WorkingSnapshot.loaded`), and any
+  first-read error (not only 404/403) leaves it a page-opening button. An unread count shows
+  "Needs you · –", never a zero. The project chip yields to a hint first (`.whint ~ .wchip`). The
+  stray bits in the page screenshot were the binary click sparkle (`#sparkle-layer`, 500 ms), not WS-3.

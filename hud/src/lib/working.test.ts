@@ -64,6 +64,15 @@ describe("attachedHint", () => {
     expect(attachedHint([{ kind: "check", rank: 6 }, { kind: "check", rank: 6 }])).toBe("2 checks");
     expect(attachedHint([{ kind: "decision", rank: 6 }, { kind: "question", rank: 2 }])).toBe("2 items");
   });
+
+  it("names the kind of what waits on the thread (WS-3): approval, question, decision, check", () => {
+    expect(attachedHint([{ kind: "approval", rank: 1 }])).toBe("1 approval");
+    expect(attachedHint([{ kind: "question", rank: 2 }])).toBe("1 question");
+    expect(attachedHint([{ kind: "task_question", rank: 2 }, { kind: "question", rank: 2 }])).toBe("2 questions");
+    expect(attachedHint([{ kind: "decision", rank: 6 }])).toBe("1 decision");
+    expect(attachedHint([{ kind: "check", rank: 7 }])).toBe("1 check");
+    expect(attachedHint([{ kind: "approval", rank: 1 }, { kind: "check", rank: 7 }, { kind: "check", rank: 7 }])).toBe("3 items");
+  });
 });
 
 describe("the fold choice", () => {
