@@ -1,5 +1,5 @@
 // PX-4: history (state only), scroll memory, the approval sheet, the ⋯ menus, the tray and the review line.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { PhoneApp, type StreamLike } from "./app";
@@ -633,6 +633,126 @@ describe("PX-4 fix round", () => {
     await h.settle();
     expect(h.q("m-review-open")).toBeNull();
     expect(h.q("m-tab-review")!.hidden).toBe(true);
+    h.app.stop();
+  });
+});
+
+// A history whose traversals are released by hand: `deferGo` holds the whole traversal (state and event),
+// `deferPop` runs it at once but holds its popstate (the state is already the new one).
+function slowHistory(mode: "go" | "pop") {
+  const entries: unknown[] = [null];
+  let at = 0;
+  const pops: ((s: unknown) => void)[] = [];
+  const held: (() => void)[] = [];
+  const pushes: unknown[] = [];
+  const env: HistoryEnv = {
+    state: () => entries[at],
+    push: (s) => { entries.splice(at + 1); entries.push(s); at += 1; pushes.push(s); },
+    replace: (s) => { entries[at] = s; },
+    go: (d) => {
+      const run = () => { at += d; const s = entries[at]; if (mode === "go") pops.forEach((f) => f(s)); else held.push(() => pops.forEach((f) => f(s))); };
+      if (mode === "go") held.push(run); else run();
+    },
+    onPop: (f) => { pops.push(f); return () => { pops.splice(pops.indexOf(f), 1); }; },
+  };
+  return { env, entries, pushes, release: () => { while (held.length) held.shift()!(); } };
+}
+
+describe("PX-4 fix round 2: late traversals", () => {
+  const depthOnes = (h: { entries: unknown[] }) => h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length;
+
+  for (const mode of ["pop", "go"] as const) {
+    it(`${mode === "pop" ? "a popstate" : "a go()"} delayed beyond the watchdog leaves the reopened level open, with no duplicate entry`, () => {
+      vi.useFakeTimers();
+      try {
+        const h = slowHistory(mode);
+        let depth = 0;
+        const closed: number[] = [];
+        const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
+        nav.start();
+        depth = 1;
+        nav.sync();
+        depth = 0;
+        nav.sync();
+        depth = 1;
+        nav.sync();
+        // Nothing is pushed while the traversal is live.
+        expect(h.pushes.length).toBe(1);
+        vi.advanceTimersByTime(2000);
+        // The watchdog itself pushed nothing and closed nothing.
+        expect(h.pushes.length).toBe(1);
+        expect(closed).toEqual([]);
+        nav.sync();
+        h.release();
+        expect(closed).toEqual([]);
+        expect(depth).toBe(1);
+        expect(depthOnes(h)).toBe(1);
+        expect(nav.hist).toBe(1);
+      } finally { vi.useRealTimers(); }
+    });
+  }
+
+  it("rapid close and reopen, three times, ends with one entry and the level open", async () => {
+    const h = fakeHistory();
+    let depth = 0;
+    const closed: number[] = [];
+    const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
+    nav.start();
+    for (let i = 0; i < 3; i++) {
+      depth = 1; nav.sync();
+      depth = 0; nav.sync();
+    }
+    depth = 1;
+    nav.sync();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(closed).toEqual([]);
+    expect(depth).toBe(1);
+    expect(h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length).toBe(1);
+    expect(nav.hist).toBe(1);
+  });
+
+  it("an owner's back after the dust settles still closes the level", async () => {
+    const h = fakeHistory();
+    let depth = 0;
+    const nav = new Nav(h.env, () => depth, (d) => { depth = Math.min(depth, d); });
+    nav.start();
+    depth = 1; nav.sync();
+    depth = 0; nav.sync();
+    depth = 1; nav.sync();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    h.pop(-1);
+    expect(depth).toBe(0);
+  });
+});
+
+describe("PX-4 fix round 2: a capped review", () => {
+  it("60 listed questions, one deferral omitted (open 61, more 1, approvals 1), quiet hours: the review stays reachable", async () => {
+    history.replaceState(null, "", "/m/");
+    const base = reviewBody(false);
+    const q = base.overnight[0] as { row: Record<string, unknown> };
+    const many = Array.from({ length: 60 }, (_, i) => ({ ...base.overnight[0], row: { ...q.row, id: `q:aaaaaaaa:${i + 1}`, title: `Q ${i}` } }));
+    const capped = { ...base, overnight: many, open: 61, more: 1, quiet: { enabled: true, now: true, start: null, end: null },
+      summary: { ...base.summary, approvals: 1, questions: 60 } };
+    const h = harness({ review: capped });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-review-open")).not.toBeNull();
+    expect(h.q("m-tab-review")!.hidden).toBe(false);
+    expect((h.q("m-tab-review") as HTMLButtonElement).disabled).toBe(false);
+    await h.click("m-review-open");
+    expect(h.app.tab).toBe("review");
+    expect(h.q("m-review")).not.toBeNull();
+    h.app.stop();
+  });
+
+  it("the same capped report with no deferral counted (approvals 0) and quiet hours: no line", async () => {
+    history.replaceState(null, "", "/m/");
+    const base = reviewBody(false);
+    const capped = { ...base, open: 61, more: 1, quiet: { enabled: true, now: true, start: null, end: null } };
+    const h = harness({ review: capped });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-review-open")).toBeNull();
     h.app.stop();
   });
 });

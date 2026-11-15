@@ -375,7 +375,9 @@ export function reviewTabShown(report: ReviewReport | null): boolean {
  * (the group Approve is for deferred approvals); every other review is reached by its line.
  */
 export function deferralsOpen(report: ReviewReport | null): boolean {
-  return !!report && allItems(report).some((item) => item.row.kind === "deferred");
+  // The report's own counts too: a capped report (`more`) can omit the deferral from what it lists, and
+  // `summary.approvals` still counts it.
+  return !!report && (report.summary.approvals > 0 || allItems(report).some((item) => item.row.kind === "deferred"));
 }
 
 /**
