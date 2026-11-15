@@ -307,7 +307,7 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .pr-title { overflow-wrap: anywhere; margin-top: 2px; }
 .pr-title .k, .pr-hold .k { font: 0.75rem var(--mono); color: var(--text-muted); letter-spacing: 0.06em;
   text-transform: uppercase; }
-.m-pr-acts { margin-top: 0.625rem; flex-wrap: wrap; gap: 0.5rem 3rem; }
+.m-pr-acts { margin-top: 0.625rem; flex-wrap: wrap; gap: 3rem 3rem; }
 .m-pr-acts .m-pr-side { display: flex; flex-direction: column; gap: 0.5rem; flex: 0 1 42%; min-width: 6.5rem; }
 .m-pr-acts .m-pr-right { margin-left: auto; }
 /* At a large text size the two sides no longer fit side by side: the right one wraps below the left (still apart), never a word cut. */
@@ -587,7 +587,7 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .m-tick input:checked::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center;
   color: var(--bg-0); font-weight: 700; }
 .m-tick input:focus-visible::before { outline: 2px solid var(--accent); outline-offset: 2px; }
-.m-review-rowacts { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem 3rem; margin-top: 0.5rem; }
+.m-review-rowacts { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 3rem 3rem; margin-top: 0.5rem; }
 .m-review-rowacts .tap { flex: 0 1 42%; min-width: 6.5rem; overflow-wrap: break-word; }
 .m-review-receipt { color: var(--text-2); font-size: 0.9375rem; padding: 0.625rem 0.75rem; min-height: 3rem;
   border: 1px dashed var(--border); border-radius: var(--m-r-field); }

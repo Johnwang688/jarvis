@@ -191,7 +191,7 @@ describe("H6: a deferred row's buttons as the Review tab's", () => {
     const acts = view.querySelector('[data-testid="m-deferred-acts"]')!;
     expect(acts.className).toBe("m-review-rowacts");
     expect(Array.from(acts.children).map((b) => b.getAttribute("data-testid"))).toEqual(["m-deferred-leave", "m-deferred-retry"]);
-    expect(rule(".m-review-rowacts")).toMatch(/justify-content: space-between; gap: 0\.5rem 3rem/);
+    expect(rule(".m-review-rowacts")).toMatch(/justify-content: space-between; gap: 3rem 3rem/);
     expect(rule(".m-review-rowacts .tap")).toMatch(/flex: 0 1 42%/);
   });
 });

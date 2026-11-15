@@ -56,6 +56,17 @@ SUFFIX = SHELL_HOST.split(".", 1)[1]
 MARKUP = "img, script, b, svg, iframe, object, embed, [onerror], [onload], a"
 
 
+
+# Dynamic Type geometry (PR #372 review): the two actions of a pair keep at least 48 px between them
+# when text is enlarged and they wrap or stack. Separation = the larger of the horizontal and vertical gap.
+PAIR_JS = """(sel) => [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null).map(row => {
+    const groups = row.matches('.m-pr-acts') ? [...row.querySelectorAll(':scope > .m-pr-side')]
+        : [...row.querySelectorAll(':scope > button')];
+    if (groups.length < 2) return null;
+    const a = groups[0].getBoundingClientRect(), b = groups[1].getBoundingClientRect();
+    return Math.round(Math.max(b.left - a.right, a.left - b.right, b.top - a.bottom, a.top - b.bottom));
+}).filter(x => x !== null)"""
+
 def _load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -386,6 +397,18 @@ def run(browser, check, until):
         box = p.rect(pmc.ROW, '[data-testid="m-pr-act-merge"]') or {"height": 0, "x": 0}
         check("phone: Merge is at least 48 px tall and sits at the right half [mutation: Merge at the left]",
               box["height"] >= 47.5 and box["x"] > 390 / 2 - 10, str(box))
+        for width in (375, 390):
+            for scale in (125, 150):
+                page.set_viewport_size({"width": width, "height": 844})
+                page.evaluate("s => document.documentElement.style.setProperty('font-size', s, 'important')", f"{scale}%")
+                page.wait_for_timeout(400)
+                seps = page.evaluate(PAIR_JS, "[data-testid=\"m-pr-acts\"]")
+                over = page.evaluate("document.documentElement.scrollWidth > window.innerWidth")
+                check(f"PR row: the two actions stay at least 48 px apart at {width} px and {scale}% text, no sideways scroll",
+                      len(seps) >= 1 and all(s >= 48 for s in seps) and not over, f"{seps} over={over}")
+                page.evaluate("() => document.documentElement.style.removeProperty('font-size')")
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(300)
         page.evaluate("document.activeElement && document.activeElement.blur()")
         page.keyboard.press("Enter")
         page.keyboard.press(" ")

@@ -12,6 +12,7 @@ const MOBILE = strip(mobile);
 // talk.css and write.css are read from disk: vitest does not process them as ?raw modules.
 const TALK = strip(readFileSync(join(__dirname, "talk.css"), "utf8"));
 const WRITE = strip(readFileSync(join(__dirname, "write.css"), "utf8"));
+const ITEMS = strip(readFileSync(join(__dirname, "items.css"), "utf8"));
 
 /** The custom properties declared on a stylesheet's `:root`. */
 function rootTokens(css: string): Map<string, string> {
@@ -67,10 +68,15 @@ describe("the phone's skin is the phone's alone", () => {
 
 describe("Dynamic Type: sized in rem", () => {
   it("has no px size past a hairline in any phone stylesheet", () => {
-    for (const [name, css] of [["mobile.css", MOBILE], ["talk.css", TALK], ["write.css", WRITE]]) {
+    for (const [name, css] of [["mobile.css", MOBILE], ["talk.css", TALK], ["write.css", WRITE], ["items.css", ITEMS]]) {
       const bad = [...css.matchAll(/(?<![\w.-])(\d+(?:\.\d+)?)px\b/g)].filter((m) => Number(m[1]) > 2).map((m) => m[0]);
       expect([name, bad]).toEqual([name, []]);
     }
+  });
+
+  it("keeps the one-tap chips on the phone tokens at 48 px, scoped under .m-chips", () => {
+    expect(ITEMS).toMatch(/\.m-chips > \.tap\.m-chip \{[^}]*min-height: 3rem[^}]*var\(--m-r-btn\)/);
+    expect(ITEMS).not.toMatch(/var\(--radius-btn\)/);
   });
 
   it("takes its text size from the reader on iOS, and never pins zoom", () => {
@@ -120,6 +126,11 @@ describe("rounder and bigger", () => {
 });
 
 describe("aurora glass, with no blur per card", () => {
+  it("keeps the two actions of a pair 48 px apart when they wrap or stack", () => {
+    expect(MOBILE).toMatch(/\.m-pr-acts \{[^}]*gap: 3rem 3rem/);
+    expect(MOBILE).toMatch(/\.m-review-rowacts \{[^}]*gap: 3rem 3rem/);
+  });
+
   it("paints a tint, a sheen and a rim; backdrop-filter appears nowhere in the phone", () => {
     expect(MOBILE + WRITE + TALK).not.toMatch(/backdrop-filter/);
     expect(MOBILE).toMatch(/\.row \{[^}]*var\(--m-sheen\), var\(--m-glass\)/);

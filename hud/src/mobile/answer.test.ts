@@ -483,7 +483,7 @@ describe("one-tap answer chips (PX-3a)", () => {
     expect(h.root.querySelector('[data-kind="question"] [data-testid="m-answer-write"] [data-testid="m-answer-text"]')).not.toBeNull();
     noMarkup(h.root);
     const css = readFileSync(join(__dirname, "items.css"), "utf8");
-    expect(css).toMatch(/\.m-chips > \.tap\.m-chip\s*\{[^}]*min-height:\s*48px/);
+    expect(css).toMatch(/\.m-chips > \.tap\.m-chip\s*\{[^}]*min-height:\s*3rem/);
     expect(css).toMatch(/\.m-chips\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(css).not.toMatch(/url\s*\(/);
   });

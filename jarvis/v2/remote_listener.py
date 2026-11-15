@@ -105,8 +105,8 @@ MANIFEST = {
     "display": "standalone",
     "name": "J.A.R.V.I.S.",
     "short_name": "Jarvis",
-    "background_color": "#141413",
-    "theme_color": "#141413",
+    "background_color": "#0a1116",
+    "theme_color": "#0a1116",
     "icons": [
         {"src": "/m/icons/orb-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
         {"src": "/m/icons/orb-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
