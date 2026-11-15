@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 import { REPO, fixRow, prRow, tqRow } from "../lib/prRow.fixtures";
 import type { TaskView, WorkingItem } from "./model";
-import { SlotCache, ageWords, slotSignature, threadsView, type ListActions, type ListModel } from "./threadsView";
+import { SlotCache, slotSignature, threadsView, type ListActions, type ListModel } from "./threadsView";
 import type { InboxAnswers } from "./views";
 import { bands, buildSlots } from "./threads";
+import { agoWords } from "./reltime";
 import { mkEntry, mkRow, mkTask, randomCase } from "./threads.fixtures";
 
 const NOW = Date.parse("2026-11-15T10:30:00Z");
@@ -52,6 +53,8 @@ describe("the bands and the strip", () => {
     const needs = card(v, "thread:aaaaaaaa");
     expect(needs.dataset.band).toBe("needs");
     expect(rowEls(needs).map((r) => r.dataset.id)).toEqual(["appr:1", "q:2"]);
+    // #371: the question's one-tap option chips sit inside the thread card.
+    expect(needs.querySelectorAll(".m-chips .m-chip").length).toBe(2);
     expect(card(v, "thread:bbbbbbbb").dataset.band).toBe("running");
     expect(card(v, "task:11111111").dataset.band).toBe("running");
     expect(card(v, "thread:cccccccc").dataset.band).toBe("recent");
@@ -305,10 +308,10 @@ describe("keyed reuse: a card is rebuilt when anything it renders from changes",
     const slot = buildSlots([mkEntry("aaaaaaaa")], [], null)[0];
     const a = answers();
     expect(slotSignature(slot, "recent", a, NOW)).not.toBe(slotSignature(slot, "recent", a, NOW + 3 * 3600_000));
-    expect(ageWords("2026-11-15T10:00:00Z", NOW)).toBe("30 min");
-    expect(ageWords("2026-11-15T05:00:00Z", NOW)).toBe("5 h");
-    expect(ageWords("2026-11-10T10:00:00Z", NOW)).toBe("5 d");
-    expect(ageWords("nope", NOW)).toBe("");
+    expect(agoWords("2026-11-15T10:00:00Z", NOW)).toBe("30 min ago");
+    expect(agoWords("2026-11-15T05:00:00Z", NOW)).toBe("5 h ago");
+    expect(agoWords("2026-11-10T10:00:00Z", NOW)).toBe("5 d ago");
+    expect(agoWords("nope", NOW)).toBe("");
   });
 
   it("a card that moves band is rebuilt for its new band", () => {

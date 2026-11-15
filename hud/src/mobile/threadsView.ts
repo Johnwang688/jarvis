@@ -26,6 +26,7 @@ import { LABEL_TEXT } from "../lib/working";
 import type { TaskView, WorkingItem } from "./model";
 import { bands, buildSlots, type Band, type Slot } from "./threads";
 import { el, empty, inboxRow, tap, type InboxAnswers } from "./views";
+import { agoWords } from "./reltime";
 import "./threads.css";
 
 /** The strip's chips: a band, or the Tasks list. `null` shows everything. */
@@ -65,17 +66,6 @@ function testid<T extends HTMLElement>(node: T, id: string): T {
   return node;
 }
 
-/** "now", "5 min", "3 h", "2 d": an age, never a clock (the skin PR's `reltime.ts` replaces this). */
-export function ageWords(iso: string | null | undefined, now: number): string {
-  const at = Date.parse(iso ?? "");
-  if (Number.isNaN(at)) return "";
-  const s = Math.max(0, Math.round((now - at) / 1000));
-  if (s < 60) return "now";
-  if (s < 3600) return `${Math.floor(s / 60)} min`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h`;
-  return `${Math.floor(s / 86400)} d`;
-}
-
 const KIND_WORDS: Record<string, string> = {
   approval: "Approval", question: "Question", task_question: "Question", proposal: "Proposal", task: "Task",
   missed: "Missed", decision: "Decision", check: "Check", pr: "Pull request", pr_unavailable: "Pull requests",
@@ -109,7 +99,7 @@ export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: numb
   return JSON.stringify([
     band, slot.key, slot.title, slot.entry,
     task ? [task.id, task.brief, task.state, task.updated, task.step, task.steps] : null,
-    ageWords(slot.entry?.last ?? task?.updated ?? "", now),
+    agoWords(slot.entry?.last ?? task?.updated ?? "", now),
     // Globals the rows draw from.
     !!a.pr, a.pr?.limited ?? false, !!a.withdraw, !!a.toggle,
     slot.rows.map((r) => [r, rowUi(r, a, now)]),
@@ -135,7 +125,7 @@ function threadTitle(slot: Slot): string {
 }
 
 function threadMeta(slot: Slot, now: number): string {
-  const age = ageWords(slot.entry?.last ?? slot.task?.updated ?? "", now);
+  const age = agoWords(slot.entry?.last ?? slot.task?.updated ?? "", now);
   if (slot.entry) return [LABEL_TEXT[slot.entry.status], slot.entry.project, age].filter(Boolean).join(" · ");
   if (slot.kind === "task") {
     const t = slot.task;
