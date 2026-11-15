@@ -48,7 +48,7 @@
 // and retry only.
 //
 // WS-5c, the unlock window (./unlock.ts): a lock pill in the header (it opens
-// the ⋯ menu, whose first row is Lock now); Done and Undo in an open chat's ⋯
+// its interim popover, whose first row is Lock now); Done and Undo in an open chat's ⋯
 // menu. The pill is the phone's copy of the window: it never authorizes.
 //
 // P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
@@ -57,13 +57,15 @@
 // row, card, question or decision has a mic.
 
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
+import { brandButton, orbState, renderOrb } from "./orb";
+import { lockIcon, unlockIcon } from "./icons";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
-  parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
+  RUNNING_STATES, parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
 } from "./model";
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
@@ -103,6 +105,8 @@ export interface AppDeps {
   onSignedOut: (message: string) => void;
   /** The owner pressed Sign out. */
   signOut: () => Promise<void>;
+  /** RD-6 will use the whole brand to open navigation. */
+  onBrand?: () => void;
   fetchJson?: (path: string) => Promise<Got>;
   /** P-4's writes (a fake in the tests). */
   postJson?: (path: string, value: unknown) => Promise<Posted>;
@@ -170,6 +174,10 @@ interface OpenTask {
 export class PhoneApp {
   tab: Tab = "inbox";
   online = true;
+  failStatus: number | null = null;
+  everOpened = false;
+  private streamOpen = false;
+  private sessionEnded = false;
   lastRead: number | null = null;
   inbox: InboxRow[] | null = null;
   projects: Project[] | null = null;
@@ -247,7 +255,7 @@ export class PhoneApp {
   private readonly timers = new Map<string, unknown>();
   private readonly frame: HTMLElement;
   private readonly banner: HTMLElement;
-  private readonly conn: HTMLElement;
+  private readonly brand: HTMLButtonElement;
   private readonly main: HTMLElement;
   private readonly rowScroll: RowScroll;
   private readonly tabs: Record<"inbox" | "review" | "chats", HTMLButtonElement>;
@@ -286,7 +294,14 @@ export class PhoneApp {
   private held: string | null = null;
 
   constructor(private readonly deps: AppDeps) {
-    this.fetchJson = deps.fetchJson ?? getJson;
+    this.fetchJson = async (path) => {
+      const got = await (deps.fetchJson ?? getJson)(path);
+      if (!this.stopped && !got.ok) {
+        this.failStatus = got.status;
+        this.renderOrb();
+      }
+      return got;
+    };
     this.postJson = deps.postJson ?? postJson;
     this.getCredential = deps.getCredential ?? (async (publicKey) => {
       const credential = await navigator.credentials.get({ publicKey: prepareRequest(publicKey) });
@@ -319,17 +334,16 @@ export class PhoneApp {
     frame.dataset.screen = "app";
     frame.dataset.stale = "false";
     const top = el("header", "top");
-    top.append(el("span", "brand", "Jarvis"));
-    this.conn = el("span", "conn", "connecting");
-    this.conn.dataset.testid = "m-conn";
-    top.append(this.conn);
-    // PX-4: Sign out and Notifications are behind the ⋯ (renderMenu). PX-5: the lock pill opens that menu,
-    // whose first row is Lock now. It shows the phone's copy of the window, never what authorizes.
+    this.brand = brandButton(() => this.deps.onBrand?.());
+    top.append(this.brand);
+    // Interim until RD-2 Settings: all four header rows live in the pill's popover.
+    // The pill remains the phone's copy of the unlock window, never authorization.
     this.pill = tap("Locked", () => this.toggleMenu(this.menuOpen === "app" ? null : "app"), "m-lock-pill", "m-lock-pill");
     this.pill.dataset.state = "locked";
     top.append(this.pill);
     this.menuWrap = menuView({ id: "m-menu", label: "Menu", items: [], open: false, toggle: () => {} });
     top.append(this.menuWrap);
+    this.renderOrb();
     this.banner = el("div", "offline");
     this.banner.dataset.testid = "m-offline";
     this.banner.setAttribute("role", "status");
@@ -426,6 +440,8 @@ export class PhoneApp {
 
   private signedOut(): void {
     if (this.stopped) return;
+    this.sessionEnded = true;
+    this.renderOrb();
     this.stop();
     this.deps.onSignedOut("Your session ended. Sign in again.");
   }
@@ -509,6 +525,7 @@ export class PhoneApp {
         this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
       }
     }
+    this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
   }
 
@@ -524,6 +541,7 @@ export class PhoneApp {
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped || !got.ok) return;
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+    this.renderOrb();
     // WS-5c rule 2: the window's mirror follows `me.unlock_s` (display and path only).
     this.unlock.fromMe(got.body);
     if (this.tab === "inbox") this.renderInbox();
@@ -736,8 +754,8 @@ export class PhoneApp {
   private async post(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
-    if ("offline" in got) { this.setOnline(false); return null; }
-    if (OFFLINE.has(got.status)) { this.setOnline(false); return null; }
+    if ("offline" in got) { this.setOnline(false, got.status); return null; }
+    if (OFFLINE.has(got.status)) { this.setOnline(false, got.status); return null; }
     this.setOnline(true);
     this.slid(got.status);
     return got;
@@ -1149,7 +1167,7 @@ export class PhoneApp {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
     if ("offline" in got || OFFLINE.has(got.status)) {
-      this.setOnline(false);
+      this.setOnline(false, got.status);
       return { status: 0, body: {}, ambiguous: true };
     }
     this.setOnline(true);
@@ -1502,16 +1520,35 @@ export class PhoneApp {
     if (this.tab === "inbox" && !this.card) this.render();
   }
 
+  private renderOrb(): void {
+    if (!this.brand) return;
+    const working = (this.entries ?? []).filter((entry) => entry.status === "working").length
+      + (this.tasks ?? []).filter((task) => RUNNING_STATES.has(task.state)).length
+      + (this.thread?.meta?.running ? 1 : 0);
+    renderOrb(this.brand, orbState({ signedOut: this.sessionEnded, online: this.online,
+      failStatus: this.failStatus, streamOpen: this.streamOpen && this.stream?.readyState === 1,
+      everOpened: this.everOpened, secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
+  }
+
   /** The lock pill: the phone's copy of the window (display only). */
   private renderPill(): void {
     const pill = this.pill;
     if (!pill) return;
     const open = this.unlock.mirror.open();
     const words = pillWords(this.unlock.mirror, this.now());
-    if (pill.textContent !== words) pill.textContent = words;
+    if (pill.textContent !== words || pill.dataset.state !== (open ? "unlocked" : "locked") || !pill.querySelector("svg")) {
+      const label = el("span");
+      if (open) {
+        const prefix = el("span", "m-pill-prefix", "Unlocked · ");
+        label.append(prefix, document.createTextNode(words.replace(/^Unlocked · /, "")));
+      } else label.textContent = words;
+      pill.replaceChildren(open ? unlockIcon() : lockIcon(), label);
+    }
     pill.dataset.state = open ? "unlocked" : "locked";
     pill.setAttribute("aria-label", `${pillLabel(this.unlock.mirror, this.now())}. Open the menu`);
     pill.setAttribute("aria-haspopup", "true");
+    pill.setAttribute("aria-controls", "m-menu-panel");
+    pill.setAttribute("aria-expanded", String(this.menuOpen === "app"));
   }
 
   async loadChats(): Promise<void> {
@@ -1582,7 +1619,7 @@ export class PhoneApp {
           const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
           const fresh = page.rows.filter((row) => row.seq > last);
           open.next = Math.max(open.next, page.next);
-          if (page.thread) open.meta = page.thread;
+          if (page.thread) { open.meta = page.thread; this.renderOrb(); }
           more = page.more;
           if (fresh.length) this.appendRows(open, fresh);
         }
@@ -1608,6 +1645,7 @@ export class PhoneApp {
   private applyTasks(r: { body: unknown } | { error: string; status: number } | null): void {
     if (this.stopped || !r || !("body" in r)) return;
     this.tasks = parseTasks(r.body);
+    this.renderOrb();
     this.tasksMore = (r.body as { more?: unknown } | null)?.more === true;
     if (this.tab === "inbox" && !this.card) this.renderInbox();
     else if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
@@ -1671,10 +1709,13 @@ export class PhoneApp {
     this.stream?.close();
     const stream = this.openStream(STREAM_URL);
     this.stream = stream;
+    this.streamOpen = stream.readyState === 1;
+    this.renderOrb();
     stream.onopen = () => {
       if (this.stream !== stream) return;
-      this.conn.textContent = "live";
-      this.conn.dataset.state = "live";
+      this.streamOpen = true;
+      this.everOpened = true;
+      this.renderOrb();
       // Anything published while the stream was down is read now, and the window's mirror (WS-5c rule 2).
       this.refreshVisible();
       void this.loadMe();
@@ -1686,8 +1727,8 @@ export class PhoneApp {
     };
     stream.onerror = () => {
       if (this.stream !== stream) return;
-      this.conn.textContent = "reconnecting";
-      this.conn.dataset.state = "down";
+      this.streamOpen = false;
+      this.renderOrb();
       void this.probe(stream);
     };
   }
@@ -1699,6 +1740,7 @@ export class PhoneApp {
     if (!got.ok && got.why === "signed-out") return this.signedOut();
     if (got.ok) {
       this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+      this.renderOrb();
       this.unlock.fromMe(got.body);
     }
     this.setOnline(got.ok);
@@ -1745,9 +1787,11 @@ export class PhoneApp {
 
   // -- online and offline ---------------------------------------------------------------
 
-  setOnline(online: boolean): void {
+  setOnline(online: boolean, failStatus?: number): void {
+    if (failStatus !== undefined) this.failStatus = failStatus;
     if (online === this.online) {
       if (!online) this.renderBanner();
+      else this.renderOrb();
       return;
     }
     this.online = online;
@@ -1760,20 +1804,14 @@ export class PhoneApp {
 
   private renderBanner(): void {
     this.banner.hidden = this.online;
-    if (this.online) {
-      const live = this.stream?.readyState === 1;
-      this.conn.textContent = live ? "live" : "connecting";
-      this.conn.dataset.state = live ? "live" : "down";
-      return;
-    }
+    this.renderOrb();
+    if (this.online) return;
     // UX-2: "last read 3 min ago" (the clock time is the banner's title); the minute tick redraws it.
     const ago = this.lastRead !== null ? agoWords(this.lastRead, this.now()) : "";
     this.banner.textContent = ago
       ? `Offline. Nothing here is current: it was last read ${ago}.`
       : "Offline. Nothing here could be read yet.";
     this.banner.title = this.lastRead !== null ? `Last read at ${absoluteWords(this.lastRead, this.now())}` : "";
-    this.conn.textContent = "offline";
-    this.conn.dataset.state = "offline";
   }
 
   // -- navigation (PX-4) -----------------------------------------------------------------------
@@ -1819,11 +1857,11 @@ export class PhoneApp {
     if (which !== null) {
       this.frame.querySelector<HTMLElement>(`[data-testid="${id}-panel"] button`)?.focus();
     } else if (inside) {
-      this.frame.querySelector<HTMLElement>(`[data-testid="${id}"]`)?.focus();
+      this.frame.querySelector<HTMLElement>(`[data-testid="${id === "m-menu" ? "m-lock-pill" : id}"]`)?.focus();
     }
   }
 
-  /** The header's ⋯: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
+  /** The pill's interim popover: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
   private renderMenu(): void {
     const open = this.menuOpen === "app";
     const items: MenuItem[] = [];
@@ -1836,8 +1874,35 @@ export class PhoneApp {
       items.push({ id: "signout", testid: "m-signout", label: "Sign out", onSelect: () => void this.signOut() });
     }
     const next = menuView({ id: "m-menu", label: "Menu", items, open, toggle: (o) => this.toggleMenu(o ? "app" : null) });
+    // Reuse the existing rows but discard the old ⋯ opener. The stable pill is the sole opener.
+    next.querySelector(".m-more")?.remove();
+    next.prepend(this.pill);
+    const panel = next.querySelector<HTMLElement>('[data-testid="m-menu-panel"]');
+    if (panel) panel.id = "m-menu-panel";
+    next.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.stopImmediatePropagation();
+        this.toggleMenu(null);
+        this.pill.focus();
+      }
+      if (event.key === "Tab" && open) {
+        const buttons = [...next.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        const first = buttons[0], last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    }, true);
+    this.pill.setAttribute("aria-expanded", String(open));
     this.menuWrap.replaceWith(next);
     this.menuWrap = next;
+    this.menuInert();
+  }
+
+  private menuInert(): void {
+    const open = this.menuOpen === "app";
+    for (const node of [this.brand, this.main, this.tabBar, this.banner]) {
+      if (open || this.card) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+    }
   }
 
   /** The view the main area shows now, as a key: scroll is remembered per key (§3.1, D4). */
@@ -2088,6 +2153,7 @@ export class PhoneApp {
     this.dropGoneFallbacks();
     if (this.card) this.card.tapAgain = (this.tapAgain.get(this.card.rowId) as "allow" | "always" | undefined) ?? null;
     this.renderPill();
+    this.renderOrb();
     const key = this.surfaceKey();
     // PX-4: while the approval sheet is open, the view under it stays as it was drawn: its scroll, rows and
     // order are exactly what the owner left, and closing the sheet draws it again in place.
@@ -2103,6 +2169,7 @@ export class PhoneApp {
     for (const node of [this.topBar, this.banner, this.main, this.tabBar]) {
       if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
     }
+    this.menuInert();
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
     if (!this.card) { this.sheetHost.replaceChildren(); return; }
     // Captured as drawn: AUTHORIZE answers this card, Confirm ALWAYS sends this rule's preview.
@@ -2420,7 +2487,7 @@ export function startApp(deps: AppDeps): PhoneApp {
   if (typeof window !== "undefined") {
     // The keyboard never covers the message box: the app follows the visible viewport.
     followViewport(window, document.documentElement);
-    window.addEventListener("offline", () => app.setOnline(false));
+    window.addEventListener("offline", () => app.setOnline(false, 0));
     window.addEventListener("online", () => app.visible());
     // WS-5c rules 1 and 2: back in view, the window's mirror (`me`) and the op-token pool are read again.
     document.addEventListener("visibilitychange", () => {

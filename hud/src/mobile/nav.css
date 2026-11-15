@@ -1,6 +1,6 @@
 /* PX-4: the approval sheet, the ⋯ menus, the Needs-you tray and the review line (nav.ts).
-   The skin's --m-* tokens only, sized in rem, no url(), no inline style. The sheet is the ONE
-   rule in the phone that may use backdrop-filter (skin.test.ts allows it for `.m-sheet` alone).
+   The skin's --m-* tokens only, sized in rem, no url(), no inline style. Backdrop blur is reserved for
+   .m-sheet, .m-drawer and .m-actsheet (skin.test.ts scans every phone stylesheet).
    Every tap target is at least 3rem (48 px). */
 
 /* -- the approval sheet (§3.3): a bottom sheet over the list, which keeps its scroll -- */
@@ -8,7 +8,7 @@
   position: absolute;
   inset: 0;
   z-index: 6;
-  background: rgba(3, 8, 12, 0.62);
+  background: var(--m-scrim);
 }
 .m-sheet {
   position: absolute;
@@ -36,7 +36,7 @@
 /* While the sheet is open nothing behind it scrolls, takes a tap or takes the keyboard (app.ts sets inert). */
 .app[data-sheet="open"] .main { overflow: hidden; }
 
-/* -- the header's ⋯ and the menus -- */
+/* -- the pill popover and the page menus -- */
 .top { position: relative; z-index: 4; }
 .m-menu { position: relative; flex: none; }
 .tap.m-more {
@@ -139,8 +139,11 @@
 }
 .m-tray-body[hidden] { display: none; }
 
-/* -- the lock pill (PX-5): the phone's copy of its unlock window, never what authorizes; it opens the ⋯ -- */
+/* -- the lock pill (PX-5): the phone's copy of its unlock window, never what authorizes; it opens the interim menu -- */
 .tap.m-lock-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
   flex: none;
   min-height: var(--m-tap);
   padding: 0 0.75rem;
@@ -149,11 +152,11 @@
   font-size: 0.875rem;
   color: var(--text-muted);
 }
-/* The header stays one line at 375 px: the brand and the connection word give way, never the pill or the ⋯. */
+/* The brand word may wrap at large text sizes; the pill stays at the right. */
 .top { flex-wrap: nowrap; }
-.top .brand { flex: 1 0 auto; }
-.top .conn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tap.m-lock-pill[data-state="unlocked"] { color: var(--accent); border-color: var(--accent); }
+.top .m-brand { flex: 0 1 auto; }
+.top .conn { white-space: normal; }
+.tap.m-lock-pill[data-state="unlocked"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
 /* -- Done on an open chat (WS-5c §5.6): its words, and Undo while its window lasts -- */
 .m-thread-done {
@@ -164,3 +167,5 @@
   padding: 0.5rem var(--m-gutter);
 }
 .m-thread-done .m-notice { margin: 0; flex: 1 1 auto; }
+
+.top > .m-menu { margin-left: auto; flex: none; }

@@ -49,7 +49,7 @@ function harness() {
     now: () => Date.parse("2026-11-15T10:30:00Z"),
   });
   answers["/m/api/inbox"] = ok({ rows: [], more: false });
-  answers["/m/api/me"] = ok({ signed_in: true });
+  answers["/m/api/me"] = ok({ signed_in: true, secure: { ok: true } });
   answers["/m/api/review"] = ok({ open: 0 });
   answers["/m/api/tasks"] = ok({ tasks: [], more: false });
   answers["/m/api/working"] = ok({ entries: [], more: false, total: 0 });

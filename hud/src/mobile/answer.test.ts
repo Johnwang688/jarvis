@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,11 +14,17 @@ import { actionPosts, installUnlock } from "./unlock.fixtures";
 // Hostile strings, as a model or a page could write them: each must arrive as text.
 const H = ['<img src=x onerror="window.__pwned=1">', "<script>window.__pwned=2</script>",
   '<b>bold</b><a href="javascript:alert(1)">x</a>'].join(" ");
-const MARKUP = "img, script, b, svg, iframe, a[href^='javascript'], [onerror], [onload]";
+const MARKUP = "img, script, b, iframe, a[href^='javascript'], [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 const LONG = "echo " + "x".repeat(9000) + " " + H;
+
+// A forged copy of a code-built icon arrives as text like any other markup (CODE_SVG cannot be joined from server text).
+const FORGED_ICON = '<svg class="m-icon" aria-hidden="true" onload="window.__pwned=3"><path d="M0 0"/></svg>';
 
 function noMarkup(node: Element) {
   expect(node.querySelectorAll(MARKUP).length).toBe(0);
+  expect(injectedSvg(node)).toEqual([]);
   expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
 }
 
@@ -55,6 +62,14 @@ describe("the shared card words (lib/approvalCard.ts)", () => {
 });
 
 describe("the answering card (P-4)", () => {
+  it("a forged copy of a code-built icon in the command arrives as text, never as an <svg>", () => {
+    const forged = { ...ORDINARY, card: { ...ORDINARY.card, command: FORGED_ICON, reason: FORGED_ICON,
+      args: { command: FORGED_ICON, description: FORGED_ICON } } };
+    const view = cardView(state(forged), noop);
+    document.body.replaceChildren(view);
+    noMarkup(view);
+    expect(view.querySelector('[data-testid="approval-command"]')!.textContent).toContain("<svg");
+  });
   it("shows the whole card as text: every argument, the whole command, no cut", () => {
     const view = cardView(state(ORDINARY), noop);
     document.body.replaceChildren(view);

@@ -13,7 +13,6 @@ const MOBILE = strip(mobile);
 const TALK = strip(readFileSync(join(__dirname, "talk.css"), "utf8"));
 const WRITE = strip(readFileSync(join(__dirname, "write.css"), "utf8"));
 const ITEMS = strip(readFileSync(join(__dirname, "items.css"), "utf8"));
-const THREADS = strip(readFileSync(join(__dirname, "threads.css"), "utf8"));
 /** PX-4: every stylesheet of the phone, read from the folder (a new one cannot escape the blur rule). */
 const PHONE_CSS: Record<string, string> = Object.fromEntries(readdirSync(__dirname).filter((f) => f.endsWith(".css"))
   .map((f) => [f, strip(readFileSync(join(__dirname, f), "utf8"))]));
@@ -26,8 +25,8 @@ function blurRules(css: string): string[][] {
   }
   return out;
 }
-/** The rules that blur and are not `.m-sheet` alone (every selector of the rule must be it). */
-const strayBlur = (css: string) => blurRules(css).filter((sels) => !sels.every((x) => x === ".m-sheet"));
+/** Overlay-only blur: every selector must be one of the three approved surfaces. */
+const strayBlur = (css: string) => blurRules(css).filter((sels) => !sels.every((x) => [".m-sheet", ".m-drawer", ".m-actsheet"].includes(x)));
 
 /** The custom properties declared on a stylesheet's `:root`. */
 function rootTokens(css: string): Map<string, string> {
@@ -83,7 +82,7 @@ describe("the phone's skin is the phone's alone", () => {
 
 describe("Dynamic Type: sized in rem", () => {
   it("has no px size past a hairline in any phone stylesheet", () => {
-    for (const [name, css] of [["mobile.css", MOBILE], ["talk.css", TALK], ["write.css", WRITE], ["items.css", ITEMS], ["threads.css", THREADS]]) {
+    for (const [name, css] of Object.entries(PHONE_CSS)) {
       const bad = [...css.matchAll(/(?<![\w.-])(\d+(?:\.\d+)?)px\b/g)].filter((m) => Number(m[1]) > 2).map((m) => m[0]);
       expect([name, bad]).toEqual([name, []]);
     }
@@ -141,24 +140,30 @@ describe("rounder and bigger", () => {
 });
 
 describe("aurora glass, with no blur per card", () => {
+  it("loads no images or external resources in any phone stylesheet", () => {
+    for (const [file, css] of Object.entries(PHONE_CSS)) expect([file, /url\s*\(/i.test(css)]).toEqual([file, false]);
+  });
   it("keeps the two actions of a pair 48 px apart when they wrap or stack", () => {
     expect(MOBILE).toMatch(/\.m-pr-acts \{[^}]*gap: 3rem 3rem/);
     expect(MOBILE).toMatch(/\.m-review-rowacts \{[^}]*gap: 3rem 3rem/);
   });
 
-  it("allows backdrop-filter on the approval sheet alone, in every phone stylesheet", () => {
+  it("allows backdrop-filter only on sheets and the drawer, in every phone stylesheet", () => {
     // The guard sees every file in the folder, not a list of three.
     expect(Object.keys(PHONE_CSS).sort()).toEqual(expect.arrayContaining(["items.css", "mobile.css", "nav.css", "talk.css", "threads.css", "write.css"]));
     for (const [file, css] of Object.entries(PHONE_CSS)) expect([file, strayBlur(css)]).toEqual([file, []]);
-    // The one exception exists, in the sheet's own rule, prefixed and plain.
+    // The existing sheet exception exists, in the sheet's own rule, prefixed and plain.
     const sheet = blurRules(PHONE_CSS["nav.css"]);
-    expect(sheet).toEqual([[".m-sheet"]]);
+    expect(sheet).toContainEqual([".m-sheet"]);
     expect(PHONE_CSS["nav.css"]).toMatch(/\.m-sheet \{[^}]*-webkit-backdrop-filter:[^}]*\n  backdrop-filter:/);
     // The checker itself: a shared selector list, a sibling class, a card or a nested rule are all stray.
     expect(strayBlur(".m-sheet, .row { backdrop-filter: blur(1px); }").length).toBe(1);
     expect(strayBlur(".m-sheet-dim { -webkit-backdrop-filter: blur(1px); }").length).toBe(1);
     expect(strayBlur(".m-card { color: red; backdrop-filter: blur(1px) }").length).toBe(1);
     expect(strayBlur("@media (min-width: 1px) { .m-tray { backdrop-filter: blur(1px); } }").length).toBe(1);
+    expect(strayBlur(".m-drawer, .m-actsheet { backdrop-filter: blur(1px); }")).toEqual([]);
+    expect(strayBlur(".m-drawer .row { backdrop-filter: blur(1px); }").length).toBe(1);
+    expect(strayBlur(".m-actsheet, .row { backdrop-filter: blur(1px); }").length).toBe(1);
     expect(strayBlur(".m-sheet { backdrop-filter: blur(1px); -webkit-backdrop-filter: blur(1px); }")).toEqual([]);
   });
 

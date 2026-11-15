@@ -466,6 +466,10 @@ def shell_checks(browser, check, until):
     daemon = Daemon(Stores(), {name: Fake(name) for name in PN}, lambda *_: lambda *_: Decision.DENY, 0,
                     remote_host=SHELL_HOST)
     daemon.start()
+    # RD-1's explicit precedence keeps a limited connection red even offline. Model a
+    # healthy proxy here, like the unlock face fixture, so this tests network loss.
+    from tests.face.hud_v2_phone_answer_check import FakeSystem
+    daemon.secure.run = FakeSystem(daemon)
     port = daemon.remote_port
     world = _populate(daemon, root)
     forwarded: list[str] = []
@@ -566,7 +570,7 @@ def shell_checks(browser, check, until):
         until(lambda: screen() == "Pair this phone", timeout=8)
         check("P-2 shell: /m/pair#code shows the pairing card, the code gone from the address",
               page.evaluate("location.hash") == "" and page.evaluate("location.pathname") == "/m/pair")
-        page.locator("button").click()
+        page.locator("button.btn").click()
         until(lambda: screen() in ("Paired", "Not paired"), timeout=8)
         check("P-2 shell: a passkey registers with the window's code", screen() == "Paired",
               page.locator("main").inner_text())
@@ -575,10 +579,11 @@ def shell_checks(browser, check, until):
               len(credentials) == 1 and credentials[0]["isResidentCredential"] and credentials[0]["rpId"] == SHELL_HOST)
         check("P-2 shell: pairing alone signs nothing in",
               not [c for c in ctx.cookies() if c["name"] == "__Host-jarvis_m"])
-        page.locator("button").click()
+        page.locator("button.btn").click()
         until(lambda: screen() in ("app", "Jarvis"), timeout=8)
         check("P-2 shell: then it signs in with the passkey, and the app opens", screen() == "app",
               page.locator("main").first.inner_text())
+        check("RD-1 setup: every security check passes on the isolated fake system", daemon.secure.check()["ok"])
         cookie = [c for c in ctx.cookies() if c["name"] == "__Host-jarvis_m"]
         check("P-2 shell: the browser holds __Host-jarvis_m: HttpOnly, Secure, SameSite=Strict, Path=/",
               len(cookie) == 1 and cookie[0]["httpOnly"] and cookie[0]["secure"]
@@ -599,22 +604,22 @@ def shell_checks(browser, check, until):
         check("P-3 app: nothing the app draws needs more than C1's policy (inline styles, if any, are refused "
               "and dropped)", all(v.startswith("style-src") for v in violations), str(violations[:5]))
         # PX-4: Sign out is behind the header's ⋯, last.
-        check("PX-4: Sign out is not on the page until the ⋯ is opened",
+        check("PX-4: Sign out is not on the page until the lock pill is opened",
               page.locator('[data-testid="m-signout"]').count() == 0)
-        page.locator('[data-testid="m-menu"]').click()
+        page.locator('[data-testid="m-lock-pill"]').click()
         until(lambda: page.locator('[data-testid="m-signout"]').count() == 1, timeout=4)
         page.locator('[data-testid="m-signout"]').click()
         until(lambda: screen() == "Jarvis", timeout=8)
         check("P-2 shell: Sign out ends the session",
               page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401)
         cdp.send("WebAuthn.setUserVerified", {"authenticatorId": authenticator, "isUserVerified": False})
-        page.locator("button").click()
-        until(lambda: page.locator("button").is_enabled() if screen() == "Jarvis" else False, timeout=10)
+        page.locator("button.btn").click()
+        until(lambda: page.locator("button.btn").is_enabled() if screen() == "Jarvis" else False, timeout=10)
         check("P-2 shell: without user verification the sign-in is refused",
               screen() == "Jarvis" and page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401,
               page.locator("main").first.inner_text())
         cdp.send("WebAuthn.setUserVerified", {"authenticatorId": authenticator, "isUserVerified": True})
-        page.locator("button").click()
+        page.locator("button.btn").click()
         until(lambda: screen() == "app", timeout=8)
         check("P-2 shell: with it back, the same passkey signs in again", screen() == "app")
         key = daemon.remote_auth.status()["passkeys"][0]["key"]
@@ -683,9 +688,9 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
     check("PX-4 Inbox: Notifications is not on the list: it is behind the header's ⋯",
-          page.locator('[data-testid="m-notify"]').count() == 0 and page.locator('[data-testid="m-menu"]').is_visible()
-          and 47.5 <= page.locator('[data-testid="m-menu"]').bounding_box()["height"])
-    page.locator('[data-testid="m-menu"]').click()
+          page.locator('[data-testid="m-notify"]').count() == 0 and page.locator('[data-testid="m-lock-pill"]').is_visible()
+          and 47.5 <= page.locator('[data-testid="m-lock-pill"]').bounding_box()["height"])
+    page.locator('[data-testid="m-lock-pill"]').click()
     until(lambda: page.locator('[data-testid="m-notify"]').count() == 1, timeout=4)
     items = page.evaluate("""Array.from(document.querySelectorAll('[data-testid="m-menu-panel"] > *'))
         .map(e => e.dataset.testid || e.dataset.menuItem)""")
@@ -703,7 +708,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="m-menu-panel"]').count() == 0, timeout=4)
     check("PX-4 menu: Escape closes it and the focus is back on the ⋯",
-          page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-menu")
+          page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-lock-pill")
     sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
         r.headers.get('content-type'), await r.text()])""")
     check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
@@ -876,7 +881,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           banner.inner_text() if banner.count() else "")
     check("P-3 offline: the view is marked stale",
           page.evaluate("document.querySelector('[data-screen]').dataset.stale") == "true"
-          and page.locator('[data-testid="m-conn"]').inner_text() == "offline")
+          and page.locator('[data-testid="m-conn"]').get_attribute("data-state") == "offline")
     net["offline"] = False
     page.locator('[data-testid="m-tab-inbox"]').click()
     until(lambda: not page.locator('[data-testid="m-offline"]').is_visible(), timeout=10)

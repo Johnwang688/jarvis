@@ -402,9 +402,9 @@ describe("the ⋯ menu", () => {
     await h.settle();
     expect(h.q("m-signout")).toBeNull();
     expect(h.q("m-notify")).toBeNull();
-    expect(h.q("m-menu")!.getAttribute("aria-expanded")).toBe("false");
-    await h.click("m-menu");
-    expect(h.q("m-menu")!.getAttribute("aria-expanded")).toBe("true");
+    expect(h.q("m-lock-pill")!.getAttribute("aria-expanded")).toBe("false");
+    await h.click("m-lock-pill");
+    expect(h.q("m-lock-pill")!.getAttribute("aria-expanded")).toBe("true");
     const panel = h.q("m-menu-panel")!;
     const order = Array.from(panel.children).map((n) => (n as HTMLElement).dataset.testid || (n as HTMLElement).dataset.menuItem);
     expect(order).toEqual(["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]);
@@ -419,13 +419,13 @@ describe("the ⋯ menu", () => {
     const h = harness();
     h.app.start();
     await h.settle();
-    await h.click("m-menu");
+    await h.click("m-lock-pill");
     h.root.querySelector<HTMLElement>(".main")!.click();
     expect(h.q("m-menu-panel")).toBeNull();
-    await h.click("m-menu");
+    await h.click("m-lock-pill");
     (h.q("m-menu-panel")!.querySelector("button") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(h.q("m-menu-panel")).toBeNull();
-    expect(document.activeElement).toBe(h.q("m-menu"));
+    expect(document.activeElement).toBe(h.q("m-lock-pill"));
     h.app.stop();
   });
 
@@ -433,7 +433,7 @@ describe("the ⋯ menu", () => {
     const h = harness();
     h.app.start();
     await h.settle();
-    await h.click("m-menu");
+    await h.click("m-lock-pill");
     await h.click("m-signout");
     expect(h.signedOut).toBe(true);
     const menu = menuView({ id: "x", label: "X", open: true, toggle: () => {}, items: [{ id: "a", label: "A" }] });

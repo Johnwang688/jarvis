@@ -97,7 +97,7 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
 
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0)); };
   const screen = () => document.querySelector<HTMLElement>("[data-screen]")?.dataset.screen;
-  const tap = async () => { document.querySelector<HTMLButtonElement>("button")!.click(); await settle(); };
+  const tap = async () => { document.querySelector<HTMLButtonElement>("button.btn")!.click(); await settle(); };
 
   it("pairs from /m/pair#code, drops the code from the address at once, then signs in", async () => {
     history.replaceState(null, "", "/m/pair#" + CODE);
@@ -145,12 +145,14 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     await import("./main");
     await settle();
     expect(screen()).toBe("Jarvis");
-    expect(document.querySelector("button")!.textContent).toBe("Sign in with passkey");
+    expect(document.querySelector('[data-testid="m-conn"]')!.textContent).toBe("Signed out");
+    expect(document.querySelector('[data-testid="m-brand"]')!.getAttribute("aria-label")).toContain("Signed out");
+    expect(document.querySelector("button.btn")!.textContent).toBe("Sign in with passkey");
     await tap();
     expect(screen()).toBe("app");
-    // PX-4: Sign out is behind the header's ⋯, last.
+    // RD-1: Sign out is behind the lock pill, last.
     expect(document.querySelector('[data-testid="m-signout"]')).toBeNull();
-    document.querySelector<HTMLButtonElement>('[data-testid="m-menu"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-testid="m-lock-pill"]')!.click();
     const out = document.querySelector<HTMLButtonElement>('[data-testid="m-signout"]')!;
     expect(out.textContent).toBe("Sign out");
     out.click();

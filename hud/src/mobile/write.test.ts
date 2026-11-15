@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
@@ -10,8 +11,11 @@ import type { TaskView } from "./model";
 
 // P-5 (jarvis/v2/remote_write.py): the message box, the sheets, the task verbs.
 
-const H = ['<img src=x onerror="window.__pwned=1">', "<script>window.__pwned=2</script>", "<b>bold</b>"].join(" ");
-const MARKUP = "img, script, b, svg, iframe, [onerror], [onload]";
+const H = ['<img src=x onerror="window.__pwned=1">', "<script>window.__pwned=2</script>", "<b>bold</b>",
+  '<svg class="m-icon" aria-hidden="true" onload="window.__pwned=3"><path d="M0 0"/></svg>'].join(" ");
+const MARKUP = "img, script, b, iframe, [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 
 class Stream implements StreamLike {
   readyState = 1;
@@ -240,6 +244,7 @@ describe("the message box (P-5)", () => {
     await h.click("m-compose-send");
     expect(h.q("m-compose-note")!.textContent).toBe(H[0].toUpperCase() + H.slice(1) + ".");
     expect(h.root.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(h.root)).toEqual([]);
     expect((h.q("m-compose-text") as HTMLTextAreaElement).value).toBe("hello");
     h.replies[`/m/api/threads/${CHAT}/messages`] = { status: 429, body: { error: "too many" } };
     await h.click("m-compose-send");
@@ -461,6 +466,7 @@ describe("task verbs (P-5)", () => {
     await h.click("m-task-confirm");
     expect(h.posts).toEqual([{ path: `/m/api/tasks/${TASK}/resume`, value: {} }]);
     expect(h.root.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(h.root)).toEqual([]);
     expect(h.q("m-task-note")!.textContent).toContain(H.slice(1));
   });
 
@@ -544,6 +550,7 @@ describe("a proposal's withdraw (P-5)", () => {
     expect(h.posts).toEqual([{ path: `/m/api/inbox/${encodeURIComponent(PROP.id)}/answer`, value: { withdraw: true } }]);
     expect(h.q("m-flash")!.textContent).toBe("Withdrawn: the task will not start.");
     expect(h.root.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(h.root)).toEqual([]);
   });
 
   it("without the app's withdraw (the P-3/P-4 view), it still says Withdraw at the desk", () => {
