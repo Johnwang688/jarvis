@@ -27,12 +27,18 @@ What it pins (P-3's acceptance items):
   - no route leaks a credential planted in a thread log, a title, a brief or
     a question;
   - `projects.is_owner` stays false, and the module never asks it;
-  - the agent-path DENY covers the new routes.
+  - the agent-path DENY covers the new routes;
+  - WS-5a, `GET /m/api/working`: exactly `WORKING_ENTRY_FIELDS` per entry and
+    `{entries, more, total}` on top, planted tokens, reasons, paths and rows
+    never sent, title and project scrubbed, statuses mapped, the desk's order
+    applied before the 100 cap, no `inbox.rows()` read, the same gates as the
+    other reads, and `working_changed` on the stream as a bare cue.
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/remote_api_check.py
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import http.client
 import importlib.util
 import inspect
@@ -331,7 +337,7 @@ class Api(rac.Remote):
 
     def reads(self):
         t, k = self.chat.id, self.task.id
-        return ["/m/api/inbox", "/m/api/projects", "/m/api/threads", f"/m/api/threads?project={self.project.id}",
+        return ["/m/api/inbox", "/m/api/working", "/m/api/projects", "/m/api/threads", f"/m/api/threads?project={self.project.id}",
                 f"/m/api/threads/{t}/log", f"/m/api/threads/{t}/log?after=1", "/m/api/tasks",
                 f"/m/api/tasks/{k}", f"/m/api/tasks/{k}/diff"]
 
@@ -919,6 +925,438 @@ class Diff(Api):
 # -- the event stream -------------------------------------------------------------------
 
 
+
+# -- WS-5a: the In progress list ------------------------------------------------------------
+
+# Pinned as they were on main (7215a5cf) before WS-5a: the existing phone
+# allowlists must not move with this route.
+PINNED = {
+    "PROJECT_FIELDS": ('id', 'name', 'created', 'inbox', 'archived'),
+    "THREAD_FIELDS": ('id', 'project_id', 'role', 'provider', 'task_id', 'title', 'title_source', 'created',
+                      'updated', 'turns', 'cost_usd', 'tokens', 'model', 'effort', 'archived', 'running',
+                      'compacting', 'queued', 'relays_waiting', 'relays_out', 'running_since'),
+    "TASK_FIELDS": ('id', 'project_id', 'brief', 'state', 'created', 'updated', 'spec', 'plan', 'status', 'report',
+                    'thread_ids', 'branch', 'provider_override', 'ceilings'),
+    "TASK_LIST_FIELDS": ('id', 'project_id', 'brief', 'state', 'created', 'updated', 'status'),
+    "STATUS_FIELDS": ('phase', 'step', 'steps', 'started', 'elapsed_s', 'cost_usd', 'tokens', 'last_tool',
+                      'open_question', 'routing'),
+    "ROW_FIELDS": ('id', 'kind', 'rank', 'title', 'blocks', 'project_id', 'thread_id', 'task_id', 'asked_at',
+                   'expires_at', 'origin', 'detail'),
+    "APPROVAL_DETAIL_FIELDS": ('req_id', 'tool', 'args', 'command', 'reason', 'layer', 'thread_id', 'task_id',
+                               'provider', 'origin', 'asked_at', 'allowlistable', 'timeout_s', 'headline',
+                               'hud_only', 'subagent', 'relayed_from', 'where', 'summary', 'summary_state'),
+    "RELAYED_FIELDS": ('title', 'provider', 'thread_id', 'kind'),
+    "GENERIC_DETAIL_FIELDS": ('req_id', 'tool', 'origin', 'thread_id', 'task_id', 'at', 'resolution', 'state',
+                              'text', 'brief', 'reason'),
+    "SUMMARY_KEYS": ('summary', 'summary_state'),
+    "APPROVAL_DETAIL_DROPPED": ('code', 'discord_channel_id'),
+}
+PINNED_DETAIL = {
+    'question': ('thread_id', 'req_id', 'text', 'options'), 'task_question': ('task_id', 'index', 'text', 'options'),
+    'proposal': ('task_id', 'brief', 'withdraw_until'), 'task': ('task_id', 'state', 'brief'),
+    'missed': ('req_id', 'tool', 'origin', 'thread_id', 'task_id', 'at', 'resolution'),
+    'decision': ('decision_id', 'question', 'options', 'default', 'why', 'answer', 'delivery'),
+    'check': ('check_id', 'title', 'prs', 'steps', 'results', 'done', 'deploy'),
+    'deferred': ('deferral_id', 'tool', 'card', 'thread_id', 'task_id', 'at', 'until', 'grantable', 'why_not',
+                 'expired', 'hud_only', 'count', 'more', 'summary'),
+    'pr': ('repo', 'number', 'title', 'branch', 'base', 'author', 'fork', 'head', 'checks', 'merge_state', 'facts',
+           'flags', 'failing', 'conflicts', 'files', 'summary', 'summary_state', 'summary_note', 'summary_reason',
+           'why', 'method', 'actions', 'card', 'hold', 'fix'),
+}
+PINNED_DROPPED = {
+    'project': ['always_ask', 'discord_channel_id', 'discord_channel_origin', 'extra_dirs', 'profile', 'root',
+                'root_real', 'routing'],
+    'thread': ['bypass', 'cost_recount', 'cwd', 'discord', 'migrated_from', 'provider_cost_total',
+               'provider_session_id', 'surface'],
+    'task': ['discord_thread_id', 'migrated_from', 'pr_scope', 'profile', 'root', 'worktree'],
+    'task_status': ['last_file'],
+    'task_list': ['branch', 'ceilings', 'plan', 'provider_override', 'report', 'spec', 'thread_ids'],
+    'pr_detail': ['url'],
+    'approval_detail': ['code', 'discord_channel_id'],
+}
+PINNED_STREAM = {'cli_turn', 'compacted', 'error', 'inbox_changed', 'model_set', 'notice', 'queued_dropped',
+                 'queued_started', 'relay_delivered', 'relay_in', 'relay_out', 'relay_reply', 'relay_state',
+                 'shutdown', 'steer_queued', 'task_created', 'task_question', 'task_status_changed',
+                 'task_updated', 'text', 'thread', 'thread_archived', 'thread_closed', 'thread_created',
+                 'thread_deleted', 'thread_moved', 'thread_restored', 'thread_updated', 'turn_finished',
+                 'turn_started', 'user_message'}
+WORKING_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last")
+DONE_TOKEN = "DONE-TOKEN-5a7c1e90b2d4"
+REASON = "REASON-PLANTED-8842"
+
+
+class Working(Api):
+    def setUp(self):
+        super().setUp()
+        self.ws = self.d.working
+        self.statuses = {}
+        self.stamp = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        for guard in (patch.object(self.d.activity, "thread_status", lambda tid: self.statuses.get(tid, "idle")),):
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def join(self, thread, *, status=None, minutes=None):
+        """The thread into the working set, at its own time (each later than
+        the last unless `minutes` says where), and its status for the read."""
+        self.stamp = self.stamp + timedelta(minutes=1) if minutes is None else \
+            datetime(2026, 11, 1, tzinfo=timezone.utc) + timedelta(minutes=minutes)
+        at = self.stamp
+        self.ws.clock = lambda: at
+        self.d.bus.publish({"kind": "user_message", "thread_id": thread.id, "project_id": thread.project_id,
+                            "data": {}})
+        if status is not None:
+            self.statuses[thread.id] = status
+        return thread
+
+    def entries(self):
+        return self.ok("/m/api/working")
+
+    def test_shape_and_exact_fields(self):
+        self.join(self.chat, status="needs_input")
+        self.join(self.second, status="working")
+        body = self.entries()
+        self.assertEqual(set(body), {"entries", "more", "total"})
+        self.assertEqual((body["more"], body["total"]), (False, 2))
+        self.assertEqual(remote_api.WORKING_ENTRY_FIELDS, WORKING_FIELDS)
+        self.assertEqual([e["thread_id"] for e in body["entries"]], [self.chat.id, self.second.id])
+        for e in body["entries"]:
+            self.assertEqual(tuple(e), WORKING_FIELDS)
+            self.assertEqual(e["project_id"], self.project.id)
+            self.assertEqual(e["project"], "Calc")
+            self.assertRegex(e["last"], r"^2026-11-01T")
+        self.assertEqual(body["entries"][1]["title"], "Second chat")
+        self.assertEqual(body["entries"][0]["status"], "needs_input")
+        print("ok  /m/api/working: {entries, more, total}, each entry exactly the allowlisted fields")
+
+    def test_planted_fields_never_appear(self):
+        self.join(self.chat)
+        self.ws.set_idle_days(9)
+        with self.ws._lock:
+            entry = self.ws._threads[self.chat.id]
+            entry.update(done_token=DONE_TOKEN, done_seq=5, reason=REASON, seq=424242)
+        thread = self.stores.threads.get(self.chat.id)
+        thread.provider_session_id = "SESSION-HANDLE-77"
+        self.stores.threads.save(thread)
+        row = {"id": "appr:x", "kind": "approval", "rank": 1, "title": AGENT, "blocks": AGENT, "thread_id": self.chat.id,
+               "project_id": self.project.id, "detail": {"command": AGENT}}
+        from jarvis.v2 import inbox as _inbox
+        with patch.object(_inbox, "rows", side_effect=AssertionError("the read touched the inbox")):
+            status, headers, body = self.get("/m/api/working")
+        self.assertEqual(status, 200, body)
+        text = json.dumps(body)
+        for planted in (DONE_TOKEN, REASON, AGENT, "424242", "SESSION-HANDLE-77", str(self.repo), str(self.root),
+                        "idle_days", "done_at", "done_seq", "done_token", "reason", "since", "rows", "why_not",
+                        "cwd", "worktree", "needs_you", "count", "pending", '"seq"'):
+            self.assertNotIn(planted, text, planted)
+        self.assertEqual(tuple(body["entries"][0]), WORKING_FIELDS)
+        del row
+        print("ok  a planted done_token, reason, seq, idle limit, session handle, paths and rows never come back")
+
+    def test_title_and_project_are_scrubbed(self):
+        named = self.stores.projects.create("Proj " + TOKEN, str(self.repo))
+        chat = self.thread("Titled " + TOKEN, project=named)
+        self.join(chat)
+        self.join(self.chat)
+        body = self.entries()
+        self.assertNotIn(TOKEN, json.dumps(body))
+        by_id = {e["thread_id"]: e for e in body["entries"]}
+        self.assertEqual(by_id[chat.id]["title"], remote_api.thread(self.d.thread_json(chat))["title"])
+        self.assertEqual(by_id[chat.id]["project"], remote_api._scrub("Proj " + TOKEN))
+        self.assertNotEqual(by_id[chat.id]["title"], "Titled " + TOKEN)
+        self.assertNotEqual(by_id[chat.id]["project"], "Proj " + TOKEN)
+        self.assertEqual(by_id[self.chat.id]["title"], remote_api.thread(self.d.thread_json(self.chat))["title"])
+        print("ok  a credential in a title or a project name comes back withheld, the title as /m/api/threads")
+
+    def test_status_mapping(self):
+        words = ["needs_input", "failed", "unread", "working", "idle"]
+        made = [self.join(self.thread(f"t {w}"), status=w) for w in words]
+        odd = [self.join(self.thread("t bogus"), status="bogus"), self.join(self.thread("t none"), status=None),
+               self.join(self.thread("t number"), status=7)]
+        self.statuses[odd[1].id] = None
+        self.statuses[odd[2].id] = 7
+        by_id = {e["thread_id"]: e["status"] for e in self.entries()["entries"]}
+        for thread, word in zip(made, words):
+            self.assertEqual(by_id[thread.id], word)
+        self.assertEqual([by_id[t.id] for t in odd], ["idle", "idle", "idle"])
+        print("ok  status is one of the five words; anything else is idle")
+
+    def test_desk_order_applies_before_the_cap(self):
+        ids = []
+        oldest = self.join(self.thread("oldest needs you"), status="needs_input", minutes=0)
+        newest = None
+        for i in range(100):
+            newest = self.join(self.thread(f"idle {i}"), minutes=10 + i)
+            ids.append(newest.id)
+        self.assertEqual(len(self.ws.members()), 101)
+        body = self.entries()
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, True, 101))
+        self.assertEqual(body["entries"][0]["thread_id"], oldest.id, "an old Needs you chat is cut for idle ones")
+        shown = [e["thread_id"] for e in body["entries"][1:]]
+        self.assertEqual(shown, ids[::-1][:99], "then newest first")
+        self.assertNotIn(ids[0], shown, "the oldest idle chat is the one that is cut")
+        print("ok  101 entries: the oldest, Needs you, stays in and first; more and total say 100 of 101")
+
+    def test_tied_timestamps_keep_the_desks_tie_break_across_the_cap(self):
+        # Identical `last` is common after seeding: the desk's order for a tie
+        # is the daemon's, descending thread id, kept by the label sort.
+        made = []
+        for i in range(103):
+            status = "needs_input" if i % 17 == 0 else ("working" if i % 5 == 0 else None)
+            made.append(self.join(self.thread(f"tie {i}"), status=status, minutes=7))
+        desk = self.owner("/working")["entries"]
+        self.assertEqual(len({e["last"] for e in desk}), 1, "the fixture must tie")
+        rank = remote_api.WORKING_LABELS
+        expect = sorted(desk, key=lambda e: rank.index(e["status"]))     # stable: the daemon's order breaks ties
+        body = self.entries()
+        self.assertEqual([e["thread_id"] for e in body["entries"]], [e["thread_id"] for e in expect[:100]])
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, True, 103))
+        # Within each label the ids run downwards, as the daemon orders a tie.
+        for word in rank:
+            ids = [e["thread_id"] for e in body["entries"] if e["status"] == word]
+            self.assertEqual(ids, sorted(ids, reverse=True), word)
+        print("ok  103 tied entries: the 100 sent are the desk's first 100, tie-break included; total 103")
+
+    def _101(self):
+        made = [self.join(self.thread(f"m {i}"), minutes=10 + i) for i in range(101)]
+        self.assertEqual(len(self.ws.members()), 101)
+        return made
+
+    def test_a_thread_gone_mid_read_keeps_the_slot_and_the_counts(self):
+        made = self._101()
+        victim = made[-1]                           # the newest: inside the first 100
+        real = self.ws.entries
+
+        calls = {"n": 0}
+        real_get = self.stores.threads.get
+
+        def get(thread_id):
+            if thread_id == victim.id and calls["n"]:
+                return None
+            return real_get(thread_id)
+
+        def entries():
+            out = real()
+            calls["n"] += 1                         # from here the victim reads as missing
+            return out
+
+        with patch.object(self.ws, "entries", entries), patch.object(self.stores.threads, "get", get):
+            body = self.entries()
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, False, 100))
+        self.assertNotIn(victim.id, [e["thread_id"] for e in body["entries"]])
+        print("ok  a thread deleted mid-read: 100 returned, total 100, more false")
+
+    def test_a_thread_archived_mid_read_is_not_named(self):
+        made = self._101()
+        victim = made[-1]
+        real = self.ws.entries
+
+        def entries():
+            out = real()
+            gone = self.stores.threads.get(victim.id)
+            gone.archived = "2026-11-02T00:00:00+00:00"
+            self.stores.threads.save(gone)
+            return out
+
+        with patch.object(self.ws, "entries", entries):
+            body = self.entries()
+        text = json.dumps(body)
+        self.assertNotIn(victim.id, text)
+        self.assertNotIn(f"m {len(made) - 1}", text)
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, False, 100))
+        print("ok  a thread archived mid-read is left out, titles included; counts from the same set")
+
+    def test_a_project_archived_mid_read_is_not_named(self):
+        named = self.stores.projects.create("Soon archived", str(self.repo))
+        late = self.join(self.thread("late in a project", project=named))
+        self.join(self.chat)
+        real = self.ws.entries
+
+        def entries():
+            out = real()
+            named.archived = "2026-11-02T00:00:00+00:00"
+            self.stores.projects.save(named)
+            return out
+
+        with patch.object(self.ws, "entries", entries):
+            body = self.entries()
+        self.assertNotIn(late.id, json.dumps(body))
+        self.assertNotIn("Soon archived", json.dumps(body))
+        self.assertEqual((len(body["entries"]), body["total"]), (1, 1))
+        print("ok  a project archived mid-read: its chats and its name are not sent")
+
+    def test_a_member_of_an_archived_project_is_absent(self):
+        named = self.stores.projects.create("Archived later", str(self.repo))
+        member = self.join(self.thread("planted member", project=named))
+        self.join(self.chat)
+        self.assertIn(member.id, self.ws.members())
+        named.archived = "2026-11-02T00:00:00+00:00"
+        self.stores.projects.save(named)
+        self.assertNotIn(member.id, [e["thread_id"] for e in self.ws.entries()], "entries() filter")
+        body = self.entries()
+        self.assertEqual([e["thread_id"] for e in body["entries"]], [self.chat.id])
+        self.assertEqual(body["total"], 1)
+        print("ok  a member whose project was archived is absent (entries() and the route)")
+
+    def test_path_spellings_are_not_the_route(self):
+        self.join(self.chat)
+        for path in ("/m/api//working", "/m/api/Working", "/m/api/working%2F", "/m/api/working;x",
+                     "/m/api/working%2f", "/m/api/./working"):
+            self.assertEqual(self.get(path)[0], 404, path)
+            self.assertEqual(self.get(path, cookie=None)[0], 401, path)
+        print("ok  odd spellings of the path are 404 signed in and 401 signed out")
+
+    def test_order_labels_then_newest_and_the_cap_boundary(self):
+        a = self.join(self.thread("a"), status="working", minutes=5)
+        b = self.join(self.thread("b"), status="unread", minutes=1)
+        c = self.join(self.thread("c"), status="failed", minutes=2)
+        d = self.join(self.thread("d"), status="working", minutes=9)
+        e = self.join(self.thread("e"), status="idle", minutes=50)
+        order = [x["thread_id"] for x in self.entries()["entries"]]
+        self.assertEqual(order, [c.id, b.id, d.id, a.id, e.id])
+        with patch.object(remote_api, "WORKING_ENTRIES", 5):
+            body = self.entries()
+            self.assertEqual((len(body["entries"]), body["more"], body["total"]), (5, False, 5))
+        with patch.object(remote_api, "WORKING_ENTRIES", 4):
+            body = self.entries()
+            self.assertEqual([x["thread_id"] for x in body["entries"]], [c.id, b.id, d.id, a.id])
+            self.assertEqual((body["more"], body["total"]), (True, 5))
+        print("ok  label order then newest, cut after it; exactly at the cap is not more")
+
+    def test_parity_with_the_desk_minus_dropped(self):
+        for i, w in enumerate(["idle", "working", "needs_input", "unread"]):
+            self.join(self.thread(f"p{i}"), status=w)
+        desk = self.owner("/working")
+        phone = self.entries()
+        rank = remote_api.WORKING_LABELS
+        expect = sorted(sorted(desk["entries"], key=lambda e: e["last"], reverse=True),
+                        key=lambda e: rank.index(e["status"]))
+        self.assertEqual([(e["thread_id"], e["project_id"], e["status"], e["last"]) for e in phone["entries"]],
+                         [(e["thread_id"], e["project_id"], e["status"], e["last"]) for e in expect])
+        self.assertEqual(set(desk["entries"][0]) - {"thread_id", "project_id", "last", "status"},
+                         set(remote_api.DROPPED["working_entry"]))
+        self.assertEqual(set(desk) - {"entries"}, set(remote_api.DROPPED["working"]))
+        self.assertEqual(set(remote_api.WORKING_ENTRY_FIELDS) - set(desk["entries"][0]), {"project", "title"})
+        self.assertEqual(phone["total"], len(desk["entries"]))
+        print("ok  the phone's entries are the desk's, ordered by label then newest, minus DROPPED, plus title and project")
+
+    def test_who_is_not_in_the_list(self):
+        self.join(self.chat)
+        self.join(self.second)
+        archived_thread = self.join(self.thread("will archive"))
+        in_archived_project = self.join(self.thread("in a project that will archive", project=self.other))
+        task_thread = self.thread("a task's")
+        with self.ws._lock:     # planted: no producer lets a task's thread in
+            self.ws._threads[task_thread.id] = {"since": "2026-11-01T00:00:00+00:00", "last": "2026-11-01T00:00:00+00:00",
+                                                "seq": 1, "done_at": None, "done_seq": None, "done_token": None,
+                                                "reason": None}
+        out = self.join(self.thread("out of the set"))
+        with self.ws._lock:
+            self.ws._threads[out.id].update(done_at="2026-11-01T00:30:00+00:00", done_seq=1, reason="done")
+        gone = self.stores.threads.get(archived_thread.id)
+        gone.archived = "2026-11-01T00:40:00+00:00"
+        self.stores.threads.save(gone)
+        # The task thread: a chat-role thread with a task id is not a chat thread (D-7).
+        planted = self.stores.threads.get(task_thread.id)
+        planted.task_id = self.task.id
+        self.stores.threads.save(planted)
+        self.ws._chat.pop(task_thread.id, None)
+        listed = [e["thread_id"] for e in self.entries()["entries"]]
+        self.assertEqual(sorted(listed), sorted([self.chat.id, self.second.id]))
+        for hidden in (archived_thread.id, in_archived_project.id, task_thread.id, out.id):
+            self.assertNotIn(hidden, listed)
+        print("ok  archived, archived-project, task and out-of-set threads are absent")
+
+    def test_reads_never_touch_the_inbox_or_the_store(self):
+        self.join(self.chat, status="needs_input")
+        self.join(self.second)
+        from jarvis.v2 import inbox as _inbox
+        before = (self.ws.members(), json.dumps(self.ws._threads, sort_keys=True))
+        with patch.object(_inbox, "rows", side_effect=AssertionError("inbox.rows was read")):
+            for _ in range(3):
+                self.assertEqual(self.get("/m/api/working")[0], 200)
+        self.assertEqual((self.ws.members(), json.dumps(self.ws._threads, sort_keys=True)), before)
+        self.assertNotIn("rows(", inspect.getsource(remote_api.working))
+        print("ok  repeated reads never read inbox.rows() and change no membership, token or seq")
+
+    def test_refusals(self):
+        self.join(self.chat)
+        status, headers, body = self.get("/m/api/working", cookie=None)
+        self.assertEqual((status, body), (401, {"error": "unauthorized"}))
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(self.get("/m/api/working", host="localhost")[0], 400)
+        for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            status, headers, body = self.phone(method, "/m/api/working", {}, cookie=self.cookie)
+            self.assertEqual((status, body), (405, {"error": "method not allowed"}), method)
+            self.assertEqual(headers["Allow"], "GET")
+            self.assertEqual(self.phone(method, "/m/api/working", {}, cookie=self.cookie, origin=None)[0], 403)
+        self.assertEqual(self.phone("HEAD", "/m/api/working", cookie=self.cookie)[0], 405)
+        for query in ("?x=1", "?project=" + self.project.id, "?limit=5"):
+            self.assertEqual(self.get("/m/api/working" + query)[0], 400, query)
+        self.assertEqual(self.get("/m/api/working/")[0], 404)
+        self.assertEqual(self.get("/m/api/working/" + self.chat.id)[0], 404)
+        # Logged out, then revoked.
+        self.assertEqual(self.phone("POST", "/m/api/logout", {}, cookie=self.cookie)[0], 200)
+        self.assertEqual(self.get("/m/api/working")[0], 401)
+        self.cookie = self.signed_in(self.a)
+        self.assertEqual(self.get("/m/api/working")[0], 200)
+        self.assertTrue(self.auth.revoke(self.auth.status()["passkeys"][0]["key"]))
+        self.assertEqual(self.get("/m/api/working")[0], 401)
+        print("ok  working: 401 without, after logout and after a revoke; 400 wrong Host or a query; 405 not GET")
+
+    def test_a_revoke_during_the_read_gets_401(self):
+        import threading
+        self.join(self.chat)
+        real = self.ws.entries
+        reading, release = threading.Event(), threading.Event()
+
+        def slow():
+            out = real()
+            reading.set()
+            release.wait(5)
+            return out
+
+        out = {}
+        with patch.object(self.ws, "entries", slow):
+            worker = threading.Thread(target=lambda: out.update(r=self.get("/m/api/working")))
+            worker.start()
+            self.assertTrue(reading.wait(5))
+            self.assertTrue(self.auth.revoke(self.auth.status()["passkeys"][0]["key"]))
+            release.set()
+            worker.join(10)
+        status, _, body = out["r"]
+        self.assertEqual((status, body), (401, {"error": "unauthorized"}))
+        print("ok  a revoke while the list is being read: 401, not the list")
+
+    def test_unavailable_and_unreadable(self):
+        self.join(self.chat)
+        with patch.object(self.ws, "entries", side_effect=RuntimeError(AGENT)):
+            status, _, body = self.get("/m/api/working")
+        self.assertEqual((status, body), (409, {"error": "the In progress list cannot be read now"}))
+        self.assertNotIn(AGENT, json.dumps(body))
+        saved, self.d.working = self.d.working, None
+        try:
+            status, _, body = self.get("/m/api/working")
+        finally:
+            self.d.working = saved
+        self.assertEqual((status, body), (503, {"error": "the In progress list is not running"}))
+        print("ok  working: 409 when the read fails (no detail), 503 when the set is not running")
+
+    def test_dropped_table_and_pinned_allowlists(self):
+        self.assertEqual({k: sorted(v) for k, v in remote_api.DROPPED.items() if not k.startswith("working")},
+                         PINNED_DROPPED)
+        self.assertEqual(sorted(remote_api.DROPPED["working_entry"]), ["rows", "seq", "since", "why_not"])
+        self.assertEqual(sorted(remote_api.DROPPED["working"]), ["count", "needs_you", "pending"])
+        for table in ("working_entry", "working"):
+            for field, why in remote_api.DROPPED[table].items():
+                self.assertTrue(why.strip(), (table, field))
+        for name, value in PINNED.items():
+            self.assertEqual(getattr(remote_api, name), value, name)
+        self.assertEqual({k: tuple(v) for k, v in remote_api.DETAIL_FIELDS.items()}, PINNED_DETAIL)
+        self.assertEqual(remote_api.STREAM_KINDS - {"working_changed"}, PINNED_STREAM)
+        self.assertNotIn("seq", remote_api.WORKING_ENTRY_FIELDS)
+        print("ok  every existing phone allowlist, DROPPED table and stream kind is as it was; seq is not sent")
+
+
 class Stream:
     """A raw SSE client: the headers, then `data:` items as they come."""
 
@@ -1056,6 +1494,24 @@ class Events(Api):
         print("ok  stream: inbox_changed {ids, reason}, thread_changed and task_changed ids only; "
               "deltas, tools, thinking, usage and every text dropped")
 
+    def test_working_changed_is_a_bare_cue_with_no_ids(self):
+        s = self.opened()
+        t, p = self.chat.id, self.project.id
+        self.d.bus.publish({"kind": "working_changed"})
+        self.d.bus.publish({"kind": "working_changed", "thread_id": t, "project_id": p,
+                            "data": {"ids": [t], "thread_id": t, "text": AGENT}})
+        items = s.items(2)
+        self.assertEqual(items, [{"kind": "working_changed", "data": {}}] * 2)
+        raw_tail = s.body(0.5)
+        self.assertNotIn(t.encode(), raw_tail)
+        self.assertNotIn(AGENT.encode(), raw_tail)
+        self.assertNotIn(t.encode(), b"".join(i.encode() for i in map(json.dumps, items)))
+        self.assertIn("working_changed", remote_api.STREAM_KINDS)
+        # No Hidden filtering applies (it has no ids to judge); no push either.
+        from jarvis.v2 import push as _push
+        self.assertNotIn("working_changed", inspect.getsource(_push))
+        print("ok  stream: working_changed is exactly {kind, data: {}}, planted ids and text dropped")
+
     def test_record_shapes(self):
         self.assertIsNone(remote_api.stream_record({"kind": "text", "thread_id": "../x"}))
         self.assertIsNone(remote_api.stream_record({"kind": "approval_requested", "data": {"command": AGENT}}))
@@ -1063,7 +1519,7 @@ class Events(Api):
         self.assertEqual(remote_api.stream_record({"kind": "inbox_changed",
                                                    "data": {"ids": ["ok:1", "bad id <b>", 7], "reason": "x y"}}),
                          {"kind": "inbox_changed", "data": {"ids": ["ok:1"], "reason": ""}})
-        for kind in remote_api.STREAM_KINDS - {"shutdown", "inbox_changed"}:
+        for kind in remote_api.STREAM_KINDS - {"shutdown", "inbox_changed", "working_changed"}:
             shaped = remote_api.stream_record({"kind": kind, "thread_id": self.chat.id,
                                                "task_id": self.task.id, "data": {"text": AGENT}})
             self.assertIsNotNone(shaped, kind)
@@ -1088,6 +1544,10 @@ class Events(Api):
         # An event published after the revoke never reaches it.
         self.d.bus.publish({"kind": "inbox_changed", "data": {"ids": ["appr:late"], "reason": "x"}})
         self.assertNotIn(b"appr:late", s.buffer)
+        self.d.bus.publish({"kind": "working_changed"})
+        self.assertNotIn(b"working_changed", s.buffer)
+        self.assertTrue(s.ends_within(3))
+        self.assertNotIn(b"working_changed", s.body(0.5))
         print("ok  stream: a revoke at the desk ends every stream of that passkey at once")
 
     def test_ends_on_expiry_and_is_not_activity(self):

@@ -331,9 +331,15 @@ class Contract(unittest.TestCase):
             self.assertIsNone(v2_permissions._command_writes_protected_state(f"cat {target}"))
             self.assertIn('{"threads": {}}', files.read_file(str(target)))
 
-    def test_working_changed_never_reaches_the_phone(self):
-        self.assertIsNone(remote_api.stream_record(dict(CHANGED)))
-        self.assertFalse(remote_api._wanted(dict(CHANGED)))
+    def test_working_changed_reaches_the_phone_as_a_bare_cue(self):
+        # WS-5a (owner, 2026-11-15): flipped from "never reaches the phone".
+        # Exactly this shape; ids and data are dropped even when planted.
+        cue = {"kind": "working_changed", "data": {}}
+        self.assertEqual(remote_api.stream_record(dict(CHANGED)), cue)
+        self.assertTrue(remote_api._wanted(dict(CHANGED)))
+        planted = {"kind": "working_changed", "thread_id": "0000beef", "project_id": "0000cafe",
+                   "data": {"ids": ["0000beef"], "thread_id": "0000beef", "text": "SECRET"}}
+        self.assertEqual(remote_api.stream_record(planted), cue)
 
 
 # -- the producer table (D-2) ---------------------------------------------------------------
@@ -998,6 +1004,102 @@ class View(Base):
         self.clock.advance(minutes=1)
         self.publish("user_message", new, data={})
         self.assertEqual([e["thread_id"] for e in self.call("GET", "/working")["entries"]], [new, old])
+
+
+class Entries(Base):
+    """WS-5a: `WorkingSet.entries()`, the membership read under the desk's
+    `view()` and the phone's `GET /m/api/working`."""
+
+    def _old_view(self):
+        """`view()` as it was before WS-5a (verbatim), the reference for
+        "the desk's /working does not change"."""
+        rows = inbox.rows(self.daemon, marks="flag")
+        with self.ws._lock:
+            snapshot = {tid: dict(e) for tid, e in self.ws._threads.items() if e["done_at"] is None}
+        entries = {}
+        for thread_id, entry in snapshot.items():
+            thread = self.ws._visible(thread_id)
+            if thread is None:
+                continue
+            entries[thread_id] = {"thread_id": thread_id, "project_id": thread.project_id,
+                                  "since": entry["since"], "last": entry["last"], "seq": entry["seq"],
+                                  "status": self.ws._status(thread_id), "rows": [], "why_not": None}
+        needs_you = []
+        for row in rows:
+            target = entries.get(row.get("thread_id")) if isinstance(row, dict) else None
+            (target["rows"] if target is not None else needs_you).append(row)
+        why = self.ws.why_not(list(entries), rows=rows) if entries else {}
+        for thread_id, entry in entries.items():
+            entry["why_not"] = why.get(thread_id)
+        ordered = sorted(entries.values(), key=lambda e: (e["last"], e["thread_id"]), reverse=True)
+        return {"entries": ordered, "needs_you": needs_you,
+                "count": working.waiting_count(rows), "pending": working.any_pending(rows)}
+
+    def fixture(self):
+        a, b = self.open_chat(), self.open_chat()
+        appr_a, out_a, worker_a = self.ask(a.id)
+        appr_b, out_b, worker_b = self.ask(b.id)
+        self.call("POST", f"/threads/{b.id}/archive", {})
+        defer_a = self.defer(a.id)
+        old = self.thread().id
+        self.publish("user_message", old, data={})
+        self.clock.advance(minutes=3)
+        quiet = self.thread(self.other).id
+        self.publish("user_message", quiet, data={})
+        self.publish("turn_finished", quiet, data={"stop": "end"})
+        task = self.stores.tasks.create(self.project.id, "t")
+        self.stores.tasks.save(task)
+        self.thread(task_id=task.id)
+        self.addCleanup(lambda: [self.daemon.resolve_approval(r.req_id, Decision.DENY, False, owner_verified=True)
+                                 for r in (appr_a, appr_b) if self.daemon.approvals.pending()])
+        return a.id, old, quiet
+
+    def test_entries_reads_no_inbox_row_and_changes_nothing(self):
+        a, old, quiet = self.fixture()
+        before_members = self.ws.members()
+        with self.ws._lock:
+            before_state = json.dumps(self.ws._threads, sort_keys=True)
+        calls = []
+        real = inbox.rows
+        with patch.object(inbox, "rows", lambda *args, **kw: calls.append(kw) or real(*args, **kw)):
+            first = self.ws.entries()
+            second = self.ws.entries()
+        self.assertEqual(calls, [], "entries() read the inbox")
+        self.assertEqual(first, second)
+        self.assertEqual(sorted(e["thread_id"] for e in first), sorted([a, old, quiet]))
+        for e in first:
+            self.assertEqual(set(e), {"thread_id", "project_id", "since", "last", "seq", "status"})
+        self.assertEqual(self.ws.members(), before_members)
+        with self.ws._lock:
+            self.assertEqual(json.dumps(self.ws._threads, sort_keys=True), before_state)
+
+    def test_entries_leaves_out_what_is_not_visible(self):
+        a, old, quiet = self.fixture()
+        self.call("POST", f"/threads/{old}/archive", {})
+        self.assertNotIn(old, [e["thread_id"] for e in self.ws.entries()])
+        self.assertNotIn(old, self.ws.members())
+
+    def test_view_is_entries_plus_rows_and_why_not(self):
+        self.fixture()
+        view = self.ws.view()
+        plain = sorted(self.ws.entries(), key=lambda e: (e["last"], e["thread_id"]), reverse=True)
+        stripped = [{k: v for k, v in e.items() if k not in ("rows", "why_not")} for e in view["entries"]]
+        self.assertEqual(stripped, plain)
+
+    def test_view_is_byte_identical_to_before_and_reads_the_inbox_once(self):
+        self.fixture()
+        calls = []
+        real = inbox.rows
+        with patch.object(inbox, "rows", lambda *args, **kw: calls.append(kw) or real(*args, **kw)):
+            new = self.ws.view()
+        self.assertEqual(calls, [{"marks": "flag"}], "the desk's /working is one marks=flag read")
+        old = self._old_view()
+        self.assertEqual(json.dumps(new), json.dumps(old))
+        self.assertTrue(new["entries"] and new["needs_you"], "the fixture has entries and rows")
+        self.assertTrue(any(e["rows"] for e in new["entries"]))
+        self.assertTrue(any(e["why_not"] for e in new["entries"]))
+        # And over the desk's own route.
+        self.assertEqual(self.call("GET", "/working"), json.loads(json.dumps(old)))
 
 
 # -- the boundaries (§4) -----------------------------------------------------------------------------

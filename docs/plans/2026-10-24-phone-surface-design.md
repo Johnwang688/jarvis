@@ -273,6 +273,7 @@ remote routes.
 | `GET inbox/<id>/detail` | `PendingApprovals.owner_details` | HUD-only cards, verified session under §4.1 only, while pending |
 | `POST inbox/<id>/answer` | the inbox dispatch (inbox IN-2) | Allow and Always need the PH-4 assertion and §4.1; Deny needs the session only |
 | `POST inbox/decisions/<id>` | inbox decisions | |
+| `GET working` | `WorkingSet.entries()` (WS-5a, 2026-11-15) | read-only In progress list `{entries, more, total}`: thread, project, title, status, last; desk order, then a 100 cap; no inbox rows, no `seq` (see `docs/plans/2026-11-15-ws5-phone-working-set-plan.md`) |
 | `GET projects`, `GET threads?project=`, `GET threads/<id>/log?after=` | the HUD's reads | transcript rows as the HUD shows them, scrubbed (`chat_reads` projection) |
 | `POST threads/<id>/messages` | `daemon.send` with `via="phone"` | queues behind a running turn; attachments refused in v1 |
 | `POST threads` | new chat in a project | provider, model and effort chips as the HUD's |
