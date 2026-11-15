@@ -212,6 +212,39 @@ describe("every request reports through the one path (orb spec §4, §11)", () =
   });
 });
 
+describe("one route the proxy keeps failing cannot storm requests", () => {
+  it("a recovery refresh runs at most once per window; a flip inside it is owed, read once when it ends", async () => {
+    const root = document.createElement("main");
+    document.body.replaceChildren(root);
+    const asked: string[] = [];
+    const timers: { fn: () => void; ms: number }[] = [];
+    const app = new PhoneApp({ root, onSignedOut: () => {}, signOut: async () => {},
+      fetchJson: async (path) => {
+        asked.push(path);
+        // A slow route behind `tailscale serve`: always the proxy's 504, beside routes that answer.
+        if (path === "/m/api/working") return { ok: false, why: "offline", status: 504 };
+        return ok({ rows: [], tasks: [], open: 0, signed_in: true, secure: { ok: true } });
+      },
+      postJson: async () => ({ status: 200, body: {} }),
+      openStream: () => new Stream(),
+      setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+      setSlow: () => 0, clearSlow: () => {},
+    });
+    apps.push(app);
+    const settle = async () => { for (let i = 0; i < 200; i++) await Promise.resolve(); };
+    const working = () => asked.filter((p) => p === "/m/api/working").length;
+    app.start(); await settle();
+    const first = working();
+    expect(first).toBeLessThanOrEqual(2);
+    await settle(); await settle();
+    expect(working()).toBe(first); // no flip-flop loop without the window ending
+    const windows = timers.filter((t) => t.ms === 4000);
+    expect(windows.length).toBe(1);
+    windows[0].fn(); await settle();
+    expect(working()).toBeLessThanOrEqual(first + 1);
+  });
+});
+
 describe("the classification table", () => {
   it.each([
     [200, undefined, "reached"], [204, {}, "reached"], [0, undefined, "offline"], [401, {}, "signed-out"],
