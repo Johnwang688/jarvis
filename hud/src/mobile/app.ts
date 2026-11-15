@@ -72,7 +72,7 @@ import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
-import { deferralsOpen, reviewLine, reviewTabShown, reviewView, type ReviewActions } from "./review";
+import { deferralsOpen, reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
 import { Nav, ScrollMemory, browserHistory, byAttr, menuView, sheetView, trayView, type HistoryEnv, type MenuItem } from "./nav";
 import { staleAt } from "../lib/approvalSummary";
 import { ACTION_PROGRESS, actionBody, prRowOf, resultWords, type PrAction } from "../lib/prRow";
@@ -539,7 +539,7 @@ export class PhoneApp {
   private renderTabs(): void {
     // M9a (phone audit): the Review tab keeps its slot, off while there is no review, so the
     // tabs never move under the thumb (Inbox, Review, Chats: Tasks is a filter of the Inbox).
-    const shown = this.tab === "review" || reviewTabShown(this.review);
+    const shown = this.tab === "review" || reviewReachable(this.review);
     this.tabs.review.disabled = !shown;
     // PX-4: the Review tab shows only while a deferred approval waits (or the review is open); the Inbox's
     // review line reaches every other review.
@@ -702,6 +702,7 @@ export class PhoneApp {
   openCard(row: InboxRow): void {
     this.flash = "";
     this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
+    this.invoker = this.tab === "review" ? "m-review-open-card" : "m-item-review";
     // PX-4: the sheet opens over whatever the owner is looking at (the list, a chat, the review), its scroll kept.
     if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     this.render();
@@ -1321,7 +1322,9 @@ export class PhoneApp {
 
   async openThread(id: string, meta: ChatThread | null = null): Promise<void> {
     if (this.thread?.id !== id || this.tab !== "chats") { this.leftFrom("thread", id); this.trayFolded = false; }
+    // Every new opening sets where back goes: from the Inbox or the review, or from the Chats list.
     if (this.tab !== "chats") this.threadBack = this.tab === "review" ? "review" : "inbox";
+    else if (!this.thread) this.threadBack = "chats";
     this.tab = "chats";
     this.sheet = null;
     this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null,
@@ -1717,6 +1720,8 @@ export class PhoneApp {
   private cardNotice: HTMLElement | null = null;
   /** After a cancelled passkey or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
   private focusNotice = false;
+  /** The control that opened the sheet (its test id), so closing returns to it wherever it lives (the list, the review). */
+  private invoker = "m-item-review";
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private timeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1755,7 +1760,9 @@ export class PhoneApp {
     } else if (was) {
       // Answered: the line saying what happened ("Denied."); else (back, or gone) the row's own button.
       const flash = this.main.querySelector<HTMLElement>('[data-testid="m-flash"]');
-      const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-item-review"]');
+      const holder = Array.from(this.main.querySelectorAll<HTMLElement>("[data-id]")).find((n) => n.dataset.id === was
+        && n.querySelector(`[data-testid="${this.invoker}"]`));
+      const row = holder?.querySelector<HTMLElement>(`[data-testid="${this.invoker}"]`);
       if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
       else row?.focus({ preventScroll: true });
     }

@@ -54,6 +54,14 @@ export class Nav {
   private off: (() => void) | null = null;
   /** The app is closing levels for a pop: `sync` waits, so it never pushes a forward entry mid-way. */
   private closing = false;
+  /**
+   * Traversals this class asked for (`go`) whose popstate has not arrived. The browser runs them later, so
+   * until they land the real position is unknown: nothing is pushed or closed from a stale answer. When the
+   * last one lands, the history is reconciled against what the app shows NOW (a sheet closed and reopened in
+   * between is not dismissed by the traversal that followed the close).
+   */
+  private pending = 0;
+  private watchdog: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * `depth`: how many levels the app shows now. `close`: close levels until the app shows at
@@ -69,6 +77,12 @@ export class Nav {
     this.off = this.env.onPop((state) => {
       const landed = depthOf(state);
       this.hist = landed;
+      if (this.pending > 0) {
+        // The answer to a `go` of ours, not the owner's back: it closes nothing.
+        this.pending -= 1;
+        if (this.pending === 0) { this.clearWatchdog(); this.sync(); }
+        return;
+      }
       this.closing = true;
       try { this.close(landed); } finally { this.closing = false; }
       this.sync();
@@ -78,11 +92,17 @@ export class Nav {
   stop(): void {
     this.off?.();
     this.off = null;
+    this.clearWatchdog();
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdog !== null) clearTimeout(this.watchdog);
+    this.watchdog = null;
   }
 
   /** Make the real history match the levels the app shows: push for each new one, go back for each closed one. */
   sync(): void {
-    if (this.closing) return;
+    if (this.closing || this.pending > 0) return;
     const want = this.depth();
     if (want > this.hist) {
       for (let i = this.hist + 1; i <= want; i++) this.env.push({ jv: i });
@@ -90,7 +110,11 @@ export class Nav {
     } else if (want < this.hist) {
       const delta = want - this.hist;
       this.hist = want;
+      this.pending += 1;
       this.env.go(delta);
+      // A traversal that never reports (the browser had nowhere to go) must not hold the history for good.
+      this.clearWatchdog();
+      this.watchdog = setTimeout(() => { this.watchdog = null; this.pending = 0; this.sync(); }, 1500);
     }
   }
 }

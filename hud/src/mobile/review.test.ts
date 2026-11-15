@@ -159,8 +159,14 @@ describe("the phone app's review (MR-11, MR-12)", () => {
     const night = harness(report({ quiet: { enabled: true, now: true, start: null, end: null } }));
     night.app.start();
     await night.settle();
-    // M9a (phone audit): no review, the tab keeps its slot, off, so Chats and Tasks never move.
-    expect([tab(night).hidden, tab(night).disabled]).toEqual([false, true]);
+    // PX-4: a deferred approval still waits (the report has them), so the review stays reachable through the
+    // tab and the Inbox's line even in the quiet hours; it was visible and disabled, a dead end.
+    expect([tab(night).hidden, tab(night).disabled]).toEqual([false, false]);
+    expect(night.root.querySelector('[data-testid="m-review-open"]')).not.toBeNull();
+    night.root.querySelector<HTMLButtonElement>('[data-testid="m-review-open"]')!.click();
+    await night.settle();
+    expect(night.app.tab).toBe("review");
+    expect(night.root.querySelector('[data-testid="m-review"]')).not.toBeNull();
     expect(Array.from(night.root.querySelectorAll("nav.tabs button")).map((b) => b.getAttribute("data-testid")))
       .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats"]);
   });

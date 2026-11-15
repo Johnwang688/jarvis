@@ -526,3 +526,113 @@ describe("PX-3b state across the sheet and back-navigation", () => {
     h.app.stop();
   });
 });
+
+describe("PX-4 fix round", () => {
+  it("history: a sheet closed and reopened before the traversal lands is not dismissed by it", async () => {
+    const h = fakeHistory();
+    let depth = 0;
+    const closed: number[] = [];
+    const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
+    nav.start();
+    depth = 1;
+    nav.sync();
+    expect(h.log.at(-1)).toBe('push {"jv":1}');
+    depth = 0;
+    nav.sync();
+    expect(h.log.at(-1)).toBe("go -1");
+    // Reopened at once: nothing is pushed on a position that is not known yet.
+    depth = 1;
+    nav.sync();
+    expect(h.log.filter((l) => l.startsWith("push"))).toEqual(['push {"jv":1}']);
+    await Promise.resolve();
+    await Promise.resolve();
+    // The old traversal landed: it closed nothing, and the new level now has its own entry.
+    expect(closed).toEqual([]);
+    expect(depth).toBe(1);
+    expect(h.log.filter((l) => l.startsWith("push"))).toEqual(['push {"jv":1}', 'push {"jv":1}']);
+    expect(nav.hist).toBe(1);
+  });
+
+  it("app: close the sheet and reopen it at once; the late history traversal leaves it open", async () => {
+    history.replaceState(null, "", "/m/");
+    const h = harness({ rows: [approval()] });
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("m-back");
+    await h.click("m-item-review");
+    expect(h.app.card).not.toBeNull();
+    await h.traversed();
+    expect(h.app.card).not.toBeNull();
+    expect(h.q("m-sheet")).not.toBeNull();
+    expect(history.state).toEqual({ jv: 1 });
+    // And the browser's back still closes it.
+    history.back();
+    await h.traversed();
+    expect(h.app.card).toBeNull();
+    h.app.stop();
+  });
+
+  it("a chat opened from the Chats list goes back to the Chats list, not to where an earlier chat came from", async () => {
+    history.replaceState(null, "", "/m/");
+    const h = harness({ rows: [approval()] });
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    expect(h.q("m-back")!.textContent).toBe("‹ Inbox");
+    // Tap Chats (the list), then open a chat from it.
+    h.q("m-tab-chats")!.click();
+    await h.settle();
+    expect(h.app.thread).toBeNull();
+    await h.app.openThread(T1);
+    await h.settle();
+    expect(h.q("m-back")!.textContent).toBe("‹ Chats");
+    await h.click("m-back");
+    await h.traversed();
+    expect([h.app.tab, h.app.thread]).toEqual(["chats", null]);
+    h.app.stop();
+  });
+
+  it("closing an approval opened from the Morning review returns the focus to the review's own button", async () => {
+    history.replaceState(null, "", "/m/");
+    const live = { ...reviewBody(false), live: [{ row: approval({ thread_id: T1 }) }] };
+    const h = harness({ rows: [approval()], review: live });
+    h.app.start();
+    await h.settle();
+    await h.click("m-review-open");
+    expect(h.app.tab).toBe("review");
+    await h.click("m-review-open-card");
+    expect(h.q("m-sheet")).not.toBeNull();
+    expect(h.app.tab).toBe("review");
+    await h.click("m-back");
+    await h.traversed();
+    expect(h.q("m-sheet")).toBeNull();
+    expect(document.activeElement).toBe(h.q("m-review-open-card"));
+    h.app.stop();
+  });
+
+  it("quiet hours with one deferral: the review is reachable from the line and the tab, both enabled", async () => {
+    history.replaceState(null, "", "/m/");
+    const night = { ...reviewBody(true), quiet: { enabled: true, now: true, start: null, end: null } };
+    const h = harness({ review: night });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-tab-review")!.hidden).toBe(false);
+    expect((h.q("m-tab-review") as HTMLButtonElement).disabled).toBe(false);
+    await h.click("m-review-open");
+    expect(h.app.tab).toBe("review");
+    expect(h.q("m-review")).not.toBeNull();
+    h.app.stop();
+  });
+
+  it("quiet hours with nothing deferred: no line, and the tab is hidden", async () => {
+    history.replaceState(null, "", "/m/");
+    const night = { ...reviewBody(false), quiet: { enabled: true, now: true, start: null, end: null } };
+    const h = harness({ review: night });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-review-open")).toBeNull();
+    expect(h.q("m-tab-review")!.hidden).toBe(true);
+    h.app.stop();
+  });
+});

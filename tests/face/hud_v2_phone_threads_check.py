@@ -109,11 +109,13 @@ def run(browser, check, until, shots=None):
     from jarvis.v2.remote_listener import SECURITY_HEADERS
     state = world()
     seen: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def api(route):
         request = route.request
         path = request.url.split(HOST, 1)[1].split("?", 1)[0]
         seen.append(path)
+        calls.append((request.method, path))
         if request.method == "POST":
             state["answers"].append((path, request.post_data))
             return route.fulfill(status=200, json={"note": "Sent."})
@@ -129,6 +131,11 @@ def run(browser, check, until, shots=None):
             return route.fulfill(json={"tasks": state["tasks"], "more": state.get("tasks_more", False)})
         if path == "/m/api/review":
             return route.fulfill(json=state.get("review", {"open": 0}))
+        if path == "/m/api/projects":
+            return route.fulfill(json={"projects": [{"id": PROJECT, "name": "Calc"}]})
+        if path == "/m/api/threads":
+            return route.fulfill(json={"threads": [{"id": T_IDLE, "project_id": PROJECT, "title": "Notes", "provider": "claude",
+                                                    "updated": ago(90), "running": False, "turns": 2}]})
         if path == "/m/api/inbox/appr%3Ar1/detail":
             return route.fulfill(json=DETAIL)
         if (m := re.fullmatch(r"/m/api/threads/([a-z0-9]+)/log", path)):
@@ -460,6 +467,21 @@ def run(browser, check, until, shots=None):
                   abs(scroll() - before) <= 1 and page.url == f"https://{HOST}/m/" and page.evaluate("history.state") == {"jv": 0},
                   f"{before} -> {scroll()} {page.url}")
 
+            # Inbox -> chat -> tap Chats -> open a chat from that list: back goes to the Chats list, not the Inbox.
+            page.locator(target).click()
+            until(lambda: tid("m-transcript").count() == 1)
+            tid("m-tab-chats").click()
+            until(lambda: tid("m-chat").count() == 1)
+            tid("m-chat").click()
+            until(lambda: tid("m-transcript").count() == 1)
+            check(f"PX-4 a chat opened from the Chats list says and goes back to Chats, not to the earlier Inbox origin {tag}",
+                  tid("m-back").inner_text() == "‹ Chats")
+            tid("m-back").click()
+            until(lambda: tid("m-chat").count() == 1 and tid("m-transcript").count() == 0)
+            check(f"PX-4 back landed on the Chats list {tag}", tid("m-inbox").count() == 0 and tid("m-chat").count() == 1)
+            tid("m-tab-inbox").click()
+            until(lambda: tid("m-inbox").count() == 1)
+
             # The approval sheet over the list: the list keeps its scroll; the safety gap holds on the sheet.
             page.evaluate("document.querySelector('[data-testid=m-main]').scrollTop = 0")
             page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
@@ -500,11 +522,16 @@ def run(browser, check, until, shots=None):
         finally:
             ctx.close()
     seen_paths = sorted(set(seen))
-    allowed = {"/m/api/me", "/m/api/inbox", "/m/api/working", "/m/api/tasks", "/m/api/events", "/m/api/review"}
-    stray = [p for p in seen_paths if p.startswith("/m/api/") and p not in allowed and "/answer" not in p and "/detail" not in p
-             and not p.startswith(("/m/api/threads/", "/m/api/tasks/"))]
-    check("PX-2 the app reads only today's routes plus WS-5a's /m/api/working", not stray,
+    # Exact routes, with their methods: reads are GETs of these patterns, and the only POST is an answer.
+    get_ok = [r"/m/api/(me|inbox|working|tasks|review|events|projects|threads)", r"/m/api/threads/[a-z0-9]+/log",
+              r"/m/api/tasks/[a-z0-9]+", r"/m/api/inbox/[^/]+/detail"]
+    post_ok = [r"/m/api/inbox/[^/]+/answer"]
+    stray = [(m, p) for m, p in sorted(set(calls)) if p.startswith("/m/api/") and not (
+        (m == "GET" and any(re.fullmatch(g, p) for g in get_ok)) or (m == "POST" and any(re.fullmatch(g, p) for g in post_ok)))]
+    check("PX-2 the app calls only today's routes, by method (GET reads; a POST only to an answer)", not stray,
           str(stray) + " " + json.dumps(seen_paths))
+    check("PX-4 no request went to any thread or task action route (only GET log and GET task)",
+          not [c for c in calls if re.search(r"/m/api/(threads|tasks)/[^/]+/", c[1]) and not (c[0] == "GET" and c[1].endswith("/log"))])
 
 
 def main():
