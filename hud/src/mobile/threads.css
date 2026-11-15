@@ -3,6 +3,7 @@
    Every tap target is at least 3rem (48 px). */
 
 /* Keep the glass track under the header while the list scrolls. */
+.main { scroll-padding-top: var(--m-row-scroll-top, 0rem); }
 .m-strip {
   position: sticky;
   top: 0;

@@ -82,6 +82,7 @@ import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
 import { deferralsOpen, reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
 import { ScrollMemory, byAttr, menuView, sheetView, trayView, type MenuItem } from "./nav";
+import { RowScroll } from "./rowScroll";
 import { staleAt } from "../lib/approvalSummary";
 import { ACTION_PROGRESS, actionBody, prRowOf, resultWords, type PrAction } from "../lib/prRow";
 
@@ -248,6 +249,7 @@ export class PhoneApp {
   private readonly banner: HTMLElement;
   private readonly conn: HTMLElement;
   private readonly main: HTMLElement;
+  private readonly rowScroll: RowScroll;
   private readonly tabs: Record<"inbox" | "review" | "chats", HTMLButtonElement>;
   private inboxReader!: SerialReader;
   private workingReader!: SerialReader;
@@ -333,6 +335,7 @@ export class PhoneApp {
     this.banner.setAttribute("role", "status");
     this.banner.hidden = true;
     this.main = el("main", "main");
+    this.rowScroll = new RowScroll(this.main);
     this.main.dataset.testid = "m-main";
     const nav = el("nav", "tabs");
     const make = (tab: "inbox" | "review" | "chats", label: string) => {
@@ -392,6 +395,7 @@ export class PhoneApp {
 
   stop(): void {
     this.stopped = true;
+    this.rowScroll.stop();
     if (this.staleTimer) clearTimeout(this.staleTimer);
     this.staleTimer = null;
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
@@ -1860,9 +1864,7 @@ export class PhoneApp {
     const card = byAttr(this.main, from.attr, from.value);
     const target = card?.querySelector<HTMLElement>("button") ?? card;
     if (!card || !target) return;
-    const area = this.main.getBoundingClientRect();
-    const at = card.getBoundingClientRect();
-    if (at.bottom > area.bottom || at.top < area.top) card.scrollIntoView({ block: "nearest" });
+    this.rowScroll.returnTo(card);
     target.focus({ preventScroll: true });
   }
 
@@ -2036,7 +2038,7 @@ export class PhoneApp {
     const row = this.inboxRowEl(rowId);
     if (!row) return;
     row.tabIndex = -1;
-    row.scrollIntoView({ block: "start" });
+    this.rowScroll.jump(row);
     row.focus({ preventScroll: true });
   }
 
@@ -2297,6 +2299,7 @@ export class PhoneApp {
       view = this.tasksPanel();
     }
     this.main.replaceChildren(view);
+    this.rowScroll.sync();
     const keep = this.keepScroll;
     this.keepScroll = null;
     if (keep === "end") this.scrollToEnd();
@@ -2396,7 +2399,7 @@ export class PhoneApp {
       openInbox: () => this.show("inbox"),
       jump: (anchor) => {
         const target = this.main.querySelector<HTMLElement>("#" + CSS.escape(anchor));
-        target?.scrollIntoView({ block: "start" });
+        if (target) this.rowScroll.jump(target);
       },
     };
   }
