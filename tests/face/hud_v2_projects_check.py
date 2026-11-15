@@ -71,10 +71,10 @@ def _menu_checks(page, mock, check, until, expand):
 
     page.locator('[data-testid="project-menu-p1"]').click()
     until(lambda: page.locator('[data-testid="project-menu"]').count() > 0)
-    check("on the Inbox, Rename is disabled", page.locator('[data-testid="pmenu-rename"]').is_disabled())
+    check("on Unsorted, Rename is disabled", page.locator('[data-testid="pmenu-rename"]').is_disabled())
     check("and so is Archive", page.locator('[data-testid="pmenu-archive"]').is_disabled())
     why = page.locator('[data-testid="pmenu-inbox-why"]')
-    check("and the menu says why", why.count() == 1 and "Inbox" in why.inner_text())
+    check("and the menu says why", why.count() == 1 and "Unsorted" in why.inner_text())
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="project-menu"]').count() == 0)
 
@@ -230,12 +230,12 @@ def _edit_checks(page, mock, check, until, expand):
     mock.world["refuse_project_patch"] = None
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
 
-    # The Inbox: name and root are fixed, and the dialog says so.
+    # Unsorted: name and root are fixed, and the dialog says so.
     page.locator('[data-testid="project-menu-p1"]').click()
     until(lambda: page.locator('[data-testid="pmenu-edit"]').count() > 0)
     page.locator('[data-testid="pmenu-edit"]').click()
     until(lambda: page.locator('[data-testid="project-dialog-edit"]').count() > 0)
-    check("the Inbox's name and root are disabled in edit",
+    check("the Unsorted project's name and root are disabled in edit",
           page.locator('[data-testid="project-name"]').is_disabled()
           and page.locator('[data-testid="project-root"]').is_disabled()
           and page.locator('[data-testid="project-inbox-note"]').count() == 1)

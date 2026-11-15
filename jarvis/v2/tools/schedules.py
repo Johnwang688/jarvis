@@ -68,7 +68,7 @@ def _project(name):
 def schedule_create(
     brief: Annotated[str, "The task to run at each scheduled time."],
     when: Annotated[str, "Five-field cron in America/Chicago, or: " + ACCEPTED_WHEN],
-    project: Annotated[str, "Project name or id; empty uses the calling thread's project when available, else Inbox."] = "",
+    project: Annotated[str, "Project name or id; empty uses the calling thread's project when available, else Unsorted."] = "",
 ) -> str:
     """Create a recurring task schedule. Unknown timing is refused, never guessed."""
     timing = parse_when(when)

@@ -487,7 +487,7 @@ class ChannelLinker:
     @staticmethod
     def _refuse_inbox(project):
         if project.inbox:
-            raise LinkError(409, "The Inbox's channel is #ungrouped; only re-running "
+            raise LinkError(409, "The Unsorted project's channel is #ungrouped; only re-running "
                                  "`jarvis auth discord-guild` changes it")
 
     @staticmethod
@@ -658,7 +658,7 @@ class ChannelLinker:
         if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
             raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         if channel_id == cfg.ungrouped_channel_id:
-            raise LinkError(400, "#ungrouped belongs to the Inbox and cannot be linked")
+            raise LinkError(400, "#ungrouped belongs to the Unsorted project and cannot be linked")
         if channel_id in (cfg.category_id, cfg.archive_category_id,
                           *(self._state.get("archive_overflow") or [])):
             raise LinkError(400, "that is a Jarvis category, not a channel")
@@ -808,7 +808,7 @@ class ChannelLinker:
         try:
             inbox = self.stores.projects.inbox()
         except StoreError as exc:
-            LOG.warning("Discord linker could not read the Inbox (%s)", type(exc).__name__)
+            LOG.warning("Discord linker could not read the Unsorted project (%s)", type(exc).__name__)
             return False
         if inbox.discord_channel_id == cfg.ungrouped_channel_id \
                 and inbox.discord_channel_origin == "created":
@@ -1262,7 +1262,7 @@ class ChannelLinker:
             self.ensure_inbox()
         except Exception as exc:
             # Retried next tick; the rest of the tick still runs.
-            LOG.warning("Discord linker could not link the Inbox (%s)", type(exc).__name__)
+            LOG.warning("Discord linker could not link the Unsorted project (%s)", type(exc).__name__)
         cfg = self.config()
         if cfg is not None and self._reconciled_cfg != cfg and self._listing_due():
             # Armed first, so a pass that raises waits RETRY_S too.

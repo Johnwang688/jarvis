@@ -111,11 +111,11 @@ def lazy_and_ids(root: Path) -> None:
 def inbox_and_atomic(root: Path) -> None:
     stores = Stores(root)
     inbox = stores.projects.inbox()
-    assert inbox.inbox and inbox.name == "Inbox" and inbox.root == str(Path.home())
+    assert inbox.inbox and inbox.name == "Unsorted" and inbox.root == str(Path.home())
     assert Stores(root).projects.inbox() == inbox
-    refused(lambda: stores.projects.create("Inbox", str(Path.home()), inbox=True), "already exists")
+    refused(lambda: stores.projects.create("Unsorted", str(Path.home()), inbox=True), "already exists")
     refused(lambda: stores.projects.save(replace(inbox, inbox=False)), "cannot")
-    refused(lambda: stores.projects.save(replace(inbox, name="Elsewhere")), "named Inbox")
+    refused(lambda: stores.projects.save(replace(inbox, name="Elsewhere")), "named Unsorted")
     assert len(stores.projects.list(inbox=True)) == 1
     project = stores.projects.create("Old", str(root))
     path = stores.projects.path(project.id)

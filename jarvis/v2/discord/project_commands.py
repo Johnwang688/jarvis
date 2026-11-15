@@ -240,7 +240,7 @@ class ProjectCommands:
             reply.refuse("Run `/project unlink` in the project's own channel.")
             return
         if project.inbox:
-            reply.refuse("#ungrouped belongs to the Inbox; only re-running "
+            reply.refuse("#ungrouped belongs to the Unsorted project; only re-running "
                          "`jarvis auth discord-guild` changes it.")
             return
         if self.linker is None:
@@ -297,7 +297,7 @@ class ProjectCommands:
             reply.refuse("Run this in a project's channel.")
             return
         if project.inbox:
-            reply.refuse("#ungrouped belongs to the Inbox and stays where it is.")
+            reply.refuse("#ungrouped belongs to the Unsorted project and stays where it is.")
             return
         if not self._configured():
             reply.refuse(NOT_SET_UP)

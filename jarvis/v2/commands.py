@@ -73,7 +73,7 @@ _PROVIDER = (("claude", "claude"), ("codex", "codex"))
 REGISTRY: tuple[Cmd, ...] = (
     Cmd("task", "Open a task (leave the brief empty for a multi-line box)", (
         Opt("brief", "string", "What to do", max_length=4000),
-        Opt("project", "string", "Project (defaults to this channel's, or the Inbox)",
+        Opt("project", "string", "Project (defaults to this channel's, or Unsorted)",
             complete="project"),
         Opt("skill", "string", "A skill the task should use", complete="skill"),
         Opt("provider", "string", "Orchestrator provider", choices=_PROVIDER),

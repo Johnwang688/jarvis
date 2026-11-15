@@ -78,10 +78,15 @@ def unique_name(wanted: str, taken) -> str:
 
 
 def project_names_taken(stores, *, but: str | None = None) -> list[str]:
-    """Every project's name, archived ones included, plus the Inbox's — which
-    is reserved whether or not the Inbox has been created yet."""
+    """Every project's name, archived ones included, plus the catch-all's
+    "Unsorted" — reserved whether or not that project has been created yet —
+    and "Inbox" while that is, or is about to be, the catch-all's name (another
+    project holds "Unsorted"): never on two projects."""
     from .daemon import safe_list
-    return [p.name for p in safe_list(stores.projects) if p.id != but] + ["Inbox"]
+    taken = [p.name for p in safe_list(stores.projects) if p.id != but] + ["Unsorted"]
+    if stores.projects.inbox_name_reserved(but):
+        taken.append("Inbox")
+    return taken
 
 
 def thread_titles_taken(stores, project_id: str, *, but: str | None = None) -> list[str]:
@@ -411,7 +416,7 @@ def archive_project(daemon, project_id: str, expect) -> dict:
     stores = daemon.stores
     project = daemon.require(stores.projects, project_id)
     if project.inbox:
-        raise DaemonError("The Inbox cannot be archived: it is where unplaced chat lands")
+        raise DaemonError("The Unsorted project cannot be archived: it is where unplaced chat lands")
     if project.archived:
         raise DaemonError(f"project {project.name} is already archived")
     seen = impact(daemon, project_id)

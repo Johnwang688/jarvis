@@ -6,7 +6,7 @@
 // The search is the daemon's (`POST /projects/{id}/search`, owner-only): it
 // shares `grep_files`' protected-file filter, so a credential bundle or an
 // env file is never searched, never shown; it stops at 2,000 matches and
-// 10 s and says so. Refused on the Inbox, which is the whole home folder.
+// 10 s and says so. Refused on Unsorted, which is the whole home folder.
 // What the owner types goes to that one route and nowhere else.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";

@@ -56,7 +56,7 @@ import { composeMovable, folderName, movedAway, type Compose } from "../lib/comp
 import type { PaneNo } from "../lib/workspace";
 import { shortId, threadTooltip } from "../lib/threadmodel";
 import { shortThreadId, threadLabel } from "../lib/threadTitle";
-import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
+import { projectNamesTaken, threadTitlesTaken, unsortedWhy } from "../lib/projects";
 import { loadShowMore, moreLabel, recentChats, saveShowMore } from "../lib/recentChats";
 import { waitingTitle } from "../lib/relays";
 import { InlineRename } from "./InlineRename";
@@ -70,8 +70,6 @@ interface ProjectMenuAt {
   x: number;
   y: number;
 }
-
-const INBOX_WHY = "The Inbox is where unplaced chat lands: it keeps its name and cannot be archived.";
 
 /** What a drag is carrying: a thread id, or the not-yet-sent compose row. */
 const COMPOSE_DRAG = "jarvis/compose";
@@ -306,13 +304,13 @@ export const Sidebar = memo(function Sidebar(props: {
         ) : null}
       </div>
       {props.inbox && props.onOpenInbox ? (
-        // Not the "Inbox" project below (where unplaced chat lands): the owner
+        // Not the "Unsorted" project below (where unplaced chat lands): the owner
         // inbox, everything waiting on the owner. A real button, so Enter and
         // Space open it; it only opens the view, it answers nothing.
         <button
           type="button"
           // The aurora (owner, 2026-10-25; theme.css): this row only, never
-          // the "Inbox" project. Calm with nothing waiting, dimmed and
+          // the "Unsorted" project. Calm with nothing waiting, dimmed and
           // spark-free while something pending keeps the count amber.
           className={"tree-row ownerinbox aurora" + (props.inbox.shown ? " sel" : "")}
           data-aurora={props.inbox.pending ? "pending" : props.inbox.count ? "live" : "calm"}
@@ -732,7 +730,7 @@ export const Sidebar = memo(function Sidebar(props: {
             Archive…
           </button>
           {pmenuProject.inbox ? (
-            <div className="mwhy" data-testid="pmenu-inbox-why">{INBOX_WHY}</div>
+            <div className="mwhy" data-testid="pmenu-inbox-why">{unsortedWhy(pmenuProject.name)}</div>
           ) : null}
         </div>
       ) : null}

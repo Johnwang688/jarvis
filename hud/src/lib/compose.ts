@@ -61,7 +61,7 @@ export function saveLastProject(id: string, storage?: Storage | null): void {
  * 2. Otherwise the project of the chat thread most recently active on the
  *    server (`updated` moves on every turn), which also covers a fresh
  *    browser and turns that came from Discord.
- * 3. Otherwise the Inbox, then the first project, then null (no projects).
+ * 3. Otherwise the Unsorted project, then the first project, then null (no projects).
  */
 export function lastProject(projects: Project[], threads: Thread[], stored: string | null): string | null {
   const exists = (id: string | null | undefined) => !!id && projects.some((p) => p.id === id);

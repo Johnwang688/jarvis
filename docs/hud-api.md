@@ -176,7 +176,7 @@ every one of these routes asks (`kind`):
   virtualenv folder named `.env` is a folder). Inside a
   withheld folder only the gate's own state files — and the folders on the
   way to them — are listed (`~/.config/jarvis/allowlist.json` stays
-  reachable from the Inbox).
+  reachable from the Unsorted project).
 - `GET /projects/{id}/file?path=<rel>` → `{"path", "abs", "content",
   "etag", "mtime", "mtime_ns", "size", "encoding": "utf-8"|"utf-8-bom"|null,
   "eol": "LF"|"CRLF"|"CR"|"mixed"|null, "kind", "editable": bool,
@@ -274,7 +274,7 @@ every one of these routes asks (`kind`):
   `~/.local/share/jarvis`, `V2_DATA_DIR`, the sessions, spill, goals and
   voices folders; `editor_policy.jarvis_dirs`). It has no owner check by
   design and answers any loopback client — v1's `fetch_page` included — while
-  the Inbox is rooted at `~` (review of PR #49, LOW3).
+  the Unsorted project is rooted at `~` (review of PR #49, LOW3).
 - The port is read from `GET /status` → `workshop_port` (2026-10-08), never
   assumed: a hard-coded 8403 made the HUD suite's mock-served window load the
   owner's **live** daemon's preview for fixture project `p1`
@@ -620,8 +620,9 @@ backend is `jarvis/v2/projects.py` and `jarvis/v2/trash.py`.
 
 **Names.** A name that collides is **numbered, never refused**: `name (1)`,
 `name (2)`, …, compared ignoring case and surrounding spaces. Project names
-are unique across all projects, archived ones included, and `Inbox` is
-reserved. Thread titles are unique within their project. Applied on
+are unique across all projects, archived ones included, and `Unsorted` (the
+catch-all project) is reserved, as is `Inbox` while that is, or is about to be,
+the catch-all's name (another project already holds `Unsorted`). Thread titles are unique within their project. Applied on
 `POST /projects`, `PATCH /projects/{id}` (only when the name really changes,
 so existing duplicates stay editable), `PATCH /threads/{id}` `{title}`, and
 restore. Read the name from the response, not the request.
@@ -656,7 +657,7 @@ payloads gain `discord_channel_id` (where Discord was asked, or `null`).
   or null before its worktree exists.
 
 **Impact.** `GET /projects/{id}/impact` is read-only (it never creates the
-Inbox) and is what every confirmation is built from:
+Unsorted project) and is what every confirmation is built from:
 `{project_id, name, root, inbox, archived, token, blockers: [str],
 chat_threads: {count, archived}, tasks: {total, finished, active: [{id,
 brief, state}]}, task_threads, running_turns: [{thread_id, title}],
@@ -685,7 +686,7 @@ Archive view, and opens, starts, steers and resumes nothing there.
 paused, not deleted, and goes only with its project's permanent delete.
 
 - `POST /projects/{id}/archive?expect=<token>` → `{project,
-  paused_schedules}`. 400 without `expect`; 409 for the Inbox, an
+  paused_schedules}`. 400 without `expect`; 409 for the Unsorted project, an
   unfinished task, a running chat turn (both named), or a stale token.
   Idle sessions in the project are closed first. Publishes
   `project_archived {project_id, name, paused_schedules}`.
@@ -815,7 +816,7 @@ footing as `/approvals` (owner-only too since BR-0, below).
   `by: "owner"`. Refusals: 400 for a bad id, an unseen or unknown channel,
   another server, not a text channel, a missing permission there, #ungrouped
   or a Jarvis category; 409 for a channel already linked elsewhere, an
-  archived project, a missing folder, the Inbox (only setup changes
+  archived project, a missing folder, the Unsorted project (only setup changes
   #ungrouped), an already-linked create, no guild file, or no Discord
   surface; 502/503 when Discord fails or rate-limits. Unlink keeps the
   channel.
@@ -823,7 +824,7 @@ footing as `/approvals` (owner-only too since BR-0, below).
   "results": [{"project_id", "name", "channel_id", "status": "created" |
   "failed", "error"?}], "skipped": [{"project_id", "name", "reason"}]}` —
   a channel for every live, unlinked project whose folder exists (never the
-  Inbox), one create a second.
+  Unsorted project), one create a second.
 - Review fixes (PR #8): `GET /discord`'s `linker` gains `"pending_moves":
   int` (archive/restore moves waiting out a 429 or an outage), and
   `project_restored` gains `"previous_name"` (the name before PR #4's
@@ -2085,7 +2086,7 @@ a search's protected-file filter from `tools.search.refused` (the one
   `.gitignore` (default **on**; off searches ignored files too). Hidden files
   are searched, `SKIP_DIRS` never. At most **2,000 matches and 10 s**
   (`truncated` / `timed_out`); a line is cut at 1,000 characters; `ranges`
-  are UTF-16 offsets. **400 on the Inbox** (it is the whole home folder), on
+  are UTF-16 offsets. **400 on the Unsorted project** (it is the whole home folder), on
   a pattern neither engine accepts, and on any other key.
 - `POST /projects/{id}/fs` `{"op": "new_file"|"new_folder"|"rename"|"delete",
   "path", "to"?}` → `{"ok", "op", "path", "abs", "kind"?, "from"?,
@@ -2276,7 +2277,7 @@ The window's half (`hud/src/lib/linediff.ts`, `lib/gitMarks.ts`,
 against the **buffer** (Myers, bounded), only for a `text` or `safety`
 buffer — never an env file — and asks for HEAD's text again when the status
 poll's `head` moves, and every 10 s while the window is visible for a file
-whose base `head` is not the project's (a nested repository, the Inbox, an
+whose base `head` is not the project's (a nested repository, the Unsorted project, an
 extra folder: the poll cannot see that HEAD move); the status is polled
 every 3 s per project while a tree or a gutter shows it. Rules in CLAUDE.md's
 ED-9 paragraph.

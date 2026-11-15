@@ -5,7 +5,7 @@
 // id) and Unlink — which keeps the channel, always (decisions D3: channels are
 // never deleted). The backend validates everything; a refusal is shown inline
 // in its own words. Before `jarvis auth discord-guild` the buttons are off and
-// the dialog says which command turns them on. The Inbox's channel is
+// the dialog says which command turns them on. The Unsorted project's channel is
 // #ungrouped and only setup changes it, so it gets no buttons.
 //
 // Every name and reason is React text: channel names come off the network,
@@ -85,7 +85,7 @@ export function DiscordLink(props: { project: Project; onChanged?: () => void })
       ) : null}
       {inbox ? (
         <div className="muted small" data-testid="discord-inbox-note">
-          The Inbox posts in #ungrouped; only <code>jarvis auth discord-guild</code> changes that.
+          {props.project.name} posts in #ungrouped; only <code>jarvis auth discord-guild</code> changes that.
         </div>
       ) : (
         <div className="row">

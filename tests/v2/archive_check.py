@@ -47,7 +47,7 @@ NAME_TABLE = [
     ("site", ["site", "site (2)"], "site (1)"),
     ("site (1)", ["site", "site (1)"], "site (2)"),
     ("e2e-calc", ["E2E-CALC "], "e2e-calc (1)"),
-    ("Inbox", ["Inbox"], "Inbox (1)"),
+    ("Unsorted", ["Unsorted"], "Unsorted (1)"),
     ("new", ["old"], "new"),
     ("straße", ["STRASSE"], "straße (1)"),
 ]
@@ -227,9 +227,9 @@ class Names(Base):
         self.assertEqual(made["name"], "calc (1)")
         self.assertEqual(self.request("POST", "/projects", {"name": "CALC", "root": str(self.repo_b)}, 201)["name"],
                          "CALC (2)")
-        # The Inbox's name is reserved even before the Inbox exists.
-        self.assertEqual(self.request("POST", "/projects", {"name": "inbox", "root": str(self.repo_b)}, 201)["name"],
-                         "inbox (1)")
+        # The Unsorted project's name is reserved even before that project exists.
+        self.assertEqual(self.request("POST", "/projects", {"name": "unsorted", "root": str(self.repo_b)}, 201)["name"],
+                         "unsorted (1)")
         self.request("POST", "/projects", {"name": "x", "root": str(self.root / "missing")}, 400)
         created = [e for e in self.drain() if e["kind"] == "project_created"]
         self.assertEqual(len(created), 3)
@@ -331,7 +331,7 @@ class Archive(Base):
         self.assertEqual(impact["chat_threads"]["count"], 1)
         self.assertEqual(impact["tasks"], {"total": 1, "finished": 1, "active": []})
         self.assertEqual([w["task_id"] for w in impact["worktrees"]], [done.id])
-        self.assertEqual(len(self.stores.projects.list()), projects_before)   # /impact made no Inbox
+        self.assertEqual(len(self.stores.projects.list()), projects_before)   # /impact made no Unsorted project
         url = f"/projects/{self.project.id}/archive"
         self.owner("POST", url, status=400)                                  # expect is required
         self.owner("POST", url + "?expect=stale", status=409)

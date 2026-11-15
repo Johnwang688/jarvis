@@ -7,6 +7,7 @@ atomic replacement protects readers from partially written JSON files.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -16,13 +17,26 @@ import tempfile
 import threading
 import time
 import types
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generic, TypeVar, Union, get_args, get_origin, get_type_hints
 
 from jarvis import config
 from . import model
+
+LOG = logging.getLogger(__name__)
+
+# The catch-all project (the `Project.inbox` flag, kept) is named "Unsorted"
+# (WS-0, owner answer O-4): "Inbox" is the sidebar's owner Inbox. A catch-all
+# stored under the old name keeps it only while another project holds "Unsorted".
+UNSORTED_NAME = "Unsorted"
+LEGACY_INBOX_NAME = "Inbox"
+
+
+def name_key(name: str) -> str:
+    """Names compare on case and surrounding spaces (as `projects.name_key`)."""
+    return (name or "").strip().casefold()
 
 T = TypeVar("T", model.Project, model.Thread, model.Task)
 _lock = threading.RLock()
@@ -278,21 +292,112 @@ class ProjectStore(_Store[model.Project]):
     def save(self, obj: model.Project) -> None:
         with _lock:
             previous = self.get(obj.id)
+            # A record still pending (being created) has nothing stored yet.
+            stored = previous if self.path(obj.id).exists() else None
             if previous and previous.inbox and not obj.inbox:
-                raise StoreError("The inbox cannot become an ordinary project")
+                raise StoreError("The catch-all project cannot become an ordinary project")
+            # The cross-project reservation scan is strict (one unreadable record
+            # raises), so it runs only when a reservation is at stake: the
+            # catch-all itself, or a name that is "Unsorted" or "Inbox". An
+            # ordinary name never scans, so a corrupt neighbour cannot block
+            # it; a reservation-relevant save then fails closed (refused).
+            relevant = obj.inbox or name_key(obj.name) in (name_key(UNSORTED_NAME), name_key(LEGACY_INBOX_NAME))
+            others = [p for p in self.list() if p.id != obj.id] if relevant else []
+            clash = any(name_key(p.name) == name_key(UNSORTED_NAME) for p in others)
             if obj.inbox:
-                if obj.name != "Inbox" or obj.root != str(Path.home()):
-                    raise StoreError("The inbox must be named Inbox and rooted at the owner's home")
-                if any(p.id != obj.id for p in self.list(inbox=True)):
-                    raise StoreError("The inbox project already exists")
+                if obj.root != str(Path.home()):
+                    raise StoreError("The catch-all project must be rooted at the owner's home")
+                if any(p.inbox for p in others):
+                    raise StoreError("The catch-all project already exists")
+                if obj.name == UNSORTED_NAME:
+                    if clash:
+                        raise StoreError(f"Another project is already named {UNSORTED_NAME}")
+                elif obj.name == LEGACY_INBOX_NAME:
+                    # Only a catch-all that already carries the old name keeps
+                    # it, or one made while another project holds "Unsorted":
+                    # the owner's project is never renamed (WS-0, D-12). Never
+                    # on two projects: no other project may be named Inbox.
+                    if not clash and not (stored and stored.name == LEGACY_INBOX_NAME):
+                        raise StoreError(f"The catch-all project must be named {UNSORTED_NAME}")
+                    if any(name_key(p.name) == name_key(LEGACY_INBOX_NAME) for p in others):
+                        raise StoreError(f"Another project is already named {LEGACY_INBOX_NAME}")
+                else:
+                    raise StoreError(f"The catch-all project must be named {UNSORTED_NAME}")
+            else:
+                changed = stored is None or name_key(stored.name) != name_key(obj.name)
+                if changed and name_key(obj.name) == name_key(UNSORTED_NAME):
+                    # An ordinary project cannot take the reserved name. One that
+                    # already has it (before this rule) stays saveable.
+                    raise StoreError(f"{UNSORTED_NAME} is reserved for the catch-all project")
+                if changed and name_key(obj.name) == name_key(LEGACY_INBOX_NAME) \
+                        and self._fallback_reserved(others):
+                    raise StoreError(f"{LEGACY_INBOX_NAME} is the catch-all project's name here")
             super().save(obj)
 
+    @staticmethod
+    def _fallback_reserved(projects: list[model.Project]) -> bool:
+        """Whether "Inbox" is, or is about to be, the catch-all's name: a catch-all
+        carries it, or none exists yet and another project already holds "Unsorted"."""
+        catch_all = [p for p in projects if p.inbox]
+        if catch_all:
+            return any(p.name == LEGACY_INBOX_NAME for p in catch_all)
+        return any(name_key(p.name) == name_key(UNSORTED_NAME) for p in projects)
+
+    def inbox_name_reserved(self, but: str | None = None) -> bool:
+        """`_fallback_reserved` over the stored projects (`but` left out)."""
+        with _lock:
+            return self._fallback_reserved([p for p in self._snapshot() if p.id != but])
+
+    def _snapshot(self) -> list[model.Project]:
+        """Every readable project: a record that cannot be read is skipped, as
+        `daemon.safe_list` does, so a naming helper never fails on one."""
+        found = []
+        for project_id in self.ids():
+            try:
+                project = self.get(project_id)
+            except StoreError:
+                continue
+            if project is not None:
+                found.append(project)
+        return found
+
+    def _name_clash(self, obj: model.Project) -> bool:
+        """Whether another project, archived or not, is named "Unsorted"."""
+        return any(p.id != obj.id and name_key(p.name) == name_key(UNSORTED_NAME)
+                   for p in self.list())
+
     def inbox(self) -> model.Project:
+        """The catch-all project (the flag keeps its old name; the owner's
+        Inbox is a different thing, `inbox.py`)."""
         with _lock:
             found = self.list(inbox=True)
             if len(found) > 1:
-                raise StoreError(f"{self.root}: multiple inbox projects")
-            return found[0] if found else self.create("Inbox", str(Path.home()), inbox=True)
+                raise StoreError(f"{self.root}: multiple catch-all projects")
+            if found:
+                return found[0]
+            clash = any(name_key(p.name) == name_key(UNSORTED_NAME) for p in self.list())
+            return self.create(LEGACY_INBOX_NAME if clash else UNSORTED_NAME,
+                               str(Path.home()), inbox=True)
+
+    def migrate_unsorted(self) -> str:
+        """One-time rename of a stored catch-all named "Inbox" to "Unsorted",
+        through `save` (the PATCH guard is untouched). Returns "none" (no
+        catch-all yet), "ok" (already Unsorted), "renamed", or "collision"
+        (another project, archived ones included, holds the name: the
+        catch-all stays "Inbox" and the owner's project is never renamed)."""
+        with _lock:
+            found = self.list(inbox=True)
+            if not found:
+                return "none"
+            catch_all = found[0]
+            if catch_all.name != LEGACY_INBOX_NAME:
+                return "ok"
+            if self._name_clash(catch_all):
+                LOG.warning("catch-all project stays named %s: another project is already named %s",
+                            LEGACY_INBOX_NAME, UNSORTED_NAME)
+                return "collision"
+            self.save(replace(catch_all, name=UNSORTED_NAME))
+            return "renamed"
 
 
 SURFACE = re.compile(r"^(?:dm|dm:retired|discord:[0-9]{1,24})$")

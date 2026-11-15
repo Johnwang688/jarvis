@@ -89,7 +89,7 @@ def impact(w, pid):
 
 
 def _project_names(w, but=None):
-    return [p["name"] for p in w["projects"] if p["id"] != but] + ["Inbox"]
+    return [p["name"] for p in w["projects"] if p["id"] != but] + ["Unsorted"]
 
 
 def _root_ok(w, root):
@@ -154,7 +154,7 @@ def discord_handle(h, w, method, parts, body) -> bool:
         if not _configured(w):
             h._err(409, "Discord is not set up: run `jarvis auth discord-guild` first")
         elif project.get("inbox"):
-            h._err(409, "The Inbox's channel is #ungrouped; only re-running "
+            h._err(409, "The Unsorted project's channel is #ungrouped; only re-running "
                         "`jarvis auth discord-guild` changes it")
         elif action == "create":
             if w.get("refuse_channel_create"):
@@ -284,7 +284,7 @@ def handle(h, mock, method, path, body) -> bool:
                 h._json(project)
                 return True
             if project.get("inbox"):
-                h._err(409, "The Inbox cannot be archived: it is where unplaced chat lands")
+                h._err(409, "The Unsorted project cannot be archived: it is where unplaced chat lands")
                 return True
             seen = impact(w, project["id"])
             if not query.get("expect"):
