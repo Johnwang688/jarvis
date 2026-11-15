@@ -217,12 +217,19 @@ def run(browser, check, until):
         # A launch without opens_here: the Inbox.
         mock.review = report(False)
         page.goto(ORIGIN + "/m/#inbox")
-        until(lambda: page.locator('[data-testid="m-tab-review"]').count() == 1, timeout=6)
+        until(lambda: page.locator('[data-testid="m-review-open"]').count() == 1, timeout=6)
         until(lambda: page.locator('[data-testid="m-inbox"]').count() == 1, timeout=6)
         pause(0.4)
         check("a launch without opens_here opens the Inbox", selected_tab() == "m-tab-inbox", str(selected_tab()))
-        check("the Review tab sits beside the Inbox while the review has open items",
+        line = page.locator('[data-testid="m-review-open"]')
+        check("PX-4: the review is a line in the Inbox, with its count, a 48 px target",
+              line.is_visible() and "Morning review" in line.inner_text() and "left overnight" in line.inner_text()
+              and line.bounding_box()["height"] >= 47.5, line.inner_text())
+        check("PX-4: the Review tab shows beside the Inbox while a deferred approval waits",
               page.locator('[data-testid="m-tab-review"]').is_visible())
+        tap('[data-testid="m-review-open"]')
+        until(lambda: page.locator('[data-testid="m-review"]').count() == 1, timeout=6)
+        check("PX-4: the line opens the review", selected_tab() == "m-tab-review", str(selected_tab()))
         # The notification's tap with opens_here: the Review tab.
         mock.review = report(True)
         page.goto("about:blank")

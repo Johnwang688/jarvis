@@ -368,3 +368,21 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
 export function reviewTabShown(report: ReviewReport | null): boolean {
   return !!report && report.open > 0 && !report.quiet.now;
 }
+
+/**
+ * PX-4 (plan C D2): whether the review holds a deferred approval. The Review tab shows only then
+ * (the group Approve is for deferred approvals); every other review is reached by its line.
+ */
+export function deferralsOpen(report: ReviewReport | null): boolean {
+  return !!report && allItems(report).some((item) => item.row.kind === "deferred");
+}
+
+/** PX-4: "Morning review · 5 left overnight", a line in the Inbox that opens today's review. Code's words. */
+export function reviewLine(report: ReviewReport | null, open: () => void): HTMLElement | null {
+  if (!reviewTabShown(report)) return null;
+  const n = report!.open;
+  const line = tap("", open, "m-review-line", "m-review-open");
+  line.append(el("span", "m-review-text", `Morning review · ${n} left overnight`), el("span", "m-review-more", "Open"));
+  line.setAttribute("aria-label", `Morning review, ${n} left overnight. Open`);
+  return line;
+}

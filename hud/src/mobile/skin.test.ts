@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import theme from "../theme.css?raw";
 import mobile from "./mobile.css?raw";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import page from "../../mobile.html?raw";
 
@@ -14,6 +14,20 @@ const TALK = strip(readFileSync(join(__dirname, "talk.css"), "utf8"));
 const WRITE = strip(readFileSync(join(__dirname, "write.css"), "utf8"));
 const ITEMS = strip(readFileSync(join(__dirname, "items.css"), "utf8"));
 const THREADS = strip(readFileSync(join(__dirname, "threads.css"), "utf8"));
+/** PX-4: every stylesheet of the phone, read from the folder (a new one cannot escape the blur rule). */
+const PHONE_CSS: Record<string, string> = Object.fromEntries(readdirSync(__dirname).filter((f) => f.endsWith(".css"))
+  .map((f) => [f, strip(readFileSync(join(__dirname, f), "utf8"))]));
+
+/** Every rule that sets a backdrop filter (prefixed or not), as [selector list, file]. */
+function blurRules(css: string): string[][] {
+  const out: string[][] = [];
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (/(^|[\s;])(-webkit-)?backdrop-filter\s*:/.test(m[2])) out.push(m[1].split(",").map((x) => x.trim()));
+  }
+  return out;
+}
+/** The rules that blur and are not `.m-sheet` alone (every selector of the rule must be it). */
+const strayBlur = (css: string) => blurRules(css).filter((sels) => !sels.every((x) => x === ".m-sheet"));
 
 /** The custom properties declared on a stylesheet's `:root`. */
 function rootTokens(css: string): Map<string, string> {
@@ -132,8 +146,23 @@ describe("aurora glass, with no blur per card", () => {
     expect(MOBILE).toMatch(/\.m-review-rowacts \{[^}]*gap: 3rem 3rem/);
   });
 
-  it("paints a tint, a sheen and a rim; backdrop-filter appears nowhere in the phone", () => {
-    expect(MOBILE + WRITE + TALK + THREADS).not.toMatch(/backdrop-filter/);
+  it("allows backdrop-filter on the approval sheet alone, in every phone stylesheet", () => {
+    // The guard sees every file in the folder, not a list of three.
+    expect(Object.keys(PHONE_CSS).sort()).toEqual(expect.arrayContaining(["items.css", "mobile.css", "nav.css", "talk.css", "threads.css", "write.css"]));
+    for (const [file, css] of Object.entries(PHONE_CSS)) expect([file, strayBlur(css)]).toEqual([file, []]);
+    // The one exception exists, in the sheet's own rule, prefixed and plain.
+    const sheet = blurRules(PHONE_CSS["nav.css"]);
+    expect(sheet).toEqual([[".m-sheet"]]);
+    expect(PHONE_CSS["nav.css"]).toMatch(/\.m-sheet \{[^}]*-webkit-backdrop-filter:[^}]*\n  backdrop-filter:/);
+    // The checker itself: a shared selector list, a sibling class, a card or a nested rule are all stray.
+    expect(strayBlur(".m-sheet, .row { backdrop-filter: blur(1px); }").length).toBe(1);
+    expect(strayBlur(".m-sheet-dim { -webkit-backdrop-filter: blur(1px); }").length).toBe(1);
+    expect(strayBlur(".m-card { color: red; backdrop-filter: blur(1px) }").length).toBe(1);
+    expect(strayBlur("@media (min-width: 1px) { .m-tray { backdrop-filter: blur(1px); } }").length).toBe(1);
+    expect(strayBlur(".m-sheet { backdrop-filter: blur(1px); -webkit-backdrop-filter: blur(1px); }")).toEqual([]);
+  });
+
+  it("paints a tint, a sheen and a rim", () => {
     expect(MOBILE).toMatch(/\.row \{[^}]*var\(--m-sheen\), var\(--m-glass\)/);
     expect(MOBILE).toMatch(/\.m-card \{[^}]*var\(--m-sheen\), var\(--m-glass\)/);
     expect(MOBILE).toMatch(/\.tabs \{[^}]*var\(--m-glass-bar\)/);

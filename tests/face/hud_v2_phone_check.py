@@ -598,6 +598,11 @@ def shell_checks(browser, check, until):
         print(f"  note  {len(violations)} CSP refusal(s) in the app: {sorted(set(violations))[:3]}")
         check("P-3 app: nothing the app draws needs more than C1's policy (inline styles, if any, are refused "
               "and dropped)", all(v.startswith("style-src") for v in violations), str(violations[:5]))
+        # PX-4: Sign out is behind the header's ⋯, last.
+        check("PX-4: Sign out is not on the page until the ⋯ is opened",
+              page.locator('[data-testid="m-signout"]').count() == 0)
+        page.locator('[data-testid="m-menu"]').click()
+        until(lambda: page.locator('[data-testid="m-signout"]').count() == 1, timeout=4)
         page.locator('[data-testid="m-signout"]').click()
         until(lambda: screen() == "Jarvis", timeout=8)
         check("P-2 shell: Sign out ends the session",
@@ -677,6 +682,15 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-3 app: every tap target is at least 48 px tall (Inbox)", not small_targets(), str(small_targets()))
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
+    check("PX-4 Inbox: Notifications is not on the list: it is behind the header's ⋯",
+          page.locator('[data-testid="m-notify"]').count() == 0 and page.locator('[data-testid="m-menu"]').is_visible()
+          and 47.5 <= page.locator('[data-testid="m-menu"]').bounding_box()["height"])
+    page.locator('[data-testid="m-menu"]').click()
+    until(lambda: page.locator('[data-testid="m-notify"]').count() == 1, timeout=4)
+    items = page.evaluate("""Array.from(document.querySelectorAll('[data-testid="m-menu-panel"] > *'))
+        .map(e => e.dataset.testid || e.dataset.menuItem)""")
+    check("PX-4 menu: Notifications, when Jarvis last answered, then Sign out last",
+          items == ["m-notify", "m-menu-lastread", "m-signout"], str(items))
     note = page.locator('[data-testid="m-notify"]')
     # One compact row (2026-10-28); "count only, never what" is the "on" state's hint (notify.test.ts).
     check("P-6 Inbox: the notifications row offers them, off",
@@ -686,6 +700,10 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           page.locator('[data-testid="m-notify-button"]').inner_text() == "Turn on"
           and page.locator('[data-testid="m-notify-button"]').get_attribute("aria-label") == "Turn on notifications"
           and 44 <= note.bounding_box()["height"] <= 60, str(note.bounding_box()))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="m-menu-panel"]').count() == 0, timeout=4)
+    check("PX-4 menu: Escape closes it and the focus is back on the ⋯",
+          page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-menu")
     sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
         r.headers.get('content-type'), await r.text()])""")
     check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
@@ -838,8 +856,15 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-3 app: every tap target is at least 48 px tall (Tasks)", not small_targets(), str(small_targets()))
     bad, fields = answer_controls()
     # P-5: a running task offers Cancel only (asked first, then the passkey).
-    check("P-5 Tasks: a running task offers Cancel only (no resume, start or answer control)",
+    # PX-4: Cancel is behind the task page's ⋯, so the page itself offers no answer control at all.
+    check("P-5 Tasks: a running task's page shows no resume, start, cancel or answer control (Cancel is behind the ⋯)",
+          bad == [] and fields == 0, f"{bad} {fields}")
+    page.locator('[data-testid="m-task-more"]').click()
+    until(lambda: page.locator('[data-testid="m-task-more-panel"]').count() == 1, timeout=4)
+    bad, fields = answer_controls()
+    check("P-5 Tasks: the page's ⋯ offers Cancel only (asked first, then the passkey)",
           bad == ["Cancel task"] and fields == 0, f"{bad} {fields}")
+    page.keyboard.press("Escape")
 
     # -- offline: nothing shown as current -----------------------------------------------
     net["offline"] = True

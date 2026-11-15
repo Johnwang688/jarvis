@@ -192,9 +192,24 @@ describe("M13: focus follows the card", () => {
     await h.click("m-item-review");
     expect(document.activeElement).toBe(h.q("m-card-heading"));
     expect(h.q("m-card-heading")!.tabIndex).toBe(-1);
+    // PX-4: the heading is in the sheet, and DENY is not what the focus lands on.
+    expect(h.q("m-card-heading")!.closest(".m-sheet")).not.toBeNull();
+    expect(document.activeElement).not.toBe(h.q("approval-deny"));
     await h.click("m-back");
     await h.settle();
     expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-item-review"]'));
+  });
+
+  it("keeps the focus on the heading through a redraw of the open sheet, and never on AUTHORIZE or ALWAYS", async () => {
+    const h = harness([row({})]);
+    h.app.start();
+    await h.settle();
+    await h.click("m-open-card");
+    h.app.render();
+    expect(document.activeElement).toBe(h.q("m-card-heading"));
+    h.q("approval-allow")!.focus();
+    h.app.render();
+    expect([document.activeElement === h.q("approval-allow"), document.activeElement === h.q("approval-always")]).not.toContain(true);
   });
 
   it("an answered card gives the focus to the line saying what happened", async () => {

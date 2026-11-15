@@ -310,7 +310,7 @@ def run(browser, check, until):
         tid("m-new-start").click()
         pump(lambda: {t.id for t in daemon.stores.threads.list()} - before)
         made = [t for t in daemon.stores.threads.list() if t.id not in before]
-        until(lambda: tid("m-thread").count() == 1, timeout=8)
+        until(lambda: tid("m-thread").count() == 1 and tid("m-compose").count() == 1, timeout=8)
         check("P-5 New chat: a Codex chat in the project, its first message via the phone, and it opens",
               len(made) == 1 and made[0].provider == PN.CODEX and made[0].project_id == project.id
               and pump(lambda: users(made[0].id)) and users(made[0].id)[0]["via"] == "phone"
@@ -338,7 +338,16 @@ def run(browser, check, until):
               and daemon.stores.tasks.get(task.id).state == TaskState.CLARIFYING, str(runner.calls))
 
         # -- Cancel with the passkey -------------------------------------------------------
+        until(lambda: tid("m-task-more").count() == 1, timeout=8)
+        more = until(lambda: tid("m-task-more").bounding_box(), timeout=4)  # a redraw can detach it for an instant
+        check("PX-4 Cancel: no Cancel button on the page; the page's ⋯ (a 48 px target, in its header) holds it",
+              tid("m-task-cancel").count() == 0 and more["width"] >= 47.5 and more["height"] >= 47.5
+              and page.locator('.subbar [data-testid="m-task-more"]').count() == 1, str(more))
+        tid("m-task-more").click()
         until(lambda: tid("m-task-cancel").count() == 1, timeout=8)
+        check("PX-4 Cancel: a 48 px row of the menu, the only one",
+              until(lambda: tid("m-task-cancel").bounding_box(), timeout=4)["height"] >= 47.5
+              and page.locator('[data-testid="m-task-more-panel"] button').count() == 1)
         tid("m-task-cancel").click()
         check("P-5 Cancel: asks first, and says it cannot be undone",
               "cannot be resumed" in tid("m-task-ask").inner_text() and runner.calls == [("start", task.id)])
