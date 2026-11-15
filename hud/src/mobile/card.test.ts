@@ -146,7 +146,7 @@ describe("M2: the card says what it waits on", () => {
     h.replies["/m/api/inbox/appr%3Ar1/answer"] = () => new Promise<Posted>((r) => { answer = r; });
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     const at = () => Array.from(h.q("approval-card")!.children).map((n) => (n as HTMLElement).dataset.testid || n.className);
     const before = at();
     await h.click("approval-allow");
@@ -169,7 +169,7 @@ describe("M2: the card says what it waits on", () => {
     h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     const node = h.q("m-card-notice");
     await h.click("approval-allow");
     expect(h.q("m-card-notice")).toBe(node);
@@ -189,19 +189,19 @@ describe("M13: focus follows the card", () => {
     const h = harness([row({})]);
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     expect(document.activeElement).toBe(h.q("m-card-heading"));
     expect(h.q("m-card-heading")!.tabIndex).toBe(-1);
     await h.click("m-back");
     await h.settle();
-    expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-open-card"]'));
+    expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-item-review"]'));
   });
 
   it("an answered card gives the focus to the line saying what happened", async () => {
     const h = harness([row({})]);
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     h.gets["/m/api/inbox"] = { ok: true, body: { rows: [] } };
     await h.click("approval-deny");
     expect(h.q("m-flash")!.textContent).toBe("Denied.");
@@ -233,7 +233,7 @@ describe("H5: offline, a chat or a card says it was not read", () => {
     h.app.start();
     await h.settle();
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: false, why: "offline" } as Got;
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     expect(h.q("m-card-loading")!.textContent).toBe("Not read yet: you're offline.");
   });
 

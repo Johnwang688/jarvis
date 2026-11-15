@@ -211,7 +211,7 @@ describe("the phone app answers (P-4)", () => {
     h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { decision: "allow", publicKey: { challenge: "AAEC" } } };
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     expect(h.root.querySelector('[data-testid="approval-card"]')).not.toBeNull();
     expect(h.credential).not.toHaveBeenCalled();
     await h.click("approval-allow");
@@ -230,7 +230,7 @@ describe("the phone app answers (P-4)", () => {
       rule: { tool: "run_command", prefix: "git" }, rule_words: "the rule", publicKey: { challenge: "AAED" } } };
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     await h.click("approval-always");
     expect(h.root.querySelector('[data-testid="m-rule-words"]')!.textContent).toBe("the rule");
     expect(h.credential).not.toHaveBeenCalled();
@@ -245,7 +245,7 @@ describe("the phone app answers (P-4)", () => {
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     await h.click("approval-deny");
     expect(h.posts).toEqual([{ path: "/m/api/inbox/appr%3Ar1/answer", value: { decision: "deny" } }]);
     expect(h.credential).not.toHaveBeenCalled();
@@ -258,7 +258,7 @@ describe("the phone app answers (P-4)", () => {
     h.credential.mockResolvedValueOnce(null);
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     await h.click("approval-allow");
     expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/appr%3Ar1/answer/options"]);
     expect(h.root.querySelector('[data-testid="m-card-notice"]')!.textContent).toContain("Nothing was answered");
@@ -370,7 +370,7 @@ describe("the phone app answers (P-4)", () => {
     expect(view.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Answer at the desk");
     const answers: InboxAnswers = { openCard: () => {}, send: () => {}, retry: () => {}, busy: new Set(), notes: new Map(), drafts: new Map(), picks: new Map() };
     const live = inboxView(parseInbox([APPR, row({ id: "prop:bbbbbbbb", kind: "proposal", rank: 3, task_id: "bbbbbbbb" })])!, () => {}, answers);
-    expect(live.querySelector('[data-testid="m-open-card"]')).not.toBeNull();
+    expect(live.querySelector('[data-testid="m-item-review"]')).not.toBeNull();
     expect(live.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Withdraw at the desk");
   });
 });
@@ -439,7 +439,7 @@ describe("AS: the phone's card and rows", () => {
       picks: new Map(), expanded: new Map(), toggle() {} };
     const view = inboxView(parsed, () => {}, answers);
     noMarkup(view);
-    const open = view.querySelector('[data-testid="m-open-card"]')!, detail = view.querySelector('[data-testid="m-detail"]')!;
+    const open = view.querySelector('[data-testid="m-item-review"]')!, detail = view.querySelector('[data-testid="m-detail"]')!;
     expect(open.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(view.querySelector('[data-testid="m-row-summary"]')!.textContent).toContain("AI SUMMARY");
     expect(view.querySelector('[data-testid="m-row-why"]')!.textContent).toContain("WHY ASKED");
@@ -476,7 +476,7 @@ describe("one-tap answer chips (PX-3a)", () => {
     }
     expect(h.root.querySelector('[data-kind="question"] [data-testid="m-chips"]')!.getAttribute("role")).toBe("group");
     // The approval keeps its card button and gains no Write your own.
-    expect(h.root.querySelector('[data-kind="approval"] [data-testid="m-open-card"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-kind="approval"] [data-testid="m-item-review"]')).not.toBeNull();
     expect(h.root.querySelector('[data-kind="approval"] [data-testid="m-answer-write"]')).toBeNull();
     // The options are not listed twice, and Write your own is still there.
     expect(h.root.querySelectorAll('[data-kind="question"] ul.options').length).toBe(0);

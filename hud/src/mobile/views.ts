@@ -139,7 +139,7 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
  * full head SHA. Each button hands the app this row as drawn: the app sends
  * its head and card, never a value read again (PM-D's MED 2).
  */
-function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
+export function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
   const v = prRowOf(row);
   if (!v) { genericDetail(row, box); return; }
   const pr = a?.pr;
@@ -356,7 +356,7 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
   const deferred = deferredOf(row);
   if (row.kind === "approval") {
     // The row's one action, edged in the accent (M7 of the phone audit).
-    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-open-card"));
+    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-item-review"));
   } else if (deferred) {
     // Plain buttons, neither defaulted; the retry asks for the passkey first.
     // H6 (phone audit): as the Review tab lays them out, Leave it at the left

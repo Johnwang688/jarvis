@@ -388,7 +388,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
     expect(h.root.querySelector('[data-testid="m-tab-inbox"]')!.textContent).toBe("Inbox · 1");
     // P-4: an approval row opens its answering card; nothing answers from the row.
-    expect(h.root.querySelector('[data-testid="m-open-card"]')!.textContent).toBe("Open the card to answer");
+    expect(h.root.querySelector('[data-testid="m-item-review"]')!.textContent).toBe("Review");
     expect(h.root.querySelector('[data-testid="m-desk-only"]')).toBeNull();
   });
 

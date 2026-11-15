@@ -214,7 +214,7 @@ def run(browser, check, until, shots=None):
             tid("m-chip-tasks").click()
             until(lambda: tid("m-band-needs").count() == 1)
             # The approval's own card still opens from its row (the sheet is PX-4's).
-            page.locator('[data-id="appr:r1"] [data-testid="m-open-card"]').click()
+            page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
             until(lambda: tid("m-card-heading").count() == 1)
             check(f"PX-2 the approval's card still opens, focus on its heading {tag}",
                   page.evaluate("document.activeElement?.dataset?.testid") == "m-card-heading")
@@ -287,6 +287,89 @@ def run(browser, check, until, shots=None):
             check(f"PX-2 no sideways scroll at {width}", wide[0] <= wide[1] and wide[2] <= wide[3], str(wide))
     finally:
         ctx.close()
+
+    # -- PX-3b: compact items, "+N for later" and Later ----------------------------------------------
+    px3b = os.environ.get("JARVIS_PX3B_SHOTS")
+    if px3b:
+        Path(px3b).mkdir(parents=True, exist_ok=True)
+
+    def shot3b(page, name, element):
+        if px3b:
+            page.locator(element).screenshot(path=str(Path(px3b) / f"{name}.png"))
+
+    for width in (375, 390):
+        state.update(world())
+        state["rows"] = [
+            row("appr:r1", "approval", 1, "Claude asks to use Bash",
+                {"tool": "Bash", "command": "npm test", "headline": "Run the test suite", "summary": "Runs the project's tests",
+                 "summary_state": "ready", "where": {"cwd": "/home/me/calc"}}, thread_id=T_NEEDS, expires_at=ago(-19)),
+            row("q:" + T_NEEDS + ":1", "question", 2, "Claude asks you", {"text": "Which branch should I use?", "options": ["main", "dev"]},
+                thread_id=T_NEEDS),
+            row("q:" + T_NEEDS + ":4", "question", 4, "Claude asks again", {"text": "Rebase first?", "options": []}, thread_id=T_NEEDS),
+            row("chk:5", "check", 5, "Check the multiply button", {"text": "Try it on the phone"}, thread_id=T_NEEDS),
+            row("missed:6", "missed", 6, "Denied while you slept", {"text": "n", "n": 1}, thread_id=T_NEEDS),
+            row("missed:8", "missed", 8, "Another denied call", {"text": "n", "n": 1}, thread_id=T_NEEDS),
+        ]
+        ctx, page, problems = open_page(width)
+        tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+        item = lambda i: page.locator(f'[data-testid="m-inbox-row"][data-id="{i}"]')  # noqa: E731
+        tag = f"@{width}"
+        try:
+            until(lambda: tid("m-item-fold").count() == 1, timeout=10)
+            card = f'[data-testid="m-thread"][data-key="thread:{T_NEEDS}"]'
+            check(f"PX-3b the approval item is compact: headline, summary, one Review button, no Deny {tag}",
+                  item("appr:r1").locator("button").evaluate_all("els => els.map(e => e.dataset.testid)") == ["m-item-review"]
+                  and item("appr:r1").locator(".headline").inner_text() == "Run the test suite"
+                  and item("appr:r1").locator('[data-testid="m-command"]').count() == 0)
+            check(f"PX-3b '+2 for later' folds only ranks above 5; ranks 1 to 5 show {tag}",
+                  tid("m-item-fold").inner_text() == "+2 for later"
+                  and all(item(i).is_visible() for i in ("appr:r1", "q:" + T_NEEDS + ":1", "q:" + T_NEEDS + ":4", "chk:5"))
+                  and not item("missed:6").is_visible() and not item("missed:8").is_visible()
+                  and page.locator('[data-testid="m-inbox-row"]').count() == 6)
+            shot3b(page, f"mixed-card-{width}", card)
+            tid("m-item-fold").click()
+            check(f"PX-3b expanding shows the folded rows and says Hide {tag}",
+                  item("missed:6").is_visible() and item("missed:8").is_visible()
+                  and tid("m-item-fold").get_attribute("aria-expanded") == "true")
+            shot3b(page, f"fold-open-{width}", card)
+            tid("m-item-fold").click()
+            check(f"PX-3b collapsing folds them again {tag}", not item("missed:6").is_visible())
+            check(f"PX-3b Later is offered to rank 5 and up, never to ranks 1 to 4 {tag}",
+                  all(item(i).locator('[data-testid="m-item-later"]').count() == 0
+                      for i in ("appr:r1", "q:" + T_NEEDS + ":1", "q:" + T_NEEDS + ":4"))
+                  and item("chk:5").locator('[data-testid="m-item-later"]').count() == 1)
+            before = len(state["answers"])
+            n_before = len(seen)
+            item("chk:5").locator('[data-testid="m-item-later"]').click()
+            stub = item("chk:5")
+            check(f"PX-3b Later collapses the row to one line with Show; ranks 1 to 4 stay {tag}",
+                  stub.get_attribute("data-later") == "true" and stub.locator('[data-testid="m-item-unlater"]').count() == 1
+                  and all(item(i).is_visible() for i in ("appr:r1", "q:" + T_NEEDS + ":1", "q:" + T_NEEDS + ":4")))
+            check(f"PX-3b Later sends nothing to the server {tag}",
+                  len(state["answers"]) == before and len(seen) == n_before, str(seen[n_before:]))
+            shot3b(page, f"later-in-use-{width}", card)
+            small = page.evaluate("""() => Array.from(document.querySelectorAll('.m-item-review, .m-later, .m-unlater, .m-fold'))
+                .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid, Math.round(e.getBoundingClientRect().height)])
+                .filter(([, h]) => h < 48)""")
+            check(f"PX-3b Review, Later, Show and the fold are at least 48 px tall {tag}", not small, str(small))
+            wide = page.evaluate("[document.documentElement.scrollWidth, innerWidth, document.querySelector('main').scrollWidth, document.querySelector('main').clientWidth]")
+            check(f"PX-3b no sideways scroll with items {tag}", wide[0] <= wide[1] and wide[2] <= wide[3], str(wide))
+            stub.locator('[data-testid="m-item-unlater"]').click()
+            check(f"PX-3b Show restores the row {tag}", item("chk:5").get_attribute("data-later") is None
+                  and item("chk:5").locator('[data-testid="m-item-later"]').count() == 1)
+            item("chk:5").locator('[data-testid="m-item-later"]').click()
+            page.reload()
+            until(lambda: tid("m-item-fold").count() == 1, timeout=10)
+            check(f"PX-3b Later is this page's memory: a reload restores the row {tag}",
+                  item("chk:5").get_attribute("data-later") is None and item("chk:5").is_visible())
+            tid("m-item-fold").click()
+            tid("m-item-review").first.click()
+            until(lambda: tid("m-card-heading").count() == 1)
+            check(f"PX-3b Review opens the approval's card, focus on its heading {tag}",
+                  page.evaluate("document.activeElement?.dataset?.testid") == "m-card-heading")
+            check(f"PX-3b no CSP violation or script error {tag}", not problems, str(problems))
+        finally:
+            ctx.close()
     seen_paths = sorted(set(seen))
     allowed = {"/m/api/me", "/m/api/inbox", "/m/api/working", "/m/api/tasks", "/m/api/events", "/m/api/review"}
     stray = [p for p in seen_paths if p.startswith("/m/api/") and p not in allowed and "/answer" not in p and "/detail" not in p]
