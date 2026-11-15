@@ -185,6 +185,9 @@ def run(browser, check, until):
 
         tid("m-tab-chats").click()
         until(lambda: page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').count() == 1, timeout=8)
+        project_head = tid("m-project-head").first
+        check("RD-5 Chats: an idle project starts folded", project_head.get_attribute("aria-expanded") == "false")
+        project_head.click()
         page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').click()
         until(lambda: tid("m-mic").count() == 1, timeout=8)
         check("P-7 the chat's box has Hold to talk, and the mic was not asked for yet",

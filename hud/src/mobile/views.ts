@@ -33,6 +33,8 @@ import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
 import "./items.css";
 import { timeLabel } from "./reltime";
+import { chevronIcon } from "./icons";
+import type { ProjectFolds } from "./folds";
 import {
   ASSISTANT_ROLES, deskNote, lineKind, orderTasks,
   type ChatThread, type DiffView, type LogRow, type Project, type TaskView,
@@ -536,33 +538,70 @@ function asThread(t: ChatThread): Thread {
 }
 
 export function chatsView(projects: Project[] | null, threads: ChatThread[], expanded: ReadonlySet<string>,
-                          actions: { open: (t: ChatThread) => void; toggle: (projectId: string) => void }): HTMLElement {
+                          actions: { open: (t: ChatThread) => void; toggle: (projectId: string) => void;
+                            fold?: (projectId: string, folded: boolean) => void },
+                          state: { folds?: Pick<ProjectFolds, "get">; needs?: ReadonlySet<string>;
+                            running?: ReadonlySet<string> } = {}): HTMLElement {
   const view = testid(el("section", "view"), "m-chats");
+  const toolbar = testid(el("div", "m-project-toolbar"), "m-chats-toolbar");
+  toolbar.append(el("h1", "m-project-title", "Chats"));
+  view.append(toolbar);
   if (projects === null) { view.append(empty("Loading…")); return view; }
   if (!projects.length) { view.append(empty("No projects.")); return view; }
   for (const project of projects) {
     const chats = threads.filter((t) => t.project_id === project.id && !t.task_id);
     const section = testid(el("section", "project"), "m-project");
     section.dataset.id = project.id;
-    section.append(el("h2", "group", project.name));
+    const needs = chats.filter((t) => state.needs?.has(t.id)).length;
+    const running = chats.filter((t) => t.running || state.running?.has(t.id)).length;
+    const active = needs > 0 || running > 0;
+    const folded = state.folds?.get(project.id, active) ?? !active;
+    const body = testid(el("div", "m-project-body"), "m-project-body");
+    body.id = `m-chats-project-${encodeURIComponent(project.id)}`;
+    body.hidden = folded;
+    const head = tap("", () => actions.fold?.(project.id, !folded), "m-project-head", "m-project-head");
+    head.id = body.id + "-head";
+    head.setAttribute("aria-expanded", String(!folded));
+    head.setAttribute("aria-controls", body.id);
+    const folder = el("span", "m-project-folder");
+    folder.setAttribute("aria-hidden", "true");
+    head.append(chevronIcon(), folder, el("span", "m-project-name", project.name));
+    const count = (value: number, kind: string, label: string) => {
+      const badge = el("span", "m-project-count " + kind, String(value));
+      badge.append(el("span", "m-sr", " " + label));
+      return badge;
+    };
+    if (needs) head.append(count(needs, "m-project-needs", "need you"));
+    if (running) head.append(count(running, "m-project-running", "running"));
+    head.append(count(chats.length, "", chats.length === 1 ? "chat" : "chats"));
+    const heading = el("h2", "m-project-heading");
+    heading.append(head);
+    section.append(heading, body);
     const byId = new Map(chats.map((t) => [t.id, t]));
-    const recent = recentChats(chats.map(asThread), { expanded: expanded.has(project.id) });
-    if (!recent.shown.length) section.append(el("p", "muted small", "No chats."));
+    const recent = recentChats(chats.map(asThread), { expanded: expanded.has(project.id),
+      kept: new Set(chats.filter((t) => state.needs?.has(t.id) || state.running?.has(t.id)).map((t) => t.id)) });
+    if (!recent.shown.length) body.append(el("p", "muted small", "No chats."));
     for (const shown of recent.shown) {
       const t = byId.get(shown.id);
       if (!t) continue;
       const row = tap("", () => actions.open(t), "chat", "m-chat");
       row.dataset.id = t.id;
-      row.append(el("span", "chat-title", t.title || "(untitled)"));
-      const meta = el("span", "chat-meta", [t.provider, t.running ? "working" : ""].filter(Boolean).join(" · "));
+      const status = state.needs?.has(t.id) ? "needs you" : t.running || state.running?.has(t.id) ? "working" : "";
+      row.dataset.status = status;
+      const dot = el("span", "m-project-dot");
+      dot.setAttribute("aria-hidden", "true");
+      const words = el("span", "m-project-chat-words");
+      words.append(el("span", "chat-title", t.title || "(untitled)"));
+      const meta = el("span", "chat-meta", [t.provider, status].filter(Boolean).join(" · "));
       const updated = timeLabel("ago", t.updated);
       if (updated) { if (meta.textContent) meta.append(" · "); meta.append(updated); }
       if (t.running) row.classList.add("running");
-      row.append(meta);
-      section.append(row);
+      words.append(meta);
+      row.append(dot, words);
+      body.append(row);
     }
     if (recent.more) {
-      section.append(tap(moreLabel(recent.hidden, expanded.has(project.id)), () => actions.toggle(project.id),
+      body.append(tap(moreLabel(recent.hidden, expanded.has(project.id)), () => actions.toggle(project.id),
         "link", "m-more"));
     }
     view.append(section);

@@ -61,6 +61,7 @@
 import { waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
 import { lockIcon, unlockIcon } from "./icons";
+import { createProjectFolds } from "./folds";
 import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
@@ -73,7 +74,7 @@ import {
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
 import { decodeInbox, decodeLog, decodeReview, decodeTasks, decodeWorking, readVerdict, type Decoded } from "./reads";
-import { answerKey } from "./threads";
+import { answerKey, waiting } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
@@ -154,7 +155,7 @@ export const STILL_ANSWERING = "Your earlier answer to this is still being sentâ
 /** WS-5c Â§5.4: the Always route's words when the rule changed since it was read (`remote_answer.RULE_CHANGED`). */
 export const RULE_CHANGED = "the rule changed: read it again";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
-const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open"]);
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open", "m-project-head"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
@@ -189,6 +190,8 @@ export class PhoneApp {
   projects: Project[] | null = null;
   threads: ChatThread[] = [];
   expanded = new Set<string>();
+  readonly folds = createProjectFolds();
+  private unsubscribeFolds: () => void;
   thread: OpenThread | null = null;
   tasks: TaskView[] | null = null;
   /** PX-2: the read cut the tasks at its cap (`more`), and the inbox likewise. */
@@ -423,6 +426,13 @@ export class PhoneApp {
       unauthorized: () => void this.recheckSession(),
       online: () => this.online,
     });
+    this.unsubscribeFolds = this.folds.subscribe(() => {
+      if (this.stopped || this.tab !== "chats" || this.thread || this.sheet) return;
+      const focus = document.activeElement;
+      const headId = focus instanceof HTMLElement && focus.dataset.testid === "m-project-head" ? focus.id : null;
+      this.render();
+      if (headId) document.getElementById(headId)?.focus();
+    });
   }
 
   // -- life cycle ----------------------------------------------------------------
@@ -450,6 +460,7 @@ export class PhoneApp {
 
   stop(): void {
     this.stopped = true;
+    this.unsubscribeFolds();
     this.rowScroll.stop();
     this.clearFirstOpenTimer();
     if (this.recoverTimer !== null) this.clearTimer(this.recoverTimer);
@@ -589,6 +600,7 @@ export class PhoneApp {
     });
     if (!applied) return;
     if (this.tab === "inbox") this.renderInbox();
+    else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
     // M5: the row a task's "Answer it in the Inbox" asked for, once the read redrew it.
     const pending = this.pendingRow;
     this.pendingRow = null;
@@ -631,6 +643,7 @@ export class PhoneApp {
     }
     this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
+    else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
   /** The working read, after the debounce (a burst of events is one read). */
@@ -2501,8 +2514,15 @@ export class PhoneApp {
             if (this.expanded.has(id)) this.expanded.delete(id); else this.expanded.add(id);
             this.render();
           },
+          fold: (id, folded) => this.folds.set(id, folded),
+        }, {
+          folds: this.folds,
+          needs: new Set([...(this.inbox ?? []).filter(waiting).flatMap((r) => r.thread_id ? [r.thread_id] : []),
+            ...(this.entries ?? []).filter((e) => e.status === "needs_input").map((e) => e.thread_id)]),
+          running: new Set((this.entries ?? []).filter((e) => e.status === "working").map((e) => e.thread_id)),
         });
-        view.prepend(tap("New chat", () => void this.openNewChat(), "quiet m-new", "m-new-chat-open"));
+        view.querySelector('[data-testid="m-chats-toolbar"]')?.append(
+          tap("+ New chat", () => void this.openNewChat(), "quiet primary m-new", "m-new-chat-open"));
       }
     } else if (this.sheet?.kind === "task") {
       view = taskSheetView(this.sheet, this.projects ?? [], this.online, {

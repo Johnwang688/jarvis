@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -16,7 +17,9 @@ const HOSTILE = [
   '<svg onload="window.__pwned=3"></svg>',
 ];
 const H = HOSTILE.join(" ");
-const MARKUP = "img, script, b, svg, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+const MARKUP = "img, script, b, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 
 const ANSWER_WORDS = /\b(allow|deny|always|approve|answer it|send|withdraw|reply|resume|cancel|submit)\b/i;
 
@@ -38,6 +41,7 @@ const ROWS = parseInbox([
 
 function noMarkup(node: Element) {
   expect(node.querySelectorAll(MARKUP).length).toBe(0);
+  expect(injectedSvg(node)).toEqual([]);
   expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
 }
 
@@ -376,6 +380,63 @@ function harness() {
   const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
   return { app, answers, asked, streams, signedOut, root, ok, settle, setOffline: (v: boolean) => { offline = v; } };
 }
+
+describe("RD-5 project refreshes", () => {
+  for (const source of ["working", "needs_input", "inbox"] as const) {
+    it.each([undefined, true, false])(`${source} refresh updates counts and respects owner fold choice %s`, async (choice) => {
+      localStorage.clear();
+      const h = harness();
+      h.answers["/m/api/working"] = h.ok({ entries: [], more: false, total: 0 });
+      h.app.start();
+      try {
+        await h.settle();
+        await h.app.loadChats();
+        h.app.tab = "chats";
+        if (choice !== undefined) h.app.folds.set("cccccccc", choice);
+        h.app.render();
+        const head = () => h.root.querySelector<HTMLButtonElement>('[data-testid="m-project-head"]')!;
+        expect(head().getAttribute("aria-expanded")).toBe(String(!(choice ?? true)));
+        head().focus();
+        for (const active of [true, false]) {
+          if (source === "inbox") {
+            h.answers["/m/api/inbox"] = h.ok({ rows: active ? [{ id: "q:1", kind: "question", rank: 2,
+              thread_id: "aaaaaaaa", project_id: "cccccccc", title: "Which?", detail: {} }] : [] });
+            await h.app.loadInbox();
+          } else {
+            h.answers["/m/api/working"] = h.ok({ entries: active ? [{ thread_id: "aaaaaaaa", project_id: "cccccccc",
+              project: "Calc", title: "Fix it", status: source, last: "2026-10-25T10:00:00Z", seq: null }] : [],
+              more: false, total: active ? 1 : 0 });
+            await h.app.loadWorking(true);
+          }
+          const activity = source === "working" ? "1 running" : "1 need you";
+          expect(head().textContent?.includes(activity)).toBe(active);
+          expect(head().getAttribute("aria-expanded")).toBe(String(!(choice ?? !active)));
+          expect(document.activeElement).toBe(head());
+        }
+      } finally { h.app.stop(); localStorage.clear(); }
+    });
+  }
+
+  it("keeps focus on the same project id when a thread refresh reorders the projects", async () => {
+    localStorage.clear();
+    const h = harness();
+    h.answers["/m/api/working"] = h.ok({ entries: [], more: false, total: 0 });
+    h.app.start();
+    try {
+      await h.settle();
+      await h.app.loadChats();
+      h.app.projects!.push({ id: "dddddddd", name: "Other", inbox: false });
+      h.app.tab = "chats";
+      h.app.render();
+      const head = () => h.root.querySelector<HTMLButtonElement>('[data-id="dddddddd"] [data-testid="m-project-head"]')!;
+      head().focus();
+      h.app.projects!.reverse();
+      await h.app.loadProjectThreads("cccccccc");
+      expect(document.activeElement).toBe(head());
+      expect(head().getAttribute("aria-expanded")).toBe("false");
+    } finally { h.app.stop(); }
+  });
+});
 
 describe("the phone app: live, offline and signed out (P-3)", () => {
   it("keeps Notifications, Last read, Sign out and Lock now within two taps of the header pill", async () => {

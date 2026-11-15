@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
@@ -6,7 +7,9 @@ import { reviewView, type ReviewActions, type ReviewState } from "./review";
 import { parseReview, type ReviewItem } from "../lib/review";
 
 const H = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=2</script>';
-const MARKUP = "img, script, svg, iframe, [onerror], [onload]";
+const MARKUP = "img, script, iframe, [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 const tag = (c: string) => c.repeat(64);
 
 function row(id: string, kind: string, rank: number, over: Record<string, unknown> = {}) {
@@ -64,6 +67,7 @@ describe("the phone's Review tab (mobile/review.ts)", () => {
     const view = reviewView(state(), actions(), null);
     document.body.replaceChildren(view);
     expect(view.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(view)).toEqual([]);
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     const boxes = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]'));
     expect(boxes.length).toBe(4);
@@ -335,6 +339,7 @@ describe("the review of #329's fixes, on the phone", () => {
     const shown = view.querySelector('[data-id="defer:a"] [data-testid="m-review-args"]')!.textContent!;
     for (const word of ["timeout", "120000", "run_in_background", "description", "Build"]) expect(shown).toContain(word);
     expect(view.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(view)).toEqual([]);
     const row = inboxRow(parseRow(first.row)!, () => {});
     const listed = row.querySelector('[data-testid="m-deferred-args"]')!.textContent!;
     expect(listed).toContain("run_in_background");
