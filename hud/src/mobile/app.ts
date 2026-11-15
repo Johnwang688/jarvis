@@ -128,7 +128,7 @@ const RETRY_MS = 4000;
 export const ASKING_FACE_ID = "Asking for Face ID…";
 export const SENDING = "Sending…";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
-const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review"]);
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */

@@ -89,7 +89,7 @@ describe("compact forms", () => {
 
   it("a deferred item keeps its Leave it and Approve and retry in the wrapper", () => {
     const row = mkRow("dfr:1", 6, { kind: "missed", thread_id: T, detail: { deferred: true, tool: "Bash", command: "ls", grantable: true } });
-    draw([row]);
+    draw([row, missed("m:7", 7)]);
     const el = byId("dfr:1");
     expect(el).not.toBeNull();
     // Rank 6 is behind the fold; once opened its controls are there.
@@ -136,6 +136,15 @@ describe("+N for later (IN-8: ranks 1 to 5 never fold)", () => {
     expect(fold.textContent).toBe("Hide 2 for later");
     fold.click();
     expect(hiddenIn(byId("m:6"))).toBe(true);
+    expect(tid(document.body, "m-item-fold")!.textContent).toBe("+2 for later");
+  });
+
+  it("a sole rank 6 row in a thread card is not folded behind '+1 for later'", () => {
+    const { view } = draw([missed("m:6", 6)]);
+    expect(tid(view, "m-item-fold")).toBeNull();
+    expect(hiddenIn(byId("m:6"))).toBe(false);
+    // Two rows above 5 are still folded.
+    draw([missed("m:6", 6), missed("m:7", 7)]);
     expect(tid(document.body, "m-item-fold")!.textContent).toBe("+2 for later");
   });
 

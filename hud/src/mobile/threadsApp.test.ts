@@ -530,3 +530,51 @@ describe("the inbox read that fails without being offline", () => {
     expect(h.q("m-list-error")).toBeNull();
   });
 });
+
+describe("PX-3b: focus on the fold and Later controls survives an SSE redraw", () => {
+  const rows = () => [
+    mkRow("q:1", 2, { kind: "question", thread_id: T1, detail: { text: "Which?", options: ["a"] } }),
+    mkRow("m:5", 5, { kind: "missed", thread_id: T1, title: "Missed five" }),
+    mkRow("m:6", 6, { kind: "missed", thread_id: T1, title: "Missed six" }),
+    mkRow("m:7", 7, { kind: "missed", thread_id: T1, title: "Missed seven" }),
+  ];
+  async function ready() {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: rows(), more: false });
+    h.answers["/m/api/working"] = ok({ entries: [{ thread_id: T1, project_id: "99999999", project: "Calc", title: "chat", status: "needs_input",
+      last: "2026-11-15T10:00:00Z" }], more: false, total: 1 });
+    await started(h);
+    return h;
+  }
+  const active = () => document.activeElement as HTMLElement | null;
+  const refresh = async (h: H) => {
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: ["m:5"], reason: "x" } });
+    await h.flush();
+  };
+
+  it("focus on Show (after Later) stays on that row's Show", async () => {
+    const h = await ready();
+    h.root.querySelector<HTMLElement>('[data-id="m:5"] [data-testid="m-item-later"]')!.click();
+    const show = h.root.querySelector<HTMLElement>('[data-id="m:5"] [data-testid="m-item-unlater"]')!;
+    show.focus();
+    await refresh(h);
+    expect(active()?.dataset.testid).toBe("m-item-unlater");
+    expect(active()?.closest<HTMLElement>("[data-id]")?.dataset.id).toBe("m:5");
+  });
+
+  it("focus on the fold toggle stays on it", async () => {
+    const h = await ready();
+    const fold = h.root.querySelector<HTMLElement>('[data-testid="m-item-fold"]')!;
+    fold.focus();
+    await refresh(h);
+    expect(active()?.dataset.testid).toBe("m-item-fold");
+  });
+
+  it("focus on Later stays on that row's Later", async () => {
+    const h = await ready();
+    h.root.querySelector<HTMLElement>('[data-id="m:5"] [data-testid="m-item-later"]')!.focus();
+    await refresh(h);
+    expect(active()?.dataset.testid).toBe("m-item-later");
+    expect(active()?.closest<HTMLElement>("[data-id]")?.dataset.id).toBe("m:5");
+  });
+});

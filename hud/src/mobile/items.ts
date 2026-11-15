@@ -163,7 +163,8 @@ export function buildItems(slot: Slot, env: ItemsEnv, ui: ItemsUi): HTMLElement 
     return node;
   };
   // A card with no head of its own (a row alone) never folds: its one row is the card.
-  const canFold = slot.kind !== "row";
+  // A sole row never folds either: "+1 for later" would only hide the one thing the card holds.
+  const canFold = slot.kind !== "row" && slot.rows.length > 1;
   const shown = slot.rows.filter((r) => !canFold || !folds(r));
   const rest = canFold ? slot.rows.filter(folds) : [];
   for (const row of shown) current.append(drawRow(row));
@@ -177,6 +178,8 @@ export function buildItems(slot: Slot, env: ItemsEnv, ui: ItemsUi): HTMLElement 
       redraw("m-item-fold", null);
     }, "quiet m-fold", "m-item-fold");
     toggle.setAttribute("aria-expanded", String(open));
+    // Focus is kept across a redraw by data-id (the app reads the nearest one): a slot's fold is named by its key.
+    toggle.dataset.id = "fold:" + slot.key;
     current.append(toggle, body);
   }
   return current;
