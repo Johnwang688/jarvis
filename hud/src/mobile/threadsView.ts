@@ -296,7 +296,8 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   const showRunning = all || model.filter === "running";
   const showRecent = all;
   const noNeeds = !grouped.needs.length && !unread && !model.error;
-  const noRunning = !grouped.running.length && model.working === "ok" && model.tasks !== null && !model.tasksMore;
+  const runningCut = model.workingCut.more || model.tasksMore;
+  const noRunning = !grouped.running.length && model.working === "ok" && model.tasks !== null && !runningCut;
 
   if (showNeeds) {
     const sec = testid(el("section", "m-band"), "m-band-needs");
@@ -306,7 +307,7 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
       const mark = el("span", "m-empty-mark");
       mark.setAttribute("aria-hidden", "true");
       card.append(mark, el("h3", "", "Nothing needs you"), el("p", "",
-        "No approvals, questions or pull requests are waiting." + (noRunning ? " Nothing is running." : "")));
+        "No approvals, questions or pull requests are waiting." + (noRunning ? " Nothing is running." : runningCut ? " More at the desk." : "")));
       sec.append(card);
     } else {
       sec.append(heading(`Needs you${grouped.needs.length ? ` · ${waitingCount(rows)}` : ""}`, "m-band-needs-head"));
@@ -321,7 +322,9 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
     sec.append(heading(`Running${grouped.running.length ? ` · ${grouped.running.length}` : ""}`, "m-band-running-head"));
     // Route-specific (Sol 3): a failed working read says so here, and nothing else about the app changes.
     if (model.working === "unavailable") sec.append(note("In progress unavailable", "m-working-unavailable", "m-band-note m-unavailable"));
-    if (!grouped.running.length && model.working !== "unavailable") sec.append(note("Nothing running", "m-running-none"));
+    if (!grouped.running.length && model.working !== "unavailable") {
+      sec.append(note(runningCut ? "More at the desk" : "Nothing running", "m-running-none"));
+    }
     draw(grouped.running, "running", sec);
     if (model.tasksMore) {
       sec.append(note("Showing the newest 200 tasks: older ones, running ones included, are at the desk", "m-tasks-more"));

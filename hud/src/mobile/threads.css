@@ -2,8 +2,11 @@
    no url(), no inline style, no backdrop-filter (skin.test.ts scans this file too).
    Every tap target is at least 3rem (48 px). */
 
-/* One translucent track; no independent sticky rectangle over the aurora wash. */
+/* Keep the glass track under the header while the list scrolls. */
 .m-strip {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
@@ -107,7 +110,7 @@
 .m-thread-items { display: flex; flex-direction: column; gap: 0.5rem; padding: 0 0.5rem 0.5rem; }
 .m-thread-items .row { background: var(--m-raise); }
 @keyframes m-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) { .m-thread .m-thread-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .m-thread[data-state] .m-thread-dot { animation: none; } }
 
 /* Recent is one glass group; rows with received items retain all of those items. */
 .m-recent-list .m-thread-recent { border: 0; border-radius: 0; box-shadow: none; background: none; }

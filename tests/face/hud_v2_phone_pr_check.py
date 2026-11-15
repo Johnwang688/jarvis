@@ -540,7 +540,9 @@ def run(browser, check, until):
         check("fix question: its link goes to the task's question row", True)
         groups = page.evaluate("""() => [...document.querySelectorAll('[data-testid="m-inbox"] h2.group')]
             .map(h => h.textContent)""")
-        check("rank 4 rows (ended fixes) sit under 'Needs you'", "Needs you" in groups, str(groups))
+        needs_count = sum(1 for r in rows if 1 <= r["rank"] <= 5)
+        check("rank 4 rows (ended fixes) sit under 'Needs you' with the exact waiting count",
+              f"Needs you · {needs_count}" in groups, str(groups))
         check("no link anywhere in the inbox, no markup made from daemon text",
               page.locator('[data-testid="m-inbox"] :is(' + MARKUP + ')').count() == 0
               and page.evaluate("window.__pwned === undefined"))

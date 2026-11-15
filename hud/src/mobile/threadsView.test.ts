@@ -125,11 +125,19 @@ describe("the bands and the strip", () => {
 });
 
 describe("RD-3 glass strip and dense slot heads", () => {
-  it("uses a translucent segmented track with no opaque sticky background", () => {
+  it("keeps the translucent segmented track sticky below the header without an opaque background", () => {
     const css = readFileSync(join(__dirname, "threads.css"), "utf8");
     const track = css.match(/\.m-strip\s*\{([^}]+)\}/)![1];
     expect(track).toContain("background: var(--m-seg, rgba(255, 255, 255, 0.06))");
-    expect(track).not.toMatch(/sticky|--m-glass-sticky|#[\da-f]{3,8}/i);
+    expect(track).toContain("position: sticky");
+    expect(track).toContain("top: 0");
+    expect(track).toContain("z-index: 2");
+    expect(track).not.toMatch(/--m-glass-sticky|#[\da-f]{3,8}/i);
+  });
+
+  it("overrides every state dot's pulse under reduced motion", () => {
+    const css = readFileSync(join(__dirname, "threads.css"), "utf8");
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.m-thread\[data-state\] \.m-thread-dot\s*\{\s*animation: none;/);
   });
 
   it("keeps full accessible chip names and only the active filter pressed", () => {
@@ -202,6 +210,19 @@ describe("RD-3 glass strip and dense slot heads", () => {
     }
     expect(draw(model({ rows: null, error: "boom" })).querySelector(".m-empty-card")).toBeNull();
     expect(draw(model({ rows: [], error: "boom" })).querySelector(".m-empty-card")).toBeNull();
+  });
+
+  it.each(["working", "tasks"] as const)("does not claim nothing is running when the %s read was capped", (source) => {
+    const over = source === "working"
+      ? { entries: [mkEntry("aaaaaaaa", "failed")], workingCut: { more: true, total: 101 } }
+      : { tasksMore: true };
+    const v = draw(model(over));
+    expect(v.querySelector(".m-empty-card")!.textContent)
+      .toBe("Nothing needs youNo approvals, questions or pull requests are waiting. More at the desk.");
+    expect(v.textContent).not.toMatch(/Nothing (is )?running/);
+    const running = draw(model({ ...over, filter: "running" }));
+    expect(running.querySelector('[data-testid="m-running-none"]')!.textContent).toBe("More at the desk");
+    expect(running.textContent).not.toMatch(/Nothing (is )?running/);
   });
 });
 
