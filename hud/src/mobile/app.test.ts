@@ -379,7 +379,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     h.app.start();
     await h.settle();
     expect(h.streams.map((s) => s.url)).toEqual([STREAM_URL]);
-    expect(h.root.querySelector('[data-testid="m-empty"]')!.textContent).toBe("All clear");
+    expect(h.root.querySelector('[data-testid="m-empty"]')!.textContent).toContain("Nothing needs you");
     h.answers["/m/api/inbox"] = h.ok({ rows: [row({ id: "appr:r9", kind: "approval", rank: 1, title: "Claude asks to use Bash",
       detail: { tool: "Bash", command: "ls" } })] });
     h.streams[0].open();

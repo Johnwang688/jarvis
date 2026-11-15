@@ -6,6 +6,7 @@ import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
 import { ScrollMemory, menuView, sheetView, trayView } from "./nav";
 import { mkRow } from "./threads.fixtures";
+import { RowScroll } from "./rowScroll";
 
 describe("ScrollMemory", () => {
   it("keeps a top per view and the row left from, matched by attribute", () => {
@@ -207,6 +208,54 @@ describe("no browser-history integration: no entry, no listener, the URL as it w
 });
 
 describe("scroll memory and the row you came from", () => {
+  it("the Answer in Inbox route uses the shared row jump and focuses that row", async () => {
+    const jump = vi.spyOn(RowScroll.prototype, "jump").mockImplementation(() => {});
+    const h = harness({ rows: [mkRow("tq:11111111:0", 3, { kind: "task_question", task_id: K1,
+      detail: { text: "Which target?", options: [] } })] });
+    try {
+      h.app.start();
+      await h.settle();
+      h.app.showInboxRow("tq:11111111:0");
+      const row = h.root.querySelector('[data-id="tq:11111111:0"]');
+      expect(row).not.toBeNull();
+      expect(jump).toHaveBeenLastCalledWith(row);
+      expect(document.activeElement).toBe(row);
+    } finally { h.app.stop(); jump.mockRestore(); }
+  });
+
+  it("Morning review anchor chips use the same row jump, with no Inbox inset", async () => {
+    const jump = vi.spyOn(RowScroll.prototype, "jump").mockImplementation(() => {});
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
+    const h = harness({ review: reviewBody(false) });
+    try {
+      h.app.start();
+      await h.settle();
+      h.app.show("review");
+      const chip = h.q("m-review-chip")!;
+      expect(chip).not.toBeNull();
+      chip.click();
+      const target = Array.from(h.q("m-main")!.querySelectorAll("[id]")).find((node) => node.id === chip.dataset.anchor);
+      expect(target).toBeDefined();
+      expect(jump).toHaveBeenLastCalledWith(target);
+      expect(h.q("m-main")!.style.getPropertyValue("--m-row-scroll-top")).toBe("");
+    } finally { h.app.stop(); jump.mockRestore(); vi.unstubAllGlobals(); }
+  });
+
+  it("Back delegates row visibility to the strip-aware check", async () => {
+    const back = vi.spyOn(RowScroll.prototype, "returnTo").mockImplementation(() => {});
+    const h = harness({ rows: [mkRow("q:1", 3, { thread_id: T1, detail: { text: "Which?", options: [] } })] });
+    try {
+      h.app.start();
+      await h.settle();
+      await h.click("m-thread-open");
+      await h.click("m-back");
+      const card = h.root.querySelector(`[data-thread="${T1}"]`);
+      expect(card).not.toBeNull();
+      expect(back).toHaveBeenLastCalledWith(card);
+      expect(document.activeElement).toBe(card!.querySelector("button"));
+    } finally { h.app.stop(); back.mockRestore(); }
+  });
+
   it("the Inbox keeps its scroll across a chat, and the row opened from it takes the focus back", async () => {
     history.replaceState(null, "", "/m/");
     const rows = [mkRow("q:1", 3, { thread_id: T1, detail: { text: "Which?", options: [] } }),

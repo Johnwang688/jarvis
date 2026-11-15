@@ -80,7 +80,7 @@ def task(tid, state, brief, minutes=10):
 def world():
     rows = [
         row("appr:r1", "approval", 1, "Claude asks to use Bash",
-            {"tool": "Bash", "command": "npm test", "headline": "Run the test suite"}, thread_id=T_NEEDS),
+            {"tool": "Bash", "command": "npm test", "headline": "Run the test suite", "provider": "claude"}, thread_id=T_NEEDS),
         row("q:" + T_NEEDS + ":1", "question", 2, "Claude asks you", {"text": "Which branch should I use?", "options": ["main", "dev"]},
             thread_id=T_NEEDS),
         row("q:" + T_ARCHIVED + ":1", "question", 3, "An old chat asks you", {"text": "Still there?", "options": []},
@@ -195,6 +195,18 @@ def run(browser, check, until, shots=None):
                   tid("m-chip-needs").text_content() == "Needs you · 5" and tid("m-chip-running").text_content() == "Running · 2"
                   and tid("m-chip-tasks").text_content() == "Tasks",
                   " / ".join(tid(i).text_content() for i in ("m-chip-needs", "m-chip-running", "m-chip-tasks")))
+            track = tid("m-strip").evaluate("""e => {
+                const s = getComputedStyle(e), c = s.backgroundColor;
+                return {color: c, translucent: c === 'transparent' || (c.startsWith('rgba(') && Number(c.split(',').at(-1).replace(')', '')) < 1)};
+            }""")
+            check(f"RD-3 the segmented track has no opaque background {tag}", track["translucent"], str(track))
+            paint = tid("m-strip").evaluate("""e => {
+                const badge = getComputedStyle(e.querySelector('[data-tone=pending] .m-chip-count'));
+                return {segments: Array.from(e.querySelectorAll('[aria-pressed=false]')).map(b => getComputedStyle(b).backgroundColor),
+                        ink: badge.color, fill: badge.backgroundColor};
+            }""")
+            check(f"RD-3 unselected segments are transparent and the pending badge has distinct ink {tag}",
+                  all(c == "rgba(0, 0, 0, 0)" for c in paint["segments"]) and paint["ink"] != paint["fill"], str(paint))
             ids = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-inbox-row]')).map(r => r.dataset.id)")
             want = sorted(r["id"] for r in state["rows"])
             check(f"PX-2 IN-8: every received row drawn exactly once {tag}", sorted(ids) == want, f"{sorted(ids)} vs {want}")
@@ -202,6 +214,16 @@ def run(browser, check, until, shots=None):
             inside = card.locator('[data-testid="m-inbox-row"]').evaluate_all("els => els.map(e => e.dataset.id)")
             check(f"PX-2 an approval and a question sit inside their thread's card {tag}",
                   inside == ["appr:r1", "q:" + T_NEEDS + ":1"], str(inside))
+            check(f"RD-3 the dense head shows dot, project, kind, provider and age {tag}",
+                  card.locator('.m-thread-dot').count() == 1
+                  and card.locator('.m-thread-project').inner_text() == "Calc"
+                  and card.locator('.m-thread-kind').inner_text() == "Approval"
+                  and card.locator('.m-thread-provider').inner_text() == "Claude"
+                  and "ago" in card.locator('.m-thread-age').inner_text())
+            recent = tid("m-recent-list")
+            sizes = recent.locator('.m-thread-open').evaluate_all("els => els.map(e => e.getBoundingClientRect().height)")
+            check(f"RD-3 Recent is one group with rows at least 56 px tall {tag}",
+                  recent.count() == 1 and len(sizes) == 2 and all(h >= 56 for h in sizes), str(sizes))
             check(f"PX-2 an archived thread's row is its own orphan card, titled from its origin {tag}",
                   page.locator(f'[data-key="orphan:{T_ARCHIVED}"] .m-thread-title').inner_text() == "Old docs chat")
             check(f"PX-2 a row with no thread is a row card {tag}", page.locator('[data-key="row:pr:Johnwang688/Calc#12"]').count() == 1)
@@ -222,6 +244,14 @@ def run(browser, check, until, shots=None):
             shot(page, f"bands-mixed-{width}")
             shot(page, f"thread-card-approval-question-{width}", f'[data-testid="m-thread"][data-key="thread:{T_NEEDS}"]')
             shot(page, f"summary-strip-{width}", '[data-testid="m-strip"]')
+            page.set_viewport_size({"width": width, "height": 812 if width == 375 else 844})
+            shot(page, f"inbox-mixed-{width}")
+            page.set_viewport_size({"width": width, "height": 2200})
+            recent.locator('.m-thread-open').last.click()
+            until(lambda: tid("m-transcript").count() == 1)
+            check(f"RD-3 a Recent row opens its chat {tag}", tid("m-transcript").is_visible())
+            tid("m-back").click()
+            until(lambda: tid("m-inbox").count() == 1)
             # A chip filters to its band, and again shows everything.
             tid("m-chip-running").click()
             until(lambda: tid("m-band-needs").count() == 0)
@@ -243,6 +273,30 @@ def run(browser, check, until, shots=None):
             until(lambda: tid("m-card-heading").count() == 1)
             check(f"PX-2 the approval's card still opens, focus on its heading {tag}",
                   page.evaluate("document.activeElement?.dataset?.testid") == "m-card-heading")
+        finally:
+            ctx.close()
+
+    # -- one empty card above Recent, at the two target phone sizes ------------------------------
+    for width, height in ((375, 812), (390, 844)):
+        state.update(world())
+        state["rows"] = []
+        state["tasks"] = []
+        state["working"] = {"entries": [entry(T_IDLE, "idle", "Notes", 90), entry(T_FAILED, "unread", "Refactor", 200)],
+                            "more": False, "total": 2}
+        ctx, page, problems = open_page(width, height)
+        tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+        try:
+            until(lambda: tid("m-empty").count() == 1 and tid("m-recent-list").count() == 1, timeout=10)
+            check(f"RD-3 one empty-state card replaces both empty headings @{width}",
+                  tid("m-empty").count() == 1
+                  and tid("m-empty").locator('h3').inner_text() == "Nothing needs you"
+                  and tid("m-empty").locator('p').inner_text() == "No approvals, questions or pull requests are waiting. Nothing is running."
+                  and tid("m-band-needs-head").count() == 0 and tid("m-running-none").count() == 0)
+            check(f"RD-3 Recent stays below the empty card @{width}",
+                  tid("m-band-recent").bounding_box()["y"] >= tid("m-empty").bounding_box()["y"] + tid("m-empty").bounding_box()["height"])
+            check(f"RD-3 empty view has no sideways scroll or script/CSP error @{width}",
+                  page.evaluate("document.documentElement.scrollWidth <= innerWidth") and not problems, str(problems))
+            shot(page, f"inbox-empty-{width}")
         finally:
             ctx.close()
 

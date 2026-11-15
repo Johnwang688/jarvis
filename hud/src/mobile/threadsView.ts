@@ -24,10 +24,10 @@ import { startsCollapsed, staleAt, summaryView } from "../lib/approvalSummary";
 import { prRowOf, questionRow } from "../lib/prRow";
 import { LABEL_TEXT } from "../lib/working";
 import type { TaskView, WorkingItem } from "./model";
-import { bands, buildSlots, type Band, type Slot } from "./threads";
-import { el, empty, tap, type InboxAnswers } from "./views";
+import { bands, buildSlots, waiting, type Band, type Slot } from "./threads";
+import { el, tap, type InboxAnswers } from "./views";
 import { buildItems, ItemsUi } from "./items";
-import { agoWords } from "./reltime";
+import { absoluteWords, agoWords, timeLabel } from "./reltime";
 import "./threads.css";
 
 /** The strip's chips: a band, or the Tasks list. `null` shows everything. */
@@ -102,7 +102,8 @@ export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: numb
   return JSON.stringify([
     band, slot.key, slot.title, slot.entry,
     task ? [task.id, task.brief, task.state, task.updated, task.step, task.steps] : null,
-    agoWords(slot.entry?.last ?? task?.updated ?? "", now),
+    agoWords(threadAt(slot), now),
+    absoluteWords(threadAt(slot), now),
     // Globals the rows draw from.
     !!a.pr, a.pr?.limited ?? false, !!a.withdraw, !!a.toggle,
     slot.rows.map((r) => [r, rowUi(r, a, now)]),
@@ -131,15 +132,55 @@ function threadTitle(slot: Slot): string {
   return oneLine(slot.rows[0]?.title, 80) || "Item";
 }
 
-function threadMeta(slot: Slot, now: number): string {
-  const age = agoWords(slot.entry?.last ?? slot.task?.updated ?? "", now);
-  if (slot.entry) return [LABEL_TEXT[slot.entry.status], slot.entry.project, age].filter(Boolean).join(" · ");
-  if (slot.kind === "task") {
-    const t = slot.task;
-    const progress = t && t.steps ? `step ${Math.min(t.step, t.steps)} of ${t.steps}` : "";
-    return ["Task", t?.state ?? "", progress, age].filter(Boolean).join(" · ");
+/** Use the newest row's time when the slot has neither a working entry nor a task read. */
+function threadAt(slot: Slot): string {
+  return slot.entry?.last ?? slot.task?.updated ?? slot.rows.reduce((at, row) =>
+    Date.parse(row.asked_at ?? "") > (Date.parse(at) || 0) ? row.asked_at! : at, "");
+}
+
+function threadKind(slot: Slot): string {
+  const row = slot.rows.find(waiting);
+  if (row) return kindWord(row);
+  if (slot.entry) return LABEL_TEXT[slot.entry.status];
+  if (slot.task) return ({ running: "Working", verifying: "Verifying", failed: "Failed", done: "Done", blocked: "Blocked" } as Record<string, string>)[slot.task.state] || "Task";
+  return slot.rows.length ? kindWord(slot.rows[0]) : "Chat";
+}
+
+/** The slot reads have no provider field; approval details carry one when known. Never infer it from a title. */
+function threadProvider(slot: Slot): string {
+  for (const row of slot.rows) {
+    const provider = oneLine(row.detail.provider, 20);
+    if (provider) return ({ claude: "Claude", codex: "Codex" } as Record<string, string>)[provider] || provider;
   }
-  return ["Chat", age].filter(Boolean).join(" · ");
+  return "";
+}
+
+function threadHead(slot: Slot, now: number, head: HTMLElement): void {
+  const dot = testid(el("span", "m-thread-dot"), "m-thread-dot");
+  dot.setAttribute("aria-hidden", "true");
+  const main = el("span", "m-thread-main");
+  main.append(el("span", "m-thread-title", threadTitle(slot)));
+  const meta = el("span", "m-thread-meta");
+  const project = slot.entry?.project;
+  if (project) meta.append(testid(el("span", "m-thread-project", project), "m-thread-project"));
+  const kind = threadKind(slot);
+  meta.append(testid(el("span", "m-thread-kind", kind), "m-thread-kind"));
+  // Keep an error visible even when a waiting row supplies the kind word.
+  if ((slot.entry?.status === "failed" || slot.task?.state === "failed") && kind !== "Failed") {
+    meta.append(el("span", "m-thread-failed", "Failed"));
+  }
+  const provider = threadProvider(slot);
+  if (provider) meta.append(testid(el("span", "m-thread-provider", provider), "m-thread-provider"));
+  const t = slot.task;
+  if (t?.steps) meta.append(el("span", "m-thread-progress", `step ${Math.min(t.step, t.steps)} of ${t.steps}`));
+  main.append(meta);
+  head.append(dot, main);
+  const age = timeLabel("ago", threadAt(slot), "", now);
+  if (age) {
+    age.classList.add("m-thread-age");
+    age.dataset.testid = "m-thread-age";
+    head.append(age);
+  }
 }
 
 function buildCard(slot: Slot, band: Band, a: ListActions, now: number, ui: ItemsUi): HTMLElement {
@@ -151,12 +192,14 @@ function buildCard(slot: Slot, band: Band, a: ListActions, now: number, ui: Item
   if (slot.taskId) card.dataset.task = slot.taskId;
   card.dataset.state = slot.entry?.status ?? slot.task?.state ?? "";
   if (slot.kind === "row") {
-    // A row alone: its head names the kind; the item below is the row.
-    card.append(testid(el("h3", "m-thread-head m-thread-kind", kindWord(slot.rows[0])), "m-thread-kind"));
+    // A row alone keeps its own item actions; there is no thread/task destination for its head.
+    const head = el("div", "m-thread-head");
+    threadHead(slot, now, head);
+    card.append(head);
   } else {
     const open = slot.threadId && slot.kind !== "task" ? () => a.openThread(slot.threadId!) : () => a.openTask(slot.taskId!);
     const head = tap("", open, "m-thread-open", "m-thread-open");
-    head.append(el("span", "m-thread-title", threadTitle(slot)), el("span", "m-thread-meta", threadMeta(slot, now)));
+    threadHead(slot, now, head);
     card.append(head);
   }
   if (slot.rows.length) {
@@ -193,6 +236,7 @@ function strip(model: ListModel, a: ListActions, running: number): HTMLElement {
   const pending = !!model.rows?.some((r) => r.rank <= 2);
   const chip = (id: Exclude<Filter, null>, label: string, tone = "", count: string | null = null) => {
     const b = tap("", () => a.setFilter(model.filter === id ? null : id), "chip", "m-chip-" + id);
+    b.setAttribute("aria-label", count === null ? label : `${label} · ${count}`);
     // The count never shrinks: a long label gives way to an ellipsis, never the number.
     b.append(el("span", "m-chip-label", label));
     if (count !== null) b.append(el("span", "m-chip-count", ` · ${count}`));
@@ -251,11 +295,23 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   const showNeeds = all || model.filter === "needs";
   const showRunning = all || model.filter === "running";
   const showRecent = all;
+  const noNeeds = !grouped.needs.length && !unread && !model.error;
+  const runningCut = model.workingCut.more || model.tasksMore;
+  const noRunning = !grouped.running.length && model.working === "ok" && model.tasks !== null && !runningCut;
 
   if (showNeeds) {
     const sec = testid(el("section", "m-band"), "m-band-needs");
     sec.dataset.band = "needs";
-    sec.append(heading(grouped.needs.length || unread ? "Needs you" : "Nothing needs you", "m-band-needs-head"));
+    if (noNeeds) {
+      const card = testid(el("article", "m-thread m-empty-card"), "m-empty");
+      const mark = el("span", "m-empty-mark");
+      mark.setAttribute("aria-hidden", "true");
+      card.append(mark, el("h3", "", "Nothing needs you"), el("p", "",
+        "No approvals, questions or pull requests are waiting." + (noRunning ? " Nothing is running." : runningCut ? " More at the desk." : "")));
+      sec.append(card);
+    } else {
+      sec.append(heading(`Needs you${grouped.needs.length ? ` · ${waitingCount(rows)}` : ""}`, "m-band-needs-head"));
+    }
     if (unread) sec.append(note("The Inbox could not be read", "m-inbox-unreadable"));
     draw(grouped.needs, "needs", sec);
     view.append(sec);
@@ -263,10 +319,12 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   if (showRunning && (grouped.running.length || model.working === "unavailable" || model.filter === "running" || model.tasksMore)) {
     const sec = testid(el("section", "m-band"), "m-band-running");
     sec.dataset.band = "running";
-    sec.append(heading("Running", "m-band-running-head"));
+    sec.append(heading(`Running${grouped.running.length ? ` · ${grouped.running.length}` : ""}`, "m-band-running-head"));
     // Route-specific (Sol 3): a failed working read says so here, and nothing else about the app changes.
     if (model.working === "unavailable") sec.append(note("In progress unavailable", "m-working-unavailable", "m-band-note m-unavailable"));
-    if (!grouped.running.length && model.working !== "unavailable") sec.append(note("Nothing running", "m-running-none"));
+    if (!grouped.running.length && model.working !== "unavailable") {
+      sec.append(note(runningCut ? "More at the desk" : "Nothing running", "m-running-none"));
+    }
     draw(grouped.running, "running", sec);
     if (model.tasksMore) {
       sec.append(note("Showing the newest 200 tasks: older ones, running ones included, are at the desk", "m-tasks-more"));
@@ -277,7 +335,9 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
     const sec = testid(el("section", "m-band"), "m-band-recent");
     sec.dataset.band = "recent";
     sec.append(heading("Recent", "m-band-recent-head"));
-    draw(grouped.recent.slice(0, RECENT_SHOWN), "recent", sec);
+    const list = testid(el("div", "m-recent-list"), "m-recent-list");
+    draw(grouped.recent.slice(0, RECENT_SHOWN), "recent", list);
+    sec.append(list);
     if (grouped.recent.length > RECENT_SHOWN) {
       // Rank 6 and below only (a rank 1 to 5 row is Needs you): the cards stay in the page, folded.
       const rest = testid(el("div", "m-recent-rest"), "m-recent-rest");
@@ -286,7 +346,8 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
       const toggle = tap(model.recentAll ? "Show fewer" : `Show all (${grouped.recent.length})`,
         () => a.setRecentAll(!model.recentAll), "quiet m-recent-all", "m-recent-all");
       toggle.setAttribute("aria-expanded", String(model.recentAll));
-      sec.append(toggle, rest);
+      sec.append(toggle);
+      list.append(rest);
     }
     if (grouped.info.length) {
       const n = grouped.info.reduce((sum, s) => sum + s.rows.length, 0);
@@ -297,7 +358,6 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
     }
     view.append(sec);
   }
-  if (all && !slots.length && !unread) view.append(empty("All clear"));
   // What the phone does not show.
   if (all || model.filter === "needs") {
     if (model.workingCut.more && model.working === "ok") {
