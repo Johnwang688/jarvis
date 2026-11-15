@@ -151,6 +151,62 @@ describe("the Needs you page", () => {
     }
   });
 
+  it("a second hint for the same thread while the page stays mounted waits for its own read", async () => {
+    const scroll = vi.fn();
+    (HTMLElement.prototype as any).scrollIntoView = scroll;
+    try {
+      let release!: () => void;
+      let gate = Promise.resolve();
+      const reread = vi.fn(() => gate);
+      const props = draw({ onReread: reread });                                  // t2 is in the rows
+      act(() => inboxFocus.request("t2"));
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect(scroll).toHaveBeenCalledTimes(1);                                   // the first hint landed
+      expect(inboxFocus.get()).toBeNull();
+      // The inbox moves on without t2 (cached rows), the working list still has it: a new hint, a new read.
+      gate = new Promise<void>((r) => { release = r; });
+      await act(async () => { root!.render(createElement(InboxView, { ...props, snapshot: snap(served().filter((r) => r.thread_id !== "t2")) })); });
+      act(() => inboxFocus.request("t2"));
+      await act(async () => { await Promise.resolve(); });
+      expect(inboxFocus.get()).toBe("t2");                                       // not judged against the cached rows
+      await act(async () => {
+        root!.render(createElement(InboxView, { ...props, snapshot: snap() }));
+        release();
+        await gate;
+      });
+      expect(scroll).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(q('[data-testid="inbox-thread"][data-thread-id="t2"]'));
+      expect(inboxFocus.get()).toBeNull();
+    } finally {
+      delete (HTMLElement.prototype as any).scrollIntoView;
+    }
+  });
+
+  it("a claimed request outlives the expiry through a slow read", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const scroll = vi.fn();
+    (HTMLElement.prototype as any).scrollIntoView = scroll;
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const props = draw({ snapshot: snap(served().filter((r) => r.thread_id !== "t2")), onReread: vi.fn(() => gate) });
+      act(() => inboxFocus.request("t2"));
+      await act(async () => { await Promise.resolve(); });
+      vi.setSystemTime(Date.now() + FOCUS_REQUEST_MS + 1_400);                   // the read is still on its way
+      expect(inboxFocus.get()).toBe("t2");
+      await act(async () => {
+        root!.render(createElement(InboxView, { ...props, snapshot: snap() }));
+        release();
+        await gate;
+      });
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(q('[data-testid="inbox-thread"][data-thread-id="t2"]'));
+    } finally {
+      vi.useRealTimers();
+      delete (HTMLElement.prototype as any).scrollIntoView;
+    }
+  });
+
   it("keeps the request while the inbox cannot be read, and the page going away drops it", async () => {
     const failed: InboxSnapshot = { rows: [], status: "error", message: "boom", reads: 1 };
     draw({ snapshot: failed, onReread: vi.fn(async () => {}) });
@@ -170,6 +226,22 @@ describe("the focus request's lifetime", () => {
     store.request("t1");
     expect(store.get()).toBe("t1");
     t += FOCUS_REQUEST_MS + 1;
+    expect(store.get()).toBeNull();
+  });
+
+  it("a claimed request does not expire, an unclaimed one does, and a newer request replaces the older", () => {
+    let t = 1_000;
+    const store = new InboxFocusStore(() => t);
+    const a = store.request("t1");
+    store.claim(a.id);
+    t += FOCUS_REQUEST_MS * 4;
+    expect(store.get()).toBe("t1");
+    const b = store.request("t1");                                               // the same thread, a new request
+    expect(b.id).not.toBe(a.id);
+    expect(store.current()).toBe(b);
+    store.clearRequest(a.id);                                                    // the old one's read landing clears nothing
+    expect(store.get()).toBe("t1");
+    t += FOCUS_REQUEST_MS + 1;                                                   // b was never claimed
     expect(store.get()).toBeNull();
   });
 

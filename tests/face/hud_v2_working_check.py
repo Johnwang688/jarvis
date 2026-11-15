@@ -711,6 +711,15 @@ def _nav_checks(page, mock, check, until):
     until(lambda: _focused(page) == "t6", timeout=4)
     check("a hint newer than the cached inbox rows still lands: the page reads first, then focuses the thread "
           "[mutation: the target is judged before the read]", _focused(page) == "t6", str(_focused(page)))
+    # 1b. A second hint for the same thread while the page stays mounted is a new request with its own read.
+    mock_inbox.state(mock)["rows"] = []
+    mock_inbox.changed(mock)                                  # the page re-reads: the group (and the focus) is gone
+    until(lambda: page.locator('[data-testid="inbox-thread"]').count() == 0, timeout=4)
+    mock_inbox.state(mock)["rows"] = [q]                      # back again, but this window has not heard
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: _focused(page) == "t6", timeout=4)
+    check("a second hint for the same thread, page still mounted, reads for itself and lands "
+          "[mutation: the earlier read's completion is reused]", _focused(page) == "t6", str(_focused(page)))
     # 2. A cancelled navigation leaves no target behind.
     _reset(mock)
     mock_inbox.state(mock)["rows"] = [q]

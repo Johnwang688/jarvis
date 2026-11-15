@@ -776,29 +776,34 @@ export function InboxView(props: InboxViewProps) {
 
   // WS-3: a hint on a thread row in the sidebar asks for this page at that thread. The hint comes from a
   // working list that can be newer than the rows held here, so the request is not judged until a read
-  // started for it has landed (`asked`); then the thread's group is scrolled into view and focused
-  // (tabIndex -1: no keyboard rises), and the request is gone, a thread with no group included. While
-  // the inbox cannot be read the request waits for it. It never outlives the page: going away drops it.
+  // started for THAT request has landed (`asked` is a request id, never a thread id: a second hint for the
+  // same thread is a new request with its own read); then the thread's group is scrolled into view and
+  // focused (tabIndex -1: no keyboard rises), and the request is gone, a thread with no group included.
+  // The page claims the request so a slow read cannot expire it, and while the inbox cannot be read the
+  // request waits for it. It never outlives the page: going away drops it, and a newer request replaces it.
   const wanted = useInboxFocus();
-  const [asked, setAsked] = useState<string | null>(null);
+  const wantedId = wanted?.id ?? null;
+  const [asked, setAsked] = useState<number | null>(null);
   useEffect(() => {
     if (!wanted) return;
+    inboxFocus.claim(wanted.id);
     let live = true;
-    void Promise.resolve(props.onReread()).then(() => { if (live) setAsked(wanted); }, () => { if (live) setAsked(wanted); });
+    const landed = () => { if (live) setAsked(wanted.id); };
+    void Promise.resolve(props.onReread()).then(landed, landed);
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted]);
+  }, [wantedId]);
   useEffect(() => () => inboxFocus.clear(), []);
   useEffect(() => {
-    if (!wanted || asked !== wanted || status !== "ready") return;
+    if (!wanted || asked !== wanted.id || status !== "ready") return;
     const el = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="inbox-thread"]'))
-      .find((e) => e.dataset.threadId === wanted);
+      .find((e) => e.dataset.threadId === wanted.thread);
     if (el) {
       el.scrollIntoView?.({ block: "start" });
       el.focus({ preventScroll: true });
     }
-    inboxFocus.clear();
-  }, [wanted, asked, status, rows]);
+    inboxFocus.clearRequest(wanted.id);
+  }, [wantedId, asked, status, rows]);
 
   // B4: Snooze and Dismiss for a row of rank 5 to 8 (`canMark`), or, for a
   // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.
