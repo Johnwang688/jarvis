@@ -41,6 +41,13 @@ What it pins, one section each (each names the mutation it is meant to catch):
             sidebar and scrolls inside, the project tree keeps rows, nothing
             reaches the orb; collapsed or empty costs its header line
             [no max-height / list scroll]
+  short     six threads in a short, zoomed window (1920x700 and 560 high, both
+            at 160%): at least one whole working row is visible, at least one
+            tree row too, and Schedules is not under the orb [list shrinks to
+            nothing; fixed tree minimum]
+  menukeys  a read that disables the focused Done keeps focus inside the menu;
+            ArrowDown and ArrowUp move between the enabled items and wrap
+            [focus to body; no arrow keys]
 
 `JARVIS_WORKING_SHOTS=<dir>` also saves the sidebar, expanded, collapsed, with a
 Needs you group and with a Done toast, as PNGs there.
@@ -536,9 +543,113 @@ def _tall_checks(page, mock, check, until):
     page.evaluate("(k) => localStorage.removeItem(k)", KEY)
 
 
+def _zfresh(page, mock, until, size, zoom):
+    """Reload into the single-pane workspace at a window size and a HUD zoom (percent)."""
+    page.set_viewport_size({"width": size[0], "height": size[1]})
+    page.evaluate("""([ws, zoom]) => {
+      localStorage.setItem('jarvis.hud.zoom', zoom);
+      localStorage.setItem('jarvis.hud.layout', '{}');
+      localStorage.setItem('jarvis.hud.workspace', ws);
+      localStorage.setItem('jarvis.dictation', 'review');
+    }""", [SINGLE, str(zoom)])
+    before = mock.sse_connections()
+    page.reload()
+    page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+    until(lambda: page.locator('[data-testid="project-p1"]').count() > 0)
+    mock.await_reconnect(before)
+    time.sleep(0.4)
+
+
+def _short_metrics(page):
+    return page.evaluate("""() => {
+      const r = (q) => { const e = document.querySelector(q); return e && e.getBoundingClientRect(); };
+      const wl = r('[data-testid="working-list"]'), tree = r('[data-testid="sidebar"]');
+      const orb = r('#orbdock'), foot = r('[data-testid="open-schedules"]');
+      const whole = (list, sel) => {
+        let n = 0;
+        for (const e of document.querySelectorAll(sel)) {
+          const b = e.getBoundingClientRect();
+          if (b.height < 4 || !list || b.top < list.top - 0.5 || b.bottom > list.bottom + 0.5) continue;
+          const hit = document.elementFromPoint(b.left + Math.min(40, b.width / 2), b.top + b.height / 2);
+          if (hit && e.contains(hit)) n++;
+        }
+        return n;
+      };
+      const sch = document.querySelector('[data-testid="open-schedules"]');
+      const sb = sch && sch.getBoundingClientRect();
+      const top = sb && document.elementFromPoint(sb.left + 30, sb.top + sb.height / 2);
+      return {wrows: whole(wl, '[data-testid="working-row"]'), trows: whole(tree, '[data-testid="sidebar"] .tree-row'),
+              wl: wl && wl.height, tree: tree.height, footBottom: foot && foot.bottom, orbTop: orb && orb.top,
+              schedulesFree: !!(top && sch.contains(top)), innerH: innerHeight};
+    }""")
+
+
+def _short_checks(page, mock, check, until):
+    for height in (700, 560):
+        _reset(mock)
+        page.evaluate("(k) => localStorage.removeItem(k)", KEY)
+        _zfresh(page, mock, until, (1920, height), 160)
+        until(lambda: len(_rows(page)) == 6, timeout=5)
+        page.evaluate("document.querySelector('[data-testid=\"sidebar\"]').scrollTop = 0")
+        m = _short_metrics(page)
+        where = f"1920x{height} at 160%, six threads"
+        check(f"{where}: at least one whole working row is visible [mutation: list shrinks to nothing]", m["wrows"] >= 1, str(m))
+        check(f"{where}: and at least one tree row", m["trows"] >= 1, str(m))
+        check(f"{where}: Schedules is above the orb and not covered [mutation: fixed tree minimum]",
+              m["schedulesFree"] and m["footBottom"] <= m["orbTop"] + 1, str(m))
+        _shot(page, f"6-short-{height}-160")
+    _zfresh(page, mock, until, (1600, 900), 100)
+
+
+def _menukeys_checks(page, mock, check, until):
+    _open(page, mock, until)
+    until(lambda: len(_rows(page)) == 6, timeout=4)
+    page.locator('[data-testid="working-menu-t6"]').focus()
+    page.keyboard.press("Enter")
+    page.wait_for_selector('[data-testid="thread-menu"]')
+    until(lambda: _active_id(page) == "tmenu-done", timeout=2)
+    # The next read says Done may not happen now: the focused item is disabled under the keyboard.
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["why_not"] = "a turn is running"
+    mock_working.changed(mock)
+    until(lambda: page.locator('[data-testid="tmenu-done"]').is_disabled(), timeout=3)
+    time.sleep(0.2)
+    inside = page.evaluate("() => !!document.activeElement && !!document.activeElement.closest('[data-testid=\"thread-menu\"]')")
+    check("a read that disables the focused Done keeps focus inside the menu [mutation: focus to body]",
+          inside and _active_id(page) == "tmenu-beside", str(_active_id(page)))
+    _shot(page, "7-menu-after-refresh")
+    items = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"thread-menu\"] button.mrow:not(:disabled)')]"
+                          ".map(e => e.getAttribute('data-testid'))")
+    page.keyboard.press("ArrowDown")
+    second = _active_id(page)
+    page.keyboard.press("ArrowUp")
+    back = _active_id(page)
+    page.keyboard.press("ArrowUp")
+    wrapped = _active_id(page)
+    page.keyboard.press("ArrowDown")
+    check("ArrowDown and ArrowUp move between the enabled items and wrap [mutation: no arrow keys]",
+          len(items) >= 3 and second == items[1] and back == items[0] and wrapped == items[-1]
+          and _active_id(page) == items[0], f"{items} {second} {back} {wrapped}")
+    page.keyboard.press("Escape")
+    until(lambda: _active_id(page) == "working-menu-t6", timeout=2)
+    check("Escape still gives focus back to the opener", _active_id(page) == "working-menu-t6", str(_active_id(page)))
+    # The project menus share the handler.
+    page.locator('[data-testid="project-menu-p2"]').focus()
+    page.keyboard.press("Enter")
+    page.wait_for_selector('[data-testid="project-menu"]')
+    first = _active_id(page)
+    page.keyboard.press("ArrowDown")
+    second = _active_id(page)
+    page.keyboard.press("ArrowUp")
+    check("the project menu takes the arrow keys too, from its first item",
+          first == "pmenu-edit" and second not in (None, first) and _active_id(page) == first, f"{first} {second} {_active_id(page)}")
+    page.keyboard.press("Escape")
+
+
 SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
             _live_checks, _empty_checks, _stale_checks, _inbox_checks, _event_checks, _keys_checks,
-            _hint_checks, _tall_checks)
+            _hint_checks, _tall_checks, _short_checks, _menukeys_checks)
 
 
 def working_checks(browser, mock, base, check, until, guard, init_script):

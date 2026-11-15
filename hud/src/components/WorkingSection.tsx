@@ -18,7 +18,7 @@
 //       project's name. Its title is a real button (Tab, Enter, Space); a click
 //       anywhere on the row opens it like a tree row.
 
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { Project, Thread } from "../types";
 import type { ActivityView } from "../lib/activity";
 import type { InboxRow } from "../lib/inbox";
@@ -190,6 +190,21 @@ export const WorkingBlock = memo(function WorkingBlock(p: Omit<WorkingSectionPro
 export function WorkingDoneItem(p: { threadId: string; onDone: (id: string) => void }) {
   const work = useWorking();
   const entry = work.entries.find((e) => e.thread_id === p.threadId);
+  const ref = useRef<HTMLButtonElement | null>(null);
+  const disabled = !!entry?.why_not;
+  // A read can disable the very item the keyboard is on (Done stops being allowed): focus then
+  // goes to the next enabled item of the menu, or the menu itself, never to the page behind it.
+  useEffect(() => {
+    if (!disabled) return;
+    const btn = ref.current;
+    const a = document.activeElement;
+    if (!btn || !(a === btn || a === document.body || !a)) return;
+    const menu = btn.closest<HTMLElement>('[role="menu"]');
+    if (!menu) return;
+    const items = Array.from(menu.querySelectorAll<HTMLButtonElement>("button.mrow"));
+    const after = items.slice(items.indexOf(btn) + 1).find((b) => !b.disabled);
+    (after || items.find((b) => !b.disabled) || menu).focus();
+  }, [disabled]);
   if (!entry) return null;
   return (
     <>
@@ -197,6 +212,7 @@ export function WorkingDoneItem(p: { threadId: string; onDone: (id: string) => v
         type="button"
         className="mrow"
         role="menuitem"
+        ref={ref}
         style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                  background: "none", textTransform: "none", letterSpacing: 0 }}
         data-testid="tmenu-done"

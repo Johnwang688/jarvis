@@ -1246,6 +1246,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   min-width: 190px; padding: 4px 0; box-shadow: var(--shadow-pop);
 }
+.threadmenu:focus { outline: none; }
 .threadmenu .mrow { padding: 5px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; border-radius: 0; }
 /* The row's own inline style clears its background, so hover has to insist. */
 .threadmenu .mrow:hover { background: var(--hover) !important; }
@@ -1262,13 +1263,28 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
    projects. Rows are the tree's own (.tree-row, .act dots, .badge-like chips);
    amber is only a pending row's kind word, red only the failed dot. */
 /* The section never takes the project tree's room: at most 40% of the sidebar (and 220px), its list
-   scrolling inside that; collapsed or empty it is its header line alone. */
+   scrolling inside that; collapsed or empty it is its header line alone. Both lists keep one whole
+   row at least (28px), however short the window or high the zoom: the tree no longer holds a fixed
+   88px, which pushed Schedules under the orb in a short window. */
 .workingsec {
   flex: 0 1 auto; min-height: 0; max-height: min(40%, 220px); display: flex; flex-direction: column;
   margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.workingsec:has(> .wlist) { min-height: 56px; }   /* the header and one whole row, never less */
 .workingsec .workinghead { flex: 0 0 auto; }
-.workingsec .wlist { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
-#sidebar > .scroll { min-height: 88px; }
+.workingsec .wlist { flex: 1 1 auto; min-height: 28px; overflow-y: auto; overflow-x: hidden; }
+#sidebar > .scroll { min-height: 28px; }
+/* A window so short that the chrome alone fills the sidebar above the orb (a 560px window at 160%: its content
+   box is under 200px): the sidebar measures itself (a size container), and there the PROJECTS header folds away and the section's
+   margins go, so one whole working row, one project row and Schedules still fit above the orb. */
+#sidebar { container: sbar / size; }
+@container sbar (max-height: 200px) {
+  #sidebar .barrow { display: none; }
+  #sidebar .sidebar-foot { padding: 0; }
+  .workingsec { margin-bottom: 0; padding-bottom: 0; }
+  .workingsec:has(> .wlist) { min-height: 46px; }
+  .workingsec .wlist { min-height: 26px; }
+  #sidebar > .scroll { min-height: 26px; }
+}
 .workinghead { display: flex; align-items: center; gap: 6px; padding: 1px 12px; color: var(--text-muted); }
 .workinghead .wtoggle {
   flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); padding: 1px 4px;

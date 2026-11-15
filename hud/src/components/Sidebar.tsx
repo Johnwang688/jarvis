@@ -255,6 +255,21 @@ export const Sidebar = memo(function Sidebar(props: {
     };
   }, [menu]);
 
+  /** Arrow keys for a `role="menu"` (both menus): Up and Down move between the enabled items and
+   * wrap, Home and End go to the ends. Other keys are left alone (Tab, Escape, Enter keep working). */
+  const menuKeys = (e: React.KeyboardEvent<HTMLElement>) => {
+    const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button.mrow:not(:disabled)"));
+    if (!items.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const to = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+      : e.key === "ArrowDown" ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1);
+    items[to].focus();
+  };
+
   const openMenu = (e: React.MouseEvent, id: string, taskId: string | null = null, inWorking = false) => {
     e.preventDefault();
     e.stopPropagation();
@@ -765,6 +780,8 @@ export const Sidebar = memo(function Sidebar(props: {
           className="threadmenu"
           data-testid="project-menu"
           role="menu"
+          tabIndex={-1}
+          onKeyDown={menuKeys}
           style={{ left: pmenu.x, top: pmenu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
@@ -828,6 +845,8 @@ export const Sidebar = memo(function Sidebar(props: {
           data-testid="thread-menu"
           ref={menuRef}
           role="menu"
+          tabIndex={-1}
+          onKeyDown={menuKeys}
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
