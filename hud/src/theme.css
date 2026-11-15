@@ -1327,12 +1327,38 @@ button.tree-row.ownerinbox .wstale + .badge.inboxcount { margin-left: 6px; }
 .workingsec .whint ~ .wchip { flex-shrink: 1000; }
 .workingsec button.whint.pending { color: var(--amber); border-color: var(--amber-line); }
 .workingsec button.whint:hover:not(:disabled) { background: var(--bg-3); }
+/* The Inbox row's ✓ (Done in one press): out of the way until the row is hovered or focused. */
+.workingsec .wdone {
+  flex: 0 0 auto; font-size: 11px; line-height: 1; padding: 1px 4px; border: none; background: none;
+  color: var(--text-muted); border-radius: var(--radius-btn); opacity: 0; }
+.workingsec .wrow:hover .wdone, .workingsec .wrow:focus-within .wdone, .workingsec .wdone:focus-visible { opacity: 1; }
+.workingsec .wdone:hover:not([aria-disabled="true"]) { color: var(--accent-hi); background: var(--bg-3); }
+.workingsec .wdone[aria-disabled="true"] { opacity: 0; cursor: default; }
+.workingsec .wrow:hover .wdone[aria-disabled="true"], .workingsec .wdone[aria-disabled="true"]:focus-visible { opacity: 0.35; }
+.workingsec .wdone:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+.workingsec .wdone + .menu { margin-left: 0; }
+/* "Marked Done": bottom left of the window, over the sidebar, under the menus (z 96) and the veil. */
 .workingtoast {
-  display: flex; align-items: center; gap: 8px; margin: 2px 8px; padding: 4px 8px; flex: 0 0 auto;
+  position: fixed; left: 12px; bottom: 12px; z-index: 95; overflow: hidden;
+  display: flex; align-items: center; gap: 8px; padding: 8px 8px 9px 12px;
+  min-width: 220px; max-width: min(360px, calc(100vw - 24px));
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
-  font-size: 12px; color: var(--text); }
-.workingtoast .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workingtoast button { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; color: var(--accent-hi); }
+  box-shadow: var(--shadow-pop); font-size: 12px; color: var(--text);
+  animation: wt-in 160ms ease-out; }
+.workingtoast .wt-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.workingtoast .wt-head { font-weight: 600; }
+.workingtoast .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-muted); font-size: 11px; }
+.workingtoast button { flex: 0 0 auto; }
+.workingtoast .wt-undo { padding: 2px 10px; font-size: 11px; color: var(--accent-hi); }
+.workingtoast .wt-close { padding: 0 4px; border: none; background: none; font-size: 15px; line-height: 1;
+  color: var(--text-muted); border-radius: var(--radius-btn); }
+.workingtoast .wt-close:hover { color: var(--text); background: var(--bg-3); }
+.workingtoast .wt-bar { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+  background: var(--accent); opacity: 0.6; transform-origin: left; animation: wt-count linear forwards; }
+@keyframes wt-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes wt-count { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+@media (prefers-reduced-motion: reduce) { .workingtoast, .workingtoast .wt-bar { animation: none; } }
 .threadmenu button.mrow:disabled { opacity: 0.45; cursor: default; }
 
 /* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
@@ -2541,7 +2567,7 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
    backdrop-filter is missing the fallback is the opaque --bg-2, so nothing
    behind ever shows through. An approval card is repainted in neither colour
    nor meaning: its amber bar, border, glow and buttons are untouched. */
-.explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .vexpop, .vexmenu, .vextip,
+.explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .workingtoast, .vexpop, .vexmenu, .vextip,
 .devserver-prompt, .browser-options, .remotecontext, .remotepicker, .auth, .review .review-confirm,
 .settings-page, .block.err, .sa-stop-error {
   background: var(--glass-float);
@@ -2550,7 +2576,7 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 }
 .block.err { background: linear-gradient(var(--red-soft), var(--red-soft)), var(--glass-float); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .vexpop, .vexmenu, .vextip,
+  .explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .workingtoast, .vexpop, .vexmenu, .vextip,
   .devserver-prompt, .browser-options, .remotecontext, .remotepicker, .auth, .review .review-confirm,
   .settings-page, .block.err, .sa-stop-error { background: var(--bg-2); }
 }

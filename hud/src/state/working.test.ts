@@ -137,7 +137,7 @@ describe("WorkingStore publishing", () => {
 
 describe("WorkingStore Done and Undo", () => {
   it("Done posts the seq the entry was drawn with, then reads again", async () => {
-    const done = vi.fn(async () => ({ thread_id: "t1", done: true, token: "tok123", undo_s: 10 }));
+    const done = vi.fn(async () => ({ thread_id: "t1", done: true, token: "tok123", undo_s: 20 }));
     const fetch = vi.fn(async () => body([entry("t1", 7)]));
     const store = new WorkingStore(deps({ fetch, done }));
     await store.refresh();

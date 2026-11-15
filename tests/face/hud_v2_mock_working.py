@@ -117,7 +117,7 @@ def handle(h, mock, method: str, path: str) -> bool:
                 s["entries"] = [e for e in s["entries"] if e["thread_id"] != thread_id]
                 s["undone"][thread_id] = current
                 changed(mock)
-                h._json({"thread_id": thread_id, "done": True, "token": f"tok-{thread_id}", "undo_s": 10,
+                h._json({"thread_id": thread_id, "done": True, "token": f"tok-{thread_id}", "undo_s": 20,
                          "entry": {"thread_id": thread_id, "reason": "done"}})
             return True
         held = s["undone"].get(thread_id)

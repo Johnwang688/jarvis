@@ -18,7 +18,7 @@ revision 2, D-1 to D-11, §4 and §5's WS-1 test list).
   record (the broker announces it only with `inbox_changed`), during a
   Done's check or just after it, brings its thread back in.
 * **Done and Undo (D-4)**: a stale or bogus `seq` is a 409 with the current
-  entry, a repeated Done is a 409, an old token or one after the 10 s
+  entry, a repeated Done is a 409, an old token or one after the 20 s
   monotonic deadline is a 409, `seen_thread` is called once, activity
   during the check refuses the write, and new activity brings it back.
 * **Lifecycle (D-8)**: archive, restore, delete, move, rename, and a
@@ -262,7 +262,7 @@ class Contract(unittest.TestCase):
         self.assertEqual((working.NAME, working.IDLE_DAYS_DEFAULT, working.IDLE_DAYS_MIN, working.IDLE_DAYS_MAX,
                           working.FIRST_SWEEP_S, working.SWEEP_S, working.UNDO_S, working.BLOCKING_MAX_RANK,
                           working.COUNTED_MAX_RANK, working.PENDING_MAX_RANK),
-                         ("working.json", 3, 1, 30, 300.0, 3600.0, 10.0, 4, 5, 2))
+                         ("working.json", 3, 1, 30, 300.0, 3600.0, 20.0, 4, 5, 2))
         self.assertEqual(working.ACTIVITY_KINDS, frozenset({
             "user_message", "turn_started", "turn_finished", "error", "approval_requested", "question",
             "question_answered", "relay_in", "relay_delivered", "relay_reply", "decision_posted",
@@ -795,7 +795,7 @@ class DoneUndo(Base):
         self.assertEqual(seen, [(tid, {"only_turn": "t1"})], "seen_thread once, for the turn it saw")
         self.assertEqual(self.changes, [CHANGED])
         self.assertEqual((got["done"], got["undo_s"], got["entry"]["in"], got["entry"]["reason"]),
-                         (True, 10.0, False, "done"))
+                         (True, 20.0, False, "done"))
         self.assertRegex(got["token"], r"^[A-Za-z0-9_-]{16,64}$")
         self.assertNotIn("done_token", got["entry"])
         self.assertEqual(self.ws.entry(tid)["done_seq"], 2)
@@ -850,7 +850,10 @@ class DoneUndo(Base):
     def test_undo_after_the_deadline_and_after_a_restart(self):
         tid = self.member()
         token = self.done(tid)["token"]
-        self.clock.mono_now += 9.99
+        # Past the HUD's 15 s toast, an Undo still lands (the toast's last moment is in time).
+        self.clock.mono_now += 15.5
+        self.assertTrue(self.ws.mono() < self.ws._undo[tid][1])
+        self.clock.mono_now += 4.49
         self.assertTrue(self.ws.mono() < self.ws._undo[tid][1])
         self.clock.mono_now += 0.01
         self.assertEqual(self.call("POST", f"/working/{tid}/undo", {"token": token}, 409)["error"],

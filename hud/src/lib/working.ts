@@ -130,8 +130,9 @@ export function saveSectionOpen(open: boolean): void {
   }
 }
 
-/** How long the Undo toast stays (the daemon's own deadline is 10 s). */
-export const UNDO_TOAST_MS = 5_000;
+/** How long the "Marked Done" toast stays (owner, 2026-11-15). The daemon's own Undo deadline is
+ * 20 s (`working.UNDO_S`), so an Undo pressed at the toast's last moment still lands. */
+export const UNDO_TOAST_MS = 15_000;
 
 /** WS-4: the idle limit, as `GET /working/settings` answers it. The bounds are the daemon's. */
 export interface WorkingSettings { idle_days: number; min: number; max: number; default: number }
