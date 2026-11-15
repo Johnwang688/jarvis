@@ -31,6 +31,12 @@ What it pins, one section each (each names the mutation it is meant to catch):
             it and posts no Undo; an ineligible row's ✓ posts nothing, opens
             nothing and names the reason [✓ opens the row; toast in the sidebar
             flow; × posts an Undo]
+  needsdone (2026-11-15) the Needs you rows fold on their own chevron (it
+            lasts across a reload; the line, its count and the threads stay);
+            a finished row's ✓ posts exactly {dismiss: true}, shows "Marked
+            Done", the row leaves once hidden, Undo posts {clear: true} and it
+            returns; an approval's ✓ posts nothing and says why [no fold; hidden
+            rows drawn; rank 1 to 4 offered]
   conflict  a 409 (the entry moved on) re-reads silently: no toast, no error
             note, the row redrawn with its new seq [error toast on 409]
   live      a `working_changed` event re-reads the list, once [no refresh]
@@ -431,6 +437,78 @@ def _quickdone_checks(page, mock, check, until):
     time.sleep(0.3)
     check("and pressing it posts nothing and opens nothing",
           len(_st(mock)["done_posts"]) == posts and _chat(page, 1)["threadId"] == before and toast.count() == 0)
+
+
+NEEDS_KEY = "jarvis.hud.workingNeeds"
+
+
+def _needsdone_checks(page, mock, check, until):
+    needs = [_need_row("appr:a1", "approval", 1, "Codex asks to use run_command"),
+             _need_row("pr:r1", "pr", 5, "PR #378 is ready to merge"),
+             _need_row("missed:m1", "missed", 8, "Denied while you were away: rm -rf build")]
+    ib = mock_inbox.state(mock)
+    ib["marks"] = {}
+    ib["mark_posts"] = []
+    page.evaluate("(k) => localStorage.removeItem(k)", NEEDS_KEY)
+    _open(page, mock, until, needs)
+    ib["rows"] = [dict(r) for r in needs]           # the inbox the mark route judges against
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 3, timeout=4)
+    fold = page.locator('[data-testid="working-needs-fold"]')
+    check("the Needs you line has its own fold, open by default",
+          fold.count() == 1 and fold.get_attribute("aria-expanded") == "true"
+          and fold.get_attribute("aria-controls") == "working-needs")
+    fold.click()
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 0, timeout=2)
+    check("folding hides the rows and keeps the Needs you line, its count and the threads [mutation: no fold]",
+          page.locator('[data-testid="working-need"]').count() == 0 and fold.get_attribute("aria-expanded") == "false"
+          and page.locator('[data-testid="working-needs-line"]').count() == 1 and len(_rows(page)) == 6)
+    check("and opens nothing", page.locator('[data-testid="inbox-view"]').count() == 0)
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-fold"]').count() == 1, timeout=4)
+    check("the fold lasts across a reload [mutation: no persistence]",
+          page.locator('[data-testid="working-need"]').count() == 0
+          and page.locator('[data-testid="working-needs-fold"]').get_attribute("aria-expanded") == "false")
+    page.locator('[data-testid="working-needs-fold"]').click()
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 3, timeout=2)
+    check("and unfolds again", page.locator('[data-testid="working-need"]').count() == 3)
+    # A finished row's ✓: the inbox's own dismissal, then the same toast.
+    row = page.locator('[data-testid="working-need"][data-id="missed:m1"]')
+    tick = page.locator('[data-testid="working-need-done-missed:m1"]')
+    row.hover()
+    check("a finished row has a ✓ that shows on hover",
+          float(tick.evaluate("e => getComputedStyle(e).opacity")) == 1 and tick.get_attribute("aria-disabled") is None)
+    tick.click()
+    until(lambda: bool(ib["mark_posts"]), timeout=3)
+    check("one press posts exactly {dismiss: true} for that row [mutation: snooze, or the wrong id]",
+          [(i, b) for _, i, b in ib["mark_posts"]] == [("missed:m1", {"dismiss": True})], str(ib["mark_posts"]))
+    toast = page.locator('[data-testid="working-toast"]')
+    until(lambda: toast.count() == 1, timeout=3)
+    check("the Marked Done toast names the row", "Marked Done" in toast.inner_text() and "Denied while" in toast.inner_text(),
+          toast.inner_text())
+    check("and nothing opened (the click did not reach the row)", page.locator('[data-testid="inbox-view"]').count() == 0)
+    until(lambda: page.locator('[data-testid="working-need"][data-id="missed:m1"]').count() == 0, timeout=3)
+    check("the row leaves the sidebar once the daemon says it is hidden [mutation: hidden rows drawn]",
+          page.locator('[data-testid="working-need"]').count() == 2)
+    _shot(page, "6-row-marked-done")
+    page.locator('[data-testid="working-undo"]').click()
+    until(lambda: len(ib["mark_posts"]) == 2, timeout=3)
+    check("Undo posts exactly {clear: true} for that row",
+          (ib["mark_posts"][1][1], ib["mark_posts"][1][2]) == ("missed:m1", {"clear": True}), str(ib["mark_posts"]))
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 3, timeout=3)
+    check("and the row comes back", page.locator('[data-testid="working-need"][data-id="missed:m1"]').count() == 1)
+    # A PR row may be marked done too; an approval may not.
+    check("a PR row's ✓ is enabled", page.locator('[data-testid="working-need-done-pr:r1"]').get_attribute("aria-disabled") is None)
+    appr = page.locator('[data-testid="working-need-done-appr:a1"]')
+    check("an approval's ✓ says it still waits on the owner [mutation: rank 1 to 4 offered]",
+          appr.get_attribute("aria-disabled") == "true" and "waits on you" in (appr.get_attribute("title") or ""),
+          appr.get_attribute("title") or "")
+    page.locator('[data-testid="working-need"][data-id="appr:a1"]').hover()
+    appr.click(force=True)
+    time.sleep(0.3)
+    check("and pressing it posts nothing and opens nothing",
+          len(ib["mark_posts"]) == 2 and page.locator('[data-testid="inbox-view"]').count() == 0)
+    page.evaluate("(k) => localStorage.removeItem(k)", NEEDS_KEY)
+    ib["marks"] = {}
 
 
 def _conflict_checks(page, mock, check, until):
@@ -1038,7 +1116,7 @@ def _menukeys_checks(page, mock, check, until):
     page.keyboard.press("Escape")
 
 
-SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _quickdone_checks,
+SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _quickdone_checks, _needsdone_checks,
             _conflict_checks,
             _live_checks, _empty_checks, _stale_checks, _inbox_checks, _line_checks, _event_checks, _keys_checks,
             _hint_checks, _page_checks, _settings_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)

@@ -8,7 +8,9 @@ apply).
 The world's `working` section (`state(mock)`):
   - `entries`: what `GET /working` serves as `entries`, in the daemon's shape
     (`thread_id, project_id, since, last, seq, status, rows, why_not`);
-  - `needs_you`: the rows served under `needs_you`; `count`, `pending`;
+  - `needs_you`: the rows served under `needs_you`, each with `markable` and,
+    once the owner marked it through the inbox mock's mark route, `hidden`;
+    `count`, `pending`;
   - `fail`: (status, sentence) to answer `GET /working` with instead (404 for
     an older daemon); `reads`: every `GET /working` served;
   - `done_posts` / `undo_posts`: every Done and Undo that got through the
@@ -30,8 +32,10 @@ from __future__ import annotations
 from urllib.parse import unquote
 
 try:
+    from tests.face import hud_v2_mock_inbox as mock_inbox
     from tests.face import hud_v2_mock_subagents as mock_subagents
 except ImportError:  # run from tests/face
+    import hud_v2_mock_inbox as mock_inbox  # type: ignore[no-redef]
     import hud_v2_mock_subagents as mock_subagents  # type: ignore[no-redef]
 
 
@@ -69,7 +73,13 @@ def handle(h, mock, method: str, path: str) -> bool:
             status, sentence = s["fail"]
             h._err(status, sentence)
             return True
-        h._json({"entries": s["entries"], "needs_you": s["needs_you"], "count": s["count"],
+        # `inbox.rows(marks="flag")`, as the daemon reads it: each row says whether it may be hidden
+        # (`markable`), and one the owner marked (the inbox mock's `marks`) carries `hidden`.
+        marks = mock.world.get("inbox", {}).get("marks", {})
+        needs = [{**r, "markable": mock_inbox.markable(r),
+                  **({"hidden": marks[r["id"]]} if mock_inbox.markable(r) and r.get("id") in marks else {})}
+                 for r in s["needs_you"]]
+        h._json({"entries": s["entries"], "needs_you": needs, "count": s["count"],
                  "pending": s["pending"]})
         return True
     if parts == ["working", "settings"] and method in ("GET", "POST"):

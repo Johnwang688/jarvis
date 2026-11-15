@@ -5,7 +5,7 @@
 //
 // Everything a row carries is text. A title or a row's words are never HTML.
 
-import { isHidden, oneLine, parseRow, type InboxRow } from "./inbox";
+import { canMark, isHidden, oneLine, parseRow, type InboxRow } from "./inbox";
 import type { ActivityStatus, ActivityView } from "./activity";
 
 export interface WorkingEntry {
@@ -128,6 +128,34 @@ export function saveSectionOpen(open: boolean): void {
   } catch {
     /* no storage here: the choice just does not last */
   }
+}
+
+/** The Needs you group's own fold (owner, 2026-11-15): open unless the owner folded it. Lasts like the section's. */
+const NEEDS_KEY = "jarvis.hud.workingNeeds";
+
+export function loadNeedsOpen(): boolean {
+  try {
+    return localStorage.getItem(NEEDS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function saveNeedsOpen(open: boolean): void {
+  try {
+    localStorage.setItem(NEEDS_KEY, open ? "1" : "0");
+  } catch {
+    /* no storage here: the choice just does not last */
+  }
+}
+
+/** Why a Needs you row's ✓ cannot mark it done (dismiss it), or null when it can. The daemon judges
+ * again (IN-8): a live approval, a question, a proposal or a blocked task (ranks 1 to 4), a deferral
+ * and "PR list unavailable" are never hidden. */
+export function needDoneBlock(row: InboxRow): string | null {
+  if (canMark(row)) return null;
+  if (row.rank <= 4) return "it still waits on you: answer it on the Needs you page";
+  return "this one cannot be hidden";
 }
 
 /** How long the "Marked Done" toast stays (owner, 2026-11-15). The daemon's own Undo deadline is

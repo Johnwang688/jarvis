@@ -2377,6 +2377,15 @@ header: its click folds the list, and the page opens from the "Needs you" line.
 - **Needs you group.** The `needs_you` rows as a kind word (chosen in `lib/working.ts`, never the
   served text) and the row's title; amber only for rank 1 and 2. A click opens today's Inbox page
   (where answering happens), not the row's thread.
+  Since 2026-11-15 (owner, "declutter"): the group folds on its own chevron in the Needs you line's
+  indent (`jarvis.hud.workingNeeds`, lasts like the section's fold; the line, its count and the
+  threads stay). A row the owner has hidden (`isHidden`: dismissed or snoozed) is not drawn here; the
+  Needs you page's Show hidden still lists it. Each row has a ✓ (hover or focus) that marks it done
+  with the inbox's own dismissal, `POST /inbox/<id>/mark {dismiss: true}`, then the same "Marked
+  Done" toast, whose Undo posts `{clear: true}`. It is offered only where `canMark` holds (ranks
+  5 to 8, never a deferral or "PR list unavailable"); otherwise it is `aria-disabled`, posts nothing
+  and says why (`needDoneBlock`). The daemon judges the rank again (IN-8), and a 409 or any other
+  failure is a short note. A dismissed PR row comes back on a new head SHA (`material_key`).
 - **Done.** The thread menu opened from an Inbox row also offers Done: disabled with the entry's
   `why_not` while it is ineligible. Since 2026-11-15 (owner) each Inbox row also has a ✓, shown on
   hover or focus, that does the same in one press; while ineligible it is `aria-disabled` (not
