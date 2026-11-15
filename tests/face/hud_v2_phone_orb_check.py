@@ -42,7 +42,9 @@ def run(browser, check):
                 if state["mode"] == "offline":
                     return route.abort("internetdisconnected")
                 if state["mode"] == "unreachable":
-                    return route.fulfill(status=503, json={"error": "unavailable"})
+                    # The proxy's own page (`tailscale serve` with nothing behind it), not the daemon's
+                    # `{"error": ...}`: a daemon 503 with its words is a refusal, never "unreachable".
+                    return route.fulfill(status=503, content_type="text/plain", body="Service Unavailable")
                 if state["mode"] == "signed-out":
                     return route.fulfill(status=401, json={"error": "signed out"})
                 if path == "/m/api/me":
