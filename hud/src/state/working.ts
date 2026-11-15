@@ -12,7 +12,7 @@
 import { useSyncExternalStore } from "react";
 import { api, ApiError } from "../api";
 import { parseWorking, type WorkingEntry } from "../lib/working";
-import type { InboxRow } from "../lib/inbox";
+import type { InboxRow, MarkBody } from "../lib/inbox";
 
 export type WorkingStatus = "loading" | "ready" | "unavailable" | "error";
 
@@ -36,10 +36,15 @@ export type DoneResult =
 
 export type UndoResult = { kind: "undone" } | { kind: "stale" } | { kind: "error"; message: string };
 
+/** A Needs you row's ✓: dismissed, or refused (a 409 is the daemon's IN-8 rule or a row that moved on). */
+export type RowDoneResult = { kind: "done" } | { kind: "refused"; message: string } | { kind: "error"; message: string };
+
 export interface WorkingDeps {
   fetch: () => Promise<unknown>;
   done: (id: string, seq: number) => Promise<unknown>;
   undo: (id: string, token: string) => Promise<unknown>;
+  /** `POST /inbox/<id>/mark`: a Needs you row's ✓ dismisses it, its Undo clears that. */
+  mark: (id: string, body: MarkBody) => Promise<unknown>;
 }
 
 const EMPTY: WorkingSnapshot = {
@@ -158,12 +163,38 @@ export class WorkingStore {
       return { kind: "error", message: messageOf(error) };
     }
   };
+
+  /** Done for a Needs you row: the inbox's own dismissal (IN-7), judged again by the daemon (ranks 5 to 8). */
+  dismissRow = async (rowId: string): Promise<RowDoneResult> => {
+    try {
+      await this.deps.mark(rowId, { dismiss: true });
+      void this.refresh();
+      return { kind: "done" };
+    } catch (error) {
+      void this.refresh();
+      if (error instanceof ApiError && error.status === 409) return { kind: "refused", message: messageOf(error) };
+      return { kind: "error", message: messageOf(error) };
+    }
+  };
+
+  /** The Undo of a row's Done: the inbox's own `{clear: true}`. */
+  undismissRow = async (rowId: string): Promise<UndoResult> => {
+    try {
+      await this.deps.mark(rowId, { clear: true });
+      void this.refresh();
+      return { kind: "undone" };
+    } catch (error) {
+      void this.refresh();
+      return { kind: "error", message: messageOf(error) };
+    }
+  };
 }
 
 export const working = new WorkingStore({
   fetch: () => api.getWorking(),
   done: (id, seq) => api.workingDone(id, seq),
   undo: (id, token) => api.workingUndo(id, token),
+  mark: (id, body) => api.markInbox(id, body),
 });
 
 export function useWorking(store: WorkingStore = working): WorkingSnapshot {

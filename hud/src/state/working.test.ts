@@ -20,7 +20,7 @@ function deferred<T>() {
 }
 
 const deps = (over: Partial<WorkingDeps> = {}): WorkingDeps => ({
-  fetch: async () => body(), done: async () => ({}), undo: async () => ({}), ...over,
+  fetch: async () => body(), done: async () => ({}), undo: async () => ({}), mark: async () => ({}), ...over,
 });
 
 describe("WorkingStore reads", () => {
@@ -188,5 +188,34 @@ describe("WorkingStore Done and Undo", () => {
     expect(await late.undo("t1", "tok")).toEqual({ kind: "stale" });
     const bad = new WorkingStore(deps({ undo: async () => { throw new ApiError(500, "down"); } }));
     expect(await bad.undo("t1", "tok")).toEqual({ kind: "error", message: "down" });
+  });
+});
+
+describe("WorkingStore Needs you rows", () => {
+  it("a row's Done posts exactly {dismiss: true} for that id, then reads again", async () => {
+    const mark = vi.fn(async () => ({}));
+    const fetch = vi.fn(async () => body());
+    const store = new WorkingStore(deps({ fetch, mark }));
+    expect(await store.dismissRow("missed:a/b")).toEqual({ kind: "done" });
+    expect(mark).toHaveBeenCalledWith("missed:a/b", { dismiss: true });
+    expect(fetch).toHaveBeenCalled();
+  });
+
+  it("a 409 (the daemon's rank rule, or a row that moved on) is refused with its sentence and reads again", async () => {
+    const fetch = vi.fn(async () => body());
+    const store = new WorkingStore(deps({ fetch, mark: async () => { throw new ApiError(409, "cannot be dismissed"); } }));
+    expect(await store.dismissRow("ask:x")).toEqual({ kind: "refused", message: "cannot be dismissed" });
+    expect(fetch).toHaveBeenCalled();
+    const bad = new WorkingStore(deps({ mark: async () => { throw new ApiError(503, "down"); } }));
+    expect(await bad.dismissRow("pr:r1")).toEqual({ kind: "error", message: "down" });
+  });
+
+  it("Undo posts exactly {clear: true} for that id", async () => {
+    const mark = vi.fn(async () => ({}));
+    const store = new WorkingStore(deps({ mark }));
+    expect(await store.undismissRow("pr:r1")).toEqual({ kind: "undone" });
+    expect(mark).toHaveBeenCalledWith("pr:r1", { clear: true });
+    const bad = new WorkingStore(deps({ mark: async () => { throw new ApiError(500, "down"); } }));
+    expect(await bad.undismissRow("pr:r1")).toEqual({ kind: "error", message: "down" });
   });
 });

@@ -13,7 +13,10 @@
 //     count (the row's own) and opens the Needs you page;
 //   - a list with a height of its own (it scrolls, and never takes the project tree's room):
 //     - the Needs-you rows that have no thread entry to sit on, as a kind word and a title (text, never
-//       HTML); a click opens the Needs you page, where answering happens;
+//       HTML); a click opens the Needs you page, where answering happens. The group folds on its own
+//       chevron, beside the Needs you line (the choice lasts). Each row has a ✓ (on hover or focus) that
+//       marks it done, the inbox's dismissal: only for what may be hidden (ranks 5 to 8), else it says
+//       why. A row already hidden is not drawn here (the Needs you page's Show hidden still lists it);
 //     - one row per thread, ordered by label then newest first: the same dot
 //       as its row in the project tree (the Sidebar's activity store), its
 //       title, a hint naming what waits on it (a click opens the page at that thread), and a chip
@@ -23,14 +26,17 @@
 //       says why.
 // A row that waits on a thread is drawn on that thread only, never also in the Needs-you rows.
 
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Project, Thread } from "../types";
 import type { ActivityView } from "../lib/activity";
-import type { InboxRow } from "../lib/inbox";
+import { isHidden, type InboxRow } from "../lib/inbox";
 import type { PaneNo } from "../lib/workspace";
 import { threadLabel } from "../lib/threadTitle";
 import { threadTooltip } from "../lib/threadmodel";
-import { LABEL_TEXT, attachedHint, kindLabel, orderEntries, rowPending, type WorkingEntry } from "../lib/working";
+import {
+  LABEL_TEXT, attachedHint, kindLabel, loadNeedsOpen, needDoneBlock, orderEntries, rowPending, saveNeedsOpen,
+  type WorkingEntry,
+} from "../lib/working";
 import { useWorking } from "../state/working";
 import { Dot } from "./ActivityDot";
 import { HoverTitle } from "./HoverTitle";
@@ -56,6 +62,8 @@ export interface WorkingSectionProps {
   onMenu: (e: React.MouseEvent, id: string) => void;
   /** The row's ✓: Done for that thread (the Sidebar posts it and shows the Undo toast). */
   onDone: (id: string) => void;
+  /** A Needs you row's ✓: Done for that row (the inbox's dismissal; the Sidebar posts it and shows the toast). */
+  onDoneRow: (row: InboxRow) => void;
   onDragStart: (e: React.DragEvent, id: string) => void;
   onDragEnd: () => void;
 }
@@ -110,7 +118,14 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
     .filter((x): x is { e: WorkingEntry; t: Thread } => !!x.t);
   // A row that waits on a thread drawn here is that thread's hint, never also a line in this group.
   const drawn = new Set(rows.map((x) => x.t.id));
-  const needs = p.needsYou.filter((r) => !(r.thread_id && drawn.has(r.thread_id)));
+  // A row the owner has hidden (marked done, dismissed, snoozed) is not drawn: the Needs you page still lists it.
+  const needs = p.needsYou.filter((r) => !isHidden(r) && !(r.thread_id && drawn.has(r.thread_id)));
+  const [needsOpen, setNeedsOpen] = useState<boolean>(() => loadNeedsOpen());
+  const toggleNeeds = () =>
+    setNeedsOpen((o) => {
+      saveNeedsOpen(!o);
+      return !o;
+    });
   // null is "not read": a mark, never a zero (0 is only ever the daemon's answer).
   const known = p.inboxCount !== null;
   const waiting = p.inboxCount ?? 0;
@@ -119,6 +134,21 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
       <div className="workingsec" id={SECTION_ID} data-testid="working-section" data-open={p.open ? "true" : "false"}
            hidden={!p.open}>
         {p.open ? (
+          <div className="wneedshead">
+          {needs.length ? (
+            <button
+              type="button"
+              className="wneedsfold"
+              data-testid="working-needs-fold"
+              aria-expanded={needsOpen}
+              aria-controls="working-needs"
+              aria-label={needsOpen ? "Fold the Needs you rows" : "Unfold the Needs you rows"}
+              title={needsOpen ? "Fold these rows" : `Show ${needs.length} row${needs.length > 1 ? "s" : ""}`}
+              onClick={toggleNeeds}
+            >
+              {needsOpen ? "▾" : "▸"}
+            </button>
+          ) : null}
           <button
             type="button"
             className={"tree-row indent-1 wneedsline" + (p.pending ? " pending" : "") + (known && !waiting ? " quiet0" : "")
@@ -131,15 +161,18 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
           >
             <span className="nm">Needs you<span className="wcount" data-testid="working-needs-count">{` · ${known ? waiting : "–"}`}</span></span>
           </button>
+          </div>
         ) : null}
         {p.open && !hasList ? (
           <div className="wnone" data-testid="working-empty">Nothing in progress</div>
         ) : null}
         {p.open && hasList ? (
           <div className="wlist" data-testid="working-list">
-            {needs.length ? (
-              <div className="wneeds" data-testid="working-needs">
-                {needs.map((r) => (
+            {needs.length && needsOpen ? (
+              <div className="wneeds" id="working-needs" data-testid="working-needs">
+                {needs.map((r) => {
+                  const block = needDoneBlock(r);
+                  return (
                   <div
                     key={r.id}
                     className={"tree-row indent-1 wrow wneed" + (rowPending(r) ? " pending" : "")}
@@ -152,8 +185,24 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
                     <button type="button" className="wopen nm" onClick={(e) => { e.stopPropagation(); p.onOpenInbox(); }}>
                       {r.title}
                     </button>
+                    {/* aria-disabled, as on a thread row: the click must not fall through to the row. */}
+                    <button
+                      type="button"
+                      className="wdone"
+                      data-testid={`working-need-done-${r.id}`}
+                      aria-disabled={block ? "true" : undefined}
+                      title={block ? `Can't mark done: ${block}` : "Mark done (the Needs you page's Show hidden still lists it)"}
+                      aria-label={block ? `${r.title}: can't mark done, ${block}` : `Mark ${r.title} done`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!block) p.onDoneRow(r);
+                      }}
+                    >
+                      ✓
+                    </button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : null}
             {rows.map(({ e, t }) => {

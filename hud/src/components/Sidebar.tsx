@@ -68,6 +68,7 @@ import { Dot } from "./ActivityDot";
 import { WorkingBlock, WorkingDoneItem } from "./WorkingSection";
 import { working } from "../state/working";
 import { UNDO_TOAST_MS, loadSectionOpen, saveSectionOpen } from "../lib/working";
+import type { InboxRow } from "../lib/inbox";
 
 interface ProjectMenuAt {
   projectId: string;
@@ -170,7 +171,10 @@ export const Sidebar = memo(function Sidebar(props: {
       return !o;
     });
   // Done's "Marked Done" toast: the entry's title and the daemon's token, for UNDO_TOAST_MS.
-  const [undo, setUndo] = useState<{ id: string; token: string; title: string } | null>(null);
+  // A thread's Undo carries the daemon's token; a Needs you row's is the inbox's `{clear: true}` (no token).
+  const [undo, setUndo] = useState<
+    { kind: "thread"; id: string; token: string; title: string } | { kind: "row"; id: string; title: string } | null
+  >(null);
   // Projects whose full chat list the owner asked for (remembered, not stored on the server).
   const [showAll, setShowAll] = useState<Record<string, boolean>>(() => loadShowMore());
   const toggleShowAll = (id: string) =>
@@ -335,13 +339,20 @@ export const Sidebar = memo(function Sidebar(props: {
     const title = thread ? threadLabel(thread).text : "Thread";
     void working.done(id).then((r) => {
       // A 409 is the list having moved on: it is read again and redrawn, with no message.
-      if (r.kind === "done") setUndo({ id, token: r.token, title });
+      if (r.kind === "done") setUndo({ kind: "thread", id, token: r.token, title });
       else if (r.kind === "error") setNote({ text: `Could not mark it done: ${r.message}`, error: true });
     });
   };
-  const undoDone = (u: { id: string; token: string }) => {
+  const markRowDone = (row: InboxRow) => {
+    void working.dismissRow(row.id).then((r) => {
+      if (r.kind === "done") setUndo({ kind: "row", id: row.id, title: row.title });
+      else setNote({ text: `Could not mark it done: ${r.message}`, error: true });
+    });
+  };
+  const undoDone = (u: NonNullable<typeof undo>) => {
     setUndo(null);
-    void working.undo(u.id, u.token).then((r) => {
+    const go = u.kind === "thread" ? working.undo(u.id, u.token) : working.undismissRow(u.id);
+    void go.then((r) => {
       if (r.kind === "error") setNote({ text: `Could not undo: ${r.message}`, error: true });
     });
   };
@@ -396,6 +407,7 @@ export const Sidebar = memo(function Sidebar(props: {
           onOpenInbox={props.onOpenInbox}
           onMenu={(e, id) => openMenu(e, id, null, true)}
           onDone={markDone}
+          onDoneRow={markRowDone}
           onDragStart={(e, id) => {
             e.dataTransfer.setData("text/plain", id);
             e.dataTransfer.effectAllowed = "move";
@@ -449,7 +461,8 @@ export const Sidebar = memo(function Sidebar(props: {
       {/* "Marked Done", bottom left of the window, for UNDO_TOAST_MS or until its × (owner, 2026-11-15).
           Keyed by the token, so a second Done restarts the countdown bar. */}
       {undo ? (
-        <div className="workingtoast" key={undo.token} data-testid="working-toast" role="status">
+        <div className="workingtoast" key={undo.kind === "thread" ? undo.token : `row:${undo.id}`}
+             data-testid="working-toast" data-kind={undo.kind} role="status">
           <span className="wt-text">
             <span className="wt-head">Marked Done</span>
             <span className="nm" data-testid="working-toast-title" title={undo.title}>{undo.title}</span>

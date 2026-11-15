@@ -1299,6 +1299,16 @@ button.tree-row.ownerinbox .wstale + .badge.inboxcount { margin-left: 6px; }
 .workingsec button.wneedsline .wcount { font: 11px var(--mono); font-variant-numeric: tabular-nums; word-spacing: normal; color: var(--text-muted); }
 .workingsec button.wneedsline.pending .wcount { color: var(--amber); }
 .workingsec button.wneedsline.quiet0 { color: var(--text-muted); }
+/* The Needs you line with its own fold (owner, 2026-11-15): the chevron sits in the indent, so the line's
+   text does not move whether there are rows to fold or not. */
+.workingsec .wneedshead { position: relative; display: flex; }
+.workingsec .wneedshead > button.wneedsline { flex: 1 1 auto; min-width: 0; }
+.workingsec button.wneedsfold {
+  position: absolute; left: 8px; top: 50%; transform: translateY(-50%); z-index: 1;
+  width: 16px; height: 18px; padding: 0; border: 0; background: none; border-radius: var(--radius-btn);
+  font: 10px var(--mono); color: var(--text-muted); word-spacing: normal; }
+.workingsec button.wneedsfold:hover { color: var(--text); background: var(--bg-3); }
+.workingsec button.wneedsfold:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
 .workingsec .wnone { padding: 2px 12px 2px 26px; font-size: 11px; color: var(--text-muted); }
 .workingsec .whead {
   padding: 3px 12px 1px 26px; font: 600 9px var(--mono); letter-spacing: 0.06em;
