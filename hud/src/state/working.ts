@@ -23,6 +23,9 @@ export interface WorkingSnapshot {
   pending: boolean;
   status: WorkingStatus;
   message: string;
+  /** A read has landed (and the daemon has not since said it has no list): what is drawn is the daemon's,
+   * possibly stale after a failed read. False until then, whatever the error. */
+  loaded: boolean;
 }
 
 export type DoneResult =
@@ -40,7 +43,7 @@ export interface WorkingDeps {
 }
 
 const EMPTY: WorkingSnapshot = {
-  entries: [], needsYou: [], count: 0, pending: false, status: "loading", message: "",
+  entries: [], needsYou: [], count: 0, pending: false, status: "loading", message: "", loaded: false,
 };
 
 const messageOf = (e: unknown) => (e instanceof Error && e.message ? e.message : "the daemon could not be reached");
@@ -100,7 +103,7 @@ export class WorkingStore {
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 0;
       const gone = status === 404 || status === 403;
-      this.set({ status: gone ? "unavailable" : "error", message: messageOf(error), ...(gone ? { entries: [], needsYou: [], count: 0, pending: false } : {}) });
+      this.set({ status: gone ? "unavailable" : "error", message: messageOf(error), ...(gone ? { entries: [], needsYou: [], count: 0, pending: false, loaded: false } : {}) });
       return;
     }
     const view = parseWorking(raw);
@@ -109,7 +112,7 @@ export class WorkingStore {
       return;
     }
     this.set({ entries: view.entries, needsYou: view.needs_you, count: view.count, pending: view.pending,
-               status: "ready", message: "" });
+               status: "ready", message: "", loaded: true });
   }
 
   /** Done for one entry, with the `seq` this window drew it with. A 409 is not

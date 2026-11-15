@@ -42,8 +42,6 @@ export interface WorkingSectionProps {
   shown: boolean;
   entries: WorkingEntry[];
   needsYou: InboxRow[];
-  /** Whether the last read failed (the last list is kept and drawn). */
-  stale: boolean;
   threads: Thread[];
   projects: Project[];
   activity: ActivityView;
@@ -66,7 +64,7 @@ export function InboxHeadRow(p: {
   /** Whether there is a list to fold; when not, a click opens the Needs you page. */
   foldable: boolean; open: boolean; onToggle: () => void; onOpen: () => void;
 }) {
-  const label = p.count ? `Inbox, ${p.count} waiting on you` : "Inbox";
+  const label = p.count ? `Inbox, ${p.count} waiting on you` : "Inbox";   // null (unread) and 0 both say nothing
   return (
     <button
       type="button"
@@ -109,26 +107,25 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
   // A row that waits on a thread drawn here is that thread's hint, never also a line in this group.
   const drawn = new Set(rows.map((x) => x.t.id));
   const needs = p.needsYou.filter((r) => !(r.thread_id && drawn.has(r.thread_id)));
+  // null is "not read": a mark, never a zero (0 is only ever the daemon's answer).
+  const known = p.inboxCount !== null;
   const waiting = p.inboxCount ?? 0;
   const hasList = !!rows.length || !!needs.length;
   return (
-    <>
-      <InboxHeadRow count={p.inboxCount} pending={p.pending} shown={p.shown} stale={p.stale}
-                    foldable open={p.open} onToggle={p.onToggle} onOpen={() => p.onOpenInbox()} />
       <div className="workingsec" id={SECTION_ID} data-testid="working-section" data-open={p.open ? "true" : "false"}
            hidden={!p.open}>
         {p.open ? (
           <button
             type="button"
-            className={"tree-row indent-1 wneedsline" + (p.pending ? " pending" : "") + (waiting ? "" : " quiet0")
+            className={"tree-row indent-1 wneedsline" + (p.pending ? " pending" : "") + (known && !waiting ? " quiet0" : "")
               + (p.shown ? " sel" : "")}
             data-testid="working-needs-line"
-            data-count={waiting}
-            aria-label={waiting ? `Needs you, ${waiting} waiting` : "Needs you, nothing waiting"}
+            data-count={known ? waiting : "unknown"}
+            aria-label={!known ? "Needs you, count not known yet" : waiting ? `Needs you, ${waiting} waiting` : "Needs you, nothing waiting"}
             title="Open the Needs you page"
             onClick={() => p.onOpenInbox()}
           >
-            <span className="nm">Needs you<span className="wcount" data-testid="working-needs-count">{` · ${waiting}`}</span></span>
+            <span className="nm">Needs you<span className="wcount" data-testid="working-needs-count">{` · ${known ? waiting : "–"}`}</span></span>
           </button>
         ) : null}
         {p.open && !hasList ? (
@@ -224,22 +221,24 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
           </div>
         ) : null}
       </div>
-    </>
   );
 });
 
 /** The store's one subscriber: this block (the rainbow row and the list), and nothing else, redraws on a
- * refresh. Until the first read lands, and for an older daemon, only the row is drawn, a plain button
- * that opens the Needs you page. */
-export const WorkingBlock = memo(function WorkingBlock(p: Omit<WorkingSectionProps, "entries" | "needsYou" | "stale">) {
+ * refresh. The row is always the same element at the same place, so its focus survives the first read
+ * landing, a fold and any error. It folds the list when there is one (a read has landed, even if the
+ * last one failed); in every other state (before the first read, an older daemon, a failed first
+ * read, whatever the error) it is a plain button that opens the Needs you page, as before. */
+export const WorkingBlock = memo(function WorkingBlock(p: Omit<WorkingSectionProps, "entries" | "needsYou">) {
   const work = useWorking();
-  if (work.status === "unavailable" || work.status === "loading") {
-    return (
-      <InboxHeadRow count={p.inboxCount} pending={p.pending} shown={p.shown} stale={false}
-                    foldable={false} open={false} onToggle={p.onToggle} onOpen={() => p.onOpenInbox()} />
-    );
-  }
-  return <WorkingSection {...p} entries={work.entries} needsYou={work.needsYou} stale={work.status === "error"} />;
+  const foldable = work.status === "ready" || (work.status === "error" && work.loaded);
+  return (
+    <>
+      <InboxHeadRow count={p.inboxCount} pending={p.pending} shown={p.shown} stale={work.status === "error"}
+                    foldable={foldable} open={p.open} onToggle={p.onToggle} onOpen={() => p.onOpenInbox()} />
+      {foldable ? <WorkingSection {...p} entries={work.entries} needsYou={work.needsYou} /> : null}
+    </>
+  );
 });
 
 /** Done in a thread's menu: enabled only while the daemon's last read says it may be (a hint:

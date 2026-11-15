@@ -4432,7 +4432,7 @@ export default function App() {
               patch({ taskId: id, taskFocus: true });
               showView("task");
             }}
-            onOpenInbox={() => { if (!blockedNow.current) showView("inbox"); }}
+            onOpenInbox={() => { if (!blockedNow.current) { inboxFocus.clear(); showView("inbox"); } }}
           />
         );
       case "vex": {
@@ -4829,7 +4829,9 @@ export default function App() {
     // A thread id (WS-3: a hint on a thread row) also asks the page to scroll to that thread's group.
     onOpenInbox: (thread?: string) => {
       if (blockedNow.current) return;
+      // An ordinary open (the Needs you line) never keeps an earlier hint's target (review of PR #368).
       if (typeof thread === "string") inboxFocus.request(thread);
+      else inboxFocus.clear();
       showView("inbox");
     },
     // The morning review's row (MR-10), under the Inbox's.

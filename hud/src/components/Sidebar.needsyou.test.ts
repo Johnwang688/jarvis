@@ -89,11 +89,22 @@ describe("the rainbow Inbox row as the list's header", () => {
 
 describe("the Needs you line", () => {
   it("is shown when unfolded even with nothing waiting, reads quiet, and still opens the page", async () => {
-    await draw({ entries: [], needs_you: [] }, { count: null, pending: false, shown: false });
+    await draw({ entries: [], needs_you: [] }, { count: 0, pending: false, shown: false });
     const line = q('[data-testid="working-needs-line"]')!;
     expect(line).toBeTruthy();
     expect(line.textContent).toBe("Needs you · 0");
     expect(line.className).toContain("quiet0");
+    await act(async () => { line.click(); });
+    expect(calls).toEqual([[]]);
+  });
+
+  it("an unread count is a mark, never a zero: still clickable, and it does not announce 'nothing waiting'", async () => {
+    await draw({ entries: [], needs_you: [] }, { count: null, pending: false, shown: false });
+    const line = q('[data-testid="working-needs-line"]')!;
+    expect(line.textContent).toBe("Needs you · –");
+    expect(line.className).not.toContain("quiet0");
+    expect(line.getAttribute("aria-label")).toBe("Needs you, count not known yet");
+    expect(line.getAttribute("data-count")).toBe("unknown");
     await act(async () => { line.click(); });
     expect(calls).toEqual([[]]);
   });
@@ -134,8 +145,11 @@ describe("what waits on a thread", () => {
     expect(qa('[data-testid="working-need"]').map((e) => e.dataset.id)).toEqual(["pr:r1"]);
   });
 
-  it("keeps a row whose thread is not drawn (archived) in the Needs-you rows", async () => {
-    await draw({ entries: [entry("t1")], needs_you: [row("dec:d1", "decision", 6, { thread_id: "gone" })] });
-    expect(qa('[data-testid="working-need"]').map((e) => e.dataset.id)).toEqual(["dec:d1"]);
+  it("keeps a row whose thread is not drawn (archived) in the Needs-you rows, urgent ranks 1-4 included", async () => {
+    const rows = [row("appr:a1", "approval", 1, { thread_id: "gone" }), row("q:g:r1", "question", 2, { thread_id: "gone" }),
+                  row("prop:k", "proposal", 3, { thread_id: "gone" }), row("def:d", "deferred", 4, { thread_id: "gone" }),
+                  row("dec:d1", "decision", 6, { thread_id: "gone" })];
+    await draw({ entries: [entry("t1")], needs_you: rows });
+    expect(qa('[data-testid="working-need"]').map((e) => e.dataset.id)).toEqual(rows.map((r) => r.id));
   });
 });

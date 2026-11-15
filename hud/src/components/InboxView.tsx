@@ -774,12 +774,23 @@ export function InboxView(props: InboxViewProps) {
   const count = waitingCount(rows);
   const visible = shownRows(rows).length;
 
-  // WS-3: a hint on a thread row in the sidebar asks for this page at that thread. The request waits for
-  // the rows to be read and drawn (the page may have just opened), scrolls the thread's group into view and
-  // focuses it (tabIndex -1: no keyboard rises), then is gone. A thread with no group here is dropped too.
+  // WS-3: a hint on a thread row in the sidebar asks for this page at that thread. The hint comes from a
+  // working list that can be newer than the rows held here, so the request is not judged until a read
+  // started for it has landed (`asked`); then the thread's group is scrolled into view and focused
+  // (tabIndex -1: no keyboard rises), and the request is gone, a thread with no group included. While
+  // the inbox cannot be read the request waits for it. It never outlives the page: going away drops it.
   const wanted = useInboxFocus();
+  const [asked, setAsked] = useState<string | null>(null);
   useEffect(() => {
-    if (!wanted || status !== "ready") return;
+    if (!wanted) return;
+    let live = true;
+    void Promise.resolve(props.onReread()).then(() => { if (live) setAsked(wanted); }, () => { if (live) setAsked(wanted); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wanted]);
+  useEffect(() => () => inboxFocus.clear(), []);
+  useEffect(() => {
+    if (!wanted || asked !== wanted || status !== "ready") return;
     const el = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="inbox-thread"]'))
       .find((e) => e.dataset.threadId === wanted);
     if (el) {
@@ -787,7 +798,7 @@ export function InboxView(props: InboxViewProps) {
       el.focus({ preventScroll: true });
     }
     inboxFocus.clear();
-  }, [wanted, status, rows]);
+  }, [wanted, asked, status, rows]);
 
   // B4: Snooze and Dismiss for a row of rank 5 to 8 (`canMark`), or, for a
   // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.

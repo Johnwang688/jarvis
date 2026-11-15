@@ -1323,6 +1323,8 @@ button.tree-row.ownerinbox .wstale + .badge.inboxcount { margin-left: 6px; }
 .workingsec button.whint {
   flex: 0 0 auto; font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong);
   border-radius: 3px; padding: 0 4px; background: none; color: var(--text-muted); word-spacing: normal; }
+/* A row with a hint: the project chip gives way first (it shrinks to nothing before the title loses a letter). */
+.workingsec .whint ~ .wchip { flex-shrink: 1000; }
 .workingsec button.whint.pending { color: var(--amber); border-color: var(--amber-line); }
 .workingsec button.whint:hover:not(:disabled) { background: var(--bg-3); }
 .workingtoast {

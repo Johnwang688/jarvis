@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { groupByThread, parseInbox } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
-import { inboxFocus } from "../state/inboxFocus";
+import { FOCUS_REQUEST_MS, InboxFocusStore, inboxFocus } from "../state/inboxFocus";
 import { InboxView, type InboxViewProps } from "./InboxView";
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -104,12 +104,13 @@ describe("the Needs you page", () => {
     expect((q('[data-testid="inbox-thread-open"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("scrolls to and focuses the asked-for thread once its rows are drawn, then forgets the request", () => {
+  it("scrolls to and focuses the asked-for thread once its rows are drawn, then forgets the request", async () => {
     const scroll = vi.fn();
     (HTMLElement.prototype as any).scrollIntoView = scroll;
     try {
       act(() => inboxFocus.request("t2"));
       draw();
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
       expect(scroll).toHaveBeenCalledTimes(1);
       expect(document.activeElement).toBe(q('[data-testid="inbox-thread"][data-thread-id="t2"]'));
       expect(inboxFocus.get()).toBeNull();
@@ -118,9 +119,64 @@ describe("the Needs you page", () => {
     }
   });
 
-  it("drops a request for a thread with no group instead of keeping it", () => {
+  it("drops a request for a thread with no group instead of keeping it", async () => {
     act(() => inboxFocus.request("nope"));
     draw();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(inboxFocus.get()).toBeNull();
+  });
+
+  it("waits for the opening read before judging the target absent (a hint can be newer than the cached rows)", async () => {
+    const scroll = vi.fn();
+    (HTMLElement.prototype as any).scrollIntoView = scroll;
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const stale = snap(served().filter((r) => r.thread_id !== "t2"));          // the cached rows lack t2
+      const props = draw({ snapshot: stale, onReread: vi.fn(() => gate) });
+      act(() => inboxFocus.request("t2"));
+      await act(async () => { await Promise.resolve(); });
+      expect(inboxFocus.get()).toBe("t2");                                       // not thrown away yet
+      expect(scroll).not.toHaveBeenCalled();
+      await act(async () => {                                                    // the read lands with t2 in it
+        root!.render(createElement(InboxView, { ...props, snapshot: snap() }));
+        release();
+        await gate;
+      });
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(q('[data-testid="inbox-thread"][data-thread-id="t2"]'));
+      expect(inboxFocus.get()).toBeNull();
+    } finally {
+      delete (HTMLElement.prototype as any).scrollIntoView;
+    }
+  });
+
+  it("keeps the request while the inbox cannot be read, and the page going away drops it", async () => {
+    const failed: InboxSnapshot = { rows: [], status: "error", message: "boom", reads: 1 };
+    draw({ snapshot: failed, onReread: vi.fn(async () => {}) });
+    act(() => inboxFocus.request("t2"));
+    await act(async () => { await Promise.resolve(); });
+    expect(inboxFocus.get()).toBe("t2");
+    act(() => root!.unmount());
+    root = null;
+    expect(inboxFocus.get()).toBeNull();                                         // abandoned: nothing left to misfire
+  });
+});
+
+describe("the focus request's lifetime", () => {
+  it("an unanswered request expires, so a later ordinary open does not meet it", () => {
+    let t = 1_000;
+    const store = new InboxFocusStore(() => t);
+    store.request("t1");
+    expect(store.get()).toBe("t1");
+    t += FOCUS_REQUEST_MS + 1;
+    expect(store.get()).toBeNull();
+  });
+
+  it("an ordinary open clears it", () => {
+    const store = new InboxFocusStore();
+    store.request("t1");
+    store.clear();
+    expect(store.get()).toBeNull();
   });
 });

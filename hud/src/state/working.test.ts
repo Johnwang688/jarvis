@@ -95,6 +95,25 @@ describe("WorkingStore reads", () => {
     expect(store.snapshot().status).toBe("error");
     expect(store.snapshot().entries).toEqual([]);
   });
+
+  it("`loaded` is false until a read lands, whatever an earlier error was; a later error keeps it; a missing route drops it", async () => {
+    let fail: unknown = new ApiError(500, "server error");
+    const store = new WorkingStore(deps({ fetch: async () => { if (fail) throw fail; return body([entry("t1")]); } }));
+    await store.refresh();
+    expect(store.snapshot()).toMatchObject({ status: "error", loaded: false });
+    fail = new Error("network down");
+    await store.refresh();
+    expect(store.snapshot()).toMatchObject({ status: "error", loaded: false });
+    fail = null;
+    await store.refresh();
+    expect(store.snapshot()).toMatchObject({ status: "ready", loaded: true });
+    fail = new Error("network down");
+    await store.refresh();
+    expect(store.snapshot()).toMatchObject({ status: "error", loaded: true });
+    fail = new ApiError(404, "route not found");
+    await store.refresh();
+    expect(store.snapshot()).toMatchObject({ status: "unavailable", loaded: false });
+  });
 });
 
 describe("WorkingStore publishing", () => {
