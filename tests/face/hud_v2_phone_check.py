@@ -689,8 +689,8 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     until(lambda: page.locator('[data-testid="m-notify"]').count() == 1, timeout=4)
     items = page.evaluate("""Array.from(document.querySelectorAll('[data-testid="m-menu-panel"] > *'))
         .map(e => e.dataset.testid || e.dataset.menuItem)""")
-    check("PX-4 menu: Notifications, when Jarvis last answered, then Sign out last",
-          items == ["m-notify", "m-menu-lastread", "m-signout"], str(items))
+    check("PX-4/PX-5 menu: Lock now first, Notifications, when Jarvis last answered, then Sign out last",
+          items == ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"], str(items))
     note = page.locator('[data-testid="m-notify"]')
     # One compact row (2026-10-28); "count only, never what" is the "on" state's hint (notify.test.ts).
     check("P-6 Inbox: the notifications row offers them, off",

@@ -19,8 +19,9 @@ What it pins (the package's acceptance items):
   - a HUD-only Browser card is never granted;
   - the chat is told through B1's delivery (via inbox, no desk, queued),
     a blocked task is resumed; Leave it sends nothing;
-  - the phone: retry needs its own fresh assertion (none: 401; replayed or
-    another card's: refused), Leave it needs the session only;
+  - the phone (WS-5c): retry is gated (400 without an op token, 423 while
+    locked), bound to the deferral id, each `_deferral` case 409 with the
+    window open, a replay 409 duplicate; Leave it needs the session only;
   - agents cannot write a grant or a record (protected state at v2 layer 1
     and in v1, write_file, SELF_PROTECTED); `owner_json` never reaches a
     row, the store, a log line, the bus or the phone.
@@ -467,8 +468,7 @@ class Grants(_Temp):
                                                              "thread_id": "t2", "kind": "started"})}.items():
             self.assertNotEqual(quiet_defer.request_digest(other), digest, name)
         self.assertIsNone(quiet_defer.request_digest(request(args={"x": float("nan")})), "not exactly JSON: never grantable")
-        self.assertNotEqual(remote_answer.defer_binding("x"), "x", "a binding is never a bare approval id")
-        print("ok  the digest covers thread, task, tool, args and command; a binding is never a bare id")
+        print("ok  the digest covers thread, task, tool, args and command")
 
     def test_an_expired_grant_asks(self):
         n = self.n
@@ -965,17 +965,16 @@ class Delta(Review):
         self.assertEqual(self.n.store.get(gone.req_id)["why_not"], "folder")
         print("ok  LOW 5: the digest binds the folder itself (real path, device, inode); a missing one is never granted")
 
-    def test_a_deferral_subject_takes_allow_only(self):
-        from jarvis.v2 import remote_auth
-        self.assertEqual(remote_auth.DEFER_DECISIONS, ("allow",))
-        from jarvis.v2 import review
-        binding = remote_answer.defer_binding("abcDEF123_-x")
-        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(binding))
-        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(review.subject([("defer:a", "a" * 64),
-                                                                            ("defer:b", "b" * 64)])))
-        for odd in ("defer:", "defer:a:b", "defers:abc", "task:0123abcd", "defer:" + "a" * 59):
-            self.assertIsNone(remote_auth._DEFER_SUBJECT.fullmatch(odd), odd)
-        print("ok  a deferral's subject is defer:<id> or defers:<56 hex>, and takes Allow only")
+    def test_the_per_action_deferral_subjects_are_gone(self):
+        """WS-5c: the phone's Approve and retry is gated by the unlock window
+        and an op token, bound to the deferral id in the URL; the `defer:` and
+        `defers:` assertion subjects went with the per-action challenges."""
+        from jarvis.v2 import remote_auth, review
+        for gone in ("DEFER_DECISIONS", "_DEFER_SUBJECT"):
+            self.assertFalse(hasattr(remote_auth, gone), gone)
+        self.assertFalse(hasattr(remote_answer, "defer_binding"))
+        self.assertFalse(hasattr(review, "subject"))
+        print("ok  the defer:/defers: assertion subjects are gone (WS-5c)")
 
     def test_low6_relayed_and_subagent_calls_are_not_offered_a_grant(self):
         n = self.n
@@ -1206,17 +1205,8 @@ class Live(unittest.TestCase):
         self.assertEqual((results[1]["status"], results[2]["status"]), (409, 400))
         self.assertIn(results[0]["delivery"], ("started", "queued"))
         refused = quiet_defer.approve_and_retry(self.daemon, good.req_id, via="phone")
-        self.assertEqual((refused["ok"], refused["status"]), (False, 401), "the phone needs its assertion")
-        # The phone's binding: one id is `defer:<id>`; a set is the morning
-        # review's subject over every id and its tag (MR-6, review.subject).
-        from jarvis.v2 import review
-        self.assertEqual(remote_answer.defer_binding("abc"), "defer:abc")
-        pair = [("defer:a", "a" * 64), ("defer:b", "b" * 64)]
-        self.assertEqual(review.subject(pair), review.subject(list(reversed(pair))))
-        self.assertNotEqual(review.subject(pair), review.subject([("defer:a", "a" * 64), ("defer:c", "b" * 64)]))
-        self.assertTrue(review.subject(pair).startswith("defers:") and len(review.subject(pair)) <= 64)
-        self.assertNotIn(":", good.req_id, "an approval's id can never be a binding")
-        print("ok  approve_and_retry/leave: one id in, one result out (never raising); a set binds review.subject")
+        self.assertEqual((refused["ok"], refused["status"]), (False, 401), "the phone needs its gate")
+        print("ok  approve_and_retry/leave: one id in, one result out (never raising)")
 
     def test_a_browser_row_offers_no_grant(self):
         thread = self.chat()
@@ -1285,51 +1275,59 @@ class PhoneRetry(ra.Phone):
         self.assertEqual(req.outcome[0], "deferred")
         return req, f"defer:{req.req_id}"
 
-    def test_retry_needs_a_fresh_assertion_of_its_own(self):
+    def retry(self, row, op=None, cookie=None):
+        return self.post_answer(row, {"action": "retry", "op": op or self.op(cookie)}, cookie=cookie)
+
+    def test_retry_is_gated_and_bound_to_its_id(self):
+        """WS-5c §5.3, §5.4: Approve and retry needs the unlock window and an
+        op token; it binds the deferral id in the URL, with the full
+        `_deferral` lookup at act time."""
         req, row = self.deferred()
-        status, _, body = self.post_answer(row, {"action": "retry"})
-        self.assertEqual(status, 401, body)
-        status, _, body = self.post_answer(row, {"action": "retry", "assertion": "x"})
-        self.assertEqual(status, 401, body)
+        self.assertEqual(self.post_answer(row, {"action": "retry"})[0], 400, "no op token")
+        self.assertEqual(self.post_answer(row, {"action": "retry", "assertion": "x"})[0], 400, "the old body")
+        status, _, body = self.retry(row)
+        self.assertEqual((status, body), (423, {"error": "locked", "unlock": True}))
         self.assertEqual(self.d.inbox.deferred.get(req.req_id)["state"], "waiting")
         # The inbox dispatch with the phone's `via` cannot grant either.
         with self.assertRaises(Exception) as caught:
             inbox.answer(self.d, row, {"action": "retry"}, owner_verified=False, via="phone")
         self.assertEqual(getattr(caught.exception, "status", None), 401)
-        # Always is not an answer here.
-        status, _, body = self.options(row, "always")
-        self.assertEqual(status, 409, body)
-        credential, _ = self.assertion(row, "allow")
-        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
+        # Always is not an answer here (the rule read, and the act).
+        self.assertEqual(self.rule(row)[2], {"error": remote_answer.NO_ALWAYS})
+        self.unlocked()
+        op = self.op()
+        status, _, body = self.retry(row, op)
         self.assertEqual(status, 200, body)
         self.assertIn(body["delivery"], ("started", "queued"))
         self.assertEqual(self.d.inbox.deferred.get(req.req_id)["state"], "granted")
-        # Replayed, on another deferral: the challenge is spent (409), nothing granted.
+        self.assertEqual(self.retry(row, op)[2], {"error": "already sent", "duplicate": True, "state": "completed"})
+        # The same token on another deferral: reused, nothing granted.
         other, other_row = self.deferred("make other")
-        status, _, body = self.post_answer(other_row, {"action": "retry", "assertion": credential})
-        self.assertIn(status, (401, 409), body)
+        self.assertEqual(self.retry(other_row, op)[2], {"error": "op token reused"})
         self.assertEqual(self.d.inbox.deferred.get(other.req_id)["state"], "waiting")
-        # One issued for that deferral, sent for another: refused (401), spent.
-        credential, _ = self.assertion(other_row, "allow")
-        third, third_row = self.deferred("make third")
-        status, _, body = self.post_answer(third_row, {"action": "retry", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertEqual(self.d.inbox.deferred.get(third.req_id)["state"], "waiting")
-        print("ok  phone: Approve and retry needs its own fresh assertion (none 401, replayed or another's refused)")
+        print("ok  phone: Approve and retry is gated (400 without a token, 423 locked), bound to its id; "
+              "a replay is 409 duplicate, the token on another deferral 409 reused")
 
-    def test_an_approvals_assertion_is_never_a_deferrals(self):
-        self.mono2.now = 0.0
-        self.d._owner_seen_at = None
-        self.clock.now = at(12)                 # an ordinary card, asked in the day
-        approval, _out, _worker = self.ask()
-        credential, _ = self.assertion(self.row(approval), "allow")
-        self.clock.now = at(23.5)
+    def test_each_deferral_case_is_409_with_the_window_open(self):
+        self.unlocked()
+        # Not waiting (left).
         req, row = self.deferred()
-        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertEqual(self.d.inbox.deferred.get(req.req_id)["state"], "waiting")
-        self.assertTrue(self.pending(approval), "and the card was not answered either")
-        print("ok  phone: an approval's assertion is never a deferral's (bound to defer:<id>)")
+        self.assertEqual(self.post_answer(row, {"action": "leave"})[0], 200)
+        status, _, body = self.retry(row)
+        self.assertEqual(status, 409, body)
+        # Not grantable (a Browser row).
+        thread = self.d.open_thread(self.project.id, Role.CHAT, PN.FAST, {})
+        browser = private(thread_id=thread.id)
+        self.mono2.now += quiet_defer.PRESENT_S     # the admitted retry above was presence
+        self.d.approvals.ask(browser)
+        self.assertEqual(self.retry(f"defer:{browser.req_id}")[0], 409)
+        self.assertEqual(self.d.inbox.deferred.get(browser.req_id)["state"], "waiting")
+        # Expired (past a day).
+        late, late_row = self.deferred("make late")
+        self.clock.now = self.clock.now + timedelta(seconds=quiet_defer.WAITING_S + 60)
+        self.assertEqual(self.retry(late_row)[0], 409)
+        self.assertNotEqual(self.d.inbox.deferred.get(late.req_id)["state"], "granted")
+        print("ok  phone, window open: not waiting, not grantable, expired: 409 each, nothing granted")
 
     def test_leave_needs_the_session_only_and_a_browser_row_takes_no_retry(self):
         req, row = self.deferred()
@@ -1337,11 +1335,12 @@ class PhoneRetry(ra.Phone):
         self.assertEqual((status, body.get("delivery")), (200, "left"), body)
         status, _, body = self.post_answer(row, {"action": "leave"}, cookie="__Host-jarvis_m=nope")
         self.assertEqual(status, 401, body)
-        self.assertFalse(self.d.owner_present(), "a Leave it from the phone (no passkey) is not presence")
+        self.assertFalse(self.d.owner_present(), "a Leave it from the phone (session only) is not presence")
         thread = self.d.open_thread(self.project.id, Role.CHAT, PN.FAST, {})
         browser = private(thread_id=thread.id)
         self.d.approvals.ask(browser)
-        status, _, body = self.options(f"defer:{browser.req_id}", "allow")
+        self.unlocked()
+        status, _, body = self.retry(f"defer:{browser.req_id}")
         self.assertEqual(status, 409, body)
         status, _, rows = self.phone("GET", "/m/api/inbox", cookie=self.cookie)
         self.assertEqual(status, 200)
@@ -1353,13 +1352,9 @@ class PhoneRetry(ra.Phone):
     def test_l5_retry_runs_the_41_checks_as_allow_does(self):
         req, row = self.deferred()
         secure = self.d.secure
+        self.unlocked()
         self.d.secure = None
-        status, _, body = self.options(row, "allow")
-        self.assertEqual(status, 409, body)
-        self.d.secure = secure
-        credential, _ = self.assertion(row, "allow")
-        self.d.secure = None
-        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
+        status, _, body = self.retry(row)
         self.assertEqual(status, 409, body)
         self.assertTrue(body["error"].startswith("limited"), body)
         self.assertEqual(self.d.inbox.deferred.get(req.req_id)["state"], "waiting", "nothing granted")
@@ -1367,12 +1362,11 @@ class PhoneRetry(ra.Phone):
         checked = []
         real = secure.check
         secure.check = lambda **kw: checked.append(kw) or real(**kw)
-        credential, _ = self.assertion(row, "allow")
-        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
+        status, _, body = self.retry(row)
         self.assertEqual(status, 200, body)
-        self.assertGreaterEqual(len(checked), 2, "options and the answer each ran §4.1")
+        self.assertGreaterEqual(len(checked), 1, "the answer ran §4.1 at act time")
         source = inspect.getsource(remote_answer._answer_deferred)
-        self.assertLess(source.index("answer_verify("), source.index("_monitor(daemon).check("))
+        self.assertLess(source.index("def act(ticket):"), source.index("_monitor(daemon).check("))
         self.assertLess(source.index("_monitor(daemon).check("), source.index("verified = True"))
         print("ok  L5: the phone's retry runs §4.1 and the Allow's gate; no monitor, no grant")
 
@@ -1380,7 +1374,8 @@ class PhoneRetry(ra.Phone):
         # What the desk's card keeps and the phone's scrub withholds (review
         # of PR #308): a labelled password in the reason.
         req, row = self.deferred("ls", reason="password: " + ra.PASSWORD)
-        status, _, body = self.options(row, "allow")
+        self.unlocked()
+        status, _, body = self.retry(row)
         self.assertEqual((status, body.get("error")), (409, remote_answer.WITHHELD), body)
         status, _, rows = self.phone("GET", "/m/api/inbox", cookie=self.cookie)
         self.assertNotIn(ra.PASSWORD, json.dumps(rows))
@@ -1423,13 +1418,23 @@ class Boundary(unittest.TestCase):
             if uses:
                 found[str(path.relative_to(ROOT))] = uses
         self.assertEqual(found, {"jarvis/v2/remote_answer.py": ["True", "verified"],
-                                 "jarvis/v2/quiet_defer.py": ["verified", "verified"],
-                                 # The morning review's group (MR-11): only after the set's assertion.
-                                 "jarvis/v2/review.py": ["verified", "True"]}, found)
+                                 "jarvis/v2/quiet_defer.py": ["verified", "verified"]}, found)
         source = inspect.getsource(remote_answer._answer_deferred)
-        self.assertLess(source.index("answer_verify("), source.index("verified = True"))
+        self.assertLess(source.index("def act(ticket):"), source.index("verified = True"))
+        self.assertIn("return gated(handler, session, path, body, op, \"approval\", act)", source)
         self.assertIn("verified=False", inspect.getsource(inbox.answer))
-        print("ok  quiet_defer.answer(verified=True): only remote_answer, after answer_verify")
+        # The morning review's group (MR-11, WS-5c): `unlocked=True` only from
+        # its gated act, which passes it on as quiet_defer's `verified`.
+        unlocked = {}
+        for path in sorted((ROOT / "jarvis").rglob("*.py")):
+            uses = re.findall(r"(?<![`\w])unlocked\s*=\s*(True|unlocked)\b", path.read_text(encoding="utf-8"))
+            if uses:
+                unlocked[str(path.relative_to(ROOT))] = uses
+        self.assertEqual(unlocked, {"jarvis/v2/review.py": ["True"]}, unlocked)
+        from jarvis.v2 import review
+        self.assertIn("verified=unlocked", inspect.getsource(review.approve))
+        print("ok  quiet_defer.answer(verified=True): only remote_answer's gated act; review's unlocked=True "
+              "only from its own")
 
     def test_the_broker_hook_runs_under_its_lock(self):
         source = inspect.getsource(PendingApprovals.ask)

@@ -118,7 +118,27 @@ the native app would be a thin shell over the same `/m/api`.
   passkey, so pairing needs one set. Tailscale's identity
   headers are logged as advisory, never trusted, because a local process
   can send them to 8408 directly.
-- **PH-4. Every Allow and every Always is its own passkey assertion.** The
+- **PH-4, amended by WS-5c (2026-11-15, the owner's answers): one passkey
+  assertion unlocks every gated action for a sliding hour.** The gated
+  actions are Allow, Always, a deferral's Approve and retry, cancel, every
+  PR action, the morning review's Approve selected, and Done and Undo. The
+  unlock challenge is bound to `unlock:<session id>`, the session, its
+  passkey and the session's generation, and is verified as below (origin,
+  rpId, UV, signature, counter rule; the counter saved before the window
+  opens). The window lives in the daemon's memory only (a restart locks
+  every phone) and each gated action slides it; session-only actions (Deny,
+  Withdraw, Start, Resume, messages, answers, Leave) slide an open window and
+  never open one; reads never touch it. Lock now, logout, End, a revoke and
+  expiry end it and delete the session's pending unlock challenges. A closed
+  window answers exactly `423 {"error": "locked", "unlock": true}`. Each
+  gated action also spends a server-issued op token (10 minutes, dying with
+  the process), so a replay is a 409 and never runs twice. Always reads its
+  rule without a challenge and sends its `preview` digest (rule freshness,
+  not proof a human saw it). Contract, checks and tests:
+  `docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5 and §7. The rest
+  of this item is the original per-action design, kept for its reasoning
+  (the counter rule, the cloned-key and own-passkey residuals still hold).
+  **Originally: every Allow and every Always is its own passkey assertion.** The
   challenge is bound to the approval and the exact answer:
   `sha256(req_id ‖ "allow" | "always" ‖ server nonce)`, single-use, valid
   60 s, so an assertion for Allow cannot be replayed as Always. The server
@@ -225,7 +245,9 @@ who the owner is off the box.
 3. a valid, unexpired, unrevoked session cookie names a paired passkey;
 4. for anything but GET or HEAD, `Origin` is exactly
    `https://<machine>.<tailnet>.ts.net`;
-5. for an Allow, a fresh assertion as in PH-4.
+5. for a gated action (Allow and the rest), the session's unlock window open
+   (PH-4 as WS-5c amends it: one assertion per sliding hour, 423 when
+   closed) and one op token spent.
 
 A request that fails any of these is refused with no body detail: a `Host`
 other than the ts.net name gets 400 (item 2), a write without the exact
@@ -248,7 +270,9 @@ again before each verified answer:
 3. **The certificate is the tailnet's own**, valid for the ts.net name, and
    the request's `Host` and `Origin` match it (§4, items 2 and 4).
 4. **The passkey is paired, unrevoked, and requires user
-   verification**, and the assertion is fresh (PH-4).
+   verification**. Whether the session's unlock window is open is checked
+   apart from this monitor, by `require_unlocked` (PH-4 as WS-5c amends it);
+   this condition is readiness only, for reads and actions alike.
 5. **Nothing else is listening on 8408**, on any interface, in WSL or on
    Windows (`ss` in WSL, `Get-NetTCPConnection` on Windows, read-only).
 
@@ -271,9 +295,9 @@ remote routes.
 |---|---|---|
 | `GET inbox` | `inbox.rows()` | private approvals in their private projection |
 | `GET inbox/<id>/detail` | `PendingApprovals.owner_details` | HUD-only cards, verified session under §4.1 only, while pending |
-| `POST inbox/<id>/answer` | the inbox dispatch (inbox IN-2) | Allow and Always need the PH-4 assertion and §4.1; Deny needs the session only |
+| `POST inbox/<id>/answer` | the inbox dispatch (inbox IN-2) | Allow and Always are gated (the unlock window and an op token, PH-4 as WS-5c amends it) and need §4.1 at act time; Always sends its rule's `preview` from `GET inbox/<id>/answer/rule`; Deny needs the session only |
 | `POST inbox/decisions/<id>` | inbox decisions | |
-| `GET working` | `WorkingSet.entries()` (WS-5a, 2026-11-15) | read-only In progress list `{entries, more, total}`: thread, project, title, status, last; desk order, then a 100 cap; no inbox rows, no `seq` (see `docs/plans/2026-11-15-ws5-phone-working-set-plan.md`) |
+| `GET working` | `WorkingSet.entries()` (WS-5a, 2026-11-15) | read-only In progress list `{entries, more, total}`: thread, project, title, status, last; desk order, then a 100 cap; no inbox rows; `seq` since WS-5c, for Done (see `docs/plans/2026-11-15-ws5-phone-working-set-plan.md`) |
 | `GET projects`, `GET threads?project=`, `GET threads/<id>/log?after=` | the HUD's reads | transcript rows as the HUD shows them, scrubbed (`chat_reads` projection) |
 | `POST threads/<id>/messages` | `daemon.send` with `via="phone"` | queues behind a running turn; attachments refused in v1 |
 | `POST threads` | new chat in a project | provider, model and effort chips as the HUD's |
@@ -342,8 +366,8 @@ path, each step the owner's call:
 
 | Rule | How the phone keeps it |
 |---|---|
-| Approvals are the owner's, deliberately | PH-4: a user-verified assertion (Face ID or passcode) bound to each Allow and each Always; no bulk Allow (one recorded exception, §10.10: the morning review's Approve selected for deferred rows, ≤10, one assertion bound to exactly that set, all §4.1 checks, all or nothing); Always shows its rule first |
-| HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 with a fresh assertion (PH-7, O-3); private detail never in push, logs or the stream |
+| Approvals are the owner's, deliberately | PH-4 as WS-5c amends it (owner, 2026-11-15): a user-verified assertion (Face ID or passcode) opens a sliding one-hour unlock window for the gated actions, each of which spends one op token (no replay); no bulk Allow (one recorded exception, §10.10: the morning review's Approve selected for deferred rows, ≤10, exactly the set the body names, all §4.1 checks, all or nothing); Always shows its rule first and binds its preview |
+| HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 inside the unlock window (PH-7, O-3; WS-5c); private detail never in push, logs or the stream |
 | No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8408; nothing in the session MCP catalog |
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
 | Nothing fetched speaks for the owner | the phone renders transcripts as the HUD does: scrubbed, untrusted, `textContent` for cards |

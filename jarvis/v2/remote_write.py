@@ -15,8 +15,9 @@ never true on this listener.
     POST /m/api/tasks                        {project_id, brief}: a task in INTAKE
     POST /m/api/tasks/<id>/start             {}: `TaskControl.start`
     POST /m/api/tasks/<id>/resume            {}: `TaskControl.resume`
-    POST /m/api/tasks/<id>/cancel/options    {}: the passkey challenge for a cancel
-    POST /m/api/tasks/<id>/cancel            {assertion}: `TaskControl.cancel`
+    POST /m/api/tasks/<id>/cancel            {op}: `TaskControl.cancel` (gated, WS-5c)
+    POST /m/api/working/<id>/done            {seq, op}: Done (gated, WS-5c §5.6)
+    POST /m/api/working/<id>/undo            {token, op}: its Undo (gated)
 
 (`GET /m/api/threads` and `GET /m/api/tasks` stay P-3's reads, `remote_api`.)
 
@@ -44,7 +45,9 @@ typed away from the screen the turn's work is on.
 `BRIEF_CHARS`) and never blank; attachments and images are refused (400,
 `NO_ATTACHMENTS`), whatever the HUD would take; any other field is a 400.
 The listener's own body cap (64 KiB) holds before that. Every write here
-counts against the session's rate (`RATE` per `RATE_S`, 429 past it).
+counts against the session's rate (`RATE` per `RATE_S`, 429 past it); a
+gated one (and every gated action of the other phone modules) only once it
+is admitted (`Rate.take_if`).
 
 **New chat.** A project the phone lists (not archived) and a provider the
 HUD's chips offer (`fast`, `claude`, `codex`; a model and effort as
@@ -64,18 +67,27 @@ stop a chat from proposing a task: a fast-path chat a phone message started
 may still propose one (`task_propose`), which starts after its grace window
 as it does from the HUD or Discord, and which the phone may withdraw.
 
-**Deliberate verbs take the passkey.** Cancel ends a task for good:
-`CANCELLED` is terminal in `model.TRANSITIONS`, and resume takes only a
-blocked task. So a cancel from the phone takes its own passkey assertion,
-as Allow does (PH-4): `cancel/options` issues a challenge bound to
-`task:<id>`, "cancel", this session and its passkey
-(`RemoteAuth.answer_options`, `TASK_DECISIONS`), and `cancel` verifies it
-before `TaskControl.cancel` is called. §4.1 is not required: a cancel
-grants nothing. Start and resume need the session only: neither destroys
-anything, and every action a started task takes still passes the gate. A
-proposal's withdraw (the inbox row, `remote_answer`) needs the session only,
-Deny's footing. Never on the phone: permanent delete (owner HUD-only,
-archived only), archive, rename, merge, steering a task, the worktree.
+**Deliberate verbs take the unlock window (WS-5c, replacing the per-cancel
+assertion).** Cancel ends a task for good: `CANCELLED` is terminal in
+`model.TRANSITIONS`, and resume takes only a blocked task. So a cancel from
+the phone is a gated action, as Allow is
+(`docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5.3), in this
+order: the body and its op token's shape (400); the session's unlock window
+(`RemoteAuth.require_unlocked`: 423 `remote_auth.locked_reply()` when
+closed, and nothing else runs); the token's signature and session (410,
+400); its admission (`Ops.admit`: 410 expired, 409 duplicate, 429 through
+`Rate.take_if`, which is this module's rate, never also `_written`'s); then
+the act-time checks (the task visible and not terminal) and
+`TaskControl.cancel`. §4.1 is not required: a cancel grants nothing. Done
+and Undo (`POST working/<id>/done|undo`) are gated the same way, bound to
+the thread in the URL and that thread's drawn `seq` (§5.6); the answer
+carries the Undo token and nothing else of the entry. Start and resume need
+the session only: neither destroys anything, and every action a started
+task takes still passes the gate. A session-only write that lands slides an
+open window (`touch_unlock`) and never opens a closed one. A proposal's
+withdraw (the inbox row, `remote_answer`) needs the session only, Deny's
+footing. Never on the phone: permanent delete (owner HUD-only, archived
+only), archive, rename, merge, steering a task, the worktree.
 
 **Recorded as the phone's.** Every task verb from the phone, a created task
 included, is a line in the task's journal (`owner_verb`, `via: "phone"`),
@@ -146,7 +158,8 @@ UNCERTAIN = "it may not have gone through: check before trying again"
 TASK_START = True
 PROVIDERS = ("fast", "claude", "codex")
 NO_ATTACHMENTS = "attachments and images are not sent from the phone; attach them at the desk"
-CANCEL_NEEDS_PASSKEY = "cancelling a task needs the passkey"
+# WS-5c: Done's Undo token, as `working._TOKEN` takes it.
+_UNDO_TOKEN = re.compile(r"[A-Za-z0-9_-]{16,64}")
 RATE_WORD = "too many writes from this phone; wait a minute"
 NOT_A_CHAT = "only a chat takes a message from the phone"
 _ID = re.compile(r"[0-9a-f]{8}")
@@ -225,6 +238,28 @@ class Rate:
                 return False
             seen.append(now)
             return True
+
+    def take_if(self, digest: str, now: float, ok) -> str:
+        """WS-5c §5.3 step 4: under this lock, the window first ("rate" when
+        full), then `ok()` (the `Ops` capacity, called with the Ops lock
+        already held: "full" when it refuses), and the write is recorded only
+        when both pass ("go"). So a refusal spends no rate token. The lock
+        order is always `RemoteAuth`'s, then Ops, then this (admission runs
+        under the auth lock since #374's fix round); nothing here takes
+        either of the others."""
+        with self._lock:
+            for key in [k for k, q in self._seen.items() if not q or now - q[-1] >= RATE_S]:
+                del self._seen[key]
+            seen = self._seen.get(digest) or deque()
+            while seen and now - seen[0] >= RATE_S:
+                seen.popleft()
+            if len(seen) >= RATE:
+                return "rate"
+            if not ok():
+                return "full"
+            seen.append(now)
+            self._seen[digest] = seen
+            return "go"
 
 
 _RATE_LOCK = threading.Lock()
@@ -494,30 +529,137 @@ def verb(daemon, task_id: str, name: str, body) -> dict:
     return {"task": _after(lambda: task_view(out))}
 
 
-def cancel_options(handler, daemon, session, task_id: str, body) -> dict:
-    """`POST tasks/<id>/cancel/options`: the challenge for one cancel."""
+def _catch(fn):
+    """`fn()`'s answer, with a refusal answered as its status (the act-time
+    half of a gated action: nothing here raises past the op's settling but
+    an `AuthError`, `Op.mutating`'s final check, 401 or `Locked`, which the
+    route answers)."""
+    from .remote_auth import AuthError
+    try:
+        return fn()
+    except _Refused as exc:
+        return exc.status, {"error": exc.word, **exc.extra}, []
+    except AuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain
+        LOG.exception("phone: a write failed (%s)", type(exc).__name__)
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
+
+
+def cancel(handler, daemon, session, path: str, task_id: str, body) -> tuple:
+    """`POST tasks/<id>/cancel {op}`: a gated action (WS-5c §5.3). The body
+    and the token's shape (400), then the unlock window (423), the token
+    and its admission (`remote_auth.gated`), then the act-time checks
+    (the task visible and not terminal: 404, 409) and `daemon.task_verb`,
+    the HUD's own call."""
+    from .remote_auth import gated, parse_op
+    body = _fields(body, ("op",), ("op",))
+    if not isinstance(task_id, str) or not _ID.fullmatch(task_id):
+        raise _Refused(400, "bad request")
+    op = parse_op(body["op"])
+    return gated(handler, session, path, body, op, "task",
+                 lambda ticket: _catch(lambda: _cancel(daemon, task_id, ticket)))
+
+
+def _cancel(daemon, task_id: str, ticket) -> tuple:
+    from .daemon import task_verb
     from .model import TERMINAL_STATES
-    _fields(body, ())
+    from .remote_api import task as task_view
     task = _task(daemon, task_id)
     if task.state in TERMINAL_STATES:
         raise _Refused(409, f"this task is already {task.state.value}")
-    return {"publicKey": handler.remote_auth.answer_options(session, "task:" + task.id, "cancel")}
-
-
-def cancel(handler, daemon, session, task_id: str, body) -> dict:
-    """`POST tasks/<id>/cancel`: the passkey for this cancel first, then
-    `daemon.task_verb`, the HUD's own call."""
-    from .daemon import task_verb
-    from .remote_api import task as task_view
-    body = _fields(body, ("assertion",))
-    assertion = body.get("assertion")
-    if not isinstance(assertion, dict):
-        raise _Refused(401, CANCEL_NEEDS_PASSKEY)
-    task = _task(daemon, task_id)
-    handler.remote_auth.answer_verify(session, assertion, "task:" + task.id, "cancel")
+    ticket.mutating()
     out = _call(lambda: task_verb(daemon, task.id, "cancel", {}))
+    ticket.returned()
+    ticket.result = "cancelled"
     record(daemon, task.id, "cancel")
-    return {"task": _after(lambda: task_view(out))}
+    return 200, {"task": _after(lambda: task_view(out))}, []
+
+
+# -- Done and Undo from the phone (WS-5c §5.6) ------------------------------------------
+
+
+def _working(daemon):
+    found = getattr(daemon, "working", None)
+    if found is None:
+        raise _Refused(503, "the In progress list is not running")
+    return found
+
+
+def done(handler, daemon, session, path: str, thread_id: str, body) -> tuple:
+    """`POST working/<id>/done {seq, op}`: Done on the thread in the URL, as
+    drawn (its own `seq`, captured at the tap). 400 for a malformed id or
+    `seq`; then the window, the token, the thread still visible, and
+    `WorkingSet.done` (409 stale or out, `{error}`; 409 for a linked rank
+    1-4 row or a running turn, `{error, why_not}`; in the daemon's words,
+    scrubbed). The answer is `{thread_id, done, token, undo_s}` and nothing
+    else of the entry."""
+    from .remote_auth import gated, parse_op
+    body = _fields(body, ("seq", "op"), ("seq", "op"))
+    if not isinstance(thread_id, str) or not _ID.fullmatch(thread_id):
+        raise _Refused(400, "id must be eight lowercase hex characters")
+    seq = body["seq"]
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        raise _Refused(400, "seq must be a whole number")
+    op = parse_op(body["op"])
+
+    def act(ticket):
+        def run():
+            working = _working(daemon)
+            _visible(daemon, thread_id)
+            ticket.mutating()
+            status, payload = working.done(thread_id, seq)
+            ticket.returned()
+            if status != 200:
+                payload = payload if isinstance(payload, dict) else {}
+                refused = {"error": _word(payload.get("error") or "")}
+                if status == 409 and isinstance(payload.get("why_not"), str):
+                    # A linked rank 1-4 row or a running turn (§5.6): why,
+                    # scrubbed as every phone string is.
+                    refused["why_not"] = _word(payload["why_not"])
+                return status, refused, []
+            ticket.result = "done"
+            LOG.info("phone: Done from the phone on chat %s", thread_id)
+            return 200, {"thread_id": thread_id, "done": True, "token": payload["token"],
+                         "undo_s": payload["undo_s"]}, []
+        return _catch(run)
+    return gated(handler, session, path, body, op, "working", act)
+
+
+def undo(handler, daemon, session, path: str, thread_id: str, body) -> tuple:
+    """`POST working/<id>/undo {token, op}`: Done's own token, within its
+    window (`WorkingSet.undo`: 409 for a wrong token, too late, or after an
+    archive)."""
+    from .remote_auth import gated, parse_op
+    body = _fields(body, ("token", "op"), ("token", "op"))
+    if not isinstance(thread_id, str) or not _ID.fullmatch(thread_id):
+        raise _Refused(400, "id must be eight lowercase hex characters")
+    token = body["token"]
+    if not isinstance(token, str) or not _UNDO_TOKEN.fullmatch(token):
+        raise _Refused(400, "token must be the one Done returned")
+    op = parse_op(body["op"])
+
+    def act(ticket):
+        def run():
+            working = _working(daemon)
+            ticket.mutating()
+            status, payload = working.undo(thread_id, token)
+            ticket.returned()
+            if status != 200:
+                return status, {"error": _word(payload.get("error") if isinstance(payload, dict) else "")}, []
+            ticket.result = "undone"
+            LOG.info("phone: Undo from the phone on chat %s", thread_id)
+            return 200, {"thread_id": thread_id, "done": False}, []
+        return _catch(run)
+    return gated(handler, session, path, body, op, "working", act)
+
+
+def _visible(daemon, thread_id):
+    from .remote_api import _Refused as ReadRefused, _visible_thread
+    try:
+        return _visible_thread(daemon, thread_id)
+    except ReadRefused as exc:
+        raise _Refused(exc.status, exc.word) from None
 
 
 def _match(parts: list[str]):
@@ -535,13 +677,16 @@ def _match(parts: list[str]):
         return parts[2], parts[1]
     if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
         return "cancel", parts[1]
-    if len(parts) == 4 and parts[0] == "tasks" and parts[2] == "cancel" and parts[3] == "options":
-        return "cancel_options", parts[1]
+    if len(parts) == 3 and parts[0] == "working" and parts[2] in ("done", "undo"):
+        return parts[2], parts[1]
     return None
 
 
 # The two collections whose GET stays P-3's read (`remote_api`).
 _SHARED = ("new_chat", "new_task")
+# WS-5c's gated writes: the unlock window, an op token, their own rate
+# (`Rate.take_if` at admission), never `_written`'s.
+GATED = {"cancel": cancel, "done": done, "undo": undo}
 
 
 def route(handler, path: str, session: dict, body: bytes):
@@ -564,13 +709,15 @@ def route(handler, path: str, session: dict, body: bytes):
     auth = getattr(handler, "remote_auth", None)
     if daemon is None or auth is None:
         return 404, {"error": "not found"}, []
-    from .remote_auth import AuthError, WORDS, _json_body
+    from .remote_auth import AuthError, Locked, auth_reply, locked_reply, _json_body
     if urlsplit(getattr(handler, "path", "") or "").query:
         return 400, {"error": "bad request"}, []
     try:
         if name == "models":
             return 200, models(daemon), []
         value = _json_body(body)
+        if name in GATED:
+            return GATED[name](handler, daemon, session, path, object_id, value)
         if name in ("send", "new_chat", "new_task"):
             client = _client_id(value)
             if client is not None:
@@ -597,9 +744,10 @@ def route(handler, path: str, session: dict, body: bytes):
         return _written(handler, daemon, session, name, object_id, value, auth)
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
     except Exception as exc:  # noqa: BLE001 — never a 500 with an exception's text
         LOG.exception("phone: a write failed (%s)", type(exc).__name__)
         if name == "models":
@@ -609,27 +757,29 @@ def route(handler, path: str, session: dict, body: bytes):
 
 
 def _written(handler, daemon, session, name, object_id, value, auth):
-    """One write, past the body, the id and before the rate."""
-    from .remote_auth import AuthError, WORDS
+    """One session-only write, past the body, the id and before the rate.
+    A write that lands slides an open unlock window (`touch_unlock`), never
+    opening a closed one (WS-5c §5.1)."""
+    from .remote_auth import AuthError, Locked, auth_reply, locked_reply
     try:
         if not rate_of(handler.server).take(session.get("token_sha256") or ""):
             return 429, {"error": RATE_WORD}, [("Retry-After", str(int(RATE_S)))]
         if name == "send":
-            return 202, send(daemon, object_id, value), []
-        if name == "new_chat":
-            return 201, new_chat(daemon, value, lambda: auth.session_live(session.get("token_sha256"))), []
-        if name == "new_task":
-            return 201, new_task(daemon, value), []
-        if name in ("start", "resume"):
-            return 200, verb(daemon, object_id, name, value), []
-        if name == "cancel_options":
-            return 200, cancel_options(handler, daemon, session, object_id, value), []
-        return 200, cancel(handler, daemon, session, object_id, value), []
+            answer = 202, send(daemon, object_id, value), []
+        elif name == "new_chat":
+            answer = 201, new_chat(daemon, value, lambda: auth.session_live(session.get("token_sha256"))), []
+        elif name == "new_task":
+            answer = 201, new_task(daemon, value), []
+        else:
+            answer = 200, verb(daemon, object_id, name, value), []
+        auth.touch_unlock(session)
+        return answer
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
     except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain, kept under the id
         LOG.exception("phone: a write failed (%s)", type(exc).__name__)
         return 409, {"error": UNCERTAIN, "uncertain": True}, []

@@ -21,11 +21,8 @@ projection (`inbox.rows`, IN-1); nothing is stored.
   Remote listener, past `remote_auth.owner_status` (a session, the exact
   Host, and for a POST the exact Origin; mounted by `remote_auth.api_route`):
     GET  /m/api/review                  200 the report, phone form, with `group` and `opens_here`
-    POST /m/api/review/approve/options  {items: [{id, tag}]}
-                                        200 {publicKey, count}: a challenge bound to `subject(items)`
-                                        409 {error, changed} (the first check) or {error: "limited: …", secure}
-    POST /m/api/review/approve          {items: [{id, tag}], assertion}
-                                        200 as the HUD's; 401 without or with a refused assertion;
+    POST /m/api/review/approve          {items: [{id, tag}], op}   gated (WS-5c)
+                                        200 as the HUD's; 423 locked; 400/410/409/429 for the op token;
                                         409 {error, changed} or limited; nothing written on any refusal
     POST /m/api/review/leave            {items: [{id}]}: as the HUD's, the session only
 
@@ -59,15 +56,15 @@ selectable (IN-3 unchanged for live cards). At most `SHOWN` items, then
 `tag = HMAC-SHA256(key, "mr-v1" ‖ id ‖ digest ‖ sha256(canonical card))`,
 `key` 32 random bytes made when this module is first imported in this
 daemon's process and never written: the tag binds QH's exact digest and the
-exact card shown, and reveals neither. A restart makes every tag stale. The
-phone's assertion is bound to `subject(items)`: `defers:` and 56 hex of the
-SHA-256 of `"jarvis-morning-review-v1\\n"` and the sorted `id\\ttag` lines,
-inside `remote_auth._DEFER_SUBJECT`, Allow only. The group route always uses
-it, even for one item; the per-row route (`remote_answer`) keeps
-`defer:<id>`; neither takes the other's assertion.
+exact card shown, and reveals neither. A restart makes every tag stale.
+Since WS-5c the phone's Approve selected binds exactly the set its body
+names, ids and tags, checked at act time (`check_group`) and again under the
+store's lock; the per-assertion `defers:` subject is gone with the
+per-action challenges, and its op token (`remote_auth.gated`) is what makes
+a replay a 409 `duplicate`.
 
-**All or nothing (MR-7, the owner's answer 4).** Checked before a challenge
-is issued (`check_group`), and again after the assertion and §4.1, under the
+**All or nothing (MR-7, the owner's answer 4).** Checked at act time
+(`check_group`), and again after §4.1, under the
 deferral store's lock (`quiet_defer.approve_many` → `settle_many`, with
 `_check`): any item no longer waiting, past 24 h, whose tag no longer
 matches (another card, another digest, or a restart), withheld by the
@@ -77,10 +74,11 @@ message per chat and one resume per task.
 
 **Authority (MR-10, MR-11).** At the desk: `owner_only`, the HUD's own
 confirmation dialog, no passkey (as QH's single desk Approve and retry). On
-the phone: the session, Host and Origin, a fresh assertion bound to the
-subject, and all five §4.1 checks passing; a limited phone gets no group
-approval (the owner's answer 3), only the per-row Approve and retry. Leave
-needs the session only. At most `APPROVE_MAX` (10, the owner's answer 2) per
+the phone: the session, Host and Origin, the session's unlock window open
+(WS-5c: 423 when closed, and nothing else runs), one op token spent, and all
+five §4.1 checks passing; a limited phone gets no group approval (the
+owner's answer 3), only the per-row Approve and retry. Leave needs the
+session only, and slides an open window without opening one. At most `APPROVE_MAX` (10, the owner's answer 2) per
 Approve selected, `LEAVE_MAX` per Leave selected. The grants are QH's,
 unchanged (MR-9): exact digest and thread, single use, 30 minutes.
 
@@ -103,7 +101,6 @@ APPROVE_MAX = 10                # the owner's answer 2
 LEAVE_MAX = 25
 SHOWN = 60                      # items in the report; the rest are "in the Inbox"
 TITLE_CAP = 120
-SUBJECT_DOMAIN = "jarvis-morning-review-v1\n"
 TAG_DOMAIN = b"mr-v1"
 # The key every tag is made with: this process's own, never written (MR-6).
 _KEY = secrets.token_bytes(32)
@@ -142,15 +139,6 @@ def item_tag(record: dict) -> str:
     message = b"\x00".join((TAG_DOMAIN, str(record["id"]).encode("utf-8"),
                             str(record["digest"]).encode("ascii"), card.encode("ascii")))
     return hmac.new(_KEY, message, hashlib.sha256).hexdigest()
-
-
-def subject(items) -> str:
-    """What a group's passkey assertion is bound to: `defers:` and the first
-    56 hex of the SHA-256 of the domain line and the sorted `id\\ttag`
-    lines. Order-free; another id or tag is another subject."""
-    lines = sorted(f"{item_id}\t{tag}" for item_id, tag in items)
-    digest = hashlib.sha256((SUBJECT_DOMAIN + "\n".join(lines)).encode("utf-8")).hexdigest()
-    return "defers:" + digest[:56]
 
 
 def parse_items(body, *, approve: bool, extra: tuple = ()) -> list[tuple[str, str | None]]:
@@ -276,14 +264,15 @@ def check_group(daemon, items, *, phone: bool) -> list[dict]:
     return changed
 
 
-def approve(daemon, items, *, via: str, verified: bool = False) -> dict:
+def approve(daemon, items, *, via: str, unlocked: bool = False) -> dict:
     """Approve selected: `quiet_defer.approve_many` with this module's
     check, ids and tags as the owner confirmed them. The result's `changed`
-    names row ids."""
+    names row ids. `unlocked` (the phone's only, WS-5c): the session's
+    unlock window was open and the op admitted (`remote_auth.gated`)."""
     from . import quiet_defer
     ids = [item_id[len("defer:"):] for item_id, _tag in items]
     tags = {item_id[len("defer:"):]: tag for item_id, tag in items}
-    out = quiet_defer.approve_many(daemon, ids, via=via, verified=verified,
+    out = quiet_defer.approve_many(daemon, ids, via=via, verified=unlocked,
                                    check=_check(daemon, tags, phone=via == "phone"))
     if not out.get("ok") and out.get("changed"):
         out = dict(out, changed=[{"id": f"defer:{c['id']}", "reason": c["reason"]} for c in out["changed"]])
@@ -480,16 +469,66 @@ def hud_route(handler, daemon, parts, query):
 # -- the phone's routes (MR-11) --------------------------------------------------------------
 
 API = "/m/api/review"
-OPTIONS = API + "/approve/options"
 APPROVE = API + "/approve"
 LEAVE = API + "/leave"
-ROUTES = {API: "GET", OPTIONS: "POST", APPROVE: "POST", LEAVE: "POST"}
+ROUTES = {API: "GET", APPROVE: "POST", LEAVE: "POST"}
 GROUP_LIMITED = "; Approve selected needs every check: approve one at a time"
 
 
 def _limited_refusal(secure: dict) -> tuple[int, dict]:
     from .remote_answer import _limited, _shown_secure
     return 409, {"error": _limited(secure) + GROUP_LIMITED, "secure": _shown_secure(secure)}
+
+
+def _approve_phone(handler, daemon, session, value):
+    """Approve selected from the phone (WS-5c §5.3): the items and the op
+    token's shape (400); the unlock window (423, nothing else runs); the
+    token and its admission (`remote_auth.gated`); then exactly the set the
+    body names, ids and tags (`check_group`: 409 changed), all five §4.1
+    checks (a limited phone gets no group approval), and the grants with
+    their locked-store recheck (`approve`: all or nothing)."""
+    from .remote_auth import gated, parse_op
+    items = parse_items(value, approve=True, extra=("op",))
+    if "op" not in value:
+        raise Bad("bad request")
+    op = parse_op(value["op"])
+
+    def act(ticket):
+        def run():
+            changed = check_group(daemon, items, phone=True)
+            if changed:
+                from .quiet_defer import CHANGED
+                return 409, {"error": CHANGED, "changed": changed}, []
+            secure = _monitor_check(daemon, session, handler)
+            if not secure.get("ok"):
+                status, payload = _limited_refusal(secure)
+                return status, payload, []
+            ticket.mutating()
+            out = approve(daemon, items, via="phone", unlocked=True)
+            ticket.returned()
+            if not out["ok"]:
+                return out["status"], {k: v for k, v in out.items() if k in ("error", "changed")}, []
+            ticket.result = "approved"
+            return 200, out, []
+        return _catch(run)
+    return gated(handler, session, APPROVE, value, op, "review", act)
+
+
+def _catch(fn):
+    """`fn()`'s answer; an exception is never a 500 and, since it may have
+    come after the grants began, is the 409 "may not have gone through"
+    (the op settles `uncertain` once `mutating`, `refused` before). An
+    `AuthError` (`Op.mutating`'s final check: 401, or `Locked`) passes
+    through to `route`'s catch."""
+    from .remote_auth import AuthError
+    try:
+        return fn()
+    except AuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
+        from .remote_write import UNCERTAIN
+        LOG.exception("phone: Approve selected failed (%s)", type(exc).__name__)
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
 
 
 def route(handler, path: str, session: dict, body: bytes):
@@ -505,7 +544,7 @@ def route(handler, path: str, session: dict, body: bytes):
     auth = getattr(handler, "remote_auth", None)
     if daemon is None or auth is None:
         return 404, {"error": "not found"}, []
-    from .remote_auth import WORDS, AuthError, _json_body
+    from .remote_auth import AuthError, Locked, auth_reply, locked_reply, _json_body
     try:
         if path == API:
             payload = report(daemon, phone=True)
@@ -515,43 +554,16 @@ def route(handler, path: str, session: dict, body: bytes):
             return 200, payload, []
         value = _json_body(body)
         if path == LEAVE:
-            return 200, leave(daemon, parse_items(value, approve=False), via="phone"), []
-        if path == OPTIONS:
-            items = parse_items(value, approve=True)
-            changed = check_group(daemon, items, phone=True)
-            if changed:
-                from .quiet_defer import CHANGED
-                return 409, {"error": CHANGED, "changed": changed}, []
-            # A limited phone gets no group approval (the owner's answer 3).
-            secure = _monitor_check(daemon, session, handler)
-            if not secure.get("ok"):
-                status, payload = _limited_refusal(secure)
-                return status, payload, []
-            return 200, {"count": len(items),
-                         "publicKey": auth.answer_options(session, subject(items), "allow")}, []
-        items = parse_items(value, approve=True, extra=("assertion",))
-        assertion = value.get("assertion")
-        if not isinstance(assertion, dict):
-            return 401, {"error": "Approve selected needs the passkey"}, []
-        # The assertion first, bound to exactly this set (recomputed from the body).
-        auth.answer_verify(session, assertion, subject(items), "allow")
-        seen = getattr(daemon, "owner_seen", None)
-        if callable(seen):
-            seen()                      # QH-3: a verified group approval is presence
-        # Then every §4.1 check, in full; then the second check and the grants.
-        secure = _monitor_check(daemon, session, handler)
-        if not secure.get("ok"):
-            status, payload = _limited_refusal(secure)
-            return status, payload, []
-        out = approve(daemon, items, via="phone", verified=True)
-        if not out["ok"]:
-            return out["status"], {k: v for k, v in out.items() if k in ("error", "changed")}, []
-        return 200, out, []
+            out = leave(daemon, parse_items(value, approve=False), via="phone")
+            auth.touch_unlock(session)      # session only: slides an open window, never opens one
+            return 200, out, []
+        return _approve_phone(handler, daemon, session, value)
     except Bad as exc:
         return 400, {"error": str(exc)}, []
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
 
 
 def _monitor_check(daemon, session, handler) -> dict:

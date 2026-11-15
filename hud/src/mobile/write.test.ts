@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
+import { installUnlock } from "./unlock.fixtures";
 import { clientIdFor, COMPOSE_LINES, composerView, fitLines, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote,
   taskControlsView, verbsFor, type Composer } from "./write";
 import { parseInbox } from "../lib/inbox";
@@ -53,6 +54,7 @@ function harness() {
     codex: { label: "Codex", available: false, models: [] } } });
   gets["/m/api/tasks"] = ok({ tasks: [task("intake")] });
   gets[`/m/api/tasks/${TASK}`] = ok({ task: task("intake") });
+  installUnlock(gets, replies as Record<string, Posted>);
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
     fetchJson: async (path) => {
@@ -423,15 +425,15 @@ describe("task verbs (P-5)", () => {
     expect(h.app.online).toBe(true);
   });
 
-  it("an offline cancel/options says Offline: nothing that could cancel was sent", async () => {
+  it("an unlock that never reached Jarvis says so: nothing that could cancel was sent", async () => {
     const h = harness();
     await openTask(h, "running");
-    h.replies[`/m/api/tasks/${TASK}/cancel/options`] = { status: 0, body: {}, offline: true };
+    h.replies["/m/api/unlock/options"] = { status: 0, body: {}, offline: true };
     await h.click("m-task-more");
     await h.click("m-task-cancel");
     await h.click("m-task-confirm");
-    expect(h.posts.map((p) => p.path)).toEqual([`/m/api/tasks/${TASK}/cancel/options`]);
-    expect(h.q("m-task-note")!.textContent).toBe("Offline: the task was not cancelled.");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.q("m-task-note")!.textContent).toBe("No answer to the unlock: nothing was sent. Tap again.");
     expect(h.credential).not.toHaveBeenCalled();
   });
 
@@ -462,12 +464,11 @@ describe("task verbs (P-5)", () => {
     expect(h.q("m-task-note")!.textContent).toContain(H.slice(1));
   });
 
-  it("Cancel asks, then takes the passkey on its own challenge, then sends the assertion", async () => {
+  it("Cancel asks, then is a gated action: Face ID while locked, then the cancel with its op token", async () => {
     const h = harness();
     await openTask(h, "running");
     expect(h.q("m-task-start")).toBeNull();
     expect(h.q("m-task-resume")).toBeNull();
-    h.replies[`/m/api/tasks/${TASK}/cancel/options`] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     // PX-4: Cancel is not a button on the page; it is a row of the page's ⋯ menu (48 px, nothing else in it).
     expect(h.q("m-task-cancel")).toBeNull();
     await h.click("m-task-more");
@@ -478,18 +479,19 @@ describe("task verbs (P-5)", () => {
     expect(h.q("m-task-more-panel")).toBeNull();
     expect(h.posts).toEqual([]);
     expect(h.q("m-task-ask")!.textContent).toMatch(/cannot be resumed/);
-    // The passkey refused (Face ID cancelled): nothing is cancelled.
+    expect(h.q("m-task-confirm")!.textContent).toBe("Cancel with Face ID");
+    // Face ID cancelled: nothing is cancelled.
     h.credential.mockResolvedValueOnce(null);
     await h.click("m-task-confirm");
-    expect(h.posts.map((p) => p.path)).toEqual([`/m/api/tasks/${TASK}/cancel/options`]);
-    expect(h.q("m-task-note")!.textContent).toMatch(/The task goes on/);
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.q("m-task-note")!.textContent).toBe("Cancelled, or Face ID did not verify: nothing was sent.");
     await h.click("m-task-more");
     await h.click("m-task-cancel");
     h.gets[`/m/api/tasks/${TASK}`] = h.ok({ task: task("cancelled") });
     await h.click("m-task-confirm");
     expect(h.credential).toHaveBeenLastCalledWith({ challenge: "AAEC" });
-    expect(h.posts.slice(1)).toEqual([{ path: `/m/api/tasks/${TASK}/cancel/options`, value: {} },
-      { path: `/m/api/tasks/${TASK}/cancel`, value: { assertion: { id: "cred", response: {} } } }]);
+    expect(h.posts.slice(1).map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", `/m/api/tasks/${TASK}/cancel`]);
+    expect(Object.keys(h.posts[3].value)).toEqual(["op"]);
     expect(h.q("m-task-controls")).toBeNull();
     expect(h.root.textContent).toContain("Cancelled.");
   });

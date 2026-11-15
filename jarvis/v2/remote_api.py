@@ -51,9 +51,10 @@ the full shared card before any button works.
 **The In progress list** (WS-5a, `GET /m/api/working`) is the desk's working
 set without its inbox rows: `{entries, more, total}`, each entry exactly
 `WORKING_ENTRY_FIELDS` (the title and project name through the same scrub as
-a thread title), ordered as the desk draws it (label, then newest) **before**
-the `WORKING_ENTRIES` cap, so an old Needs-you chat is never cut for newer
-idle ones. It never reads `inbox.rows()`; hints come from the phone's own
+a thread title; `seq`, since WS-5c, the thread's own version, which the
+phone's gated Done carries back with the thread id in its URL), ordered
+as the desk draws it (label, then newest) **before** the `WORKING_ENTRIES`
+cap, so an old Needs-you chat is never cut for newer idle ones. It never reads `inbox.rows()`; hints come from the phone's own
 `/m/api/inbox` rows. `DROPPED["working_entry"]` and `["working"]` say what
 the desk's read carries that this one does not.
 
@@ -166,9 +167,9 @@ STATUS_FIELDS = ("phase", "step", "steps", "started", "elapsed_s", "cost_usd", "
                  "last_tool", "open_question", "routing")
 
 # WS-5a: one entry of the In progress list (`GET /m/api/working`), these
-# fields and nothing else. `seq` (the version Done carries back) is WS-5c's,
-# and is not here until that package adds it to this tuple and its tests.
-WORKING_ENTRY_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last")
+# fields and nothing else. `seq` (WS-5c) is the thread's own version, the one
+# the phone's Done carries back with the thread id in its URL (§5.6).
+WORKING_ENTRY_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last", "seq")
 # The five activity words, in the desk's label order (`LABEL_ORDER` in
 # hud/src/lib/working.ts, D-9); any other `status` is sent as "idle".
 WORKING_LABELS = ("needs_input", "failed", "unread", "working", "idle")
@@ -281,8 +282,8 @@ DROPPED = {
     "working_entry": {
         "since": "when the thread joined; the phone draws `last`",
         "rows": "no inbox row data (P-2): the phone joins its own /m/api/inbox rows by thread_id",
-        "why_not": "Done's refusal reason; there is no Done on the phone in this read (WS-5c)",
-        "seq": "the version Done carries back; WS-5c adds it with its gate",
+        "why_not": "Done's refusal reason; the phone's Done (WS-5c) answers it in its 409's "
+                   "`why_not` (scrubbed) instead of on every entry",
     },
     "working": {
         "needs_you": "inbox rows with no entry; the phone has /m/api/inbox",
@@ -588,6 +589,10 @@ def inbox(daemon) -> dict:
     return {"rows": [inbox_row(r) for r in rows[:INBOX_ROWS]], "more": len(rows) > INBOX_ROWS}
 
 
+def _seq(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _label(status) -> str:
     return status if isinstance(status, str) and status in WORKING_LABELS else "idle"
 
@@ -645,7 +650,8 @@ def working(daemon) -> dict:
                     "project": _scrub(name) if isinstance(name, str) else "",
                     "title": title if isinstance(title, str) else "",
                     "status": _label(e.get("status")),
-                    "last": e["last"] if at is not None else ""})
+                    "last": e["last"] if at is not None else "",
+                    "seq": e["seq"] if _seq(e.get("seq")) else 0})
     return {"entries": out, "more": len(kept) > WORKING_ENTRIES, "total": len(kept)}
 
 

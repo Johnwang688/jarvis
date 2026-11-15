@@ -13,13 +13,13 @@ that read the daemon itself, the socket or the passkeys).
 
 What it pins (the package's acceptance items):
 
-  - Allow or Always without a fresh assertion is refused;
-  - an Allow assertion replayed as Always is refused, and one for another
-    req_id; an expired or a used challenge (409);
-  - UV clear is refused, and an assertion from another passkey;
+  - Allow or Always while locked is exactly 423, without an op token 400
+    (WS-5c; the unlock itself is tests/v2/remote_unlock_check.py's);
+  - a private card's detail is a read: 200 while locked;
   - Deny works with the session only;
-  - Always shows its rule (a dry run) and writes it only after a verified
-    answer;
+  - Always shows its rule (a dry run, read without a challenge: exactly
+    RULE_FIELDS, extra keys or hostile text only at the desk, its own
+    session re-check) and writes it only with the rule's current preview;
   - a HUD-only card is answerable under §4.1 and refused (409, "answer at
     the desk") when any single check fails: one test per condition;
   - a HUD-only card's private detail never reaches a log line, the bus,
@@ -201,21 +201,33 @@ class Phone(rac.Remote):
     def detail(self, row, cookie=None):
         return self.phone("GET", f"/m/api/inbox/{row}/detail", cookie=cookie or self.cookie)
 
-    def options(self, row, decision, cookie=None):
-        return self.phone("POST", f"/m/api/inbox/{row}/answer/options", {"decision": decision},
+    def rule(self, row, cookie=None, method="GET"):
+        """WS-5c: Always's rule, read without a challenge (session only)."""
+        return self.phone(method, f"/m/api/inbox/{row}/answer/rule", {} if method != "GET" else None,
                           cookie=cookie or self.cookie)
 
     def post_answer(self, row, body, cookie=None):
         return self.phone("POST", f"/m/api/inbox/{row}/answer", body, cookie=cookie or self.cookie)
 
-    def assertion(self, row, decision, authenticator=None, cookie=None, **kw):
-        status, _, body = self.options(row, decision, cookie=cookie)
-        self.assertEqual(status, 200, body)
-        return (authenticator or self.a).get(body["publicKey"], **kw), body
+    def ensure_unlocked(self, cookie=None):
+        """WS-5c: this session's unlock window, opened if it is not."""
+        token = (cookie or self.cookie).split("=", 1)[1]
+        held = self.auth._unlocks.get(remote_auth.token_hash(token))
+        if held is None or self.auth.mono() >= held["until"]:
+            self.unlocked(cookie)
 
-    def verified(self, row, decision, cookie=None, **kw):
-        credential, _ = self.assertion(row, decision, cookie=cookie, **kw)
-        return self.post_answer(row, {"decision": decision, "assertion": credential}, cookie=cookie)
+    def verified(self, row, decision, cookie=None):
+        """A gated Allow or Always (WS-5c): the window open, a fresh op token,
+        and for Always the preview of the rule read now. A refused rule read
+        is returned as it is."""
+        self.ensure_unlocked(cookie)
+        body = {"decision": decision, "op": self.op(cookie)}
+        if decision == "always":
+            status, headers, got = self.rule(row, cookie)
+            if status != 200:
+                return status, headers, got
+            body["preview"] = got["preview"]
+        return self.post_answer(row, body, cookie=cookie)
 
     def pending(self, request) -> bool:
         return any(r.req_id == request.req_id for r in self.d.approvals.pending())
@@ -232,108 +244,44 @@ class Phone(rac.Remote):
         self.assertTrue(result["ok"], result)
 
 
-# -- PH-4: per-answer assertions ------------------------------------------------------------
+# -- WS-5c: Allow and Always are gated by the unlock window -------------------------------
 
 
 class Assertions(Phone):
-    def test_allow_or_always_without_a_fresh_assertion_is_refused(self):
+    def test_allow_or_always_needs_the_window_and_an_op_token(self):
         self.secure_ok()
         request, out, worker = self.ask()
         row = self.row(request)
         for decision in ("allow", "always"):
-            status, _, body = self.post_answer(row, {"decision": decision})
-            self.assertEqual(status, 401, body)
-            # A credential-shaped thing that was never issued a challenge.
-            fake = self.a.get({"rpId": HOST, "challenge": remote_auth.b64url(os.urandom(32))})
-            status, _, body = self.post_answer(row, {"decision": decision, "assertion": fake})
-            self.assertEqual(status, 409, body)
+            extra = {"preview": "0" * 64} if decision == "always" else {}
+            status, _, body = self.post_answer(row, {"decision": decision, "op": self.op(), **extra})
+            self.assertEqual((status, body), (423, {"error": "locked", "unlock": True}), decision)
+            self.assertEqual(self.post_answer(row, {"decision": decision, **extra})[0], 400, "no op token")
+            self.assertEqual(self.post_answer(row, {"decision": decision, "op": "x", **extra})[0], 400)
+            # The old per-action assertion is no field of the answer now.
+            self.assertEqual(self.post_answer(row, {"decision": decision, "assertion": {}, **extra})[0], 400)
         self.assertTrue(self.pending(request), "nothing was answered")
         status, _, body = self.verified(row, "allow")
         self.assertEqual((status, body["decision"], body["authority"]), (200, "allow", "hud"), body)
         self.decided(out, worker, Decision.ALLOW)
-        print("ok  PH-4: Allow and Always need a fresh assertion (401 without, 409 for one never issued)")
+        print("ok  WS-5c: Allow and Always need the open window (423 locked) and an op token (400 without)")
 
-    def test_an_allow_assertion_is_never_an_always_nor_another_card(self):
+    def test_reads_while_locked(self):
+        """Sol r2-4: a private card's detail is a read: 200 while locked;
+        its Allow is 423; then the unlock; then the Allow goes."""
         self.secure_ok()
-        one, out, worker = self.ask()
-        two, _, _ = self.ask(args={"command": "git log"})
-        credential, _ = self.assertion(self.row(one), "allow")
-        status, _, body = self.post_answer(self.row(one), {"decision": "always", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertEqual(self.written(), [], "no rule written")
-        # The challenge was spent by that attempt: the same assertion, now
-        # as the Allow it was, is a used challenge.
-        status, _, body = self.post_answer(self.row(one), {"decision": "allow", "assertion": credential})
-        self.assertEqual(status, 409, body)
-        credential, _ = self.assertion(self.row(one), "allow")
-        status, _, body = self.post_answer(self.row(two), {"decision": "allow", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertTrue(self.pending(one) and self.pending(two), "neither card was answered")
-        # And Always's assertion is not an Allow either.
-        credential, _ = self.assertion(self.row(one), "always")
-        status, _, body = self.post_answer(self.row(one), {"decision": "allow", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertTrue(self.pending(one))
-        print("ok  PH-4: an Allow assertion replayed as Always, or on another card, is refused (and spent)")
-
-    def test_an_expired_or_used_challenge_is_refused(self):
-        self.secure_ok()
-        request, out, worker = self.ask()
+        request, out, worker = self.private()
         row = self.row(request)
-        credential, _ = self.assertion(row, "allow")
-        self.mono.now += remote_auth.CHALLENGE_S + 1
-        status, _, body = self.post_answer(row, {"decision": "allow", "assertion": credential})
-        self.assertEqual((status, body), (409, {"error": "challenge expired"}))
-        credential, _ = self.assertion(row, "allow")
-        self.assertEqual(self.post_answer(row, {"decision": "allow", "assertion": credential})[0], 200)
-        self.decided(out, worker, Decision.ALLOW)
-        # The same assertion again, on a new card with the same answer.
-        again, _, _ = self.ask()
-        status, _, body = self.post_answer(self.row(again), {"decision": "allow", "assertion": credential})
-        self.assertEqual(status, 409, body)
-        self.assertTrue(self.pending(again))
-        print("ok  PH-4: an expired (60 s, monotonic) or used challenge is refused (409)")
-
-    def test_uv_clear_or_another_passkey_is_refused(self):
-        self.secure_ok()
-        request, out, worker = self.ask()
-        row = self.row(request)
-        credential, _ = self.assertion(row, "allow", uv=False)
-        self.assertEqual(self.post_answer(row, {"decision": "allow", "assertion": credential})[0], 401)
-        other = self.pair()
-        other_cookie = self.signed_in(other)
-        # Another paired passkey answering this session's challenge.
-        credential, _ = self.assertion(row, "allow", authenticator=other)
-        self.assertEqual(self.post_answer(row, {"decision": "allow", "assertion": credential})[0], 401)
-        # The other session's own challenge, sent under this session.
-        credential, _ = self.assertion(row, "allow", authenticator=other, cookie=other_cookie)
-        self.assertEqual(self.post_answer(row, {"decision": "allow", "assertion": credential})[0], 401)
-        # A wrong origin, a cross-origin ceremony, a wrong rpId.
-        for kw in ({"origin": "https://evil.ts.net"}, {"client_extra": {"crossOrigin": True}},
-                   {"rp_id": "evil.ts.net"}):
-            credential, _ = self.assertion(row, "allow", **kw)
-            self.assertEqual(self.post_answer(row, {"decision": "allow", "assertion": credential})[0], 401, kw)
-        self.assertTrue(self.pending(request))
-        # The other passkey verifies for its own session.
-        credential, _ = self.assertion(row, "allow", authenticator=other, cookie=other_cookie)
-        status, _, body = self.post_answer(row, {"decision": "allow", "assertion": credential}, cookie=other_cookie)
+        status, _, body = self.detail(row)
         self.assertEqual(status, 200, body)
+        self.assertEqual(body["card"]["browser"]["target"], PRIVATE)
+        status, _, body = self.post_answer(row, {"decision": "allow", "op": self.op()})
+        self.assertEqual((status, body), (423, {"error": "locked", "unlock": True}))
+        self.unlocked()
+        status, _, body = self.post_answer(row, {"decision": "allow", "op": self.op()})
+        self.assertEqual((status, body["authority"]), (200, "hud"), body)
         self.decided(out, worker, Decision.ALLOW)
-        print("ok  PH-4: UV clear, another passkey, another session's challenge, a bad origin or rpId: 401")
-
-    def test_the_counter_rule_holds_per_answer(self):
-        self.secure_ok()
-        counting = self.pair(rac.Authenticator(step=1))
-        cookie = self.signed_in(counting)
-        request, _, _ = self.ask()
-        row = self.row(request)
-        credential, _ = self.assertion(row, "allow", authenticator=counting, cookie=cookie,
-                                       count=counting.count)
-        status, _, body = self.post_answer(row, {"decision": "allow", "assertion": credential}, cookie=cookie)
-        self.assertEqual(status, 401, "a counter that did not rise")
-        status, _, body = self.verified(row, "allow", authenticator=counting, cookie=cookie)
-        self.assertEqual(status, 200, body)
-        print("ok  PH-4: the counter rule (a counter that does not rise is refused)")
+        print("ok  a private card's detail is 200 while locked; its Allow 423; unlock; then 200")
 
     def test_deny_needs_the_session_only(self):
         request, out, worker = self.ask()
@@ -362,14 +310,16 @@ class Always(Phone):
         self.secure_ok()
         request, out, worker = self.ask(args={"command": "git status --short"})
         row = self.row(request)
-        status, _, body = self.options(row, "always")
+        status, _, body = self.rule(row)
         self.assertEqual(status, 200, body)
+        self.assertEqual(tuple(body), remote_answer.RULE_FIELDS)
         self.assertEqual(body["rule"], {"tool": "run_command", "prefix": "git"})
         self.assertIn("'git'", body["rule_words"])
         self.assertEqual(body["resolution"], "approved-always")
+        self.assertEqual(body["preview"], remote_answer.preview_of(request.req_id, body["rule"], "approved-always"))
         self.assertEqual(self.written(), [], "the dry run wrote nothing")
-        credential = self.a.get(body["publicKey"])
-        status, _, got = self.post_answer(row, {"decision": "always", "assertion": credential})
+        self.unlocked()
+        status, _, got = self.post_answer(row, {"decision": "always", "preview": body["preview"], "op": self.op()})
         self.assertEqual(status, 200, got)
         self.assertEqual(got["allowlisted"], body["rule"], "what was shown is what was written")
         self.assertEqual(self.written(), [body["rule"]])
@@ -377,14 +327,102 @@ class Always(Phone):
         self.assertEqual(self.d.approvals.decisions[-1]["resolution"], "approved-always")
         # A compound command shows that no rule can be written, and writes none.
         request, out, worker = self.ask(args={"command": "git status && rm -rf build"})
-        status, _, body = self.options(self.row(request), "always")
+        status, _, body = self.rule(self.row(request))
         self.assertEqual((status, body["rule"]), (200, None), body)
         self.assertTrue(body["resolution"].startswith("allow (not allowlistable"), body)
-        status, _, got = self.post_answer(self.row(request), {"decision": "always",
-                                                              "assertion": self.a.get(body["publicKey"])})
+        status, _, got = self.post_answer(self.row(request), {"decision": "always", "preview": body["preview"],
+                                                              "op": self.op()})
         self.assertEqual((status, got["allowlisted"]), (200, None), got)
         self.assertEqual(len(self.written()), 1)
-        print("ok  Always: the exact rule first (a dry run), written only by the verified answer")
+        print("ok  Always: the exact rule first (a dry run, read without a challenge), written only by the "
+              "gated answer")
+
+    def test_the_preview_binds_the_rules_freshness(self):
+        """WS-5c §5.4: the Always carries the preview of the rule read; the
+        server recomputes it. Each of these is 409, or 400 where marked."""
+        self.secure_ok()
+        request, out, worker = self.ask(args={"command": "git status --short"})
+        other, _, _ = self.ask(args={"command": "npm test"})
+        row = self.row(request)
+        good = self.rule(row)[2]
+        theirs = self.rule(self.row(other))[2]
+        self.unlocked()
+
+        def always(preview, **extra):
+            body = {"decision": "always", "op": self.op(), **extra}
+            if preview is not None:
+                body["preview"] = preview
+            return self.post_answer(row, body)
+        changed = {"error": remote_answer.RULE_CHANGED}
+        self.assertEqual(always(theirs["preview"])[2], changed, "another card's preview")
+        self.assertEqual(always(remote_answer.preview_of(request.req_id, {"tool": "run_command", "prefix": "rm"},
+                                                         good["resolution"]))[2], changed, "only the rule changed")
+        self.assertEqual(always(remote_answer.preview_of(request.req_id, good["rule"], "allow (other)"))[2], changed,
+                         "only the resolution changed")
+        # A stale preview: the rule this request has changed after it was read.
+        real = self.d.approvals.always_rule
+        with patch.object(self.d.approvals, "always_rule",
+                          lambda req_id: ({"tool": "run_command", "prefix": "gitx"}, real(req_id)[1])):
+            self.assertEqual(always(good["preview"])[2], changed, "a stale preview")
+        for bad in (None, "", "0" * 63, "A" * 64, 7):
+            self.assertEqual(always(bad)[0], 400, bad)
+        # An Always sent with an Allow card's confirmation state, and an Allow with Always's.
+        self.assertEqual(self.post_answer(row, {"decision": "always", "op": self.op()})[0], 400)
+        self.assertEqual(self.post_answer(row, {"decision": "allow", "preview": good["preview"],
+                                                "op": self.op()})[0], 400)
+        self.assertTrue(self.pending(request))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(always(good["preview"])[0], 200)
+        self.assertEqual(self.written(), [good["rule"]])
+        self.decided(out, worker, Decision.ALLOW)
+        print("ok  the preview: another card's, a rule or resolution changed, a stale one 409; missing or "
+              "malformed 400; an Allow's state 400")
+
+    def test_the_rule_read(self):
+        """Sol r3-2: session only, works while locked, never slides; its own
+        final session check; exactly RULE_FIELDS; never a partial rule."""
+        self.secure_ok()
+        request, _, _ = self.ask(args={"command": "git status --short"})
+        row = self.row(request)
+        status, _, body = self.rule(row)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(tuple(body), remote_answer.RULE_FIELDS)
+        self.assertLessEqual(set(body["rule"]), set(remote_answer.RULE_ENTRY_FIELDS))
+        self.assertEqual(self.auth._unlocks, {}, "it neither needs nor opens a window")
+        for method in ("POST", "PUT", "DELETE"):
+            self.assertEqual(self.rule(row, method=method)[0], 405, method)
+        self.assertEqual(self.phone("GET", f"/m/api/inbox/{row}/answer/rule?x=1", cookie=self.cookie)[0], 400)
+        # A planted extra entry key: shown only at the desk.
+        real = self.d.approvals.always_rule
+        with patch.object(self.d.approvals, "always_rule",
+                          lambda req_id: ({"tool": "run_command", "prefix": "git", "extra": "x"}, real(req_id)[1])):
+            self.assertEqual(self.rule(row)[2], {"error": remote_answer.RULE_AT_DESK})
+        # Hostile text in the entry: withheld whole, never partly shown.
+        for entry in ({"tool": "run_command", "prefix": TOKEN}, {"tool": TOKEN}, {"tool": "run_command", "prefix": 3}):
+            with patch.object(self.d.approvals, "always_rule", lambda req_id, e=entry: (e, "approved-always")):
+                status, _, got = self.rule(row)
+            self.assertEqual((status, got), (409, {"error": remote_answer.RULE_AT_DESK}), entry)
+            self.assertNotIn(TOKEN, json.dumps(got))
+        # Not allowlistable, a deferred row, and private while limited: 409.
+        flat, _, _ = self.ask(allowlistable=False)
+        self.assertEqual(self.rule(self.row(flat))[2], {"error": remote_answer.NO_ALWAYS})
+        self.assertEqual(self.rule("defer:abc")[2], {"error": remote_answer.NO_ALWAYS})
+        private, _, _ = self.private()
+        _flip_serve(self)
+        self.assertEqual(self.rule(self.row(private))[0], 409)
+        self.system.bad.clear()
+        # End or revoke during the read: 401.
+        session = self.session_of()
+        real_rule = remote_answer.rule
+
+        def ending(*args):
+            out = real_rule(*args)
+            self.auth.end_session(session["id"])
+            return out
+        with patch.object(remote_answer, "rule", ending):
+            self.assertEqual(self.rule(row)[0], 401)
+        print("ok  the rule read: 200 while locked, exactly RULE_FIELDS, extra keys or hostile text only at the "
+              "desk, 405/400, End during it 401")
 
     def test_the_dry_run_matches_resolve(self):
         cases = [{"tool": "Bash", "args": {"command": "npm test"}},
@@ -417,9 +455,10 @@ class Always(Phone):
     def test_always_is_refused_where_the_card_takes_none(self):
         self.secure_ok()
         request, _, _ = self.ask(allowlistable=False)
-        self.assertEqual(self.options(self.row(request), "always")[2], {"error": remote_answer.NO_ALWAYS})
+        self.assertEqual(self.rule(self.row(request))[2], {"error": remote_answer.NO_ALWAYS})
+        self.assertEqual(self.verified(self.row(request), "always")[2], {"error": remote_answer.NO_ALWAYS})
         private, _, _ = self.private()
-        self.assertEqual(self.options(self.row(private), "always")[0], 409)
+        self.assertEqual(self.rule(self.row(private))[0], 409)
         self.assertEqual(self.written(), [])
         print("ok  Always: refused on a card that takes none (not allowlistable, HUD-only)")
 
@@ -482,22 +521,22 @@ class Secured(Phone):
         self.secure_ok()
         ordinary, o_out, o_worker = self.ask()
         private, p_out, p_worker = self.private()
-        # An assertion taken while every check held...
-        early, _ = self.assertion(self.row(private), "allow")
+        # A window opened while every check held...
+        self.unlocked()
         FLIPS[name](self)
         result = self.d.secure.check()
         self.assertEqual((result["ok"], result["failed"]), (False, name), result)
-        # ...is refused once one fails: answer at the desk.
-        status, _, body = self.post_answer(self.row(private), {"decision": "allow", "assertion": early})
+        # ...still answers nothing a failed check refuses: answer at the desk.
+        status, _, body = self.verified(self.row(private), "allow")
         self.assertEqual((status, body["error"]), (409, remote_answer.AT_DESK), body)
         self.assertTrue(self.pending(private), "the card waits for the desk")
         status, _, got = self.detail(self.row(private))
         self.assertEqual((status, got["error"], got["secure"]["failed"]), (409, remote_answer.AT_DESK, name))
         self.assertNotIn(PRIVATE, json.dumps(got))
-        self.assertEqual(self.options(self.row(private), "allow")[0], 409)
+        self.assertEqual(self.verified(self.row(private), "allow")[0], 409)
         self.assertNotIn(PRIVATE, json.dumps(self.phone("GET", "/m/api/inbox", cookie=self.cookie)[2]))
         # Discord's authority on the ordinary card: Allow yes, Always no.
-        self.assertEqual(self.options(self.row(ordinary), "always")[0], 409)
+        self.assertEqual(self.rule(self.row(ordinary))[0], 409)
         status, _, body = self.detail(self.row(ordinary))
         self.assertEqual((status, body["can"]), (200, {"deny": True, "allow": True, "always": False}), body)
         self.assertTrue(body["why"].startswith("limited: "), body["why"])
@@ -540,11 +579,11 @@ class Secured(Phone):
         self.secure_ok()
         self.assertTrue(self.d.secure.view()["ok"], "shown: secured")
         private, _, _ = self.private()
-        early, _ = self.assertion(self.row(private), "allow")
+        self.unlocked()
         runs = self.d.secure.runs
         _flip_serve(self)               # nothing re-checked yet: the view still says ok
         self.assertTrue(self.d.secure.view()["ok"])
-        status, _, body = self.post_answer(self.row(private), {"decision": "allow", "assertion": early})
+        status, _, body = self.post_answer(self.row(private), {"decision": "allow", "op": self.op()})
         self.assertEqual((status, body["error"]), (409, remote_answer.AT_DESK))
         self.assertGreater(self.d.secure.runs, runs, "the answer ran the checks itself")
         self.assertEqual(self.d.secure.view()["failed"], "serve", "and the failure is shown at once")
@@ -608,7 +647,8 @@ class Cards(Phone):
                 self.assertEqual(body["can"], {"deny": True, "allow": False, "always": False})
                 self.assertEqual(body["why"], remote_answer.WITHHELD)
                 for decision in ("allow", "always"):
-                    self.assertEqual(self.options(row, decision)[2], {"error": remote_answer.WITHHELD})
+                    self.assertEqual(self.verified(row, decision)[2], {"error": remote_answer.WITHHELD})
+                self.assertEqual(self.rule(row)[2], {"error": remote_answer.WITHHELD})
                 self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
                 self.decided(out, worker, Decision.DENY)
         print("ok  a card the phone's scrub would change: Allow and Always refused, Deny works")
@@ -646,7 +686,7 @@ class Cards(Phone):
                 self.assertEqual((status, body["withheld"], body["can"]["allow"]), (200, True, False), body)
                 self.assertNotIn(secret, json.dumps(body))
                 self.assertNotIn(secret, json.dumps(self.phone("GET", "/m/api/inbox", cookie=self.cookie)[2]))
-                self.assertEqual(self.options(row, "allow")[2], {"error": remote_answer.WITHHELD})
+                self.assertEqual(self.verified(row, "allow")[2], {"error": remote_answer.WITHHELD})
                 self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
                 self.decided(out, worker, Decision.DENY)
         # Ordinary arguments stay as they are and answerable.
@@ -665,10 +705,9 @@ class Cards(Phone):
         status, _, body = self.detail(row)
         self.assertEqual((status, body["withheld"]), (200, True))
         self.assertNotIn(TOKEN, json.dumps(body))
-        status, _, got = self.post_answer(row, {"decision": "allow", "assertion": self.a.get(
-            {"rpId": HOST, "challenge": remote_auth.b64url(os.urandom(32))})})
-        self.assertNotEqual(status, 200)
-        self.assertEqual(self.options(row, "allow")[0], 409)
+        status, _, got = self.post_answer(row, {"decision": "allow", "op": self.op()})
+        self.assertNotEqual(status, 200, "locked")
+        self.assertEqual(self.verified(row, "allow")[0], 409)
         self.assertTrue(self.pending(request))
         print("ok  a credential as an argument's key: withheld, no Allow")
 
@@ -686,7 +725,7 @@ class Cards(Phone):
         self.assertIn(remote_api.TOO_DEEP, json.dumps(body["card"]))
         self.assertEqual((status, body["withheld"], body["can"]), (200, True, {"deny": True, "allow": False,
                                                                                "always": False}))
-        self.assertEqual(self.options(row, "allow")[2], {"error": remote_answer.WITHHELD})
+        self.assertEqual(self.verified(row, "allow")[2], {"error": remote_answer.WITHHELD})
         self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
         self.decided(out, worker, Decision.DENY)
         print("ok  an argument nested past the redaction's depth: withheld, Deny only")
@@ -765,11 +804,11 @@ class OwnerVerified(Phone):
         ],
         "jarvis/v2/remote_answer.py": [
             "owner_verified,via=\"phone\")",                            # _dispatch -> inbox.answer
-            "False)",                                                  # questions and decisions
-            "False)",                                                  # Deny
+            "False))",                                                 # questions (session only)
+            "False))",                                                 # Deny (session only)
             "False)",                                                  # a proposal's withdraw (P-5)
-            'bool(secure.get("ok"))',                                  # §4.1 after the assertion
-            "owner_verified)",                                         # the verified answer
+            'bool(secure.get("ok"))',                                  # §4.1 inside the gated act
+            "owner_verified)",                                         # the gated answer
         ],
     }
 
@@ -791,12 +830,14 @@ class OwnerVerified(Phone):
                          {rel: sorted(uses) for rel, uses in self.ALLOWED.items()})
         # The phone's True is the §4.1 result after the assertion, nothing else.
         source = inspect.getsource(remote_answer.answer)
-        self.assertLess(source.index("answer_verify("), source.index("check(session=session, handler=handler)"))
+        # Inside the gated act (after the window and admission), never before.
+        self.assertLess(source.index("def act(ticket):"), source.index("check(session=session, handler=handler)"))
+        self.assertIn("return gated(handler, session, path, body, op, \"approval\", act)", source)
         self.assertLess(source.index("check(session=session, handler=handler)"),
                         source.index('owner_verified = bool(secure.get("ok"))'))
         self.assertIn("projects.owner_only", inspect.getsource(inbox.route).replace("from .projects import owner_only",
                                                                                      "projects.owner_only"))
-        print("ok  owner_verified: only the HUD's routes (own Host) and the phone after its assertion under §4.1")
+        print("ok  owner_verified: only the HUD's routes (own Host) and the phone, gated, under §4.1")
 
     def test_discord_and_the_inbox_dispatch_cannot_satisfy_hud_only(self):
         request, out, worker = self.private()
@@ -814,8 +855,9 @@ class OwnerVerified(Phone):
                            [("Host", f"127.0.0.1:{self.d.port}"), ("Origin", f"http://127.0.0.1:{self.d.port}"),
                             ("Content-Type", "application/json")], b'{"decision": "allow"}')
         self.assertEqual(status, 403)
-        # The phone with no assertion.
-        self.assertEqual(self.post_answer(self.row(request), {"decision": "allow"})[0], 401)
+        # The phone with no op token (400), and locked (423).
+        self.assertEqual(self.post_answer(self.row(request), {"decision": "allow"})[0], 400)
+        self.assertEqual(self.post_answer(self.row(request), {"decision": "allow", "op": self.op()})[0], 423)
         self.assertTrue(self.pending(request))
         # The HUD's own route is the control: it answers.
         host = f"127.0.0.1:{self.d.face_port}"
@@ -825,7 +867,7 @@ class OwnerVerified(Phone):
         self.assertEqual(status, 200)
         self.decided(out, worker, Decision.ALLOW)
         print("ok  hud_only: Discord's resolve, the inbox dispatch without an assertion, the API listener, "
-              "and the phone without a passkey are all refused; the HUD route answers")
+              "and the phone locked are all refused; the HUD route answers")
 
 
 # -- questions and decisions --------------------------------------------------------------------
@@ -1017,9 +1059,11 @@ class Boundary(Phone):
         request, _, _ = self.ask()
         row = self.row(request)
         self.assertEqual(self.phone("POST", f"/m/api/inbox/{row}/detail", {}, cookie=self.cookie)[0], 405)
-        self.assertEqual(self.phone("GET", f"/m/api/inbox/{row}/answer/options", cookie=self.cookie)[0], 405)
-        self.assertEqual(self.options(row, "deny")[0], 400)
-        self.assertEqual(self.options(row, "ALLOW")[0], 400)
+        # WS-5c: the per-action options route is gone (404 past the session).
+        self.assertEqual(self.phone("POST", f"/m/api/inbox/{row}/answer/options", {"decision": "allow"},
+                                    cookie=self.cookie)[0], 404)
+        self.assertEqual(self.phone("GET", f"/m/api/inbox/{row}/answer/options", cookie=self.cookie)[0], 404)
+        self.assertEqual(self.post_answer(row, {"decision": "ALLOW", "op": self.op()})[0], 400)
         self.assertEqual(self.post_answer(row, {"decision": "maybe"})[0], 400)
         self.assertEqual(self.post_answer("missed:x", {"decision": "deny"})[0], 400)
         self.assertEqual(self.post_answer("appr:nope", {"decision": "deny"})[0], 409)
@@ -1027,48 +1071,6 @@ class Boundary(Phone):
         self.assertEqual(self.phone("POST", f"/m/api/inbox/{row}/answer", {"decision": "deny"},
                                     cookie=self.cookie, origin="https://evil.ts.net")[0], 403)
         print("ok  methods and shapes: 405, 400 for a bad decision or kind, 409 when gone, 403 without the Origin")
-
-    def test_the_answer_challenge_pool_is_per_session(self):
-        self.secure_ok()
-        cap = remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION
-        cards = [self.ask(args={"command": f"echo {i}"})[0] for i in range(cap + 1)]
-        for card in cards[:cap]:
-            self.assertEqual(self.options(self.row(card), "allow")[0], 200)
-        status, _, body = self.options(self.row(cards[cap]), "allow")
-        self.assertEqual(status, 429, body)
-        # Another session is never refused for this one's abandoned prompts.
-        other = self.pair()
-        other_cookie = self.signed_in(other)
-        self.assertEqual(self.options(self.row(cards[cap]), "allow", cookie=other_cookie)[0], 200)
-        self.assertEqual(self.phone("POST", "/m/api/login/options", {})[0], 200, "sign-in is not crowded out")
-        # The same session asking again for the same card and answer replaces
-        # its earlier challenge: never a 429, and the old one is spent.
-        old, _ = self.assertion(self.row(cards[0]), "allow")
-        for _ in range(cap * 3):
-            self.assertEqual(self.options(self.row(cards[0]), "allow")[0], 200)
-        status, _, body = self.post_answer(self.row(cards[0]), {"decision": "allow", "assertion": old})
-        self.assertEqual(status, 409, body)
-        credential, _ = self.assertion(self.row(cards[0]), "allow")
-        self.assertEqual(self.post_answer(self.row(cards[0]), {"decision": "allow", "assertion": credential})[0], 200)
-        print("ok  per-answer challenges: 4 per session (429 past it), never across sessions; a repeat replaces")
-
-    def test_pool_exhaustion_by_another_session(self):
-        """The security review's case (PR #313): another signed-in session
-        asking again and again, and one session's abandoned prompts, never
-        lock the owner's session out."""
-        self.secure_ok()
-        request, _, _ = self.ask()
-        row = self.row(request)
-        other = self.pair()
-        other_cookie = self.signed_in(other)
-        for _ in range(16):
-            self.assertEqual(self.options(row, "allow", cookie=other_cookie)[0], 200)
-        self.assertEqual(self.options(row, "allow")[0], 200, "the owner's own session")
-        for _ in range(16):
-            self.options(row, "allow")
-        self.assertEqual(self.options(row, "allow", cookie=other_cookie)[0], 200)
-        print("ok  per-answer challenges: another session's prompts never 429 this one")
-
 
 # -- the monitor ----------------------------------------------------------------------------------
 

@@ -20,18 +20,21 @@
 //
 // P-4, answering (jarvis/v2/remote_answer.py): an approval row opens its
 // card (./card.ts), read from `GET /m/api/inbox/<id>/detail`; Deny is one
-// tap; AUTHORIZE and ALWAYS each ask `answer/options` for a challenge bound
-// to that card and that answer, then the passkey (Face ID or the passcode),
-// then send the assertion with the answer. ALWAYS shows the rule it would
-// write first and asks again before the passkey. Questions and decisions
-// are answered from their rows. Each answer is sent once, never queued or
-// retried; a refusal shows the daemon's words. When §4.1 does not hold
-// (`/m/api/me`'s `secure`), a red "limited: ..." line says so.
+// tap, the session only. AUTHORIZE and ALWAYS are gated actions (WS-5c,
+// ./unlock.ts): each tap freezes its request with an op token from the
+// pool; a locked phone asks for Face ID once (unlock/options, the passkey,
+// unlock, then the frozen request, in the same gesture) and an unlocked one
+// asks nothing. ALWAYS reads its rule (`answer/rule`) and takes one confirm
+// tap, which sends the rule's `preview`. Questions and decisions are
+// answered from their rows. Each answer is sent once, never queued; the one
+// resend is WS-5c's, after a 423, of the same frozen request. A refusal
+// shows the daemon's words. When §4.1 does not hold (`/m/api/me`'s
+// `secure`), a red "limited: ..." line says so.
 //
 // P-5, writing (jarvis/v2/remote_write.py, ./write.ts): an owner's chat
 // takes a message box (Send is a tap; Enter is a new line), the Chats tab a
 // "New chat" sheet and the Tasks tab a "New task" sheet; a task offers
-// Start, Resume and Cancel, each confirmed first, Cancel then the passkey.
+// Start, Resume and Cancel, each confirmed first, Cancel a gated action.
 // A proposal in the inbox takes Withdraw. Nothing is shown as sent before
 // its 2xx; offline, nothing is sent (no write queue).
 //
@@ -40,9 +43,13 @@
 // not begun. A launch or a notification's tap opens it when the last push
 // was the morning one (`opens_here`), else the Inbox. Questions and
 // decisions are answered in place; deferred approvals are ticked one by one
-// (never all at once) and approved as a set with ONE passkey assertion
-// bound to exactly that set, all or nothing; a limited phone (§4.1) gets the
-// per-row Approve and retry only.
+// (never all at once) and approved as a set, ONE gated action naming exactly
+// that set, all or nothing; a limited phone (§4.1) gets the per-row Approve
+// and retry only.
+//
+// WS-5c, the unlock window (./unlock.ts): a lock pill in the header (it opens
+// the ⋯ menu, whose first row is Lock now); Done and Undo in an open chat's ⋯
+// menu. The pill is the phone's copy of the window: it never authorizes.
 //
 // P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
 // message box also takes "Hold to talk". Its words are added to that chat's
@@ -52,8 +59,9 @@
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
-import { cardView, deadlineAt, deadlineWords, parseDetail, parseSecure, type CardState, type Secure } from "./card";
+import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
+import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
@@ -97,8 +105,12 @@ export interface AppDeps {
   fetchJson?: (path: string) => Promise<Got>;
   /** P-4's writes (a fake in the tests). */
   postJson?: (path: string, value: unknown) => Promise<Posted>;
-  /** The passkey for one answer: the request options in, the assertion's JSON out (a fake in the tests). */
+  /** The passkey for one unlock: the request options in, the assertion's JSON out (a fake in the tests). */
   getCredential?: (publicKey: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+  /** WS-5c rule 6: whether the tap's user activation still holds (`navigator.userActivation.isActive`). */
+  activation?: () => boolean | null;
+  /** WS-5c: the op-token pool's half-life refill and the Undo window (real timers unless a test gives its own). */
+  unlockTimer?: Timer;
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -128,12 +140,19 @@ const RETRY_MS = 4000;
 /** M2 (phone audit): what the card says while it waits on Face ID, then on Jarvis. */
 export const ASKING_FACE_ID = "Asking for Face ID…";
 export const SENDING = "Sending…";
+/** Opus L5: a sheet opened again while this row's earlier gated answer is still out. */
+export const STILL_ANSWERING = "Your earlier answer to this is still being sent…";
+/** WS-5c §5.4: the Always route's words when the rule changed since it was read (`remote_answer.RULE_CHANGED`). */
+export const RULE_CHANGED = "the rule changed: read it again";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
 const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
 const TIME_TICK_MS = 60_000;
+
+/** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
+interface ThreadDone { id: string; busy: boolean; note: string; token: string | null; until: number }
 
 /** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
 interface OpenThread {
@@ -242,8 +261,18 @@ export class PhoneApp {
   private logAgain = false;
   /** PX-4: the scroll each view had, and what is open besides the list. There is no browser-history integration. */
   private readonly mem = new ScrollMemory();
-  /** Which ⋯ menu is open: the header's, or an open task page's. */
-  menuOpen: "app" | "task" | null = null;
+  /** Which ⋯ menu is open: the header's, an open task page's, or an open chat's. */
+  menuOpen: "app" | "task" | "thread" | null = null;
+  /** WS-5c: the op-token pool, the window's mirror, and every gated tap's flow (./unlock.ts). */
+  readonly unlock: Unlock;
+  /** WS-5c rule 6: controls whose Face ID needs a fresh tap: scope (a row id, "review", "task:<id>",
+   * "thread:<id>") → which action, and its frozen op, which "Unlock and send" resumes unchanged. */
+  readonly tapAgain = new Map<string, string>();
+  private readonly frozen = new Map<string, FrozenOp>();
+  /** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
+  threadDone: ThreadDone | null = null;
+  private readonly pill: HTMLButtonElement;
+  private readonly unlockTimer: Timer;
   /** The open chat's Needs-you tray folded to its bar by the owner. */
   trayFolded = false;
   private menuWrap: HTMLElement;
@@ -269,6 +298,20 @@ export class PhoneApp {
     try { this.recentAll = localStorage.getItem(RECENT_KEY) === "1"; } catch { /* no storage: it just does not last */ }
     this.inboxReader = serialRead(() => this.read("/m/api/inbox"), (r) => this.applyInbox(r));
     this.workingReader = serialRead(() => this.fetchJson("/m/api/working"), (got) => this.applyWorking(got));
+    this.unlockTimer = deps.unlockTimer ?? realTimer;
+    this.unlock = new Unlock({
+      fetchJson: this.fetchJson, postJson: this.postJson, getCredential: this.getCredential,
+      activation: deps.activation ?? (() => {
+        const ua = typeof navigator !== "undefined" ? (navigator as { userActivation?: { isActive: boolean } }).userActivation : undefined;
+        return ua ? ua.isActive : null;
+      }),
+      now: this.now, timer: this.unlockTimer,
+      signedOut: () => this.signedOut(),
+      reached: (ok) => this.setOnline(ok),
+      changed: () => this.renderPill(),
+      // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
+      reread: () => { if (!this.stopped) void this.probe(); },
+    });
     this.tasksReader = serialRead(() => this.read("/m/api/tasks"), (r) => this.applyTasks(r));
     const frame = el("div", "app");
     frame.dataset.screen = "app";
@@ -278,7 +321,11 @@ export class PhoneApp {
     this.conn = el("span", "conn", "connecting");
     this.conn.dataset.testid = "m-conn";
     top.append(this.conn);
-    // PX-4: Sign out and Notifications are behind the ⋯ (renderMenu); the lock pill is PX-5's.
+    // PX-4: Sign out and Notifications are behind the ⋯ (renderMenu). PX-5: the lock pill opens that menu,
+    // whose first row is Lock now. It shows the phone's copy of the window, never what authorizes.
+    this.pill = tap("Locked", () => this.toggleMenu(this.menuOpen === "app" ? null : "app"), "m-lock-pill", "m-lock-pill");
+    this.pill.dataset.state = "locked";
+    top.append(this.pill);
     this.menuWrap = menuView({ id: "m-menu", label: "Menu", items: [], open: false, toggle: () => {} });
     top.append(this.menuWrap);
     this.banner = el("div", "offline");
@@ -302,7 +349,7 @@ export class PhoneApp {
     this.tabBar = nav;
     // A tap outside an open ⋯ menu closes it.
     frame.addEventListener("click", (e) => {
-      if (this.menuOpen && !(e.target instanceof Element && e.target.closest(".m-menu"))) this.toggleMenu(null);
+      if (this.menuOpen && !(e.target instanceof Element && e.target.closest(".m-menu, .m-lock-pill"))) this.toggleMenu(null);
     });
     this.frame = frame;
     this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
@@ -326,6 +373,9 @@ export class PhoneApp {
     this.deps.root.className = "app-root";
     this.deps.root.replaceChildren(this.frame);
     this.renderMenu();
+    this.renderPill();
+    // WS-5c rule 1: the op-token pool fills before the first tap.
+    void this.unlock.pool.refill();
     // A notification's tap opens /m/#inbox: the Inbox is the first tab anyway.
     if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
@@ -355,6 +405,14 @@ export class PhoneApp {
     for (const r of [this.inboxReader, this.workingReader, this.tasksReader]) r.invalidate();
     if (this.workingRetry !== null) this.clearSlow(this.workingRetry);
     this.workingRetry = null;
+    this.unlock.stop();
+  }
+
+  /** The app came back into view: the window's mirror (`me`) and the op-token pool, read again (WS-5c rules 1, 2). */
+  visible(): void {
+    if (this.stopped) return;
+    void this.probe();
+    void this.unlock.pool.refill();
   }
 
   private async signOut(): Promise<void> {
@@ -462,6 +520,8 @@ export class PhoneApp {
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped || !got.ok) return;
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+    // WS-5c rule 2: the window's mirror follows `me.unlock_s` (display and path only).
+    this.unlock.fromMe(got.body);
     if (this.tab === "inbox") this.renderInbox();
   }
 
@@ -575,49 +635,47 @@ export class PhoneApp {
     await this.answerInReview(item, { action: "leave" });
   }
 
-  /** Approve selected, step two: one challenge for exactly the ticked set, the passkey once, then the set. */
-  async approveSelected(): Promise<void> {
+  /** Approve selected, step two: exactly the confirmed set (ids and tags), frozen with its op token, as ONE
+   * gated action (WS-5c): Face ID once if the phone is locked; all or nothing at the daemon. `confirmed` is the
+   * set the drawn confirmation was built from (captured when its button was drawn); a different one is refused. */
+  async approveSelected(confirmed: readonly { id: string; tag: string }[] | null): Promise<void> {
     const report = this.review;
-    if (!report || this.reviewBusy || !this.reviewConfirming || !this.reviewConfirmed) return;
+    if (!report || this.reviewBusy || !this.reviewConfirming || !confirmed || this.reviewConfirmed !== confirmed) return;
     // Exactly what the confirmation showed, and only while it still holds.
-    if (confirmedChanged(report, this.reviewConfirmed).length) { this.checkConfirmed(report); this.render(); return; }
-    const body = { items: this.reviewConfirmed.map((c) => ({ id: c.id, tag: c.tag })) };
+    if (confirmedChanged(report, confirmed).length) { this.checkConfirmed(report); this.render(); return; }
+    const items = confirmed.map((c) => ({ id: c.id, tag: c.tag }));
     this.reviewBusy = true;
     this.reviewFlash = "";
     this.render();
-    const done = async (result: { status: number; body: Record<string, unknown> } | null, words?: string) => {
-      this.reviewBusy = false;
-      this.reviewConfirming = false;
-      this.reviewConfirmed = null;
-      if (words !== undefined) this.reviewFlash = words;
-      else if (result && result.status === 200) {
-        const n = typeof result.body.approved === "number" ? result.body.approved : body.items.length;
-        this.reviewSel = emptySelection();
-        this.reviewFlash = `Approved ${n} once each, for 30 minutes; their chats were told.`;
-      } else if (result && result.status === 409 && Array.isArray(result.body.changed)) {
-        // All or nothing: what changed is unticked, with why; the rest need a new confirmation.
-        const after = afterChanged(this.reviewSel, result.body.changed);
-        this.reviewSel = after.selection;
-        for (const [id, words2] of after.notes) this.notes.set(id, words2);
-        this.reviewFlash = "Nothing was approved: something you selected changed. Look again, then confirm again.";
-      } else if (result) {
-        this.reviewFlash = "Nothing was approved. " + await this.refusedWith(result.status, result.body);
-      }
+    const out = await this.gated("review", "approve", "/m/api/review/approve", { items }, () => {});
+    this.reviewBusy = false;
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    if (out !== "not-ready" && out.kind === "needs-tap") {
+      // Rule 6: the confirmation stays open; its button reads "Unlock and send" and resumes this same set.
+      this.reviewFlash = this.gatedWords(out, "review", "approve");
       this.render();
-      void this.loadReview();
-      void this.loadInbox(true);
-    };
-    const options = await this.post("/m/api/review/approve/options", body);
-    if (!options || options.status !== 200) return done(options);
-    let assertion: Record<string, unknown> | null = null;
-    try {
-      const publicKey = options.body.publicKey;
-      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
-    } catch {
-      assertion = null;
+      return;
     }
-    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was approved.");
-    return done(await this.post("/m/api/review/approve", { items: body.items, assertion }));
+    this.reviewConfirming = false;
+    this.reviewConfirmed = null;
+    if (out !== "not-ready" && out.kind === "done") {
+      const n = typeof out.body.approved === "number" ? out.body.approved : items.length;
+      this.reviewSel = emptySelection();
+      this.reviewFlash = `Approved ${n} once each, for 30 minutes; their chats were told.`;
+    } else if (out !== "not-ready" && out.kind === "refused" && out.status === 409 && Array.isArray(out.body.changed)) {
+      // All or nothing: what changed is unticked, with why; the rest need a new confirmation.
+      const after = afterChanged(this.reviewSel, out.body.changed);
+      this.reviewSel = after.selection;
+      for (const [id, words2] of after.notes) this.notes.set(id, words2);
+      this.reviewFlash = "Nothing was approved: something you selected changed. Look again, then confirm again.";
+    } else if (out !== "not-ready" && out.kind === "refused") {
+      this.reviewFlash = "Nothing was approved. " + this.refusedWords(out.status, out.body);
+    } else {
+      this.reviewFlash = this.gatedWords(out, "review", "approve");
+    }
+    this.render();
+    void this.loadReview();
+    void this.loadInbox(true);
   }
 
   /** Leave selected: the session only, one result each. */
@@ -677,15 +735,23 @@ export class PhoneApp {
     if ("offline" in got) { this.setOnline(false); return null; }
     if (OFFLINE.has(got.status)) { this.setOnline(false); return null; }
     this.setOnline(true);
+    this.slid(got.status);
     return got;
   }
 
-  /** A 401 from an answer is a passkey that was not accepted, unless the session ended too. */
+  /** WS-5c rule 2: a session-only action's 2xx slides the mirror, only while it is open (`touch_unlock`). */
+  private slid(status: number): void {
+    if (status < 200 || status >= 300) return;
+    this.unlock.mirror.slideSession();
+    this.renderPill();
+  }
+
+  /** A refusal's words. A 401 is the session ending (the `me` probe signs out); never "locked" (WS-5c rule 9). */
   private async refusedWith(status: number, body: Record<string, unknown>): Promise<string> {
     if (status === 401) {
       const me = await this.fetchJson("/m/api/me");
       if (!me.ok && me.why === "signed-out") { this.signedOut(); return ""; }
-      return "Not accepted: the passkey was not verified for this answer.";
+      return "Not accepted (401).";
     }
     const word = typeof body.error === "string" ? body.error : "";
     return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
@@ -750,7 +816,7 @@ export class PhoneApp {
 
   async denyCard(): Promise<void> {
     const card = this.card;
-    if (!card || card.busy) return;
+    if (!card || card.busy || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = SENDING;
@@ -759,48 +825,178 @@ export class PhoneApp {
     await this.finish(card, result, "Denied.");
   }
 
-  /** AUTHORIZE: a challenge for this card and this answer, then the passkey, then the answer. */
-  async allowCard(): Promise<void> {
-    const card = this.card;
-    if (!card || card.busy) return;
-    card.busy = true;
-    card.notice = "";
-    card.progress = ASKING_FACE_ID;
-    this.render();
-    const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "allow" });
-    if (!options || options.status !== 200) return this.finish(card, options, "");
-    await this.withPasskey(card, "allow", options.body.publicKey, "Authorized.");
+  // -- gated actions (WS-5c, ./unlock.ts) ---------------------------------------------
+
+  /**
+   * One gated tap. The request is frozen NOW (its URL, body and a pool token): nothing later changes it.
+   * When the control is waiting for "Unlock and send" (rule 6) for this same action, that frozen op is
+   * resumed instead, with its own token: no new token, and no action POST before the unlock.
+   * "not-ready": the pool was empty and nothing was sent (rule 1).
+   */
+  private async gated(scope: string, action: string, url: string, fields: Record<string, unknown>,
+                      stage: (s: Stage) => void): Promise<Outcome | "not-ready"> {
+    const waiting = this.tapAgain.get(scope) === action ? this.frozen.get(scope) : undefined;
+    let op: FrozenOp;
+    let running: Promise<Outcome>;
+    if (waiting) {
+      op = waiting;
+      running = this.unlock.resume(op, stage);
+    } else {
+      const made = this.unlock.freeze(`${scope}:${action}`, url, fields);
+      if (!made) return "not-ready";
+      op = made;
+      running = this.unlock.run(op, stage);
+    }
+    this.tapAgain.delete(scope);
+    this.frozen.delete(scope);
+    const out = await running;
+    if (out.kind === "needs-tap" && !this.stopped) {
+      this.tapAgain.set(scope, action);
+      this.frozen.set(scope, op);
+    }
+    return out;
   }
 
-  /** ALWAYS, step one: the rule it would write, shown before the passkey is asked for. */
+  /** The words a gated outcome shows when it is not the action's own answer (`done`/`refused` are the caller's). */
+  private gatedWords(out: Outcome | "not-ready", scope: string, action: string): string {
+    return out === "not-ready" ? NOT_READY : this.unlock.words(out, `${scope}:${action}`);
+  }
+
+  /** What a stage of the flow says while it runs. */
+  private stageWords(s: Stage, sending: string): string {
+    return s === "unlocking" ? ASKING_FACE_ID : sending;
+  }
+
+  /** The first words a gated tap shows: Face ID when the phone believes it is locked, else what it sends. */
+  private firstStage(sending: string): string {
+    return this.unlock.mirror.open() ? sending : ASKING_FACE_ID;
+  }
+
+  /** A refusal's words without a second `me` probe (the flow already made it for a 401). */
+  private refusedWords(status: number, body: Record<string, unknown>): string {
+    if (status === 401) return "Not accepted (401).";
+    const word = typeof body.error === "string" ? body.error : "";
+    return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
+  }
+
+  /** A gated answer on the open card: what it did, or why not, where the owner is looking. */
+  private gatedCardFinish(card: CardState, out: Outcome | "not-ready", action: "allow" | "always", what: string): void {
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    let ok = false;
+    let words: string;
+    if (out !== "not-ready" && out.kind === "done") {
+      ok = true;
+      words = what + (out.body.authority === "limited" ? " (with Discord's authority: limited)" : "");
+    } else if (out !== "not-ready" && out.kind === "refused") {
+      words = this.refusedWords(out.status, out.body);
+    } else {
+      words = this.gatedWords(out, card.rowId, action);
+    }
+    if (this.card !== card) {
+      // The sheet closed while it ran: the words go to the row and the list's line, and to the same row's
+      // sheet if the owner opened it again meanwhile (its AUTHORIZE was off while this ran, Opus L5).
+      this.notes.set(card.rowId, words);
+      this.flash = words;
+      const again = this.card && this.card.rowId === card.rowId && !this.card.busy ? this.card : null;
+      if (again && ok) this.card = null;
+      else if (again) { again.notice = words; this.focusNotice = true; }
+      this.render();
+      if (ok) void this.loadInbox();
+      return;
+    }
+    card.busy = false;
+    card.progress = "";
+    if (ok) {
+      this.notes.set(card.rowId, words);
+      this.card = null;
+      this.flash = words;
+      this.render();
+      void this.loadInbox();
+      return;
+    }
+    const waiting = out !== "not-ready" && out.kind === "needs-tap";
+    card.tapAgain = waiting ? action : null;
+    if (!waiting) card.rule = null;
+    card.notice = words;
+    this.focusNotice = true;
+    this.render();
+    if (out !== "not-ready" && out.kind === "refused" && out.status === 409) void this.loadCard();
+  }
+
+  /** AUTHORIZE: a gated action (WS-5c): Face ID once if the phone is locked, then the frozen answer. `card` is
+   * the sheet the button was drawn on. The row is held in `answering` until the answer settles, so a sheet
+   * closed and opened again meanwhile cannot mint a second op for the same approval (Opus L5). */
+  async allowCard(card: CardState | null = this.card): Promise<void> {
+    if (!card || this.card !== card || card.busy || this.answering.has(card.rowId)) return;
+    card.busy = true;
+    card.notice = "";
+    card.progress = this.firstStage(SENDING);
+    this.answering.add(card.rowId);
+    this.render();
+    const out = await this.gated(card.rowId, "allow", this.path(card.rowId, "answer"), { decision: "allow" },
+      (s) => { card.progress = this.stageWords(s, SENDING); if (this.card === card) this.render(); });
+    this.answering.delete(card.rowId);
+    this.gatedCardFinish(card, out, "allow", "Authorized.");
+  }
+
+  /** ALWAYS, step one: the rule it would write, read without a challenge (`answer/rule`, WS-5c §5.4). */
   async alwaysCard(): Promise<void> {
     const card = this.card;
-    if (!card || card.busy) return;
+    if (!card || card.busy || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = "Reading the rule ALWAYS would write…";
     this.render();
-    const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "always" });
-    if (this.card !== card) return;
-    if (!options || options.status !== 200) return this.finish(card, options, "");
-    const words = typeof options.body.rule_words === "string" ? options.body.rule_words : "";
-    const publicKey = options.body.publicKey;
+    await this.readRule(card, "");
+  }
+
+  /** The rule read (again): shown with its Confirm, or why it could not be. Never sends anything. */
+  private async readRule(card: CardState, notice: string): Promise<void> {
+    const got = await this.fetchJson(this.path(card.rowId, "answer/rule"));
+    if (this.stopped || this.card !== card) return;
     card.busy = false;
     card.progress = "";
-    card.rule = publicKey && typeof publicKey === "object"
-      ? { words, entry: options.body.rule ?? null, publicKey: publicKey as Record<string, unknown> } : null;
+    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
+    if (!got.ok && got.why === "offline") {
+      this.setOnline(false);
+      card.rule = null;
+      card.notice = "Offline: the rule could not be read.";
+    } else if (!got.ok) {
+      card.rule = null;
+      card.notice = this.refusedWords(got.status, (got.body ?? {}) as Record<string, unknown>);
+    } else {
+      card.rule = parseRule(got.body);
+      card.notice = card.rule ? notice : "The rule could not be read.";
+    }
+    if (card.notice) this.focusNotice = true;
     this.render();
   }
 
-  /** ALWAYS, step two: the owner read the rule; now the passkey. */
-  async confirmAlways(): Promise<void> {
-    const card = this.card;
-    if (!card || card.busy || !card.rule) return;
+  /** ALWAYS, step two: the owner read the rule; one confirm tap freezes `{decision: "always", preview, op}`.
+   * `card` and `rule` are the sheet and the rule its Confirm was drawn with: the preview sent is that rule's,
+   * and a rule read again since (another object) is refused, never substituted. Held in `answering` (Opus L5). */
+  async confirmAlways(card: CardState | null = this.card, rule: Rule | null = card?.rule ?? null): Promise<void> {
+    if (!card || this.card !== card || card.busy || !rule || card.rule !== rule || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
-    card.progress = ASKING_FACE_ID;
+    card.progress = this.firstStage(SENDING);
+    this.answering.add(card.rowId);
     this.render();
-    await this.withPasskey(card, "always", card.rule.publicKey, "Authorized, and the rule is written.");
+    const out = await this.gated(card.rowId, "always", this.path(card.rowId, "answer"),
+      { decision: "always", preview: rule.preview },
+      (s) => { card.progress = this.stageWords(s, SENDING); if (this.card === card) this.render(); });
+    this.answering.delete(card.rowId);
+    if (out !== "not-ready" && out.kind === "refused" && out.status === 409 && out.body.error === RULE_CHANGED
+        && this.card === card) {
+      // Rule 8: the rule changed. It is read again and shown; only a new confirm tap sends.
+      card.busy = true;
+      card.progress = "Reading the rule ALWAYS would write…";
+      card.rule = null;
+      this.render();
+      await this.readRule(card, "The rule changed: read it again, then confirm.");
+      return;
+    }
+    this.gatedCardFinish(card, out, "always", "Authorized, and the rule is written.");
   }
 
   cancelAlways(): void {
@@ -809,70 +1005,36 @@ export class PhoneApp {
     this.render();
   }
 
-  private async withPasskey(card: CardState, decision: "allow" | "always", publicKey: unknown, what: string) {
-    let assertion: Record<string, unknown> | null = null;
-    try {
-      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
-    } catch {
-      assertion = null;
-    }
-    if (this.card !== card) return;
-    if (!assertion) {
-      card.busy = false;
-      card.progress = "";
-      card.rule = null;
-      card.notice = "Cancelled, or the passkey was not verified. Nothing was answered.";
-      this.focusNotice = true;
-      this.render();
-      return;
-    }
-    card.progress = SENDING;
-    this.render();
-    const result = await this.post(this.path(card.rowId, "answer"), { decision, assertion });
-    if (result && result.status === 200 && result.body.authority === "limited") what += " (with Discord's authority: limited)";
-    await this.finish(card, result, what);
+  /** A row's gated action finished: its words, and whether it was the action's own success. */
+  private rowWords(rowId: string, action: string, out: Outcome | "not-ready", ok: (body: Record<string, unknown>) => string): {
+    words: string; ok: boolean;
+  } {
+    if (out !== "not-ready" && out.kind === "done") return { words: ok(out.body), ok: true };
+    if (out !== "not-ready" && out.kind === "refused") return { words: this.refusedWords(out.status, out.body), ok: false };
+    return { words: this.gatedWords(out, rowId, action), ok: false };
   }
 
-  /**
-   * QH, Approve and retry on a deferred row: a challenge bound to this
-   * deferral (`answer/options`, `{decision: "allow"}`), the passkey, then the
-   * answer with its assertion. Sent once; a cancelled passkey answers nothing.
-   */
+  /** QH, Approve and retry on a deferred row: a gated action bound to the deferral id in its URL. */
   async retryDeferred(row: InboxRow): Promise<void> {
     if (this.answering.has(row.id)) return;
     this.flash = "";
     this.answering.add(row.id);
     this.notes.delete(row.id);
     this.render();
-    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
-      this.answering.delete(row.id);
-      if (note !== undefined) this.notes.set(row.id, note);
-      else if (result && result.status === 200) {
-        this.flash = typeof result.body.note === "string" ? result.body.note : "Approved once.";
-      } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
-      this.render();
-      void this.loadInbox(true);
-    };
-    const options = await this.post(this.path(row.id, "answer/options"), { decision: "allow" });
-    if (!options || options.status !== 200) return done(options);
-    let assertion: Record<string, unknown> | null = null;
-    try {
-      const publicKey = options.body.publicKey;
-      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
-    } catch {
-      assertion = null;
-    }
-    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was approved.");
-    return done(await this.post(this.path(row.id, "answer"), { action: "retry", assertion }));
+    const out = await this.gated(row.id, "retry", this.path(row.id, "answer"), { action: "retry" }, () => {});
+    this.answering.delete(row.id);
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    const r = this.rowWords(row.id, "retry", out, (body) => typeof body.note === "string" ? body.note : "Approved once.");
+    if (r.ok) this.flash = r.words; else this.notes.set(row.id, r.words);
+    this.render();
+    void this.loadInbox(true);
   }
 
   /**
-   * PM-F, one action on a PR row (PM-D's phone routes; `fix` is PM-E's): a
-   * challenge bound to the row's head and card **as drawn** (`row` is the
-   * object the button was drawn from; nothing is read again here, PM-D's MED
-   * 2), the passkey, then the act with its assertion. Sent once, never
-   * retried: a 409 says the daemon's words in the row's notice and the inbox
-   * is read again, so the row is drawn as it is now.
+   * PM-F, one action on a PR row (PM-D's phone route; `fix` is PM-E's), a gated action (WS-5c): the body is
+   * the row's head and card **as drawn** (`row` is the object the button was drawn from; nothing is read
+   * again here, PM-D's MED 2), frozen with its op token at the tap. A 409 says the daemon's words in the
+   * row's notice and the inbox is read again, so the row is drawn as it is now. Never sent again.
    */
   async prAct(row: InboxRow, action: PrAction): Promise<void> {
     const view = prRowOf(row);
@@ -882,38 +1044,23 @@ export class PhoneApp {
     this.flash = "";
     this.answering.add(row.id);
     this.notes.delete(row.id);
-    this.prProgress.set(row.id, ASKING_FACE_ID);
+    this.prProgress.set(row.id, this.firstStage(ACTION_PROGRESS[action]));
     this.render();
-    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
-      this.answering.delete(row.id);
-      this.prProgress.delete(row.id);
-      if (note !== undefined) this.notes.set(row.id, note);
-      else if (result && result.status === 200) {
-        const limited = result.body.authority === "limited" ? " (with Discord's authority: limited)" : "";
-        this.notes.set(row.id, resultWords(action, result.body) + limited);
-      } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
-      else if (sent) this.notes.set(row.id, "No answer came back: it may have been done. Look again in a moment.");
+    const out = await this.gated(row.id, action, "/m/api/inbox/pr", bound, (s) => {
+      this.prProgress.set(row.id, this.stageWords(s, ACTION_PROGRESS[action]));
       this.render();
-      void this.loadInbox(true);
-    };
-    let sent = false;
-    const options = await this.post("/m/api/inbox/pr/options", bound);
-    if (!options || options.status !== 200) return done(options);
-    let assertion: Record<string, unknown> | null = null;
-    try {
-      const publicKey = options.body.publicKey;
-      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
-    } catch {
-      assertion = null;
-    }
-    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was done.");
-    this.prProgress.set(row.id, ACTION_PROGRESS[action]);
+    });
+    this.answering.delete(row.id);
+    this.prProgress.delete(row.id);
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    const r = this.rowWords(row.id, action, out, (b) =>
+      resultWords(action, b) + (b.authority === "limited" ? " (with Discord's authority: limited)" : ""));
+    this.notes.set(row.id, r.words);
     this.render();
-    sent = true;
-    return done(await this.post("/m/api/inbox/pr", { ...bound, assertion }));
+    void this.loadInbox(true);
   }
 
-  /** PM-F: a PR fix's Cancel, through the task's own `task:` passkey flow (P-5's cancel). */
+  /** PM-F: a PR fix's Cancel: the task's cancel, a gated action (WS-5c). */
   async cancelFix(row: InboxRow): Promise<void> {
     const fix = prRowOf(row)?.fix;
     const id = fix?.taskId;
@@ -921,32 +1068,21 @@ export class PhoneApp {
     this.flash = "";
     this.answering.add(row.id);
     this.notes.delete(row.id);
-    this.prProgress.set(row.id, ASKING_FACE_ID);
+    this.prProgress.set(row.id, this.firstStage("Cancelling the fix…"));
     this.render();
-    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
-      this.answering.delete(row.id);
-      this.prProgress.delete(row.id);
-      if (note !== undefined) this.notes.set(row.id, note);
-      else if (result && result.status === 200) this.notes.set(row.id, resultWords("cancel", result.body));
-      else if (result && result.status === 401) this.notes.set(row.id, "Not accepted: the passkey was not verified for this cancel.");
-      else if (result) this.notes.set(row.id, refusal(result.status, result.body, "Not cancelled"));
+    const out = await this.gated(row.id, "cancel-fix", `/m/api/tasks/${encodeURIComponent(id)}/cancel`, {}, (s) => {
+      this.prProgress.set(row.id, this.stageWords(s, "Cancelling the fix…"));
       this.render();
-      void this.loadInbox(true);
-    };
-    const path = `/m/api/tasks/${encodeURIComponent(id)}/cancel`;
-    const options = await this.post(path + "/options", {});
-    if (!options || options.status !== 200) return done(options);
-    let assertion: Record<string, unknown> | null = null;
-    try {
-      const publicKey = options.body.publicKey;
-      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
-    } catch {
-      assertion = null;
-    }
-    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. The fix goes on.");
-    this.prProgress.set(row.id, "Cancelling the fix…");
+    });
+    this.answering.delete(row.id);
+    this.prProgress.delete(row.id);
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    const words = out !== "not-ready" && out.kind === "refused"
+      ? refusal(out.status, out.body, "Not cancelled")
+      : this.rowWords(row.id, "cancel-fix", out, (b) => resultWords("cancel", b)).words;
+    this.notes.set(row.id, words);
     this.render();
-    return done(await this.post(path, { assertion }));
+    void this.loadInbox(true);
   }
 
   /** A question's or a decision's answer, from its row. Sent once. `echo` is the option's words as the phone
@@ -1013,6 +1149,7 @@ export class PhoneApp {
       return { status: 0, body: {}, ambiguous: true };
     }
     this.setOnline(true);
+    this.slid(got.status);
     const result = got;
     // The write took effect, or may have, but its answer failed (remote_write's UNCERTAIN).
     if (result.body.uncertain === true) return { status: result.status, body: result.body, ambiguous: true };
@@ -1236,44 +1373,38 @@ export class PhoneApp {
     this.render();
   }
 
-  /** A confirmed verb: Start and Resume on the session; Cancel with its own passkey assertion. */
+  /** A confirmed verb: Start and Resume on the session; Cancel a gated action (WS-5c), frozen at this tap. */
   async confirmVerb(id: string, verb: Verb): Promise<void> {
     const w = this.taskState(id);
     if (w.busy || w.confirming !== verb || !this.online) return;
     w.busy = true;
     w.note = "";
     this.render();
-    let result: { status: number; body: Record<string, unknown>; ambiguous?: boolean } | null;
     if (verb === "cancel") {
-      const options = await this.write(`/m/api/tasks/${id}/cancel/options`, {});
-      if (options && options.status === 200 && options.body.publicKey && typeof options.body.publicKey === "object") {
-        let assertion: Record<string, unknown> | null = null;
-        try { assertion = await this.getCredential(options.body.publicKey as Record<string, unknown>); } catch { assertion = null; }
-        if (!assertion) {
-          if (this.taskWrite === w) {
-            w.busy = false;
-            w.confirming = null;
-            w.note = "Cancelled, or the passkey was not verified. The task goes on.";
-            this.render();
-          }
-          return;
-        }
-        result = await this.write(`/m/api/tasks/${id}/cancel`, { assertion });
-      } else if (options?.ambiguous && options.status === 0) {
-        // `cancel/options` is a read: nothing was sent that could have cancelled.
-        if (this.taskWrite === w) {
-          w.busy = false;
-          w.confirming = null;
-          w.note = "Offline: the task was not cancelled.";
-          this.render();
-        }
+      const out = await this.gated("task:" + id, "cancel", `/m/api/tasks/${id}/cancel`, {}, () => {});
+      if (out !== "not-ready" && out.kind === "signed-out") return;
+      if (this.taskWrite !== w) return;
+      w.busy = false;
+      if (out !== "not-ready" && out.kind === "needs-tap") {
+        // Rule 6: the confirmation stays; its button reads "Unlock and send" and resumes this same cancel.
+        w.note = this.gatedWords(out, "task:" + id, "cancel");
+        this.render();
         return;
-      } else {
-        result = options;
       }
-    } else {
-      result = await this.write(`/m/api/tasks/${id}/${verb}`, {});
+      w.confirming = null;
+      if (out !== "not-ready" && out.kind === "done") {
+        w.note = "Cancelled.";
+        void this.loadTasks();
+        if (this.task?.id === id) { void this.openTask(id); return; }
+      } else if (out !== "not-ready" && out.kind === "refused") {
+        w.note = out.status === 401 ? "Not accepted (401)." : refusal(out.status, out.body, "Not cancelled");
+      } else {
+        w.note = this.gatedWords(out, "task:" + id, "cancel");
+      }
+      this.render();
+      return;
     }
+    const result = await this.write(`/m/api/tasks/${id}/${verb}`, {});
     if (this.taskWrite !== w) return;
     w.busy = false;
     w.confirming = null;
@@ -1282,15 +1413,101 @@ export class PhoneApp {
     } else if (result.ambiguous) {
       w.note = MAYBE_DONE;
     } else if (result.status === 200) {
-      w.note = verb === "start" ? "Started." : verb === "resume" ? "Resumed." : "Cancelled.";
+      w.note = verb === "start" ? "Started." : "Resumed.";
       void this.loadTasks();
       if (this.task?.id === id) { void this.openTask(id); return; }
-    } else if (result.status === 401 && verb === "cancel") {
-      w.note = "Not accepted: the passkey was not verified for this cancel.";
     } else {
       w.note = refusal(result.status, result.body, "Not done");
     }
     this.render();
+  }
+
+  // -- Done, Undo and Lock now (WS-5c §5.6, §5.1) ------------------------------------------
+
+  /** The open chat's working-set entry, when it has one with a `seq` (Done binds that thread's `seq`). */
+  private doneEntry(id: string): WorkingItem | null {
+    const entry = this.entries?.find((e) => e.thread_id === id) ?? null;
+    return entry && entry.seq !== null ? entry : null;
+  }
+
+  /**
+   * Done on the open chat: a gated action bound to the chat in its URL and its `seq` AS DRAWN. `seq` is captured
+   * when the menu item was drawn (doneControls) and frozen at the tap: the working set is never read again here,
+   * so a background read that brought a newer `seq` cannot change what is sent (Sol MED 1). If the thread moved
+   * on since it was drawn, the server's 409 is the right answer.
+   */
+  async doneThread(id: string, seq: number): Promise<void> {
+    if (this.threadDone?.id === id && this.threadDone.busy) return;
+    const st = { id, busy: true, note: this.firstStage("Marking it done…"), token: null as string | null, until: 0 };
+    this.threadDone = st;
+    this.render();
+    const out = await this.gated("thread:" + id, "done", `/m/api/working/${encodeURIComponent(id)}/done`, { seq },
+      (s) => { st.note = this.stageWords(s, "Marking it done…"); if (this.threadDone === st) this.render(); });
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    st.busy = false;
+    if (out !== "not-ready" && out.kind === "done" && typeof out.body.token === "string") {
+      const undoS = typeof out.body.undo_s === "number" && out.body.undo_s > 0 ? Math.min(out.body.undo_s, 60) : 0;
+      st.token = out.body.token;
+      st.until = this.now() + undoS * 1000;
+      st.note = "Marked done.";
+      // The Undo leaves when its window ends.
+      if (undoS) this.unlockTimer.set(() => { if (this.threadDone === st && !st.busy) this.render(); }, undoS * 1000 + 50);
+      void this.loadWorking(true);
+    } else if (out !== "not-ready" && out.kind === "refused") {
+      const why = typeof out.body.why_not === "string" && out.body.why_not ? " " + this.refusedWords(out.status, { error: out.body.why_not }) : "";
+      st.note = "Not done. " + this.refusedWords(out.status, out.body) + why;
+    } else {
+      st.note = this.gatedWords(out, "thread:" + id, "done");
+    }
+    if (this.threadDone === st) this.render();
+  }
+
+  /** Undo, within its window, with Done's own token: a gated action of its own (a fresh op token). `drawn` and
+   * `token` are the Done and its undo token the button was drawn with; anything else since is refused. */
+  async undoThread(id: string, drawn: ThreadDone | null = this.threadDone, token: string | null = drawn?.token ?? null): Promise<void> {
+    const st = drawn;
+    if (!st || this.threadDone !== st || st.id !== id || st.busy || !token || st.token !== token || this.now() >= st.until) return;
+    st.busy = true;
+    st.note = this.firstStage("Undoing…");
+    this.render();
+    const out = await this.gated("thread:" + id, "undo", `/m/api/working/${encodeURIComponent(id)}/undo`, { token },
+      (s) => { st.note = this.stageWords(s, "Undoing…"); if (this.threadDone === st) this.render(); });
+    if (out !== "not-ready" && out.kind === "signed-out") return;
+    st.busy = false;
+    if (out !== "not-ready" && out.kind === "done") {
+      st.token = null;
+      st.note = "Undone: it is back in the list.";
+      void this.loadWorking(true);
+    } else if (out !== "not-ready" && out.kind === "refused") {
+      st.note = "Not undone. " + this.refusedWords(out.status, out.body);
+    } else {
+      st.note = this.gatedWords(out, "thread:" + id, "undo");
+    }
+    if (this.threadDone === st) this.render();
+  }
+
+  /** Lock now (the ⋯ menu's first row): the window ends at Jarvis; the pill follows only its 200. */
+  async lockNow(): Promise<void> {
+    const r = await this.unlock.lockNow();
+    if (this.stopped || r === "signed-out") return;
+    this.flash = r === "locked" ? "Locked. The next Allow, cancel or PR action asks for Face ID."
+      : r === "overtaken" ? "Lock now reached Jarvis, but this phone unlocked again since: the pill shows what Jarvis says now."
+      : r === "unreached" ? "Lock now did not reach Jarvis: this phone may still be unlocked."
+      : "Lock now was refused: this phone may still be unlocked.";
+    this.renderPill();
+    if (this.tab === "inbox" && !this.card) this.render();
+  }
+
+  /** The lock pill: the phone's copy of the window (display only). */
+  private renderPill(): void {
+    const pill = this.pill;
+    if (!pill) return;
+    const open = this.unlock.mirror.open();
+    const words = pillWords(this.unlock.mirror, this.now());
+    if (pill.textContent !== words) pill.textContent = words;
+    pill.dataset.state = open ? "unlocked" : "locked";
+    pill.setAttribute("aria-label", `${pillLabel(this.unlock.mirror, this.now())}. Open the menu`);
+    pill.setAttribute("aria-haspopup", "true");
   }
 
   async loadChats(): Promise<void> {
@@ -1454,8 +1671,9 @@ export class PhoneApp {
       if (this.stream !== stream) return;
       this.conn.textContent = "live";
       this.conn.dataset.state = "live";
-      // Anything published while the stream was down is read now.
+      // Anything published while the stream was down is read now, and the window's mirror (WS-5c rule 2).
       this.refreshVisible();
+      void this.loadMe();
     };
     stream.onmessage = (ev) => {
       if (this.stream !== stream) return;
@@ -1475,7 +1693,10 @@ export class PhoneApp {
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped) return;
     if (!got.ok && got.why === "signed-out") return this.signedOut();
-    if (got.ok) this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+    if (got.ok) {
+      this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+      this.unlock.fromMe(got.body);
+    }
     this.setOnline(got.ok);
     if (stream && stream === this.stream && stream.readyState === CLOSED) {
       this.setTimer(() => { if (this.stream === stream) this.connect(); }, RETRY_MS);
@@ -1582,15 +1803,15 @@ export class PhoneApp {
   }
 
   /** Open or close a ⋯ menu (`null` closes whichever is open). The focus follows: into its panel, back to its button. */
-  toggleMenu(which: "app" | "task" | null): void {
+  toggleMenu(which: "app" | "task" | "thread" | null): void {
     const was = this.menuOpen;
     if (which === was) return;
     const inside = typeof document !== "undefined" && !!(document.activeElement as HTMLElement | null)?.closest?.(".m-menu");
     this.menuOpen = which;
     if (was === "app" || which === "app") this.renderMenu();
-    if (was === "task" || which === "task") this.render();
+    if (was === "task" || which === "task" || was === "thread" || which === "thread") this.render();
     if (typeof document === "undefined") return;
-    const id = (which ?? was) === "task" ? "m-task-more" : "m-menu";
+    const id = (which ?? was) === "task" ? "m-task-more" : (which ?? was) === "thread" ? "m-thread-more" : "m-menu";
     if (which !== null) {
       this.frame.querySelector<HTMLElement>(`[data-testid="${id}-panel"] button`)?.focus();
     } else if (inside) {
@@ -1598,11 +1819,13 @@ export class PhoneApp {
     }
   }
 
-  /** The header's ⋯: Notifications, when Jarvis last answered, and Sign out (last). */
+  /** The header's ⋯: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
   private renderMenu(): void {
     const open = this.menuOpen === "app";
     const items: MenuItem[] = [];
     if (open) {
+      // Always offered: the pill is only the phone's copy, so Lock now never waits on it.
+      items.push({ id: "lock", testid: "m-lock-now", label: "Lock now", onSelect: () => void this.lockNow() });
       items.push({ id: "notifications", node: this.notify.view() });
       items.push({ id: "lastread", info: true,
         label: this.lastRead === null ? "Not read yet" : `Last read ${agoWords(this.lastRead, this.now())}` });
@@ -1708,7 +1931,7 @@ export class PhoneApp {
   private pendingRow: string | null = null;
   /** The card's one status node, kept across redraws so VoiceOver announces its changes (review of #338, LOW). */
   private cardNotice: HTMLElement | null = null;
-  /** After a cancelled passkey or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
+  /** After a cancelled Face ID or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
   private focusNotice = false;
   /** The control that opened the sheet (its test id), so closing returns to it wherever it lives (the list, the review). */
   private invoker = "m-item-review";
@@ -1724,6 +1947,7 @@ export class PhoneApp {
       if (this.stopped) return;
       refreshTimes(this.main, this.now());
       if (!this.online) this.renderBanner();
+      this.renderPill();
       this.tickTimes();
     }, TIME_TICK_MS);
   }
@@ -1821,6 +2045,30 @@ export class PhoneApp {
     return Array.from(this.main.querySelectorAll<HTMLElement>('[data-testid="m-inbox-row"]')).find((r) => r.dataset.id === rowId);
   }
 
+  /** WS-5c rule 6: an "Unlock and send" is dropped once its sheet, item, confirmation or page has gone. */
+  private dropGoneFallbacks(): void {
+    for (const [scope, action] of [...this.tapAgain]) {
+      let alive: boolean;
+      if (action === "allow" || action === "always") alive = this.card?.rowId === scope && (action === "allow" || !!this.card.rule);
+      else if (scope === "review") alive = this.tab === "review" && this.reviewConfirming;
+      else if (scope.startsWith("task:")) {
+        const id = scope.slice(5);
+        alive = this.tab === "tasks" && this.task?.id === id && this.taskWrite?.id === id && this.taskWrite.confirming === "cancel";
+      } else if (scope.startsWith("thread:")) alive = this.tab === "chats" && this.thread?.id === scope.slice(7);
+      else {
+        const row = this.inbox?.find((r) => r.id === scope) ?? (this.review ? allItems(this.review).find((i) => i.row.id === scope)?.row : undefined);
+        alive = !!row;
+        // A PR action's frozen head and card must still be the row's: a changed row is a new decision.
+        const body = this.frozen.get(scope)?.body;
+        if (row && body && typeof body.head === "string") {
+          const view = prRowOf(row);
+          alive = !!view && view.head === body.head && view.card === body.card;
+        }
+      }
+      if (!alive) { this.tapAgain.delete(scope); this.frozen.delete(scope); }
+    }
+  }
+
   render(): void {
     this.wakeForStale();
     // Before anything is built: a reused card (threadsView) is moved out of the old view as the new one is made, which blurs it.
@@ -1831,8 +2079,13 @@ export class PhoneApp {
     }
     this.renderBadge();
     this.renderTabs();
-    // A task page's ⋯ is open only while that page is.
+    // A task page's ⋯ is open only while that page is; an open chat's likewise.
     if (this.menuOpen === "task" && !(this.tab === "tasks" && this.task)) this.menuOpen = null;
+    if (this.menuOpen === "thread" && !(this.tab === "chats" && this.thread && !this.sheet)) this.menuOpen = null;
+    if (this.threadDone && this.thread?.id !== this.threadDone.id && !this.threadDone.busy) this.threadDone = null;
+    this.dropGoneFallbacks();
+    if (this.card) this.card.tapAgain = (this.tapAgain.get(this.card.rowId) as "allow" | "always" | undefined) ?? null;
+    this.renderPill();
     const key = this.surfaceKey();
     // PX-4: while the approval sheet is open, the view under it stays as it was drawn: its scroll, rows and
     // order are exactly what the owner left, and closing the sheet draws it again in place.
@@ -1850,12 +2103,19 @@ export class PhoneApp {
     }
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
     if (!this.card) { this.sheetHost.replaceChildren(); return; }
-    const view = cardView(this.card, {
+    // Captured as drawn: AUTHORIZE answers this card, Confirm ALWAYS sends this rule's preview.
+    const card = this.card;
+    const rule = card.rule;
+    // Opus L5: this row's earlier gated answer is still out (the sheet was closed and opened again): every
+    // answer stays off until it settles, so a second AUTHORIZE cannot mint a second op.
+    const drawn: CardState = !card.busy && this.answering.has(card.rowId)
+      ? { ...card, busy: true, progress: card.progress || STILL_ANSWERING } : card;
+    const view = cardView(drawn, {
       back: () => this.goBack(),
       deny: () => void this.denyCard(),
-      allow: () => void this.allowCard(),
+      allow: () => void this.allowCard(card),
       always: () => void this.alwaysCard(),
-      confirmAlways: () => void this.confirmAlways(),
+      confirmAlways: () => void this.confirmAlways(card, rule),
       cancelAlways: () => this.cancelAlways(),
       // AS: the owner's own open or close of the command, kept across a re-read of the card.
       toggleCommand: (o) => { if (this.card) { this.card.expanded = o; this.render(); } },
@@ -1883,6 +2143,7 @@ export class PhoneApp {
       openCard: (row) => this.openCard(row),
       send: (row, body, echo) => void this.sendAnswer(row, body, echo),
       retry: (row) => void this.retryDeferred(row),
+      tapAgain: this.tapAgain,
       busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
       expanded: this.opened,
       toggle: (row, open) => { this.opened.set(row.id, open); this.render(); },
@@ -1917,6 +2178,7 @@ export class PhoneApp {
         busy: this.answering, groupBusy: this.reviewBusy, confirming: this.reviewConfirming, flash: this.reviewFlash,
         drafts: this.drafts, picks: this.reviewPicks, withdrawing: this.withdrawing, online: this.online,
         opened: this.opened, confirmLines: this.reviewConfirmed ? this.reviewConfirmLines : null,
+        unlocked: this.unlock.mirror.open(), tapAgain: this.tapAgain,
       }, { ...this.reviewActions(), expand: (row, open) => { this.opened.set(row.id, open); this.render(); } }, this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
         : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
     } else if (this.tab === "inbox") {
@@ -1981,6 +2243,10 @@ export class PhoneApp {
           fold: (f) => { this.trayFolded = f; this.render(); },
         });
         if (tray) view.querySelector(".subbar")?.after(tray);
+        // WS-5c §5.6: Done (and its Undo) in the open chat's ⋯, for a chat in the In progress list.
+        const doneBox = this.doneControls(thread.id);
+        if (doneBox.menu) view.querySelector(".subbar")?.append(doneBox.menu);
+        if (doneBox.note) view.querySelector(".subbar")?.after(doneBox.note);
       } else {
         view = chatsView(this.projects, this.threads, this.expanded, {
           open: (t) => void this.openThread(t.id, t),
@@ -2009,6 +2275,7 @@ export class PhoneApp {
           confirming: w.confirming, busy: w.busy, note: w.note, online: this.online,
           ask: (verb) => this.askVerb(open.id, verb), back: () => this.backVerb(open.id),
           confirm: (verb) => void this.confirmVerb(open.id, verb),
+          locked: !this.unlock.mirror.open(), tapAgain: this.tapAgain.get("task:" + open.id) === "cancel",
           // PX-4: Cancel is in this page's ⋯ menu.
           menu: { open: this.menuOpen === "task", toggle: (o) => this.toggleMenu(o ? "task" : null) },
         }, allowed);
@@ -2040,6 +2307,40 @@ export class PhoneApp {
   }
 
 
+  /** The open chat's ⋯ (Done) and Done's line with its Undo while its window lasts. */
+  private doneControls(id: string): { menu: HTMLElement | null; note: HTMLElement | null } {
+    const st = this.threadDone?.id === id ? this.threadDone : null;
+    const entry = this.doneEntry(id);
+    const undoing = !!st?.token && this.now() < st.until;
+    const pending = this.tapAgain.get("thread:" + id);
+    let menu: HTMLElement | null = null;
+    if (entry && entry.seq !== null && !undoing) {
+      // The seq this item is drawn with is the one its tap sends (Sol MED 1): captured here, never re-read.
+      const seq = entry.seq;
+      menu = menuView({
+        id: "m-thread-more", label: "Chat actions", open: this.menuOpen === "thread",
+        toggle: (o) => this.toggleMenu(o ? "thread" : null),
+        items: [{ id: "done", testid: "m-thread-done", label: pending === "done" ? UNLOCK_AND_SEND : "Done",
+          disabled: !!st?.busy || !this.online, onSelect: () => void this.doneThread(id, seq) }],
+      });
+    }
+    let note: HTMLElement | null = null;
+    if (st && (st.note || undoing)) {
+      note = el("div", "m-thread-done");
+      note.dataset.testid = "m-thread-done-note";
+      const line = el("p", "m-notice", st.note);
+      line.setAttribute("role", "status");
+      note.append(line);
+      if (undoing) {
+        const token = st.token;
+        const undo = tap(pending === "undo" ? UNLOCK_AND_SEND : "Undo", () => void this.undoThread(id, st, token), "quiet m-send", "m-thread-undo");
+        undo.disabled = st.busy || !this.online;
+        note.append(undo);
+      }
+    }
+    return { menu, note };
+  }
+
   /** The Tasks filter's body: today's task list, headed by "New task", and the cap's notice. */
   private tasksPanel(): HTMLElement {
     const view = tasksView(this.tasks, (t) => void this.openTask(t.id));
@@ -2053,6 +2354,8 @@ export class PhoneApp {
   }
 
   private reviewActions(): ReviewActions {
+    // The confirmed set this draw shows: the confirm button sends exactly it (never a later re-read).
+    const confirmed = this.reviewConfirmed;
     return {
       toggle: (item) => {
         if (this.reviewBusy) return;
@@ -2072,7 +2375,7 @@ export class PhoneApp {
         this.reviewConfirming = true;
         this.render();
       },
-      approveConfirm: () => void this.approveSelected(),
+      approveConfirm: () => void this.approveSelected(confirmed),
       approveCancel: () => { if (!this.reviewBusy) { this.reviewConfirming = false; this.reviewConfirmed = null; this.render(); } },
       leaveSelected: () => void this.leaveSelected(),
       retry: (row) => void this.retryDeferred(row).then(() => {
@@ -2115,9 +2418,10 @@ export function startApp(deps: AppDeps): PhoneApp {
     // The keyboard never covers the message box: the app follows the visible viewport.
     followViewport(window, document.documentElement);
     window.addEventListener("offline", () => app.setOnline(false));
-    window.addEventListener("online", () => void app.probe());
+    window.addEventListener("online", () => app.visible());
+    // WS-5c rules 1 and 2: back in view, the window's mirror (`me`) and the op-token pool are read again.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && !app.stopped) void app.probe();
+      if (document.visibilityState === "visible" && !app.stopped) app.visible();
     });
     // P-7: a recording never continues in the background; its microphone is released.
     document.addEventListener("visibilitychange", () => {

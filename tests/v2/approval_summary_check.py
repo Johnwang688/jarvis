@@ -880,8 +880,12 @@ class DecidesNothing(unittest.TestCase):
             "always_rule": inspect.getsource(approvals.PendingApprovals.always_rule),
         }
         from jarvis.v2 import review
-        for name in ("item_tag", "subject", "check_group", "_check", "approve", "refusal", "_place_refusal"):
+        for name in ("item_tag", "_approve_phone", "check_group", "_check", "approve", "refusal",
+                     "_place_refusal"):
             sources["review." + name] = inspect.getsource(getattr(review, name))
+        # WS-5c: Always's rule read and its preview decide nothing from a summary either.
+        for name in ("_rule", "preview_of"):
+            sources["remote_answer." + name] = inspect.getsource(getattr(remote_answer, name))
         for name, source in sources.items():
             self.assertIsNone(pattern.search(source), name)
 

@@ -1,0 +1,470 @@
+import { describe, expect, it, vi } from "vitest";
+import { PhoneApp, type StreamLike } from "./app";
+import { ANSWER_WAIT_MS } from "./unlock";
+import type { Got, Posted } from "./net";
+import { actionPosts, installUnlock } from "./unlock.fixtures";
+
+// PX-5 in the app: the lock pill, Lock now, the mirror's re-reads and slides, a POST 401, the card's
+// "Unlock and send", and Done and Undo from an open chat (WS-5c, plan C §5).
+
+class Stream implements StreamLike {
+  readyState = 1;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage = null;
+  onerror = null;
+  close() {}
+}
+
+const T1 = "aaaaaaaa";
+const NOW = Date.parse("2026-11-15T10:30:00Z");
+const DETAIL = {
+  card: { req_id: "r1", tool: "Bash", args: { command: "npm test" }, command: "npm test", reason: "r", layer: "human",
+    origin: "", headline: "", asked_at: "2026-11-15T10:29:00+00:00", timeout_s: 600, allowlistable: true, thread_id: T1 },
+  private: false, withheld: false, secure: { ok: true, failed: null, label: "", reason: "" },
+  can: { deny: true, allow: true, always: true }, why: "",
+};
+const APPR = { id: "appr:r1", kind: "approval", rank: 1, title: "Claude asks to use Bash", blocks: "", project_id: null,
+  thread_id: T1, task_id: null, asked_at: null, expires_at: null, origin: "", detail: { req_id: "r1", tool: "Bash" } };
+
+function harness(opts: { unlockS?: number; rows?: unknown[] } = {}) {
+  const posts: { path: string; value: any }[] = [];
+  const replies: Record<string, Posted> = {};
+  const gets: Record<string, Got> = {};
+  const fetched: string[] = [];
+  let clock = NOW;
+  const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
+  const signedOut = vi.fn();
+  const timers: { fn: () => void; ms: number }[] = [];
+  // A held path answers only when released (one hold per request).
+  const holds: Record<string, Promise<void>[]> = {};
+  const never: string[] = [];
+  const root = document.createElement("main");
+  document.body.replaceChildren(root);
+  gets["/m/api/inbox"] = { ok: true, body: { rows: opts.rows ?? [] } };
+  gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null }, unlock_s: opts.unlockS ?? 0 } };
+  gets["/m/api/review"] = { ok: true, body: { open: 0 } };
+  gets["/m/api/tasks"] = { ok: true, body: { tasks: [], more: false } };
+  gets["/m/api/working"] = { ok: true, body: { entries: [{ thread_id: T1, project_id: "p1", project: "Calc", title: "Fix it",
+    status: "unread", last: "2026-11-15T10:00:00Z", seq: 7 }], more: false, total: 1 } };
+  gets[`/m/api/threads/${T1}/log`] = { ok: true, body: { rows: [{ seq: 1, role: "Claude", text: "hello", at: null, marks: [] }],
+    next: 2, thread: { id: T1, title: "Fix it", project_id: "p1", role: "chat", provider: "claude" } } };
+  gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: DETAIL };
+  installUnlock(gets, replies);
+  let stream: Stream | null = null;
+  const app = new PhoneApp({
+    root, onSignedOut: signedOut, signOut: async () => {},
+    fetchJson: async (path) => {
+      fetched.push(path);
+      // A read that never answers (Sol r1 LOW 2: the recovery GET left pending).
+      if (never.some((prefix) => path.startsWith(prefix))) return new Promise<Got>(() => {});
+      return gets[path.split("?")[0]] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } };
+    },
+    postJson: async (path, value) => {
+      posts.push({ path, value });
+      const held = holds[path]?.shift();
+      if (held) await held;
+      return replies[path] ?? { status: 200, body: { ok: true } };
+    },
+    getCredential: credential,
+    openStream: () => { stream = new Stream(); return stream; },
+    setTimer: (fn) => { queueMicrotask(fn); return 0; },
+    unlockTimer: { set: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clear: () => {} },
+    now: () => clock,
+  });
+  const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+  const q = (id: string) => root.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+  const click = async (id: string) => { q(id)!.click(); await settle(); };
+  const hold = (path: string) => { let open!: () => void; (holds[path] ??= []).push(new Promise((r) => { open = r; })); return () => open(); };
+  /** Fires the newest bounded-wait timer (ANSWER_WAIT_MS), as if that long passed. */
+  const elapse = async () => { timers.filter((t) => t.ms === ANSWER_WAIT_MS).at(-1)!.fn(); await settle(); };
+  return { app, root, posts, replies, gets, fetched, credential, signedOut, timers, settle, q, click, hold, never, elapse,
+    stream: () => stream!, tick: (ms: number) => { clock += ms; } };
+}
+
+describe("the lock pill and Lock now", () => {
+  it("shows Locked, then Unlocked until HH:MM from me's unlock_s; it opens the menu, whose first row is Lock now", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    const pill = h.q("m-lock-pill")!;
+    expect(pill.textContent).toBe("Locked");
+    expect(pill.dataset.state).toBe("locked");
+    const h2 = harness({ unlockS: 1800 });
+    h2.app.start();
+    await h2.settle();
+    expect(h2.q("m-lock-pill")!.textContent).toMatch(/^Unlocked · \d{1,2}:\d{2}/);
+    expect(h2.q("m-lock-pill")!.dataset.state).toBe("unlocked");
+    await h2.click("m-lock-pill");
+    const rows = Array.from(h2.root.querySelectorAll('[data-testid="m-menu-panel"] > *')).map((n) => (n as HTMLElement).dataset.testid);
+    expect(rows[0]).toBe("m-lock-now");
+    await h2.click("m-lock-now");
+    expect(h2.posts).toEqual([{ path: "/m/api/lock", value: {} }]);
+    expect(h2.q("m-lock-pill")!.textContent).toBe("Locked");
+    expect(h2.q("m-flash")!.textContent).toMatch(/^Locked\./);
+  });
+
+  it("a Lock now that did not reach Jarvis says the phone may still be unlocked, and the pill does not claim Locked", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.replies["/m/api/lock"] = { status: 0, body: {}, offline: true };
+    h.app.start();
+    await h.settle();
+    await h.click("m-lock-pill");
+    await h.click("m-lock-now");
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("unlocked");
+    expect(h.q("m-flash")!.textContent).toContain("may still be unlocked");
+  });
+
+  it("after Lock now the next Allow takes the locked path (Face ID first, no doomed POST)", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    await h.app.lockNow();
+    h.posts.length = 0;
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", "/m/api/inbox/appr%3Ar1/answer"]);
+  });
+});
+
+describe("the mirror (rule 2)", () => {
+  it("is read from me again on the stream's reopen and on visibility, which also refills the pool", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    expect(h.app.unlock.mirror.open()).toBe(false);
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true }, unlock_s: 600 } };
+    h.stream().onopen!(new Event("open"));
+    await h.settle();
+    expect(h.app.unlock.mirror.open()).toBe(true);
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true }, unlock_s: 0 } };
+    const reads = h.app.unlock.pool.reads;
+    h.app.visible();
+    await h.settle();
+    expect(h.app.unlock.mirror.open()).toBe(false);
+    expect(h.app.unlock.pool.reads).toBe(reads + 1);
+    expect(h.q("m-lock-pill")!.textContent).toBe("Locked");
+  });
+
+  it("a 202 message slides it only while open, and never opens it", async () => {
+    const h = harness();
+    h.replies[`/m/api/threads/${T1}/messages`] = { status: 202, body: { status: "sent" } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.app.sendMessage(T1, "hi");
+    expect(h.app.unlock.mirror.open()).toBe(false);
+    h.app.unlock.mirror.fromMe(60);
+    h.tick(30_000);
+    await h.app.sendMessage(T1, "again");
+    expect(h.app.unlock.mirror.until).toBe(NOW + 30_000 + 3_600_000);
+  });
+
+  it("Deny and Leave never ask for Face ID nor unlock", async () => {
+    const h = harness({ rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-deny");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/appr%3Ar1/answer"]);
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+});
+
+describe("rule 9: a POST 401 is signed out, never locked", () => {
+  it("an Allow's 401 probes me; signed out there, the app signs out and no unlock is tried", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 401, body: { error: "unauthorized" } };
+    h.gets["/m/api/me"] = { ok: false, why: "signed-out", status: 401 };
+    await h.click("approval-allow");
+    expect(h.signedOut).toHaveBeenCalledTimes(1);
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/appr%3Ar1/answer"]);
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+});
+
+describe("Opus L1 in the app: the pill follows me when local state cannot be trusted", () => {
+  it("an unlock whose answer was lost: the app probes me, and me open makes the pill say Unlocked", async () => {
+    const h = harness({ rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("locked");
+    h.replies["/m/api/unlock"] = { status: 0, body: {}, offline: true };
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null }, unlock_s: 3600 } };
+    const before = h.fetched.filter((f) => f === "/m/api/me").length;
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.settle();
+    expect(h.fetched.filter((f) => f === "/m/api/me").length).toBeGreaterThan(before);
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("unlocked");
+    expect(actionPosts(h.posts)).toEqual([]);
+    expect(h.q("m-card-notice")!.textContent).toBe("No answer to the unlock: nothing was sent. Tap again.");
+  });
+});
+
+describe("Opus L5: a sheet closed and opened again while its answer is out", () => {
+  it("AUTHORIZE (and ALWAYS, Deny) stay off on the reopened sheet; a tap there mints no second op", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    const release = h.hold("/m/api/inbox/appr%3Ar1/answer");
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    expect(actionPosts(h.posts).length).toBe(1);
+    // The owner closes the sheet mid-send and opens it again.
+    await h.click("m-back");
+    // The list's Review is off while the answer is out; the sheet can still be opened from elsewhere
+    // (the open chat's tray, the review): opened again here as those do.
+    expect((h.q("m-item-review") as HTMLButtonElement).disabled).toBe(true);
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    expect(h.app.card?.detail).toBeTruthy();
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    expect((h.q("approval-always") as HTMLButtonElement).disabled).toBe(true);
+    expect((h.q("approval-deny") as HTMLButtonElement).disabled).toBe(true);
+    expect(h.q("m-card-notice")!.textContent).toBe("Your earlier answer to this is still being sent…");
+    const reads = h.app.unlock.pool.reads;
+    await h.app.allowCard();
+    await h.app.denyCard();
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.app.unlock.pool.reads).toBe(reads);
+    // The first answer lands: the reopened sheet closes with its words.
+    release();
+    await h.settle();
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.app.card).toBeNull();
+    expect(h.q("m-flash")!.textContent).toBe("Authorized.");
+  });
+
+  it("a refusal that lands after the reopen shows its words on the reopened sheet, whose AUTHORIZE is back", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 409, body: { error: "already answered" } };
+    h.app.start();
+    await h.settle();
+    const release = h.hold("/m/api/inbox/appr%3Ar1/answer");
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.click("m-back");
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    release();
+    await h.settle();
+    expect(h.q("m-card-notice")!.textContent).toBe("Already answered.");
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("Sol r1 LOW 2: an answer that never settles does not keep the reopened sheet off", () => {
+  it("a POST that never answers: after the bound, op status is read, nothing is resent, and AUTHORIZE is back with Unknown", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    h.hold("/m/api/inbox/appr%3Ar1/answer");             // never released
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.click("m-back");
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    await h.elapse();
+    await h.settle();
+    expect(h.fetched.some((f) => f.startsWith("/m/api/ops/n"))).toBe(true);
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.app.answering.has("appr:r1")).toBe(false);
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.q("m-card-notice")!.textContent).toBe("No answer came back. Unknown: check at the desk.");
+  });
+
+  it("the POST and its recovery GET both pending: each wait is bounded, and the controls come back with Unknown", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    h.hold("/m/api/inbox/appr%3Ar1/answer");
+    h.never.push("/m/api/ops/n");
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.click("m-back");
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    await h.elapse();                                     // the POST's bound: the status GET starts, and hangs
+    expect(h.fetched.some((f) => f.startsWith("/m/api/ops/n"))).toBe(true);
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    await h.elapse();                                     // the status GET's bound
+    await h.settle();
+    expect(h.app.answering.has("appr:r1")).toBe(false);
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.q("m-card-notice")!.textContent).toBe("No answer came back. Unknown: check at the desk.");
+    expect(actionPosts(h.posts).length).toBe(1);
+    // A new tap mints a new op: never the old one's token.
+    const first = actionPosts(h.posts)[0].value.op;
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 200, body: { ok: true } };
+    await h.click("approval-allow");
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(2);
+    expect(acts[1].value.op).not.toBe(first);
+  });
+});
+
+describe("Sol r1 LOW 1 in the app: a delayed Lock now overtaken by an unlock", () => {
+  it("says so, and the pill follows me", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.app.start();
+    await h.settle();
+    const release = h.hold("/m/api/lock");
+    const lock = h.app.lockNow();
+    await h.settle();
+    (h.app.unlock as any).unlocks += 1;                   // an unlock finished while Lock now was out
+    release();
+    await lock;
+    await h.settle();
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("unlocked");
+    expect(h.q("m-flash")!.textContent).toBe("Lock now reached Jarvis, but this phone unlocked again since: the pill shows what Jarvis says now.");
+  });
+});
+
+describe("draw-time capture: Confirm ALWAYS sends the rule it was drawn with", () => {
+  it("a rule replaced under the drawn Confirm (no redraw) is refused, never substituted", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    const preview = "a".repeat(64);
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "Bash" }, rule_words: "Bash npm test", resolution: "r", preview } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-always");
+    const confirm = h.q("m-rule-confirm")!;
+    h.app.card!.rule = { words: "other", entry: null, resolution: "", preview: "b".repeat(64) };   // no redraw
+    confirm.click();
+    await h.settle();
+    expect(actionPosts(h.posts)).toEqual([]);
+  });
+
+  it("the drawn rule's preview is what is sent", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    const preview = "a".repeat(64);
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "Bash" }, rule_words: "Bash npm test", resolution: "r", preview } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-always");
+    await h.click("m-rule-confirm");
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].value.decision).toBe("always");
+    expect(acts[0].value.preview).toBe(preview);
+  });
+});
+
+describe("rule 6 on the card: Unlock and send", () => {
+  it("AUTHORIZE becomes Unlock and send, resumes the same op, and is dropped when the sheet closes", async () => {
+    const h = harness({ rows: [APPR] });
+    let active = false;
+    (h.app.unlock as any).deps.activation = () => active;
+    h.credential.mockRejectedValueOnce(new Error("NotAllowedError"));
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    expect(h.q("approval-allow")!.textContent).toBe("Unlock and send");
+    expect(h.q("m-card-notice")!.textContent).toBe("Face ID needs a fresh tap: press Unlock and send.");
+    expect(actionPosts(h.posts)).toEqual([]);
+    // Closing the sheet drops it: opening again shows AUTHORIZE and a new tap takes a new token.
+    await h.click("m-back");
+    await h.click("m-item-review");
+    expect(h.q("approval-allow")!.textContent).toBe("AUTHORIZE");
+    expect(h.app.tapAgain.size).toBe(0);
+    h.credential.mockRejectedValueOnce(new Error("NotAllowedError"));
+    await h.click("approval-allow");
+    expect(h.q("approval-allow")!.textContent).toBe("Unlock and send");
+    active = true;
+    await h.click("approval-allow");
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].value.decision).toBe("allow");
+    expect(h.q("m-flash")!.textContent).toBe("Authorized.");
+  });
+});
+
+describe("Done and Undo from an open chat (WS-5c §5.6)", () => {
+  it("Done sends the chat's seq with an op token; Undo within its window sends Done's token with a fresh op", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 200, body: { thread_id: T1, done: true, token: "u".repeat(32), undo_s: 10 } };
+    h.replies[`/m/api/working/${T1}/undo`] = { status: 200, body: { thread_id: T1, done: false } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.click("m-thread-more");
+    await h.click("m-thread-done");
+    expect(h.posts[0].path).toBe(`/m/api/working/${T1}/done`);
+    expect(Object.keys(h.posts[0].value).sort()).toEqual(["op", "seq"]);
+    expect(h.posts[0].value.seq).toBe(7);
+    expect(h.q("m-thread-done-note")!.textContent).toContain("Marked done.");
+    await h.click("m-thread-undo");
+    expect(h.posts[1].path).toBe(`/m/api/working/${T1}/undo`);
+    expect(h.posts[1].value.token).toBe("u".repeat(32));
+    expect(h.posts[1].value.op).not.toBe(h.posts[0].value.op);
+    expect(h.q("m-thread-done-note")!.textContent).toContain("Undone");
+  });
+
+  it("Sol MED 1: Done sends the seq it was DRAWN with, not one a background read brought since", async () => {
+    // The mutant this pins: doneThread reading the working set again at the tap would send 8.
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 409, body: { error: "changed since you read it" } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.click("m-thread-more");                      // the menu, and its Done, drawn with seq 7
+    const done = h.q("m-thread-done")!;
+    // A background working read brings seq 8; the open chat is not drawn again.
+    h.gets["/m/api/working"] = { ok: true, body: { entries: [{ thread_id: T1, project_id: "p1", project: "Calc", title: "Fix it",
+      status: "unread", last: "2026-11-15T10:05:00Z", seq: 8 }], more: false, total: 1 } };
+    await h.app.loadWorking(true);
+    await h.settle();
+    expect(h.app.entries![0].seq).toBe(8);
+    expect(h.q("m-thread-done")).toBe(done);             // the same drawn control
+    done.click();
+    await h.settle();
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].value.seq).toBe(7);
+    expect(h.q("m-thread-done-note")!.textContent).toBe("Not done. Changed since you read it.");
+  });
+
+  it("Undo sends the undo token its button was drawn with", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 200, body: { thread_id: T1, done: true, token: "u".repeat(32), undo_s: 10 } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.app.doneThread(T1, 7);
+    const undo = h.q("m-thread-undo")!;
+    h.app.threadDone!.token = "v".repeat(32);            // replaced under the drawn button: refused, never substituted
+    undo.click();
+    await h.settle();
+    expect(h.posts.filter((p) => p.path.endsWith("/undo"))).toEqual([]);
+  });
+
+  it("Undo is gone once its window ends; a refused Done says why", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 200, body: { thread_id: T1, done: true, token: "u".repeat(32), undo_s: 10 } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.app.doneThread(T1, 7);
+    expect(h.q("m-thread-undo")).not.toBeNull();
+    h.tick(10_001);
+    h.timers.at(-1)!.fn();
+    expect(h.q("m-thread-undo")).toBeNull();
+    await h.app.undoThread(T1);
+    expect(h.posts.filter((p) => p.path.endsWith("/undo"))).toEqual([]);
+    h.replies[`/m/api/working/${T1}/done`] = { status: 409, body: { error: "it still needs you", why_not: "an approval is waiting" } };
+    await h.app.doneThread(T1, 7);
+    expect(h.q("m-thread-done-note")!.textContent).toBe("Not done. It still needs you. An approval is waiting.");
+  });
+});

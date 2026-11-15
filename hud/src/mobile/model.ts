@@ -154,6 +154,8 @@ export interface WorkingItem {
   status: WorkingStatus;
   /** The last activity, ISO; "" when the daemon could not read it. */
   last: string;
+  /** WS-5c: the thread's own version, which Done binds (§5.6); null when the read did not carry one. */
+  seq: number | null;
 }
 
 /** `more`: the daemon cut the list; `total` is how many there were before the cut. */
@@ -171,7 +173,8 @@ export function parseWorkingList(raw: unknown): WorkingList | null {
     seen.add(id);
     const status = (WORKING_STATUSES as readonly string[]).includes(str(e.status)) ? (e.status as WorkingStatus) : "idle";
     entries.push({ thread_id: id, project_id: idOrNull(e.project_id), project: oneLine(e.project, 80),
-      title: oneLine(e.title, 120), status, last: str(e.last) });
+      title: oneLine(e.title, 120), status, last: str(e.last),
+      seq: typeof e.seq === "number" && Number.isInteger(e.seq) && e.seq >= 0 ? e.seq : null });
   }
   return { entries, more: raw.more === true, total: Math.max(num(raw.total), entries.length) };
 }

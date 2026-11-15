@@ -11,9 +11,10 @@
 //   - every string is set with textContent; a Browser card's page text sits
 //     in its own <bdi>;
 //   - Deny is cheap (one tap, the session only) and first; AUTHORIZE and
-//     ALWAYS are far below it, each takes the passkey (Face ID or the
-//     passcode) on its own challenge, and ALWAYS shows the rule it would
-//     write before the passkey is asked for;
+//     ALWAYS are far below it, each a gated action (WS-5c, ./unlock.ts): Face
+//     ID once when the phone is locked, nothing more inside its unlock hour;
+//     ALWAYS shows the rule it would write (`answer/rule`) and takes one
+//     confirm tap, which sends that rule's `preview`;
 //   - nothing is keyboard-defaulted: no form, no autofocus, AUTHORIZE and
 //     ALWAYS out of the Tab order and never focused by a tap, and Enter or
 //     Space on the card does nothing unless Deny itself has focus;
@@ -28,6 +29,7 @@ import { argText, browserBody, nestedTooDeep, originText, reasonText, TOO_DEEP_W
 import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { oneLine, type InboxRow } from "../lib/inbox";
 import { absoluteWords, denyWords } from "./reltime";
+import { UNLOCK_AND_SEND } from "./unlock";
 import { relayedLine, relayedParts } from "../lib/relays";
 import {
   AI_LABEL, WHERE_LABEL, WHY_LABEL, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
@@ -71,7 +73,19 @@ export function parseDetail(raw: unknown): CardDetail | null {
   };
 }
 
-export interface Rule { words: string; entry: unknown; publicKey: Json }
+/** What `GET .../answer/rule` showed (WS-5c §5.4): the rule, its words and the `preview` an Always sends. */
+export interface Rule { words: string; entry: unknown; resolution: string; preview: string }
+
+const PREVIEW_RE = /^[0-9a-f]{64}$/;
+
+/** `GET .../answer/rule`'s body (`RULE_FIELDS`), or null for anything else (no preview, no Always). */
+export function parseRule(raw: unknown): Rule | null {
+  if (!isObj(raw) || typeof raw.preview !== "string" || !PREVIEW_RE.test(raw.preview)) return null;
+  const entry = raw.rule;
+  if (entry !== null && !isObj(entry)) return null;
+  return { words: typeof raw.rule_words === "string" ? raw.rule_words : "", entry: entry ?? null,
+    resolution: typeof raw.resolution === "string" ? raw.resolution : "", preview: raw.preview };
+}
 
 export interface CardState {
   rowId: string;
@@ -87,6 +101,8 @@ export interface CardState {
   progress?: string;
   /** AS: the owner's own open (true) or close (false) of the command; undefined until then. */
   expanded?: boolean;
+  /** WS-5c rule 6: the answer whose Face ID needs a fresh tap; its button reads "Unlock and send". */
+  tapAgain?: "allow" | "always" | null;
 }
 
 export interface CardActions {
@@ -400,7 +416,7 @@ export function cardView(state: CardState, actions: CardActions, now: number = D
     if (state.rule.entry !== null && state.rule.entry !== undefined) {
       rule.append(testid(el("pre", "code", JSON.stringify(state.rule.entry)), "m-rule-entry"));
     }
-    const confirm = button("Confirm ALWAYS with Face ID or passcode", "always", "m-rule-confirm",
+    const confirm = button(state.tapAgain === "always" ? UNLOCK_AND_SEND : "Confirm ALWAYS", "always", "m-rule-confirm",
       actions.confirmAlways, true);
     const cancel = button("Not this", "quiet", "m-rule-cancel", actions.cancelAlways, false);
     confirm.disabled = state.busy;
@@ -416,7 +432,7 @@ export function cardView(state: CardState, actions: CardActions, now: number = D
       always.disabled = state.busy || !allowable || !d.can.always;
       authorize.append(always);
     }
-    const allow = button("AUTHORIZE", "allow", "approval-allow", actions.allow, true);
+    const allow = button(state.tapAgain === "allow" ? UNLOCK_AND_SEND : "AUTHORIZE", "allow", "approval-allow", actions.allow, true);
     allow.disabled = state.busy || !allowable || !d!.can.allow || (!!d && nestedTooDeep(d.card.args));
     authorize.append(allow);
     card.append(gap(), authorize);

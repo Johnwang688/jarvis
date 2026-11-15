@@ -111,7 +111,7 @@ HTTP-auth plan).
 
 The phone's only door is the remote listener (8408, loopback, behind `tailscale
 serve`): strict Host/Origin, `/m/*` only; agents never reach it. Routes need
-a passkey session; each Allow, cancel, defer and PR action a fresh assertion.
+a passkey session; gated actions a sliding 1 h passkey unlock.
 Phone sends are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07.
 Dictation is not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
 

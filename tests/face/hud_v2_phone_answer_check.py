@@ -9,8 +9,11 @@ are a fake system answering as this PC did, so no Windows command runs. Real
 approvals wait on the daemon's real broker, and each is answered from the
 phone:
 
-  - Deny (one tap, no passkey), Allow (the passkey), Always (the rule
-    first, then the passkey; the rule is then in the allowlist);
+  - Deny (one tap, no passkey); Allow while locked (WS-5c: unlock/options,
+    the passkey, unlock, then the answer with its op token, in one tap);
+    Always inside the unlock window (the challenge-free rule read, one
+    confirm tap, `{decision, preview, op}`, no passkey; the rule is then in
+    the allowlist);
   - a HUD-only Browser card under §4.1 shows the desk's Browser words;
     with one probe flipped to failing, the same card says "answer at the
     desk" and only Deny works;
@@ -144,11 +147,18 @@ def run(browser, check, until):
     project = daemon.stores.projects.create("Calc", str(root))
     thread = daemon.stores.threads.create(project.id, Role.CHAT, PN.CLAUDE, cwd=str(root))
 
+    posted: list[tuple[str, dict]] = []
+
     def forward(route):
         request = route.request
         url = urlsplit(request.url)
         path = url.path + ("?" + url.query if url.query else "")
         sent = request.all_headers()
+        if request.method == "POST":
+            try:
+                posted.append((url.path, json.loads(request.post_data or "{}")))
+            except ValueError:
+                posted.append((url.path, {}))
         if url.path == "/m/api/events":
             return route.fulfill(**stream_window(path, sent))
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
@@ -378,9 +388,22 @@ def run(browser, check, until):
         # -- Allow --------------------------------------------------------------------------
         allow, a_out, a_worker = ask(tool="Bash", args={"command": "npm test"}, command="npm test")
         open_card(allow)
+        check("WS-5c pill: locked before the first gated action",
+              page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state") == "locked")
+        before = len(posted)
         page.locator(f'{card} [data-testid="approval-allow"]').click()
         pump(lambda: "decision" in a_out)
         check("P-4 Allow: the passkey (UV), then the answer", a_out.get("decision") == Decision.ALLOW, str(a_out))
+        trail = [p for p, _ in posted[before:]]
+        answer_body = next((b for p, b in posted[before:] if p.endswith("/answer")), {})
+        check("WS-5c Allow while locked: unlock/options, unlock, then the answer, in one tap; no answer POST first",
+              trail == ["/m/api/unlock/options", "/m/api/unlock", f"/m/api/inbox/appr%3A{allow.req_id}/answer"]
+              and sorted(answer_body) == ["decision", "op"] and str(answer_body.get("op", "")).startswith("o1."),
+              str(trail))
+        pump(lambda: page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state") == "unlocked")
+        check("WS-5c pill: unlocked after the unlock",
+              page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state") == "unlocked"
+              and "Unlocked · " in page.locator('[data-testid="m-lock-pill"]').inner_text())
         until(lambda: page.locator('[data-testid="m-flash"]').count() == 1, timeout=8)
         check("P-4 Allow: the phone says so", "Authorized" in page.locator('[data-testid="m-flash"]').inner_text())
         check("P-4 Allow: no rule was written", not Path(config.ALLOWLIST_PATH).exists()
@@ -397,9 +420,15 @@ def run(browser, check, until):
               == {"tool": "run_command", "prefix": "git"} and pending(always))
         check("P-4 Always: nothing written before the passkey", not Path(config.ALLOWLIST_PATH).exists()
               or v1_permissions.load_allowlist() == [])
+        before = len(posted)
         page.locator('[data-testid="m-rule-confirm"]').click()
         pump(lambda: "decision" in w_out)
-        check("P-4 Always: confirmed with the passkey, allowed", w_out.get("decision") == Decision.ALLOW, str(w_out))
+        check("P-4 Always: confirmed, allowed", w_out.get("decision") == Decision.ALLOW, str(w_out))
+        trail = posted[before:]
+        check("WS-5c Always inside the window: one confirm tap, no passkey, {decision, preview, op}",
+              [p for p, _ in trail] == [f"/m/api/inbox/appr%3A{always.req_id}/answer"]
+              and sorted(trail[0][1]) == ["decision", "op", "preview"] and trail[0][1]["decision"] == "always"
+              and re.fullmatch(r"[0-9a-f]{64}", trail[0][1]["preview"]) is not None, str(trail)[:300])
         check("P-4 Always: and exactly the rule shown is written",
               v1_permissions.load_allowlist() == [{"tool": "run_command", "prefix": "git"}])
 

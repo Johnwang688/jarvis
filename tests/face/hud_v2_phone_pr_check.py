@@ -10,20 +10,22 @@ authenticator stands in for the iPhone (the harness of
 
   - **One real PR, end to end:** PM-C's real summaries over pr_facts' fake gh
     and a fake model, PM-D's real `PrActions` on the same fake gh. The row
-    draws title, buttons, facts, then the AI summary; Merge asks
-    `/m/api/inbox/pr/options` with the row's head and card, takes the passkey,
-    and the fake gh runs `gh pr merge … --match-head-commit <head>` once; the
-    row's fixed notice says "Asking for Face ID…", then the result.
+    draws title, buttons, facts, then the AI summary; Merge on a locked phone
+    (WS-5c) is unlock/options, the passkey, unlock, then the act with the row's
+    head and card as drawn and an op token, in one tap, and the fake gh runs
+    `gh pr merge … --match-head-commit <head>` once; the row's fixed notice
+    says what happened.
   - **A card that moved under the phone:** the daemon's row changes (no event),
-    Merge sends the drawn card, the options are a 409 "Changed since you read
-    it.", nothing runs, and the row is drawn again from a new read.
+    Merge (now inside the unlock window: no passkey) sends the drawn card, the
+    act's own checks refuse it with a 409 "Changed since you read it.",
+    nothing runs, nothing is sent again, and the row is drawn again.
   - **Each state** (`hud_v2_pr_rows.STATES`, crafted rows in the PR source):
     pending, failed and off summaries, notes, squash, held (no buttons), each
     fix state, the fix card; never a GitHub link, never the head SHA; hostile
     text stays text.
   - **Limited (Q1):** with one §4.1 probe failing, a flagged PR offers nothing
     and says to answer it at the desk; an unflagged one keeps its buttons.
-  - **Cancel a fix** takes the `task:` passkey flow.
+  - **Cancel a fix** is the task's cancel, a gated action with its op token.
 
 `--shots DIR` only draws every state and saves one screenshot per row (no
 checks), which also works against an older build.
@@ -189,6 +191,9 @@ class Phone:
             sent = request.all_headers()
             if url.path == "/m/api/events":
                 return route.fulfill(**stream_window(path, sent))
+            # A check's hook, run before the request reaches the daemon (WS-5c: Lock now from another tab).
+            if self.before_forward is not None:
+                self.before_forward(request.method, url.path)
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
             try:
                 conn.putrequest(request.method, path, skip_host=True, skip_accept_encoding=True)
@@ -204,6 +209,12 @@ class Phone:
                 data = response.read()
                 if request.method == "POST":
                     self.posts.append((url.path, json.loads(body or b"null"), response.status))
+                    # The daemon's own answer, in step with `posts` (a check can hold its exact words).
+                    try:
+                        answer = json.loads(data or b"null")
+                    except ValueError:
+                        answer = None
+                    self.answers.append((url.path, response.status, answer))
                 route.fulfill(status=response.status, headers={k: v for k, v in response.getheaders()}, body=data)
             finally:
                 conn.close()
@@ -236,6 +247,8 @@ class Phone:
             return {"status": status, "headers": headers, "body": data}
 
         self.posts: list = []
+        self.answers: list = []
+        self.before_forward = None
         self.ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True,
                                        service_workers="block", device_scale_factor=2)
         self.ctx.route(re.compile(r".*"), lambda route: route.abort())
@@ -418,13 +431,14 @@ def run(browser, check, until):
         merge.click()
         p.pump(lambda: prs.run.acts() != [] or len(p.posts) > before + 1, timeout=10)
         p.pump(lambda: "Merged" in row.locator('[data-testid="m-pr-notice"]').inner_text(), timeout=8)
-        sent = [x for x in p.posts[before:] if x[0].startswith("/m/api/inbox/pr")]
+        sent = p.posts[before:]
         acts = prs.run.acts()
-        check("phone Merge: options then the act, each with the row's head and card exactly as drawn",
-              [x[0] for x in sent] == [pr_merge.PHONE_OPTIONS, pr_merge.PHONE_ACT]
-              and sent[0][1] == {"id": pmc.ROW, "action": "merge", "head": d["head"], "card": d["card"]}
-              and {k: sent[1][1][k] for k in ("id", "action", "head", "card")} == sent[0][1]
-              and isinstance(sent[1][1].get("assertion"), dict), str([(x[0], x[2]) for x in sent]))
+        check("phone Merge (WS-5c, locked): unlock/options, unlock, then the act with the row's head and card as drawn and its op token",
+              [x[0] for x in sent] == ["/m/api/unlock/options", "/m/api/unlock", pr_merge.PHONE_ACT]
+              and {k: v for k, v in sent[2][1].items() if k != "op"}
+              == {"id": pmc.ROW, "action": "merge", "head": d["head"], "card": d["card"]}
+              and str(sent[2][1].get("op", "")).startswith("o1.") and sent[2][2] == 200,
+              str([(x[0], x[2]) for x in sent]))
         check("phone Merge: the passkey, then gh pr merge … --match-head-commit <head>, once [mutation: no passkey]",
               len(acts) == 1 and acts[0]["argv"][-2:] == ["--match-head-commit", d["head"]]
               and "--merge" in acts[0]["argv"], str([a["argv"] for a in acts]))
@@ -443,9 +457,9 @@ def run(browser, check, until):
         before = len(p.posts)
         p.row(pmc.ROW).locator('[data-testid="m-pr-act-merge"]').click()
         p.pump(lambda: "changed since you read it" in p.row(pmc.ROW).inner_text().lower(), timeout=8)
-        sent = [x for x in p.posts[before:] if x[0].startswith("/m/api/inbox/pr")]
-        check("phone 409: the drawn card is sent, the options refuse it, nothing runs, no retry [mutation: retry]",
-              len(sent) == 1 and sent[0][2] == 409 and sent[0][1]["card"] == d["card"]
+        sent = p.posts[before:]
+        check("phone 409: inside the window the drawn card is sent once, the act refuses it, nothing runs, no retry [mutation: retry]",
+              [x[0] for x in sent] == [pr_merge.PHONE_ACT] and sent[0][2] == 409 and sent[0][1]["card"] == d["card"]
               and len(prs.run.acts()) == acts_before, str([(x[0], x[2]) for x in sent]))
         check("phone 409: the server's words in the row's notice",
               "Changed since you read it" in p.row(pmc.ROW).locator('[data-testid="m-pr-notice"]').inner_text())
@@ -531,14 +545,14 @@ def run(browser, check, until):
               page.locator('[data-testid="m-inbox"] :is(' + MARKUP + ')').count() == 0
               and page.evaluate("window.__pwned === undefined"))
 
-        # -- Cancel a fix: the task: passkey ---------------------------------------------
+        # -- Cancel a fix: the task's cancel, a gated action (WS-5c) ------------------------
         before = len(p.posts)
         p.row(R.fix_running()["id"]).locator('[data-testid="m-pr-fix-cancel"]').click()
         p.pump(lambda: ("cancel", fix_task.id) in p.runner.calls, timeout=8)
         sent = [x[0] for x in p.posts[before:]]
-        check("fix Cancel: the task's cancel options, the passkey, then TaskControl.cancel [mutation: no passkey]",
-              sent[:2] == [f"/m/api/tasks/{fix_task.id}/cancel/options", f"/m/api/tasks/{fix_task.id}/cancel"]
-              and isinstance(p.posts[before + 1][1].get("assertion"), dict)
+        cancel_body = p.posts[before][1] if len(p.posts) > before else {}
+        check("fix Cancel: the task's cancel with its op token (inside the window: no passkey), then TaskControl.cancel",
+              sent == [f"/m/api/tasks/{fix_task.id}/cancel"] and list(cancel_body) == ["op"]
               and ("cancel", fix_task.id) in p.runner.calls, str(sent))
 
         # -- limited (Q1) ------------------------------------------------------------------

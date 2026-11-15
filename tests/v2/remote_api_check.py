@@ -980,7 +980,8 @@ PINNED_STREAM = {'cli_turn', 'compacted', 'error', 'inbox_changed', 'model_set',
                  'task_updated', 'text', 'thread', 'thread_archived', 'thread_closed', 'thread_created',
                  'thread_deleted', 'thread_moved', 'thread_restored', 'thread_updated', 'turn_finished',
                  'turn_started', 'user_message'}
-WORKING_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last")
+# WS-5c added `seq`, the thread's own version the phone's Done carries back.
+WORKING_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last", "seq")
 DONE_TOKEN = "DONE-TOKEN-5a7c1e90b2d4"
 REASON = "REASON-PLANTED-8842"
 
@@ -1034,6 +1035,7 @@ class Working(Api):
         with self.ws._lock:
             entry = self.ws._threads[self.chat.id]
             entry.update(done_token=DONE_TOKEN, done_seq=5, reason=REASON, seq=424242)
+            seq = entry["seq"]
         thread = self.stores.threads.get(self.chat.id)
         thread.provider_session_id = "SESSION-HANDLE-77"
         self.stores.threads.save(thread)
@@ -1044,13 +1046,15 @@ class Working(Api):
             status, headers, body = self.get("/m/api/working")
         self.assertEqual(status, 200, body)
         text = json.dumps(body)
-        for planted in (DONE_TOKEN, REASON, AGENT, "424242", "SESSION-HANDLE-77", str(self.repo), str(self.root),
+        for planted in (DONE_TOKEN, REASON, AGENT, "SESSION-HANDLE-77", str(self.repo), str(self.root),
                         "idle_days", "done_at", "done_seq", "done_token", "reason", "since", "rows", "why_not",
-                        "cwd", "worktree", "needs_you", "count", "pending", '"seq"'):
+                        "cwd", "worktree", "needs_you", "count", "pending"):
             self.assertNotIn(planted, text, planted)
         self.assertEqual(tuple(body["entries"][0]), WORKING_FIELDS)
+        self.assertEqual(body["entries"][0]["seq"], seq, "WS-5c: the entry's own seq, and nothing else of it")
         del row
-        print("ok  a planted done_token, reason, seq, idle limit, session handle, paths and rows never come back")
+        print("ok  a planted done_token, reason, idle limit, session handle, paths and rows never come back; "
+              "seq is the entry's own")
 
     def test_title_and_project_are_scrubbed(self):
         named = self.stores.projects.create("Proj " + TOKEN, str(self.repo))
@@ -1232,8 +1236,10 @@ class Working(Api):
                         key=lambda e: rank.index(e["status"]))
         self.assertEqual([(e["thread_id"], e["project_id"], e["status"], e["last"]) for e in phone["entries"]],
                          [(e["thread_id"], e["project_id"], e["status"], e["last"]) for e in expect])
-        self.assertEqual(set(desk["entries"][0]) - {"thread_id", "project_id", "last", "status"},
+        self.assertEqual(set(desk["entries"][0]) - {"thread_id", "project_id", "last", "status", "seq"},
                          set(remote_api.DROPPED["working_entry"]))
+        by_id = {e["thread_id"]: e["seq"] for e in desk["entries"]}
+        self.assertEqual({e["thread_id"]: e["seq"] for e in phone["entries"]}, by_id, "the desk's seq")
         self.assertEqual(set(desk) - {"entries"}, set(remote_api.DROPPED["working"]))
         self.assertEqual(set(remote_api.WORKING_ENTRY_FIELDS) - set(desk["entries"][0]), {"project", "title"})
         self.assertEqual(phone["total"], len(desk["entries"]))
@@ -1344,7 +1350,7 @@ class Working(Api):
     def test_dropped_table_and_pinned_allowlists(self):
         self.assertEqual({k: sorted(v) for k, v in remote_api.DROPPED.items() if not k.startswith("working")},
                          PINNED_DROPPED)
-        self.assertEqual(sorted(remote_api.DROPPED["working_entry"]), ["rows", "seq", "since", "why_not"])
+        self.assertEqual(sorted(remote_api.DROPPED["working_entry"]), ["rows", "since", "why_not"])
         self.assertEqual(sorted(remote_api.DROPPED["working"]), ["count", "needs_you", "pending"])
         for table in ("working_entry", "working"):
             for field, why in remote_api.DROPPED[table].items():
@@ -1353,8 +1359,9 @@ class Working(Api):
             self.assertEqual(getattr(remote_api, name), value, name)
         self.assertEqual({k: tuple(v) for k, v in remote_api.DETAIL_FIELDS.items()}, PINNED_DETAIL)
         self.assertEqual(remote_api.STREAM_KINDS - {"working_changed"}, PINNED_STREAM)
-        self.assertNotIn("seq", remote_api.WORKING_ENTRY_FIELDS)
-        print("ok  every existing phone allowlist, DROPPED table and stream kind is as it was; seq is not sent")
+        self.assertIn("seq", remote_api.WORKING_ENTRY_FIELDS)
+        print("ok  every existing phone allowlist, DROPPED table and stream kind is as it was; seq is sent "
+              "(WS-5c)")
 
 
 class Stream:

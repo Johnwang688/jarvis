@@ -3,17 +3,21 @@ morning-review.md), in a real headless Chromium at an iPhone viewport.
 
 A mock mobile server: the built `mobile.html` and its assets from `hud/dist`,
 served as `https://<host>/m/` by Playwright routes, with `/m/api/*` played by
-this file (the report, the options and the answers; nothing real is
-approved). WebAuthn is a fake: `navigator.credentials.get` answers a
-credential-shaped object and counts its calls, standing in for Face ID.
+this file (the report, the op tokens, the unlock routes and the answers;
+nothing real is approved). WebAuthn is a fake: `navigator.credentials.get`
+answers a credential-shaped object and counts its calls, standing in for Face
+ID.
 
 What it pins:
   - a launch (a notification's tap opens `/m/#inbox`) with `opens_here`
     opens the Review tab; without it, the Inbox;
   - no box is ticked at first; there is no select-all;
-  - tick 2 of 3: the confirmation lists exactly those 2; the passkey is
-    asked once; the POSTs carry exactly those ids and tags;
-  - a 409 `changed` unticks that item and says why;
+  - tick 2 of 3: the confirmation lists exactly those 2; with the phone
+    believing itself unlocked while Jarvis is locked (WS-5c, a stale client),
+    the approve is 423, then ONE unlock (Face ID once) and ONE resend of the
+    same frozen set and op token; the check waits for the FINAL answer, a
+    409 `changed`, never the first 423;
+  - that 409 `changed` unticks that item and says why;
   - a decision answered in place folds to a receipt and the scroll holds
     within one row;
   - each jump chip lands on its chat;
@@ -135,6 +139,10 @@ class Mock:
         self.review = report(True)
         self.posts: list[tuple[str, dict]] = []
         self.replies: dict[str, tuple[int, dict]] = {}
+        # Answers given once each, in order, before `replies` (WS-5c: the stale client's 423, then the 409).
+        self.queue: dict[str, list[tuple[int, dict]]] = {}
+        self.unlock_s = 0
+        self.issued = 0
 
     def __call__(self, route):
         request = route.request
@@ -154,8 +162,19 @@ class Mock:
             return route.fulfill(status=404, body=b"")
         if path == "/m/api/events":
             return route.fulfill(status=200, content_type="text/event-stream", body=b"retry: 60000\n: connected\n\n")
+        if request.method == "GET" and path == "/m/api/ops/tokens":
+            # WS-5c: four tokens of the server's shape, low-entropy markers, never a real key.
+            import base64
+            toks = []
+            for _ in range(4):
+                self.issued += 1
+                payload = json.dumps({"sid": "s" * 22, "n": "n" + str(self.issued).zfill(21), "t": 1}).encode()
+                toks.append("o1." + base64.urlsafe_b64encode(payload).decode().rstrip("=") + "." + "A" * 43)
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps({"tokens": toks, "ttl_s": 600}))
         if request.method == "GET":
-            payload = {"/m/api/me": {"signed_in": True, "secure": {"ok": True, "failed": None, "label": ""}},
+            payload = {"/m/api/me": {"signed_in": True, "secure": {"ok": True, "failed": None, "label": ""},
+                                     "unlock_s": self.unlock_s},
                        "/m/api/inbox": {"rows": [], "more": False},
                        "/m/api/review": self.review,
                        "/m/api/push": {"key": "", "enabled": False, "subscribed": False}}.get(path)
@@ -164,11 +183,14 @@ class Mock:
             return route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
         body = json.loads(request.post_data or "{}")
         self.posts.append((path, body))
-        status, payload = self.replies.get(path, (200, {"ok": True}))
-        if path == "/m/api/review/approve/options" and path not in self.replies:
-            payload = {"count": len(body.get("items", [])), "publicKey": {
+        queued = self.queue.get(path)
+        status, payload = queued.pop(0) if queued else self.replies.get(path, (200, {"ok": True}))
+        if path == "/m/api/unlock/options" and path not in self.replies:
+            payload = {"publicKey": {
                 "challenge": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", "rpId": HOST, "timeout": 60000,
                 "userVerification": "required", "allowCredentials": [{"type": "public-key", "id": "Y3JlZA"}]}}
+        if path == "/m/api/unlock" and path not in self.replies:
+            payload = {"unlocked": True, "unlock_s": 3600}
         return route.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
 
 
@@ -179,6 +201,7 @@ def run(browser, check, until):
         print("  skip  hud/dist has no phone shell (run npm run build in hud/)")
         return
     mock = Mock(dist)
+    mock.unlock_s = 900          # WS-5c: `me` says unlocked; Jarvis is locked by the time Approve is sent
     ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True,
                               has_touch=True, ignore_https_errors=True, service_workers="block")
     ctx.route("**/*", mock)
@@ -294,20 +317,31 @@ def run(browser, check, until):
         check("the confirmation lists exactly those 2", listed == ["defer:a", "defer:b"], str(listed))
         check("nothing is posted and no passkey asked before the confirmation",
               mock.posts == [] and page.evaluate("window.__gets.length") == 0, str(mock.posts))
-        mock.replies["/m/api/review/approve"] = (409, {"error": "changed", "changed": [{"id": "defer:b",
-                                                                                      "reason": "answered"}]})
+        # WS-5c: a stale client (the phone read unlock_s > 0; Jarvis was locked since, by Lock now
+        # elsewhere): the first approve is 423, then one unlock and one resend; the final answer is the 409.
+        mock.queue["/m/api/review/approve"] = [(423, {"error": "locked", "unlock": True}),
+                                               (409, {"error": "changed", "changed": [{"id": "defer:b",
+                                                                                         "reason": "answered"}]})]
         tap('[data-testid="m-review-confirm-go"]')
-        until(lambda: len(mock.posts) == 2, timeout=4)
+        approves = lambda: [b for p_, b in mock.posts if p_ == "/m/api/review/approve"]  # noqa: E731
+        until(lambda: len(approves()) == 2 and not mock.queue["/m/api/review/approve"], timeout=6)
+        until(lambda: page.locator('[data-testid="m-review-flash"]').count() == 1, timeout=3)
+        pause(0.5)
         items = [{"id": "defer:a", "tag": "a" * 64}, {"id": "defer:b", "tag": "b" * 64}]
-        check("the POSTs carry exactly those ids and tags, with one assertion",
-              mock.posts[0] == ("/m/api/review/approve/options", {"items": items})
-              and mock.posts[1][0] == "/m/api/review/approve" and mock.posts[1][1]["items"] == items
-              and isinstance(mock.posts[1][1].get("assertion"), dict)
-              and page.evaluate("window.__gets.length") == 1, str(mock.posts)[:300])
+        sent = approves()
+        check("WS-5c stale client: the approve, its 423, ONE unlock (Face ID once), then the same set once more",
+              [p_ for p_, _b in mock.posts] == ["/m/api/review/approve", "/m/api/unlock/options", "/m/api/unlock",
+                                                "/m/api/review/approve"]
+              and page.evaluate("window.__gets.length") == 1, str([p_ for p_, _b in mock.posts]))
+        check("the POSTs carry exactly those ids and tags, and the resend is the same frozen request and op token",
+              len(sent) == 2 and sent[0]["items"] == items and sent[1] == sent[0]
+              and sorted(sent[0]) == ["items", "op"] and str(sent[0]["op"]).startswith("o1."), str(sent)[:300])
         until(lambda: page.locator('[data-testid="m-review-flash"]').count() == 1, timeout=3)
         check("a 409 changed unticks that item and explains",
               [t[1] for t in ticks()] == [True, False, False, False]
-              and "Nothing was approved" in page.locator('[data-testid="m-review-flash"]').inner_text()
+              # Opus L6: the final 409's own words (a changed set), not any refusal's.
+              and page.locator('[data-testid="m-review-flash"]').inner_text()
+              == "Nothing was approved: something you selected changed. Look again, then confirm again."
               and "Unticked" in page.locator('[data-id="defer:b"] [data-testid="m-review-note"]').inner_text(),
               str(ticks()))
         # A chip lands on its chat.

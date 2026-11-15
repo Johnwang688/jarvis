@@ -12,7 +12,9 @@ authenticator stands in for the iPhone. Fake providers; a spy task runner.
   - offline, the box says so and Send is off;
   - New chat: project, provider, first message; the new chat opens;
   - New task: made in INTAKE and opened; Start asks first, then starts it;
-  - Cancel on a running task: asked first, then the passkey, then cancelled;
+  - Cancel on a running task: asked first, then (WS-5c, the phone locked)
+    unlock/options, the passkey, unlock and the cancel with its op token,
+    in one tap; then cancelled;
   - a proposal withdrawn from its inbox row;
   - every control at least 48 px tall; hostile text stays text; no page errors.
 
@@ -145,6 +147,7 @@ def run(browser, check, until):
     project = daemon.stores.projects.create("Calc " + HOSTILE, str(root))
     chat = daemon.open_thread(project.id, Role.CHAT, PN.CLAUDE, {})
     net = {"offline": False}
+    posted: list[tuple[str, dict]] = []
 
     def forward(route):
         request = route.request
@@ -153,6 +156,11 @@ def run(browser, check, until):
         sent = request.all_headers()
         if net["offline"] and url.path.startswith("/m/api/"):
             return route.fulfill(status=502, body=b"")
+        if request.method == "POST":
+            try:
+                posted.append((url.path, json.loads(request.post_data or "{}")))
+            except ValueError:
+                posted.append((url.path, {}))
         if url.path == "/m/api/events":
             return route.fulfill(**stream_window(path, sent))
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
@@ -351,11 +359,18 @@ def run(browser, check, until):
         tid("m-task-cancel").click()
         check("P-5 Cancel: asks first, and says it cannot be undone",
               "cannot be resumed" in tid("m-task-ask").inner_text() and runner.calls == [("start", task.id)])
+        check("WS-5c Cancel: the confirm names Face ID while the phone is locked",
+              tid("m-task-confirm").inner_text() == "Cancel with Face ID", tid("m-task-confirm").inner_text())
+        before = len(posted)
         tid("m-task-confirm").click()
         pump(lambda: len(runner.calls) == 2)
         check("P-5 Cancel: the passkey (virtual authenticator), then TaskControl.cancel",
               runner.calls[-1] == ("cancel", task.id)
               and daemon.stores.tasks.get(task.id).state == TaskState.CANCELLED, str(runner.calls))
+        trail = posted[before:]
+        check("WS-5c Cancel: unlock/options, unlock, then the cancel with its op token, once; no cancel/options",
+              [p for p, _ in trail] == ["/m/api/unlock/options", "/m/api/unlock", f"/m/api/tasks/{task.id}/cancel"]
+              and list(trail[-1][1]) == ["op"] and str(trail[-1][1]["op"]).startswith("o1."), str([p for p, _ in trail]))
         journal = [(r.get("verb"), r.get("via")) for r in daemon.stores.tasks.read_journal(task.id)
                    if r.get("event") == "owner_verb"]
         check("P-5: each verb is in the task's journal as the phone's",

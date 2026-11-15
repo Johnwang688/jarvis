@@ -1,8 +1,8 @@
 """Writing from the phone (phone surface design §5, §11 questions 1 and 2;
 work package P-5): `jarvis/v2/remote_write.py`, the phone's half of
 `Daemon.deliver` (`NEVER_STEER`), `daemon.task_verb` and
-`Daemon.create_task`, the task-cancel half of `remote_auth.answer_options`
-and the proposal withdraw in `remote_answer`.
+`Daemon.create_task`, the gated cancel (WS-5c: the unlock window and an op
+token) and the proposal withdraw in `remote_answer`.
 
 Free and hermetic, as tests/v2/remote_answer_check.py (whose `Phone` base it
 reuses): real daemons on ephemeral loopback ports (never 8402, 8403, 8405 or
@@ -22,8 +22,9 @@ What it pins (the package's acceptance items):
   - start and resume reach `TaskControl` with exactly the HUD's arguments;
     a task is created in INTAKE (the intake gate) and starts only on Start;
     `TASK_START` off takes those two routes out;
-  - cancel takes a fresh passkey assertion bound to the task and the verb;
-    an approval's assertion is never a cancel's, nor the reverse;
+  - cancel is gated (WS-5c): 400 without its op token, 423 while locked,
+    then a terminal task 409 at act time; a replay is 409 duplicate; its
+    rate is spent once, at admission; an Allow's op token is no cancel's;
   - a proposal's withdraw from the phone, the session only;
   - every verb is in the task's journal as the phone's;
   - permanent delete, archive, merge and the rest are unreachable;
@@ -569,20 +570,6 @@ class Tasks(Base):
         self.assertEqual(self.post(f"tasks/{task.id}/start", {})[0], 409)
         print("ok  no runner: the HUD's task verb is 409 before its body is read; the phone's 409 too")
 
-    def test_cancel_prompts_never_crowd_out_an_allow(self):
-        # Review of #324, NIT 7: the two kinds of prompt are capped apart.
-        self.secure_ok()
-        tasks = [self.task(TaskState.CLARIFYING) for _ in range(remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION + 1)]
-        for task in tasks[:-1]:
-            self.assertEqual(self.post(f"tasks/{task.id}/cancel/options", {})[0], 200)
-        self.assertEqual(self.post(f"tasks/{tasks[-1].id}/cancel/options", {})[0], 429, "cancel's own cap")
-        request, out, worker = self.ask()
-        status, body = self.post(f"inbox/{self.row(request)}/answer/options", {"decision": "allow"})
-        self.assertEqual(status, 200, body)
-        self.assertEqual(self.post(f"inbox/{self.row(request)}/answer",
-                                   {"decision": "allow", "assertion": self.a.get(body["publicKey"])})[0], 200)
-        print("ok  abandoned cancel prompts cannot block an Allow (each kind has its own cap per session)")
-
     def test_task_start_is_separable(self):
         task = self.task()
         with patch.object(remote_write, "TASK_START", False):
@@ -593,60 +580,63 @@ class Tasks(Base):
         print("ok  TASK_START off: the phone's own task making and starting are gone (a chat may still propose "
               "one, as at the desk); the reads stay")
 
-    def cancel_assertion(self, task_id, cookie=None, authenticator=None):
-        status, body = self.post(f"tasks/{task_id}/cancel/options", {}, cookie=cookie)
-        self.assertEqual(status, 200, body)
-        return (authenticator or self.a).get(body["publicKey"])
+    def cancel(self, task_id, op=None, cookie=None):
+        return self.post(f"tasks/{task_id}/cancel", {"op": op or self.op(cookie)}, cookie=cookie)
 
-    def test_cancel_takes_a_fresh_passkey_assertion(self):
-        task, other = self.task(TaskState.CLARIFYING), self.task(TaskState.CLARIFYING)
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {}), (401, {"error": remote_write.CANCEL_NEEDS_PASSKEY}))
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": "x"})[0], 401)
-        # Another task's assertion, an unverified one, a used one.
-        credential = self.cancel_assertion(other.id)
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": credential})[0], 401)
-        uv = self.post(f"tasks/{task.id}/cancel/options", {})[1]["publicKey"]
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": self.a.get(uv, uv=False)})[0], 401)
-        credential = self.cancel_assertion(task.id)
-        self.assertEqual(self.runner.calls, [], "nothing cancelled yet")
-        status, body = self.post(f"tasks/{task.id}/cancel", {"assertion": credential})
+    def test_cancel_is_a_gated_action(self):
+        """WS-5c §5.3: the body and its op token (400), the unlock window
+        (423, nothing runs), then the act-time checks and TaskControl.cancel."""
+        task = self.task(TaskState.CLARIFYING)
+        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {})[0], 400, "no op token")
+        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": {}})[0], 400, "the old body")
+        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"op": "x"})[0], 400)
+        self.assertEqual(self.post("tasks/zz/cancel", {"op": self.op()})[0], 400, "a malformed id")
+        self.assertEqual(self.cancel(task.id), (423, {"error": "locked", "unlock": True}))
+        self.assertEqual(self.runner.calls, [], "nothing cancelled while locked")
+        self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CLARIFYING)
+        self.unlocked()
+        op = self.op()
+        status, body = self.cancel(task.id, op)
         self.assertEqual(status, 200, body)
         self.assertEqual(self.runner.calls, [("cancel", task.id)])
         self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CANCELLED)
         self.assertEqual(self.journal(task.id), [("cancel", "phone")])
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": credential})[0], 409, "spent")
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel/options", {}),
-                         (409, {"error": "this task is already cancelled"}))
+        self.assertEqual(self.cancel(task.id, op),
+                         (409, {"error": "already sent", "duplicate": True, "state": "completed"}), "a replay")
+        self.assertEqual(self.cancel(task.id), (409, {"error": "this task is already cancelled"}),
+                         "a terminal cancel at act time")
+        self.assertEqual(self.runner.calls, [("cancel", task.id)], "cancelled once")
+        # The per-cancel options route is gone.
+        self.assertEqual(self.post(f"tasks/{task.id}/cancel/options", {})[0], 404)
         # The HUD's own cancel is the same call.
         hud = self.task(TaskState.CLARIFYING)
         self.api("POST", f"/tasks/{hud.id}/cancel", {})
         self.assertEqual(self.runner.calls[-1], ("cancel", hud.id))
-        print("ok  cancel: its own assertion (task and verb bound, single use); TaskControl.cancel as the HUD's")
+        print("ok  cancel: gated (400, 423, then act-time 409 when terminal); TaskControl.cancel as the HUD's; "
+              "a replay is 409 duplicate")
 
-    def test_an_approvals_assertion_is_never_a_cancels(self):
-        self.secure_ok()
+    def test_cancel_takes_its_rate_at_admission_only(self):
+        """WS-5c §5.3: cancel's rate is `Rate.take_if` at admission, never
+        `_written`'s too: one cancel spends one rate token."""
         task = self.task(TaskState.CLARIFYING)
-        request, _, _ = self.ask()
-        status, body = self.post(f"inbox/{self.row(request)}/answer/options", {"decision": "allow"})
-        allow = self.a.get(body["publicKey"])
-        self.assertEqual(self.post(f"tasks/{task.id}/cancel", {"assertion": allow})[0], 401)
-        cancel = self.cancel_assertion(task.id)
-        status, body = self.post(f"inbox/{self.row(request)}/answer", {"decision": "allow", "assertion": cancel})
-        self.assertEqual(status, 401, body)
-        self.assertTrue(self.pending(request))
+        self.unlocked()
+        rate = remote_write.rate_of(self.auth.server)
+        digest = self.session_of()["token_sha256"]
+        before = len(rate._seen.get(digest, ()))
+        self.assertEqual(self.cancel(task.id)[0], 200)
+        self.assertEqual(len(rate._seen.get(digest, ())), before + 1)
+        print("ok  cancel spends one rate token, at admission")
+
+    def test_an_op_token_spent_on_an_allow_is_no_cancel(self):
+        self.secure_ok()
+        self.unlocked()
+        task = self.task(TaskState.CLARIFYING)
+        request, out, worker = self.ask()
+        op = self.op()
+        self.assertEqual(self.post_answer(self.row(request), {"decision": "allow", "op": op})[0], 200)
+        self.assertEqual(self.cancel(task.id, op), (409, {"error": "op token reused"}))
         self.assertEqual(self.runner.calls, [])
-        # The challenge's subjects and answers never cross.
-        session = next(iter(self.auth._sessions.values()))
-        for subject, decision in ((f"task:{task.id}", "allow"), (f"task:{task.id}", "always"),
-                                  (request.req_id, "cancel"), (f"x:{task.id}", "cancel"), ("task:XYZ", "cancel"),
-                                  (f"task:{task.id}", "delete")):
-            with self.subTest(subject=subject, decision=decision):
-                with self.assertRaises(remote_auth.AuthError) as caught:
-                    self.auth.answer_options(session, subject, decision)
-                self.assertEqual(caught.exception.status, 400)
-        self.assertEqual(remote_auth.TASK_DECISIONS, ("cancel",))
-        self.assertEqual(self.post(f"inbox/{self.row(request)}/answer/options", {"decision": "cancel"})[0], 400)
-        print("ok  an Allow's assertion is never a cancel's, nor the reverse; subjects and answers never cross")
+        print("ok  an op token spent on an Allow is refused on a cancel (409 reused), nothing cancelled")
 
     def test_a_proposal_is_withdrawn_from_the_phone_with_the_session(self):
         task = self.task()
@@ -717,9 +707,10 @@ class Tasks(Base):
         for path in ("tasks/0123abcd/start", "tasks/0123abcd/resume", "tasks/0123abcd/cancel/options",
                      "tasks/zz/resume"):
             self.assertEqual(self.post(path, {}), (404, {"error": "not found"}), path)
-        self.assertEqual(self.post("tasks/0123abcd/cancel", {"assertion": {}})[0], 404)
+        self.unlocked()
+        self.assertEqual(self.post("tasks/0123abcd/cancel", {"op": self.op()}), (404, {"error": "not found"}))
         self.assertEqual(self.runner.calls, [])
-        print("ok  an unknown or malformed task id is 404")
+        print("ok  an unknown or malformed task id is 404 (a malformed cancel id 400, before the window)")
 
 
 # -- what the phone never reaches --------------------------------------------------------

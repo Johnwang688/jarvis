@@ -17,9 +17,12 @@ routes on the HUD and the phone).
 * `Routes`: a real daemon; owner_only on the HUD listener (the API listener
   and an Origin-less script refused), Fix is PM-E's (503 here: not attached), no phone hold route.
 * `Phone`: a real daemon, a paired software passkey, §4.1 on a fake system:
-  the subject binding, cross-family assertions refused both ways, limited
-  plus flagged refused, limited plus unflagged allowed, a reused assertion,
-  the challenge budget, the phone scrub sending it to the desk.
+  the gate (WS-5c: 400, 423 for every action), the tapped head and card
+  checked at act time, op tokens never crossing families, limited plus
+  flagged refused, limited plus unflagged allowed, replayed and concurrent
+  Updates running gh once, expiry at 601 s and 3,660 s, expiry racing
+  admission (a barrier), a restart's tokens, lost-response outcomes, the
+  phone scrub sending it to the desk.
 * `Boundary`: nothing at `Daemon.start()`, SELF_PROTECTED, the agent-path
   DENY over the phone paths.
 
@@ -55,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis import config, rules  # noqa: E402
 from jarvis.v2 import inbox_prs, pr_facts, pr_merge, pr_summary as S, remote_api, remote_auth  # noqa: E402
+from jarvis.v2.remote_auth import RemoteAuth  # noqa: E402
 from jarvis.v2.inbox_prs import GhFailed  # noqa: E402
 from jarvis.v2.pr_facts import FileChange  # noqa: E402
 import pr_facts_check as PF  # noqa: E402  (its fakes; its tests are not collected here)
@@ -922,53 +926,53 @@ class Phone(rach.Phone):
         d = self.prs.detail()
         return {"head": d["head"], "card": d["card"]}
 
-    def options(self, action, row=ROW, cookie=None, shown=None):
-        return self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": row, "action": action, **(shown or self.shown())},
-                          cookie=cookie or self.cookie)
-
     def act(self, body, cookie=None):
         return self.phone("POST", pr_merge.PHONE_ACT, body, cookie=cookie or self.cookie)
 
-    def signed(self, action, cookie=None):
-        opts = self.shown()
-        status, _, body = self.options(action, cookie=cookie, shown=opts)
-        self.assertEqual(status, 200, body)
-        return self.a.get(body["publicKey"]), opts
+    def tapped(self, action, op=None, shown=None, cookie=None) -> dict:
+        """The body a tap freezes (WS-5c §5.7): the tapped head and card, and
+        its op token."""
+        return {"id": ROW, "action": action, **(shown or self.shown()), "op": op or self.op(cookie)}
 
     def verified(self, action, **extra):
-        credential, opts = self.signed(action)
-        return self.act({"id": ROW, "action": action, "head": opts["head"], "card": opts["card"],
-                         "assertion": credential, **extra})
+        self.ensure_unlocked()
+        return self.act({**self.tapped(action), **extra})
 
 
 class PhoneActs(Phone):
-    def test_subject_binding(self):
+    def test_the_gate_and_the_tapped_values(self):
+        """WS-5c §5.3, §5.4: the body exactly {id, action, head, card, op}
+        (400); the window (423, nothing runs); then the act-time checks on the
+        tapped head and card against the row now."""
         p = self.wire()
         d = p.detail()
-        status, _, body = self.options("merge")
-        self.assertEqual(status, 200, body)
-        self.assertEqual(set(body), {"action", "publicKey"}, "never echoes a head or card (MED 2)")
-        want = pr_merge.subject(REPO, N, d["head"], d["card"], "merge")
-        self.assertRegex(want, r"^pr:[0-9a-f]{56}$")
-        entries = [c for c in self.auth._challenges.values() if c.get("req_id") == want]
-        self.assertEqual([(c["decision"], c["family"]) for c in entries], [("merge", "pr")])
-        credential = self.a.get(body["publicKey"])
-        # Bound to the head, the card and the action: another of any is refused.
+        full = {"id": ROW, "action": "merge", "head": d["head"], "card": d["card"], "op": self.op()}
+        for drop in ("op", "head", "card", "id"):
+            self.assertEqual(self.act({k: v for k, v in full.items() if k != drop})[0], 400, drop)
+        self.assertEqual(self.act({**full, "op": "x"})[0], 400)
+        self.assertEqual(self.act({**self.tapped("merge"), "assertion": {}})[0], 400, "the old body")
+        self.assertEqual(self.act({**self.tapped("rebase")})[0], 400)
+        status, _, got = self.act(self.tapped("merge"))
+        self.assertEqual((status, got), (423, {"error": "locked", "unlock": True}))
+        self.assertEqual(p.run.acts(), [], "nothing runs while locked")
+        self.unlocked()
         for change in ({"head": HEAD2}, {"card": "0" * 64}, {"action": "update"}):
             with self.subTest(change=change):
-                credential, opts = self.signed("merge")
-                status, _, got = self.act({"id": ROW, "action": "merge", "head": d["head"], "card": d["card"],
-                                           "assertion": credential, **change})
-                self.assertEqual(status, 401, got)
+                status, _, got = self.act({**self.tapped("merge"), **change})
+                self.assertEqual(status, 409, got)
         self.assertEqual(p.run.acts(), [])
         status, _, got = self.verified("merge")
         self.assertEqual((status, got["result"], got["authority"]), (200, "merged", "hud"), got)
         self.assertEqual(self.receipts_via(), ["phone"])
-        print("ok  phone: one assertion per action, bound to pr:<56 hex> of repo, number, head, card, action")
+        # The per-action options route is gone.
+        self.assertEqual(self.phone("POST", "/m/api/inbox/pr/options", {"id": ROW, "action": "merge", **d},
+                                    cookie=self.cookie)[0], 404)
+        print("ok  phone: gated (400, 423), then the tapped head, card and action checked against the row now")
 
-    def test_options_bind_what_the_phone_showed(self):
-        """MED 2 of #336's review: a push between the phone's view and its
-        options is a 409, never a challenge for the new head."""
+    def test_the_tapped_values_after_a_push(self):
+        """MED 2 of #336's review, at act time: a push between the phone's
+        view and its tap is a 409; the server never substitutes the fresh
+        head or card."""
         p = self.wire()
         seen = self.shown()
         p.set_view(headRefOid=HEAD2)
@@ -977,58 +981,40 @@ class PhoneActs(Phone):
         eventually(lambda: p.detail()["head"] == HEAD2 and p.detail()["actions"] == ["merge"],
                    what="the new head's row")
         self.assertNotEqual(self.shown()["card"], seen["card"])
-        status, _, body = self.options("merge", shown=seen)
-        self.assertEqual(status, 409, body)
-        self.assertEqual(body["error"], pr_merge.CHANGED)
-        status, _, body = self.options("merge", shown={**seen, "card": self.shown()["card"]})
+        self.unlocked()
+        reads = p.reads
+        status, _, body = self.act(self.tapped("merge", shown=seen))
+        self.assertEqual((status, body["error"]), (409, pr_merge.CHANGED), body)
+        self.assertEqual(p.reads, reads, "refused against the row, before any fresh read [mutation: no act-time "
+                                         "check of the tapped values]")
+        status, _, body = self.act(self.tapped("merge", shown={**seen, "card": self.shown()["card"]}))
         self.assertEqual(status, 409, ("the new card with the old head", body))
-        for bad in ({"head": seen["head"]}, {"card": seen["card"]}, {}):
-            st = self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": ROW, "action": "merge", **bad},
-                            cookie=self.cookie)[0]
-            self.assertEqual(st, 400, bad)
-        self.assertFalse([c for c in self.auth._challenges.values() if c.get("family") == "pr"])
-        status, _, body = self.options("merge")
+        self.assertEqual(p.run.acts(), [])
+        p.poll()                                    # the new head's summary settled: what the phone shows now
+        status, _, body = self.act(self.tapped("merge"))
         self.assertEqual(status, 200, body)
-        print("ok  phone options: bound to the head and card the phone showed; a push since is 409")
+        print("ok  phone act: bound to the head and card the phone showed; a push since is 409")
 
     def receipts_via(self):
         path = Path(self.d.stores.root) / "inbox" / pr_merge.RECEIPTS_FILE
         return ([json.loads(x)["via"] for x in path.read_text().splitlines()
                  if json.loads(x)["phase"] == "result"] if path.exists() else [])
 
-    def test_cross_family_assertions_are_refused_both_ways(self):
+    def test_an_op_token_never_crosses_families(self):
         self.wire()
         request, out, worker = self.ask()
         approval_row = f"appr:{request.req_id}"
-        # An approval's Allow assertion is never a PR action.
-        st, _, opts = self.phone("POST", f"/m/api/inbox/{approval_row}/answer/options", {"decision": "allow"},
-                                 cookie=self.cookie)
-        self.assertEqual(st, 200, opts)
-        allow = self.a.get(opts["publicKey"])
-        d = self.prs.detail()
-        status, _, got = self.act({"id": ROW, "action": "merge", "head": d["head"], "card": d["card"],
-                                   "assertion": allow})
-        self.assertEqual(status, 401, got)
-        self.assertEqual(self.prs.run.acts(), [])
-        # A PR action's assertion never answers an approval.
-        merge, _ = self.signed("merge")
-        status, _, got = self.phone("POST", f"/m/api/inbox/{approval_row}/answer",
-                                    {"decision": "allow", "assertion": merge}, cookie=self.cookie)
-        self.assertEqual(status, 401, got)
-        self.assertTrue(self.pending(request))
-        # Nor can a subject of one family ask for another's answer.
-        session = next(iter(self.auth._sessions.values()))
-        subject = pr_merge.subject(REPO, N, HEAD, "a" * 64, "merge")
-        for req_id, decision in ((subject, "allow"), (subject, "cancel"), (request.req_id, "merge"),
-                                 ("task:0123abcd", "merge"), (f"defer:{request.req_id}", "merge"),
-                                 ("pr:" + "a" * 55, "merge"), ("pr:" + "A" * 56, "merge")):
-            with self.subTest(req_id=req_id, decision=decision):
-                with self.assertRaises(remote_auth.AuthError) as caught:
-                    self.auth.answer_options({"token_sha256": session["token_sha256"]}, req_id, decision)
-                self.assertEqual(caught.exception.status, 400)
-        self.post_answer(approval_row, {"decision": "deny"})
+        self.unlocked()
+        op = self.op()
+        self.assertEqual(self.post_answer(approval_row, {"decision": "deny"})[0], 200)
         worker.join(5)
-        print("ok  cross-family: an approval's assertion is no PR action, a PR's answers no approval")
+        request, out, worker = self.ask(args={"command": "git log"})
+        approval_row = f"appr:{request.req_id}"
+        self.assertEqual(self.post_answer(approval_row, {"decision": "allow", "op": op})[0], 200)
+        status, _, got = self.act(self.tapped("merge", op=op))
+        self.assertEqual((status, got), (409, {"error": "op token reused"}))
+        self.assertEqual(self.prs.run.acts(), [])
+        print("ok  an op token spent on an Allow is refused on a PR action (409 reused), gh never ran")
 
     def limited(self):
         rach._flip_serve(self)
@@ -1040,13 +1026,16 @@ class PhoneActs(Phone):
         run = GhRun(view=json.dumps(view), diff=PF.diff_of(("CLAUDE.md", "-x\n+y")))
         p = self.wire(view=view, run=run)
         self.assertTrue(p.detail()["flags"]["flagged"])
-        credential, opts = self.signed("merge")          # taken while every check held
+        self.unlocked()                                  # opened while every check held
         self.limited()
-        status, _, got = self.act({"id": ROW, "action": "merge", "head": opts["head"], "card": opts["card"],
-                                   "assertion": credential})
+        reads = p.reads
+        status, _, got = self.act(self.tapped("merge"))
         self.assertEqual(status, 409, got)
         self.assertTrue(got["error"].endswith(pr_merge.AT_DESK), got)
-        status, _, got = self.options("merge")
+        self.assertEqual(p.reads, reads, "refused at the act-time check, before the fresh read")
+        # Past that check (made to pass), the fresh read's judge refuses it too.
+        with patch.object(pr_merge, "phone_checks", lambda *a, **k: True):
+            status, _, got = self.act(self.tapped("merge"))
         self.assertEqual(status, 409, got)
         self.assertTrue(got["error"].endswith(pr_merge.AT_DESK), got)
         self.assertEqual(p.run.acts(), [])
@@ -1067,56 +1056,278 @@ class PhoneActs(Phone):
         self.assertEqual((receipt["via"], receipt["limited"]), ("phone", True))
         print("ok  limited phone, no safety files: Merge goes, recorded as limited")
 
-    def test_a_reused_assertion_is_refused(self):
+    def behind(self, **kw) -> Prs:
         view = PF.view(mergeStateStatus="BEHIND")
-        p = self.wire(view=view, run=GhRun(view=json.dumps(view)))
+        p = self.wire(view=view, run=GhRun(view=json.dumps(view)), **kw)
         self.assertEqual(p.detail()["actions"], ["update"])
-        credential, opts = self.signed("update")
-        body = {"id": ROW, "action": "update", "head": opts["head"], "card": opts["card"], "assertion": credential}
+        return p
+
+    def test_a_replayed_update_runs_gh_once(self):
+        """Sol r3-1: the spent challenge used to make a second identical
+        Update a 409; the op token does now."""
+        p = self.behind()
+        self.unlocked()
+        body = self.tapped("update")
         self.assertEqual(self.act(body)[0], 200)
         status, _, got = self.act(body)
-        self.assertEqual(status, 409, got)
+        self.assertEqual((status, got), (409, {"error": "already sent", "duplicate": True, "state": "completed"}))
         self.assertEqual(len(p.run.acts()), 1)
-        print("ok  a reused assertion: 409 (its challenge was spent), nothing run again")
+        print("ok  a replayed Update: 409 duplicate, gh ran once")
 
-    def test_the_challenge_budget_is_its_own(self):
-        self.wire()
-        cap = remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION
-        for _ in range(cap * 3):              # the same PR and action replaces its own
-            self.assertEqual(self.options("merge")[0], 200)
-        # Another family's budget is untouched by PR prompts...
-        request, _, worker = self.ask()
-        st = self.phone("POST", f"/m/api/inbox/appr:{request.req_id}/answer/options", {"decision": "allow"},
-                        cookie=self.cookie)[0]
-        self.assertEqual(st, 200)
-        # ...and the PR family is capped per session: distinct subjects past it 429.
-        session = next(iter(self.auth._sessions.values()))
-        s = {"token_sha256": session["token_sha256"]}
-        for i in range(cap - 1):
-            self.auth.answer_options(s, pr_merge.subject(REPO, N, HEAD, f"{i:064x}", "merge"), "merge")
-        with self.assertRaises(remote_auth.AuthError) as caught:
-            self.auth.answer_options(s, pr_merge.subject(REPO, N, HEAD, "f" * 64, "merge"), "merge")
-        self.assertEqual(caught.exception.status, 429)
-        self.assertIn("pr", remote_auth.ANSWER_FAMILIES)
-        self.post_answer(f"appr:{request.req_id}", {"decision": "deny"})
-        worker.join(5)
-        print("ok  the pr family's own budget: 4 per session, apart from approvals")
+    def test_two_concurrent_identical_updates_run_gh_once(self):
+        p = self.behind()
+        self.unlocked()
+        gate, entered = threading.Event(), threading.Event()
+        real = p.run.answers["update"]
+
+        def slow(argv):
+            entered.set()
+            gate.wait(5)
+            return real(argv)
+        p.run.answers["update"] = slow
+        body = self.tapped("update")
+        out = []
+        first = threading.Thread(target=lambda: out.append(self.act(body)))
+        first.start()
+        self.assertTrue(entered.wait(5))
+        second = self.act(body)
+        gate.set()
+        first.join(10)
+        self.assertEqual(second[:3:2], (409, {"error": "already sent", "duplicate": True, "state": "running"}))
+        self.assertEqual(out[0][0], 200, out)
+        self.assertEqual(len(p.run.acts()), 1)
+        print("ok  two concurrent identical Updates: one runs, the other 409 duplicate, gh once")
+
+    def test_the_same_token_with_another_body_is_reused(self):
+        p = self.behind()
+        self.unlocked()
+        op = self.op()
+        status, _, got = self.act(self.tapped("update", op=op, shown={**self.shown(), "card": "0" * 64}))
+        self.assertEqual(status, 409, got)                 # admitted, then refused at act time
+        status, _, got = self.act(self.tapped("update", op=op))
+        self.assertEqual((status, got), (409, {"error": "op token reused"}))
+        self.assertEqual(p.run.acts(), [])
+        print("ok  the same token with another body: 409 reused, gh never ran")
+
+    def test_an_expired_replay_runs_gh_once(self):
+        """Sol r4-1: replayed at 601 s and at 3,660 s while other actions
+        keep the window open: 410 each time, gh once."""
+        p = self.behind()
+        self.unlocked()
+        body = self.tapped("update")
+        self.assertEqual(self.act(body)[0], 200)
+        start = self.mono.now
+        for at in (remote_auth.OP_TTL_S + 1, 3660):
+            self.mono.now = start + at - 30
+            fresh, _, _ = self.ask()
+            self.assertEqual(self.post_answer(f"appr:{fresh.req_id}", {"decision": "allow", "op": self.op()})[0],
+                             200, "another action keeps the window open")
+            self.mono.now = start + at
+            status, _, got = self.act(body)
+            self.assertEqual((status, got), (410, {"error": remote_auth.EXPIRED_OP, "expired": True}), at)
+        self.assertEqual(len(p.run.acts()), 1)
+        print("ok  an Update replayed at 601 s and at 3,660 s, the window open: 410 each time, gh once")
+
+    def test_expiry_racing_admission(self):
+        """Sol r5-1, with a barrier: a completed Update's replay passes the
+        signature and session checks just before expiry and is held at the
+        Ops lock; the clock passes `expires` and another admission prunes;
+        released, the replay is 410 and gh ran once."""
+        p = self.behind()
+        self.unlocked()
+        body = self.tapped("update")
+        self.assertEqual(self.act(body)[0], 200)
+        token = remote_auth.parse_op(body["op"])
+        ops = self.auth.ops
+        arrived, go = threading.Event(), threading.Event()
+        replayer: dict = {}
+
+        class Held:
+            """The Ops lock, holding back only the replay's thread."""
+
+            def __init__(self, lock):
+                self.lock = lock
+
+            def __enter__(self):
+                if threading.current_thread() is replayer.get("thread"):
+                    arrived.set()
+                    go.wait(10)
+                return self.lock.__enter__()
+
+            def __exit__(self, *exc):
+                return self.lock.__exit__(*exc)
+
+            def acquire(self, *a, **k):
+                return self.lock.acquire(*a, **k)
+
+            def release(self):
+                return self.lock.release()
+        real_lock = ops._lock
+        ops._lock = Held(real_lock)
+        self.addCleanup(setattr, ops, "_lock", real_lock)
+        self.mono.now = token["t"] + remote_auth.OP_TTL_S - 1      # just before expiry
+        out = []
+        thread = threading.Thread(target=lambda: out.append(self.act(body)))
+        replayer["thread"] = thread
+        # The handler runs on the listener's own thread, not this one: mark it
+        # by wrapping admission instead.
+        real_admit = ops.admit
+
+        def admit(*a, **k):
+            if a[1] == token["n"]:
+                replayer["thread"] = threading.current_thread()
+            return real_admit(*a, **k)
+        ops.admit = admit
+        self.addCleanup(setattr, ops, "admit", real_admit)
+        thread.start()
+        self.assertTrue(arrived.wait(5), "the replay passed its outside checks and waits at the lock")
+        self.mono.now = token["t"] + remote_auth.OP_TTL_S + 1      # past `expires`
+        # Another admission prunes the completed record. Straight into the
+        # store: since #374's fix round the held replay holds the auth lock
+        # (admission runs under it, then the Ops lock), so a request's own
+        # admission would wait behind it.
+        ops.admit("0" * 64, "B" * 22, self.mono.now, "d", lambda room: "go")
+        self.assertNotIn((self.session_of()["token_sha256"], token["n"]), ops._records, "pruned")
+        go.set()
+        thread.join(10)
+        self.assertEqual(out[0][:3:2], (410, {"error": remote_auth.EXPIRED_OP, "expired": True}))
+        self.assertEqual(len(p.run.acts()), 1)
+        print("ok  expiry racing admission (barrier): the held replay is 410 after the prune, gh once")
+
+    def test_an_ending_during_the_fresh_read(self):
+        """Opus LOW-1 on #374, with a barrier: the desk's End, or Lock now,
+        lands while an admitted Update's fresh read runs; released, the
+        action is refused (401, or 423) at `mutating()`, before the intent
+        receipt and gh. The ended session keeps no op record."""
+        for ending in ("End", "Lock now"):
+            with self.subTest(ending=ending):
+                p = self.behind()
+                cookie = self.signed_in(self.a)
+                self.unlocked(cookie)
+                session = self.session_of(cookie)
+                body = self.tapped("update", cookie=cookie)
+                arrived, go = threading.Event(), threading.Event()
+                real = pr_merge.PrActions._fresh
+                first = []
+
+                def fresh(actor, *a, **k):
+                    if not first:
+                        first.append(1)
+                        arrived.set()
+                        go.wait(10)
+                    return real(actor, *a, **k)
+                out = []
+                with patch.object(pr_merge.PrActions, "_fresh", fresh):
+                    thread = threading.Thread(target=lambda: out.append(self.act(body, cookie)), daemon=True)
+                    thread.start()
+                    self.assertTrue(arrived.wait(5), "admitted, held in the fresh read")
+                    if ending == "End":
+                        self.assertEqual(self.hud("POST", f"/phone/sessions/{session['id']}/end")[0], 200)
+                    else:
+                        self.assertEqual(self.phone("POST", "/m/api/lock", {}, cookie=cookie)[0], 200)
+                    go.set()
+                    thread.join(10)
+                want = (401, {"error": "unauthorized"}) if ending == "End" else (423, {"error": "locked",
+                                                                                    "unlock": True})
+                self.assertEqual(out[0][:3:2], want, "[mutation: no final check in mutating()]")
+                self.assertEqual(p.run.acts(), [], "gh never ran")
+                self.assertEqual(self.receipts_via(), [])
+                path = Path(self.d.stores.root) / "inbox" / pr_merge.RECEIPTS_FILE
+                self.assertFalse(path.exists() and path.read_text().strip(), "no intent receipt either")
+                digest = session["token_sha256"]
+                self.assertEqual(self.auth.ops.count(digest), 0 if ending == "End" else 1)
+        print("ok  End or Lock now during an admitted Update's fresh read (barrier): 401 or 423 at mutating(), "
+              "no receipt, gh never ran; the ended session keeps no op record")
+
+    def test_a_restart_refuses_the_old_token(self):
+        """Sol r4-1: a new RemoteAuth, the same surviving session, a fresh
+        unlock; the old body and token are 410 and gh ran once."""
+        p = self.behind()
+        self.unlocked()
+        body = self.tapped("update")
+        self.assertEqual(self.act(body)[0], 200)
+        fresh = RemoteAuth(self.auth.dir, rac.HOST, wall=self.wall, mono=self.mono)
+        fresh.server = self.auth.server
+        self.d.remote_auth = fresh
+        self.auth.server.RequestHandlerClass.remote_auth = fresh
+        self.addCleanup(setattr, self.auth.server.RequestHandlerClass, "remote_auth", self.auth)
+        old = self.auth
+        self.auth = fresh
+        self.addCleanup(setattr, self, "auth", old)
+        self.assertEqual(self.phone("GET", "/m/api/me", cookie=self.cookie)[2]["unlock_s"], 0, "a restart locks")
+        self.unlocked()
+        status, _, got = self.act(body)
+        self.assertEqual((status, got), (410, {"error": remote_auth.FORGED_OP}))
+        self.assertEqual(len(p.run.acts()), 1)
+        print("ok  a restart: the old token is 410 after a fresh unlock, gh once")
+
+    def test_a_lost_response_reads_back_its_outcome(self):
+        """Sol r5-2, r6-1: an Update that returns ok:false reads back as
+        completed + failed ("Not done"); a gh timeout as completed + unknown;
+        a 202 with an unchanged head, or an unread follow-up, as update
+        requested, never "Done"."""
+        p = self.behind()
+        self.unlocked()
+
+        def status_of(body):
+            n = remote_auth.parse_op(body["op"])["n"]
+            return self.phone("GET", f"/m/api/ops/{n}", cookie=self.cookie)[2]
+        # A 202 with an unchanged head: "update requested".
+        p.run.answers["update"] = lambda argv: ACCEPTED
+        body = self.tapped("update")
+        status, _, got = self.act(body)
+        self.assertEqual((status, got["result"], got["ok"]), (200, "update requested", True), got)
+        self.assertEqual(status_of(body), {"state": "completed", "outcome": "ok", "code": "update_requested",
+                                           "words": "Update requested; check at the desk"})
+        # A 202 whose follow-up read cannot be read: "update requested" too.
+        p.run.answers["result"] = lambda argv: "not json"
+        body = self.tapped("update")
+        status, _, got = self.act(body)
+        self.assertEqual((status, got["result"]), (200, "update requested"), got)
+        self.assertEqual(status_of(body)["words"], "Update requested; check at the desk")
+        # gh times out and the follow-up is unread: "not read again".
+        p.run.answers["update"] = GhFailed("timeout")
+        body = self.tapped("update")
+        status, _, got = self.act(body)
+        self.assertEqual((status, got["result"], got["ok"]), (200, "not read again", False), got)
+        self.assertEqual(status_of(body), {"state": "completed", "outcome": "unknown", "code": "not_read_again",
+                                           "words": "Finished; check at the desk"})
+        # Read again, the head unchanged and no 202: "not updated", ok false.
+        p.run.answers["result"] = lambda argv: json.dumps({"state": "OPEN", "headRefOid": HEAD,
+                                                           "autoMergeRequest": None})
+        p.run.answers["update"] = lambda argv: "HTTP/2.0 200 OK\r\n\r\n{}"
+        body = self.tapped("update")
+        status, _, got = self.act(body)
+        self.assertEqual((status, got["result"], got["ok"]), (200, "not updated", False), got)
+        self.assertEqual(status_of(body), {"state": "completed", "outcome": "failed", "code": "not_updated",
+                                           "words": "Not done"})
+        # A 422 (the head moved first): the exception path, completed + failed + changed.
+        p.run.answers["update"] = lambda argv: UNPROCESSABLE
+        body = self.tapped("update")
+        status, _, got = self.act(body)
+        self.assertEqual(status, 409, got)
+        self.assertEqual(status_of(body), {"state": "completed", "outcome": "failed", "code": "changed",
+                                           "words": "Not done"})
+        # Each duplicate never runs again.
+        acts = len(p.run.acts())
+        self.assertEqual(self.act(body)[2]["duplicate"], True)
+        self.assertEqual(len(p.run.acts()), acts)
+        print("ok  lost responses: update requested its own words (202, unchanged head or unread); not read "
+              "again Finished; not updated and 422 Not done; only ok is Done")
 
     def test_the_phone_scrub_sends_it_to_the_desk(self):
         secret = "password=" + rach.PASSWORD
         facts = replace(PF.F(), title=PF.view()["title"], files=(FileChange(f"docs/{secret}.txt", 1, 0, (), False),))
         p = self.wire(facts=facts)
         self.assertEqual(p.detail()["actions"], ["merge"])
-        status, _, got = self.options("merge")
+        self.unlocked()
+        status, _, got = self.act(self.tapped("merge"))
         self.assertEqual(status, 409, got)
         self.assertTrue(got["error"].endswith(pr_merge.AT_DESK), got)
-        # The act re-checks it with the fresh facts.
+        # The act re-checks it with the fresh facts too, past the row's check.
         d = p.detail()
-        session = next(iter(self.auth._sessions.values()))
-        bound = pr_merge.subject(REPO, N, d["head"], d["card"], "merge")
-        opts = self.auth.answer_options({"token_sha256": session["token_sha256"]}, bound, "merge")
-        status, _, got = self.act({"id": ROW, "action": "merge", "head": d["head"], "card": d["card"],
-                                   "assertion": self.a.get(opts)})
+        with patch.object(pr_merge, "phone_withheld", side_effect=[False, True]):
+            status, _, got = self.act(self.tapped("merge"))
         self.assertEqual(status, 409, got)
         self.assertTrue(got["error"].endswith(pr_merge.AT_DESK), got)
         self.assertEqual(p.run.acts(), [])
@@ -1131,30 +1342,38 @@ class PhoneActs(Phone):
         self.wire()
         self.assertEqual(self.phone("POST", "/m/api/inbox/pr/hold", {"id": ROW, "note": "x"},
                                     cookie=self.cookie)[0], 404)
-        self.assertEqual(self.options("fix")[0], 409)       # Fix is not offered on this row
-        self.assertEqual(self.options("hold")[0], 400)
-        self.assertEqual(self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": ROW, "action": "merge", "note": "x"},
-                                    cookie=self.cookie)[0], 400)
-        self.assertEqual(self.phone("GET", pr_merge.PHONE_OPTIONS, cookie=self.cookie)[0], 405)
-        self.assertEqual(self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": ROW, "action": "merge"})[0], 401)
+        self.unlocked()
+        self.assertEqual(self.act(self.tapped("fix"))[0], 409)       # Fix is not offered on this row
+        self.assertEqual(self.act(self.tapped("hold"))[0], 400)
+        self.assertEqual(self.act({**self.tapped("merge"), "note": "x"})[0], 400)
+        self.assertEqual(self.phone("GET", pr_merge.PHONE_ACT, cookie=self.cookie)[0], 405)
+        self.assertEqual(self.phone("POST", pr_merge.PHONE_ACT, self.tapped("merge"))[0], 401)
         d = self.prs.detail()
         status, _, got = self.act({"id": ROW, "action": "merge", "head": d["head"], "card": d["card"]})
-        self.assertEqual(status, 401, got)
+        self.assertEqual(status, 400, got)
         self.assertIsNone(pr_merge.holds_at(Path(self.d.stores.root) / "inbox").get(REPO, N))
-        print("ok  phone: no hold route, Fix only where offered, no session 401, no assertion 401")
+        print("ok  phone: no hold route, Fix only where offered, no session 401, no op token 400")
 
     def test_a_held_pr_offers_nothing_on_the_phone(self):
         self.wire()
-        credential, opts = self.signed("merge")
+        shown = self.shown()
         status, _ = self.hud("POST", "/inbox/pr/hold", {"id": ROW, "note": "robot"})
         self.assertEqual(status, 200)
-        self.assertEqual(self.options("merge")[0], 409)
-        status, _, got = self.act({"id": ROW, "action": "merge", "head": opts["head"], "card": opts["card"],
-                                   "assertion": credential})
+        self.unlocked()
+        status, _, got = self.act(self.tapped("merge", shown=shown))
         self.assertEqual(status, 409, got)
-        self.assertIn("on hold", got["error"])
         self.assertEqual(self.prs.run.acts(), [])
-        print("ok  a hold set at the desk: the phone's options and act are 409")
+        print("ok  a hold set at the desk: the phone's act is 409")
+
+    def test_every_pr_action_is_exactly_locked(self):
+        """§5.3's 423 contract, every PR action through the router."""
+        p = self.wire()
+        for action in ("merge", "merge_as_is", "update", "fix"):
+            status, _, got = self.act(self.tapped(action))
+            self.assertEqual((status, got), (423, {"error": "locked", "unlock": True}), action)
+        self.assertEqual(p.run.acts(), [])
+        self.assertEqual(self.auth.ops.count(), 0)
+        print("ok  every PR action (merge, merge as is, update, fix) is exactly 423 while locked; nothing ran")
 
 
 # -- the boundary ------------------------------------------------------------------------------------
@@ -1176,7 +1395,7 @@ class Boundary(rac.Remote):
         for rel in ("jarvis/v2/pr_merge.py", "jarvis/v2/pr_summary.py", "jarvis/v2/remote_auth.py"):
             self.assertIn(rel, SELF_PROTECTED)
         port = config.REMOTE_PORT
-        for path in (pr_merge.PHONE_OPTIONS, pr_merge.PHONE_ACT):
+        for path in ("/m/api/inbox/pr/options", pr_merge.PHONE_ACT):
             for line in (f"curl -X POST http://127.0.0.1:{port}{path}", f"curl https://box.tail1234.ts.net{path}"):
                 verdict = rules.decide(line)
                 self.assertEqual((verdict.decision, verdict.reason), (rules.DENY, rules.REMOTE_DENIED), line)

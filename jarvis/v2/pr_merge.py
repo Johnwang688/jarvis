@@ -18,10 +18,8 @@ code's actions; this module is what the owner's OK does.
       POST /inbox/pr/fix         {id, head, card}  a Fix (PM-E, `pr_fix.PrFixes.start_fix`)
       POST /inbox/pr/fix/cancel  {id}              its Cancel (`TaskControl.cancel`)
     Phone (the remote listener, past `remote_auth.owner_status`):
-      POST /m/api/inbox/pr/options  {id, action, head, card}  a challenge bound to `subject(...)`
-                                    of what the phone showed (409 when the row moved since)
-      POST /m/api/inbox/pr          {id, action, head, card, assertion}
-    `action` "fix" (PM-E) takes the same assertion and checks, then
+      POST /m/api/inbox/pr          {id, action, head, card, op}   gated (WS-5c)
+    `action` "fix" (PM-E) takes the same gate and checks, then
     `pr_fix.start(..., via="phone", limited=...)` instead of gh.
 
 They never touch `PendingApprovals`, `merge_gate` or `remote_answer`'s
@@ -74,15 +72,21 @@ capped at `NOTE_MAX`. A hold hides every action on the row
 under the lock. Set and cleared at the desk only: no phone route. A file
 that cannot be read holds every PR (fails closed) until it reads again.
 
-**The phone (PM-15, Q1).** Each action takes a fresh passkey assertion
-bound to `subject(repo, number, head, card, action)`: `pr:` and the first
-56 hex of sha256("jarvis-pr-v1\\n" repo \\n number \\n head \\n card \\n
-action), its own subject family and challenge budget in `remote_auth`; an
-assertion of another family is never one of these, nor the reverse. The
-assertion is verified first; then every §4.1 check runs again. A limited
-phone may Merge and Update, except a PR flagged by PM-10 (or whose files
-were not all seen), which is "answer it at the desk"; so is a PR whose
-facts or file list the phone's scrub would change.
+**The phone (PM-15, Q1, as WS-5c amends it).** Each action is a gated
+action (`docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5.3): the
+session's unlock window open (`RemoteAuth.require_unlocked`, 423 when
+closed, and nothing else runs) and one server-issued op token spent
+(`remote_auth.gated`): a second identical Update is 409 `duplicate` and gh
+runs once, as the spent challenge used to make it. Then, at act time and
+against the row now, everything the per-action `/options` route checked
+(`phone_checks`): the **tapped** head and card (never fresh ones), the
+action offered, no hold, §4.1, then `PrActions.act`'s own fresh read and
+judge. A limited phone may Merge and Update, except a PR flagged by PM-10
+(or whose files were not all seen), which is "answer it at the desk"; so is
+a PR whose facts or file list the phone's scrub would change. The op is
+told `mutating()` immediately before the intent receipt and gh, and the
+result phrase, so a lost answer reads back through `GET /m/api/ops/<n>`
+(`remote_auth.PR_CODES`).
 
 SELF_PROTECTED (`jarvis/tools/files.py`): it decides when the owner's OK
 merges a pull request. Tests: `tests/v2/pr_merge_check.py`, mutants in
@@ -91,7 +95,6 @@ merges a pull request. Tests: `tests/v2/pr_merge_check.py`, mutants in
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import hmac
 import json
 import logging
@@ -138,7 +141,6 @@ RULES_MAX = 100                 # a full page of rules may be cut off: fails clo
 QUEUE = "its base uses a merge queue or auto-merge: merge it at GitHub"
 _STATUS = re.compile(rb"\AHTTP/[0-9.]+ ([0-9]{3})[ \r\n]")
 
-SUBJECT_DOMAIN = "jarvis-pr-v1"
 _CARD = re.compile(r"[0-9a-f]{64}")
 _KEY = re.compile(r"[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}#[1-9][0-9]{0,9}")
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -196,14 +198,6 @@ def owner_argv(gh: str, repo: str) -> list[str]:
 
 def result_argv(gh: str, repo: str, number: int) -> list[str]:
     return [gh, "pr", "view", str(number), "--repo", repo, "--json", "state,headRefOid,autoMergeRequest"]
-
-
-def subject(repo: str, number: int, head: str, card: str, action: str) -> str:
-    """The phone's passkey subject for one action (PM-15): `pr:` and the
-    first 56 hex of sha256("jarvis-pr-v1\\n" repo \\n number \\n head \\n
-    card \\n action). No part can hold a newline (each is validated)."""
-    text = "\n".join((SUBJECT_DOMAIN, repo, str(number), head, card, action))
-    return "pr:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:56]
 
 
 # -- ids ---------------------------------------------------------------------------------
@@ -644,9 +638,13 @@ class PrActions:
             return "updated"
         return "update requested" if status == "202" else "not updated"
 
-    def act(self, action: str, row_id: str, head, card, *, via: str, limited: bool = False) -> dict:
+    def act(self, action: str, row_id: str, head, card, *, via: str, limited: bool = False,
+            op=None) -> dict:
         """One owner action, PM-13. Refused (409 "changed since you read
-        it") when anything the OK bound has moved; nothing runs then."""
+        it") when anything the OK bound has moved; nothing runs then. `op`
+        (the phone's admitted op token, WS-5c §5.3a) is told `mutating()`
+        immediately before the intent receipt and gh, `returned()` once gh
+        returned, and the result phrase (`op.result`)."""
         if action not in ACTIONS:
             raise Refused(400, "action must be merge, merge_as_is or update")
         if not pr_facts.valid_sha(head):
@@ -664,11 +662,11 @@ class PrActions:
         if not lock.acquire(blocking=False):
             raise Refused(409, BUSY)
         try:
-            return self._act(action, row_id, repo, number, head, card, gh, via=via, limited=limited)
+            return self._act(action, row_id, repo, number, head, card, gh, via=via, limited=limited, op=op)
         finally:
             lock.release()
 
-    def _act(self, action, row_id, repo, number, head, card, gh, *, via, limited) -> dict:
+    def _act(self, action, row_id, repo, number, head, card, gh, *, via, limited, op=None) -> dict:
         holds = holds_at(inbox_dir(self.daemon))
         try:
             if holds.get(repo, number) is not None:
@@ -694,6 +692,8 @@ class PrActions:
             env = pr_facts.gh_env(home)
             if self.queued(env, gh, repo, number, facts.base, merging=merging):
                 raise Refused(409, QUEUE)
+            if op is not None:
+                op.mutating()               # WS-5c: from here, an exception is uncertain
             # NIT 7: the intent first, so a crash mid-merge still leaves a record.
             write_receipt(inbox, {**base, "phase": "intent",
                                   "at": self.now().isoformat(timespec="seconds")})
@@ -705,6 +705,8 @@ class PrActions:
                 found = _STATUS.match(out) if word == "ok" else None
                 status = found.group(1).decode() if found else None
                 word = f"http {status}" if status else ("unread" if word == "ok" else word)
+            if op is not None:
+                op.returned()
             seen, data = self._call(result_argv(gh, repo, number), env, RESULT_TIMEOUT_S, RESULT_CAP)
         except (OSError, pr_facts.MirrorRefused) as exc:
             LOG.warning("PR actions: no private gh folder (%s)", type(exc).__name__)
@@ -715,7 +717,9 @@ class PrActions:
         result = self._outcome(action, head, seen, data, status)
         if status == "422" and result != "updated":
             result = "changed"
-        receipt = {**base, "phase": "result", "at": self.now().isoformat(timespec="seconds"),
+        if op is not None:
+            op.result = result              # `remote_auth.PR_CODES`; "changed" raises below
+        receipt ={**base, "phase": "result", "at": self.now().isoformat(timespec="seconds"),
                    "gh": word, "result": result}
         saved = write_receipt(inbox, receipt)
         LOG.info("PR actions: %s on a pull request by %s: %s", action, via, result)
@@ -828,7 +832,6 @@ def hud_route(handler, daemon, parts, query):
 
 # -- the phone's routes -------------------------------------------------------------------
 
-PHONE_OPTIONS = "/m/api/inbox/pr/options"
 PHONE_ACT = "/m/api/inbox/pr"
 
 
@@ -846,20 +849,16 @@ def _secure(daemon, handler, session) -> dict:
         raise Refused(exc.status, exc.word) from None
 
 
-def phone_options(handler, daemon, session, body: dict) -> dict:
-    """The challenge for one action on one row, after the refusals that
-    need no passkey; bound to the row's head and card as shown now."""
-    if set(body) != {"id", "action", "head", "card"}:
-        raise Refused(400, "send id, action, head and card")
-    action = _phone_action(body.get("action"))
-    row_id, head, card = body.get("id"), body.get("head"), body.get("card")
-    repo, number = parse_id(row_id)
-    if not pr_facts.valid_sha(head) or not isinstance(card, str) or not _CARD.fullmatch(card):
-        raise Refused(400, "bad request")
+def phone_checks(handler, daemon, session, row_id, repo, number, head, card, action) -> bool:
+    """The act-time half of what the phone's `/options` route checked
+    (WS-5c §5.4), against the row now, on the **tapped** head and card
+    (never fresh ones): the row still here, its head and card those, the
+    action offered, no hold (the row's and the file's), §4.1, a limited
+    phone kept from a flagged PR, and nothing the phone's scrub would
+    change. Returns whether the phone is limited. `PrActions.act` then reads
+    the PR again and judges it, as before."""
     actor = actions_for(daemon)
     detail = actor.row(row_id).get("detail") or {}
-    # MED 2 of #336's review: the challenge binds what the phone showed, which
-    # must still be what the row shows.
     if (detail.get("head"), detail.get("card")) != (head, card) \
             or action not in (detail.get("actions") or []) or detail.get("hold"):
         raise _changed()
@@ -871,56 +870,82 @@ def phone_options(handler, daemon, session, body: dict) -> dict:
         raise Refused(409, "touches safety files: " + AT_DESK)
     if phone_withheld(detail.get("facts"), detail.get("files")):
         raise Refused(409, "this pull request has withheld text: " + AT_DESK)
-    bound = subject(repo, number, head, card, action)
-    return {"action": action, "publicKey": handler.remote_auth.answer_options(session, bound, action)}
+    return not secure.get("ok")
 
 
-def phone_act(handler, daemon, session, body: dict) -> dict:
-    """One action, after its own assertion; then every §4.1 check again."""
-    if set(body) - {"id", "action", "head", "card", "assertion"}:
-        raise Refused(400, "bad request")
+def phone_act(handler, daemon, session, path: str, body: dict):
+    """One action from the phone (WS-5c §5.3): the body exactly `{id,
+    action, head, card, op}` and each part's shape (400); then the unlock
+    window (423, nothing else runs), the op token and its admission
+    (`remote_auth.gated`: 410, 400, 409 duplicate, 429); then `phone_checks`
+    (409) and the action (`PrActions.act`, or `pr_fix.start` for Fix)."""
+    from .remote_auth import gated, parse_op
+    if set(body) != {"id", "action", "head", "card", "op"}:
+        raise Refused(400, "send id, action, head, card and op")
     action = _phone_action(body.get("action"))
     row_id, head, card = body.get("id"), body.get("head"), body.get("card")
     repo, number = parse_id(row_id)
     if not pr_facts.valid_sha(head) or not isinstance(card, str) or not _CARD.fullmatch(card):
         raise Refused(400, "bad request")
-    assertion = body.get("assertion")
-    if not isinstance(assertion, dict):
-        raise Refused(401, "this action needs the passkey")
-    # The assertion first, bound to this PR, its head, its card and this action.
-    handler.remote_auth.answer_verify(session, assertion, subject(repo, number, head, card, action), action)
-    seen = getattr(daemon, "owner_seen", None)
-    if callable(seen):
-        seen()                          # QH-3: a verified phone answer is presence
-    secure = _secure(daemon, handler, session)
-    limited = not secure.get("ok")
-    if action == FIX:
-        out = _phone_fix(daemon, row_id, repo, number, head, card, limited=limited)
-    else:
-        out = actions_for(daemon).act(action, row_id, head, card, via="phone", limited=limited)
-    return {**out, "authority": "limited" if limited else "hud"}
+    op = parse_op(body["op"])
+
+    def act(ticket):
+        def run():
+            limited = phone_checks(handler, daemon, session, row_id, repo, number, head, card, action)
+            if action == FIX:
+                out = _phone_fix(daemon, row_id, repo, number, head, card, limited=limited, op=ticket)
+            else:
+                out = actions_for(daemon).act(action, row_id, head, card, via="phone", limited=limited,
+                                              op=ticket)
+            return 200, {**out, "authority": "limited" if limited else "hud"}, []
+        return _phone_catch(run)
+    return gated(handler, session, path, body, op, "pr", act)
 
 
-def _phone_fix(daemon, row_id, repo, number, head, card, *, limited: bool) -> dict:
-    """PM-E: the phone's Fix, after its assertion: the hold and the phone's
-    scrub checked again here, then `pr_fix.start` (Q1: a limited phone is
-    refused a flagged PR there, through `pr_facts.decide`)."""
+def _phone_catch(fn):
+    """`fn()`'s answer, a refusal as its status. An `AuthError`
+    (`Op.mutating`'s final check: 401, or `Locked`) passes through to
+    `phone_route`'s catch."""
+    from .remote_answer import _word
+    from .remote_auth import AuthError
+    try:
+        return fn()
+    except Refused as exc:
+        return exc.status, {"error": _word(exc.word)}, []
+    except AuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — never a 500; it may have taken effect
+        LOG.warning("PR actions: a phone action failed (%s)", type(exc).__name__)
+        return 409, {"error": "it may not have gone through: check before trying again", "uncertain": True}, []
+
+
+def _phone_fix(daemon, row_id, repo, number, head, card, *, limited: bool, op=None) -> dict:
+    """PM-E: the phone's Fix, once admitted: the hold and the phone's scrub
+    checked again here, then `pr_fix.start` (Q1: a limited phone is refused
+    a flagged PR there, through `pr_facts.decide`). Every refusal of
+    `start` counts as after the mutation began (an uncertain op): it
+    can fail after the fix's record is written."""
     from . import pr_fix
     if holds_at(inbox_dir(daemon)).get(repo, number) is not None:
         raise _changed("it is on hold")
     detail = actions_for(daemon).row(row_id).get("detail") or {}
     if phone_withheld(detail.get("facts"), detail.get("files")):
         raise Refused(409, "this pull request has withheld text: " + AT_DESK)
+    if op is not None:
+        op.mutating()
     try:
-        return pr_fix.start(daemon, row_id, head, card, "phone", limited=limited)
+        out = pr_fix.start(daemon, row_id, head, card, "phone", limited=limited)
     except pr_fix.FixRefused as exc:
         raise Refused(exc.status, exc.message) from None
+    if op is not None:
+        op.returned()
+    return out
 
 
 def phone_route(handler, path: str, session: dict, body: bytes):
-    """(status, payload, headers) for the two phone paths, None otherwise.
+    """(status, payload, headers) for the phone's one path, None otherwise.
     Reached only from `remote_auth.api_route`, past the session check."""
-    if path not in (PHONE_OPTIONS, PHONE_ACT):
+    if path != PHONE_ACT:
         return None
     if handler.command != "POST":
         return 405, {"error": "method not allowed"}, [("Allow", "POST")]
@@ -928,19 +953,18 @@ def phone_route(handler, path: str, session: dict, body: bytes):
     auth = getattr(handler, "remote_auth", None)
     if daemon is None or auth is None:
         return 404, {"error": "not found"}, []
-    from .remote_auth import WORDS, AuthError, _json_body
+    from .remote_auth import AuthError, Locked, auth_reply, locked_reply, _json_body
     try:
         value = _json_body(body)
-        if path == PHONE_OPTIONS:
-            return 200, phone_options(handler, daemon, session, value), []
-        return 200, phone_act(handler, daemon, session, value), []
+        return phone_act(handler, daemon, session, path, value)
     except Refused as exc:
         from .remote_answer import _word
         return exc.status, {"error": _word(exc.word)}, []
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
 
 
 __all__ = ["ACTIONS", "AT_DESK", "CHANGED", "PrActions", "PrHolds", "actions_for", "clean_note",
-           "holds_at", "hud_route", "merge_argv", "phone_route", "subject", "update_argv"]
+           "holds_at", "hud_route", "merge_argv", "phone_route", "update_argv"]

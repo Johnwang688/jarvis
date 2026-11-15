@@ -1600,8 +1600,9 @@ WS-5c. This package is a read and a stream kind, nothing more.
   `WORKING_ENTRY_FIELDS` = `thread_id`, `project_id`, `project`, `title`,
   `status`, `last`: the title as `remote_api.thread` scrubs it, the project
   name through the same `_scrub`, `status` one of the five activity words
-  (anything else is `idle`), `last` an ISO time or `""`. No `seq` (WS-5c),
-  no inbox row (the phone joins its own `/m/api/inbox` rows by `thread_id`),
+  (anything else is `idle`), `last` an ISO time or `""`, and (since WS-5c)
+  `seq`, the thread's own version that the phone's Done carries back. No
+  inbox row (the phone joins its own `/m/api/inbox` rows by `thread_id`),
   no `since`, `why_not`, `done_*`, reason, idle limit, path or session handle.
   `DROPPED["working_entry"]` and `DROPPED["working"]` give the reason for
   each field the desk's `GET /working` sends and this does not.
@@ -1626,7 +1627,143 @@ WS-5c. This package is a read and a stream kind, nothing more.
   `Events`), `tests/v2/working_check.py` (`Entries`, and the flipped
   stream-shape assertions).
 
+## The phone's unlock window, op tokens, Done and Undo (WS-5c, 2026-11-15)
+
+Plan: `docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5 and §7
+(revision 6, plus Sol's r6 outcome corrections). It replaces PH-4's fresh
+passkey assertion per action. **Current rule; the per-action passages in the
+sections below (P-4, P-5, QH, MR, PM-D) are history where they disagree.**
+
+- **What is gated.** Allow, Always, a deferral's Approve and retry, cancel
+  (PR-fix cancel included), every PR action (Fix included), the morning
+  review's Approve selected, and Done and Undo. Each needs the session's
+  **unlock window** open and spends one **op token**. Session-only, as
+  before: Deny, Withdraw, Start, Resume, messages, question and decision
+  answers, Leave. Reads, the stream, `me`, stt and push subscribe stay on
+  the session (7 days, 12 h idle).
+- **The window** (`RemoteAuth._unlocks[token hash] = {passkey, until}`,
+  memory only, `UNLOCK_S` = 3600 on the monotonic clock). `POST
+  /m/api/unlock/options {}` issues one challenge per session (asking again
+  replaces it), bound to `unlock:<session id>`, the session, its passkey and
+  its `_unlock_gen`; `POST /m/api/unlock {assertion}` spends it first, checks
+  the binding, the generation, the passkey, credential id, user handle,
+  `crossOrigin`, origin, rpId, UV, signature and counter, saves the counter
+  (503 and closed if that fails), and only then opens the window. Open means
+  `mono() < until`; it counts only while the session row exists, is not
+  expired, `_require_usable()` passes (503) and the passkey is the
+  session's, unrevoked. `require_unlocked` (every gated action) slides it;
+  `touch_unlock` (every session-only write that lands) slides an open one
+  and never opens one. No hard stop beyond the session. `me` carries
+  `unlock_s` (a read); the desk's `GET /phone` carries each session's
+  `unlocked_until` (wall-clock seconds, or null) for Settings > Phone.
+- **Endings.** Lock now (`POST /m/api/lock {}`), logout, the desk's End, a
+  revoke (every session of the key, in memory before the save that may 503),
+  expiry, `MAX_SESSIONS` prune, and a session found ended by `session_for`,
+  `session_live` or `_session_passkey` each run `_end_unlock` under the lock:
+  the window goes, **the session's pending unlock challenges are deleted**
+  (an assertion signed before and delivered after is 409), and the generation
+  is bumped (Lock now) or, for a session that ended, retired with its `Ops`
+  records and token-request record. A restart starts with nothing: every
+  phone locked, every earlier op token 410. Runtime damage to the auth files
+  is not noticed (memory is authoritative, as for sessions).
+- **The 423 contract.** `remote_auth.Locked` (an `AuthError`) is always
+  exactly `locked_reply()`: `423 {"error": "locked", "unlock": true}`, never
+  401 (the phone reads 401 as signed out). Every local catch
+  (`remote_answer`, `remote_write`, `pr_merge`, `review`) and `api_route`
+  takes it before `AuthError`; other auth refusals go through `auth_reply`
+  (own words for 409, 410, 429, 503 plus fixed extra fields).
+- **Order inside a gated action.** 400 (the body and the op token's shape,
+  `parse_op`) → 423 (`require_unlocked`; nothing else runs: no lookup, no
+  rate token, no record) → the token's HMAC (410: forged or pre-restart)
+  and `sid` (400), outside any lock → `Ops.admit`, one step under its lock
+  with one `now`: the token's time (`t <= now + 1`, `now < t + OP_TTL_S`,
+  else 410 `expired`), pruning, a duplicate (409 `{duplicate: true,
+  state}`; the same nonce with another body is 409 "op token reused"), the
+  session rate and the capacity through `Rate.take_if` (429; a capacity
+  refusal spends no rate token; 429s carry `Retry-After: 60`), the `running`
+  record → QH-3's `owner_seen` → the act-time checks (409) → the mutation.
+  `remote_auth.gated` runs steps 2 onward for every family.
+- **Retirement against admission (#374 fix round, Sol MED, Opus LOW-1).**
+  Admission runs under `RemoteAuth._lock`, right after `_still_unlocked`
+  (the session live and its passkey unrevoked, else 401; the window open,
+  else 423; never sliding). Every retirement (logout, End, revoke, expiry,
+  prune, a session found ended) holds the same lock and cleans the session's
+  `Ops` in it, so it lands wholly before admission or wholly after (its
+  cleanup takes the new record). Lock order: auth, then Ops, then Rate;
+  nothing holding Ops or Rate takes auth. `Op.mutating()` runs
+  `_still_unlocked` again under the lock and moves to `mutating` in the same
+  step, so End, a revoke or Lock now during a slow act-time check or a PR's
+  fresh read refuses the op (401, 423; no intent receipt, no gh) before it
+  mutates; every family's catch-all re-raises that `AuthError`. An ended
+  session keeps no record; a locked one keeps its op, `refused`. Neither
+  final check slides the window. Marking `mutating` before a call that can
+  still refuse (Fix, cancel, Allow, Always, deferred retry) reads such a
+  refusal back as `uncertain`: the safe direction.
+- **Op tokens.** `GET /m/api/ops/tokens` (session only, never slides,
+  `OP_ISSUE_RATE` 30 a minute, its own final `session_live`) returns four
+  `o1.<payload>.<mac>` tokens: HMAC-SHA256 under `_op_key` (32 random bytes
+  made at start, memory only) over `{sid, n (16 bytes), t (mono at issue)}`.
+  `OP_TTL_S` = 600. The store keys records by (session digest, nonce),
+  digest = sha256 of method, path and canonical body without the token;
+  states `running`, `completed`, `refused`, `uncertain` (a route marks
+  `mutating()` immediately before the mutation and `returned()` after it);
+  no state releases a token; a refused op is retried only with a new tap.
+  Bounds `OPS_PER_SESSION` 64 and `OPS_MAX` 2,048: a full store is 429 and
+  nothing is evicted; a `running` record is never pruned. State changes name
+  their reservation. `GET /m/api/ops/<n>` reads this session's record only
+  (another session's nonce is `unknown`), with its own final `session_live`,
+  and answers `{state, outcome, code, words}`. `outcome` is `ok` only for a
+  confirmed result (a 2xx with `ok` true, or a 2xx of a family without `ok`),
+  `unknown` for "not read again" and the 409 uncertain reply, else `failed`;
+  `code` is a fixed word (`remote_auth.PR_CODES`, `OP_CODES`), never model
+  text. `words` is "Done" only for a confirmed result; an Update GitHub only
+  accepted (`update_requested`) reads "Update requested; check at the desk"
+  (Sol r6-1).
+- **Act-time checks that replace `/options`.** PR: the tapped head and card
+  (never fresh ones) against the row now, the action offered, no hold, §4.1
+  and the flags, nothing withheld (`pr_merge.phone_checks`), then
+  `PrActions.act`'s own fresh read and judge. Cancel: not terminal. Allow:
+  still pending, `_gate`. Always: the rule read without a challenge (`GET
+  /m/api/inbox/<id>/answer/rule`, session only, works while locked, exactly
+  `RULE_FIELDS`, entry keys only `tool` and `prefix`, an extra key or a
+  scrub-changed part 409 "shown only at the desk"), and the act's `preview`
+  recomputed (409 "the rule changed"); the preview binds freshness, not that
+  a human saw it. Deferred: the URL's id, the full `_deferral` lookup, then
+  `_gate_deferral`. Review: exactly the set the body names (`check_group`),
+  then §4.1, then `approve_many`'s locked recheck (`review.approve(...,
+  unlocked=True)`).
+- **Done and Undo from the phone.** `POST /m/api/working/<id>/done {seq,
+  op}` binds the URL's thread and that thread's drawn `seq` (now in the
+  phone's working read); 400 for a malformed id or `seq`, then the gate,
+  the thread still visible, and `WorkingSet.done` (409 stale, out, a linked
+  rank 1–4 row or a running turn, in the daemon's words, the last two as
+  `{error, why_not}`, scrubbed); the answer is
+  exactly `{thread_id, done, token, undo_s}`. `POST
+  /m/api/working/<id>/undo {token, op}` is `WorkingSet.undo` (409 for a
+  wrong token, after 10 s, or after an archive). Logged "Done from the
+  phone".
+- **Unchanged.** Push (`{count, rank}`, none 23–07, nothing on an unlock or
+  Done), quiet hours, NEVER_STEER, agents never reaching `/m/*` (the new
+  paths are under `/m/api`, DENY for agents, 404 on the API and HUD
+  listeners).
+- **The phone UI half (PX-5)** is not built yet: until it lands, the
+  current phone app's gated buttons call the removed `/options` routes and
+  fail (404). The backend PR stays a draft until PX-5 joins it and the
+  owner checks unlock-and-act on the real iPhone (plan §8).
+- Tests: `tests/v2/remote_unlock_check.py` (the window, endings, races,
+  failures, the 423 contract, op tokens, composed order, Done and Undo),
+  the rewritten phone cases of `remote_auth_check`, `remote_answer_check`,
+  `remote_write_check`, `quiet_defer_check`, `review_check` and
+  `pr_merge_check`, the isolation names in `archive_check`; mutants in
+  `tests/v2/remote_unlock_mutants.py` (and the phone rows of
+  `pr_merge_mutants.py`).
+
 ## Answering from the phone (phone C4 / P-4, 2026-10-25)
+
+**Since WS-5c (2026-11-15)** Allow and Always are gated by the unlock window
+and an op token, `answer/options` is gone, and Always reads its rule at
+`GET inbox/<id>/answer/rule`: see the section above. What follows is P-4 as
+built.
 
 `jarvis/v2/remote_answer.py` and `jarvis/v2/remote_secure.py` (both
 SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
@@ -1866,6 +2003,11 @@ sections of `tests/face/hud_v2_phone_check.py`.
 
 ## Writing from the phone (phone C5 / P-5, 2026-10-28)
 
+**Since WS-5c (2026-11-15)** cancel is `POST tasks/<id>/cancel {op}`, gated by the
+unlock window and an op token (no `cancel/options`), its rate taken once at
+admission; Done and Undo are new gated routes here. See the unlock-window
+section above. What follows is P-5 as built.
+
 `jarvis/v2/remote_write.py` (SELF_PROTECTED) lets a signed-in phone send a
 message to a chat, start a new chat, make and start a task, and resume or
 cancel one (design §5, §11 questions 1 and 2). `remote_auth.api_route`
@@ -2075,6 +2217,10 @@ bundle, Chromium's fake audio device, local-only STT with a fake engine).
 
 ## Quiet hours: approvals deferred to the morning (QH, 2026-10-28)
 
+**Since WS-5c (2026-11-15)** the phone's Approve and retry is `{action: "retry",
+op}`, gated by the unlock window, bound to the deferral id in the URL with the
+full `_deferral` lookup at act time; the `defer:` subject is gone.
+
 Plan: `docs/plans/2026-10-28-quiet-hours-deferral.md` (the owner's words,
 QH-1 to QH-7, "QH as built" and the #326 review's fixes). Module:
 `jarvis/v2/quiet_defer.py` (SELF_PROTECTED).
@@ -2197,6 +2343,11 @@ every client but the HUD), `inbox_marks_check`,
 `tests/face/hud_v2_inbox_check.py`.
 
 ## The morning review (MR, 2026-10-28)
+
+**Since WS-5c (2026-11-15)** the phone's Approve selected is `POST
+/m/api/review/approve {items, op}`, gated by the unlock window and an op token;
+`approve/options` and the `defers:` subject are gone, and the set is checked
+at act time and again under the store's lock. See the unlock-window section.
 
 Plan: `docs/plans/2026-10-28-morning-review.md` (the owner's words and four
 answers, MR-1 to MR-12, "MR as built"). Module: `jarvis/v2/review.py`
@@ -2395,7 +2546,9 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
 - **Hold.** `inbox/pr-holds.json` (0600). A hold hides Merge, Update and Fix; the merge route
   re-checks it under the lock. The owner's choice (PM-F): a held row keeps **Cancel the fix** for
   a running fix, since cancelling acts on nothing the hold protects.
-- **Phone.** Each action: `options`, then a passkey assertion on the `pr:` subject, then the
+- **Phone (WS-5c replaced this: one gated `POST /m/api/inbox/pr {id, action, head, card, op}`,
+  the act-time `phone_checks` on the tapped values; see the unlock-window section).** Was:
+  each action: `options`, then a passkey assertion on the `pr:` subject, then the
   act. A limited phone gets no action on a PR the daemon marks as touching safety files (Update
   included); the server refuses it anyway. A scrub that would change the facts sends it to the desk.
 - **Quiet hours.** A fix card or a stopped fix sends one `{count, rank}` push, never 23:00 to

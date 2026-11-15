@@ -15,13 +15,16 @@
 // the session only); a task's start, resume and cancel are on its own view
 // (./write.ts), and the transcript takes a message box.
 // QH: an approval deferred during quiet hours shows the card it would have
-// shown, "Approve and retry" (the app asks for the passkey first, as for an
-// Allow) where the daemon and the HUD's rules allow it, and "Leave it".
+// shown, "Approve and retry" (a gated action, as an Allow: WS-5c's unlock
+// window, ./unlock.ts) where the daemon and the HUD's rules allow it, and
+// "Leave it". A gated button whose Face ID needs a fresh tap (`tapAgain`)
+// reads "Unlock and send" (WS-5c rule 6).
 
 import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
 import { recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
+import { UNLOCK_AND_SEND } from "./unlock";
 import {
   AI_TAG, AT_DESK, actionLabel, fixCardLines, fixSummaryWords, methodWords, prButtons, prFixWords, prRowOf,
   prSummaryWords, questionRow, type PrAction,
@@ -155,7 +158,7 @@ export function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
     const left = el("div", "m-pr-side");
     const right = el("div", "m-pr-side m-pr-right");
     for (const action of buttons.actions) {
-      const b = tap(actionLabel(v, action), () => pr.act(row, action),
+      const b = tap(a?.tapAgain?.get(row.id) === action ? UNLOCK_AND_SEND : actionLabel(v, action), () => pr.act(row, action),
         "quiet m-send m-pr-act" + (action === "merge" || action === "merge_as_is" ? " m-pr-merge" : ""), `m-pr-act-${action}`);
       b.disabled = busy;
       (action === "merge" || action === "merge_as_is" ? right : left).append(b);
@@ -210,7 +213,8 @@ export function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
           "m-pr-fix-question"));
       }
       if (words.cancel) {
-        const c = tap("Cancel the fix", () => pr.cancelFix(row), "quiet m-send", "m-pr-fix-cancel");
+        const c = tap(a?.tapAgain?.get(row.id) === "cancel-fix" ? UNLOCK_AND_SEND : "Cancel the fix", () => pr.cancelFix(row),
+          "quiet m-send", "m-pr-fix-cancel");
         c.disabled = busy;
         fa.append(c);
       }
@@ -268,8 +272,11 @@ export interface InboxAnswers {
   openCard: (row: InboxRow) => void;
   /** `echo` is the words the phone itself sent (a chip's option); the receipt says them, never the server's. */
   send: (row: InboxRow, body: Record<string, unknown>, echo?: string) => void;
-  /** QH: Approve and retry on a deferred row; the app asks for the passkey first. */
+  /** QH: Approve and retry on a deferred row: a gated action (WS-5c). */
   retry: (row: InboxRow) => void;
+  /** WS-5c rule 6: a row whose gated action needs a fresh tap for Face ID, and which action ("retry", a PR
+   * action, "cancel-fix"): that button reads "Unlock and send" and resumes the same frozen op. */
+  tapAgain?: ReadonlyMap<string, string>;
   /** Rows whose answer is on its way. */
   busy: ReadonlySet<string>;
   /** A row's answer note ("Sent.", a refusal's words). */
@@ -283,11 +290,11 @@ export interface InboxAnswers {
   toggle?: (row: InboxRow, open: boolean) => void;
   /** P-5: a proposal's Withdraw, asked once before it is sent. */
   withdraw?: { confirming: ReadonlySet<string>; ask: (row: InboxRow) => void; back: (row: InboxRow) => void };
-  /** PM-F: a PR row's actions, each with its own passkey (the app's); none of them hold. */
+  /** PM-F: a PR row's actions, each a gated action (WS-5c); none of them hold. */
   pr?: {
     /** An action on the row as drawn (its head and card are sent as they were drawn). */
     act: (row: InboxRow, action: PrAction) => void;
-    /** The fix's Cancel: the task's own `task:` passkey flow. */
+    /** The fix's Cancel: the task's cancel, a gated action (WS-5c). */
     cancelFix: (row: InboxRow) => void;
     /** The fix's question: its `tq:` row in the Inbox, or (none) its task. */
     question: (rowId: string | null, taskId: string | null) => void;
@@ -358,7 +365,7 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     // The row's one action, edged in the accent (M7 of the phone audit).
     box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-item-review"));
   } else if (deferred) {
-    // Plain buttons, neither defaulted; the retry asks for the passkey first.
+    // Plain buttons, neither defaulted; the retry is a gated action (WS-5c: Face ID only when locked).
     // H6 (phone audit): as the Review tab lays them out, Leave it at the left
     // and Approve and retry at the right, far apart, never stacked.
     const acts = testid(el("div", "m-review-rowacts"), "m-deferred-acts");
@@ -366,7 +373,8 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     leave.disabled = busy;
     acts.append(leave);
     if (deferred.grantable) {
-      const retry = tap("Approve and retry", () => a.retry(row), "quiet m-send", "m-deferred-retry");
+      const retry = tap(a.tapAgain?.get(row.id) === "retry" ? UNLOCK_AND_SEND : "Approve and retry", () => a.retry(row),
+        "quiet m-send", "m-deferred-retry");
       retry.disabled = busy;
       acts.append(retry);
     }

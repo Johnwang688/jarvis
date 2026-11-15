@@ -81,6 +81,8 @@ function rowUi(row: InboxRow, a: InboxAnswers, now: number): string {
   const parts: unknown[] = [
     a.busy.has(row.id), a.notes.get(row.id) ?? "", a.picks.get(row.id) ?? -1, a.expanded?.get(row.id) ?? null,
     a.withdraw?.confirming.has(row.id) ?? null, a.pr?.progress.get(row.id) ?? "",
+    // WS-5c rule 6: which of the row's buttons reads "Unlock and send".
+    a.tapAgain?.get(row.id) ?? "",
   ];
   if (row.kind === "approval") {
     // A pending summary goes stale with time and opens the command: the card must follow.
