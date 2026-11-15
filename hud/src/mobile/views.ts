@@ -698,15 +698,18 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
 }
 
 /** H5 (phone audit): what an empty transcript says. "No messages yet." only
- * once the log was read; before that "Loading…", or, offline, that it was
- * never read (never a false "empty"). */
-export function emptyLog(loaded: boolean, online: boolean): string {
-  return loaded ? "No messages yet." : online ? "Loading…" : "Not read yet: you're offline.";
+ * once a valid log was read (`read`); before that "Loading…", or, offline, that it was
+ * never read (never a false "empty"). PR 381: a first read that finished (`loaded`)
+ * but was refused or malformed read nothing either: "Not read yet." */
+export function emptyLog(loaded: boolean, online: boolean, read: boolean = loaded): string {
+  if (read) return "No messages yet.";
+  if (loaded) return "Not read yet.";
+  return online ? "Loading…" : "Not read yet: you're offline.";
 }
 
 export function transcriptView(thread: ChatThread | null, rows: LogRow[], older: boolean,
                                back: () => void, composer?: HTMLElement | null,
-                               read: { loaded: boolean; online: boolean } = { loaded: true, online: true },
+                               read: { loaded: boolean; online: boolean; read?: boolean } = { loaded: true, online: true },
 ): { view: HTMLElement; list: HTMLElement } {
   const view = testid(el("section", "view transcript-view"), "m-thread");
   const bar = el("div", "subbar");
@@ -716,7 +719,7 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
   for (const row of rows) list.append(logRow(row, ownerChat(thread)));
-  if (!rows.length) list.append(empty(emptyLog(read.loaded, read.online)));
+  if (!rows.length) list.append(empty(emptyLog(read.loaded, read.online, read.read ?? read.loaded)));
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's
   // "read only" line for any other; nothing until the chat is known.
