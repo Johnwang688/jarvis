@@ -1491,6 +1491,7 @@ export class PhoneApp {
     const r = await this.unlock.lockNow();
     if (this.stopped || r === "signed-out") return;
     this.flash = r === "locked" ? "Locked. The next Allow, cancel or PR action asks for Face ID."
+      : r === "overtaken" ? "Lock now reached Jarvis, but this phone unlocked again since: the pill shows what Jarvis says now."
       : r === "unreached" ? "Lock now did not reach Jarvis: this phone may still be unlocked."
       : "Lock now was refused: this phone may still be unlocked.";
     this.renderPill();

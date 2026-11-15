@@ -73,8 +73,8 @@ MUTANTS = [
      "      await this.settle(op.key);\n",
      ""),
     (UNLOCK, "a lost unlock answer trusts the local Locked (Opus L1)",
-     "    if (\"offline\" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: \"unlock-lost\" }; }",
-     "    if (\"offline\" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return { kind: \"unlock-lost\" }; }"),
+     "    if (got === SLOW || \"offline\" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: \"unlock-lost\" }; }",
+     "    if (got === SLOW || \"offline\" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return { kind: \"unlock-lost\" }; }"),
     (UNLOCK, "a lost action answer trusts local state (Opus L1)",
      "      this.reached(false);\n      this.reread();\n      return this.recover(op, \"lost\");",
      "      this.reached(false);\n      return this.recover(op, \"lost\");"),
@@ -99,6 +99,16 @@ MUTANTS = [
     (UNLOCK, "the 423 path says nothing was sent (Opus L4)",
      "  return sent ? \"nothing was done\" : \"nothing was sent\";",
      "  return \"nothing was sent\";"),
+    # Follow-up round (Sol r1: 2 LOW).
+    (UNLOCK, "a delayed Lock now 200 locks the pill though an unlock finished since it was sent (Sol r1 LOW 1)",
+     "      if (this.unlocks !== unlocks) {\n        this.reread();\n        return \"overtaken\";",
+     "      if (false) {\n        this.reread();\n        return \"overtaken\";"),
+    (UNLOCK, "an action POST waited on forever (Sol r1 LOW 2)",
+     "await this.bounded(this.deps.postJson(op.url, op.body));",
+     "await this.deps.postJson(op.url, op.body);"),
+    (UNLOCK, "an op status read waited on forever (Sol r1 LOW 2)",
+     "await this.bounded(this.deps.fetchJson(opStatusUrl(op.n)));",
+     "await this.deps.fetchJson(opStatusUrl(op.n));"),
 ]
 
 

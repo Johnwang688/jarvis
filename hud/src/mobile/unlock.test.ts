@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Got, Posted } from "./net";
 import {
-  CODE_WORDS, codeWords, definite, LOCK_URL, ME_URL, Mirror, NOT_READY, nonceOf, opWords, pillWords, POOL_MAX,
+  ANSWER_WAIT_MS, CODE_WORDS, codeWords, definite, LOCK_URL, ME_URL, Mirror, NOT_READY, nonceOf, opWords, pillWords, POOL_MAX,
   TAKE_MARGIN_MS, TOKENS_URL, UNLOCK_OPTIONS_URL, UNLOCK_URL, Unlock, type Outcome, type Timer,
 } from "./unlock";
 import { fakeNonce, fakeToken, tokensGot } from "./unlock.fixtures";
@@ -30,12 +30,15 @@ function server(opts: { open?: boolean } = {}) {
   };
   const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
   const signedOut = vi.fn();
-  const gate: { unlock: Promise<void> | null; hold: Record<string, Promise<void>[]> } = { unlock: null, hold: {} };
+  const gate: { unlock: Promise<void> | null; hold: Record<string, Promise<void>[]>; never: string[] } =
+    { unlock: null, hold: {}, never: [] };
   let active: boolean | null = null;
   const u = new Unlock({
     fetchJson: async (path) => {
       gets.push(path);
       if (path === TOKENS_URL) return tokens();
+      // A read that never answers (Sol r1 LOW 2: a pending status GET).
+      if (gate.never.some((prefix) => path.startsWith(prefix))) return new Promise<Got>(() => {});
       return reads[path] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } };
     },
     postJson: async (path, value) => {
@@ -639,9 +642,107 @@ describe("rule 2: the mirror, and Lock now", () => {
     expect(s.u.mirror.open()).toBe(false);
   });
 
+  it("Sol r1 LOW 1: a Lock now whose 200 is delayed past a 423, a fresh unlock and the action's success locks nothing; me decides", async () => {
+    // Sol's sequence: Lock now runs but its 200 is delayed; an action gets 423, unlocks afresh and succeeds;
+    // the old lock's 200 lands before the action's 200.
+    const s = await filled({ open: true });
+    let releaseLock!: () => void;
+    let releaseAct!: () => void;
+    s.gate.hold[LOCK_URL] = [new Promise<void>((r) => { releaseLock = r; })];
+    s.gate.hold[ACT] = [Promise.resolve(), new Promise<void>((r) => { releaseAct = r; })];
+    s.queue[ACT] = [{ status: 423, body: { error: "locked", unlock: true } }, { status: 200, body: { ok: true } }];
+    const lock = s.u.lockNow();
+    await s.settle();
+    const act = s.u.run(s.u.freeze("k", ACT, {})!);
+    await s.settle();
+    await s.settle();
+    expect(s.paths()).toEqual([LOCK_URL, ACT, UNLOCK_OPTIONS_URL, UNLOCK_URL, ACT]);
+    s.reads[ME_URL] = { ok: true, body: { signed_in: true, unlock_s: 3590 } };
+    const meBefore = s.gets.filter((g) => g === ME_URL).length;
+    releaseLock();
+    expect(await lock).toBe("overtaken");
+    await s.settle();
+    expect(s.gets.filter((g) => g === ME_URL).length).toBe(meBefore + 1);
+    expect(s.u.mirror.open()).toBe(true);
+    releaseAct();
+    expect((await act).kind).toBe("done");
+    expect(s.u.mirror.open()).toBe(true);
+    expect(s.acts().length).toBe(2);
+  });
+
+  it("a delayed Lock now with no unlock since it was sent still locks the pill", async () => {
+    const s = await filled({ open: true });
+    let releaseLock!: () => void;
+    s.gate.hold[LOCK_URL] = [new Promise<void>((r) => { releaseLock = r; })];
+    const lock = s.u.lockNow();
+    await s.settle();
+    releaseLock();
+    expect(await lock).toBe("locked");
+    expect(s.u.mirror.open()).toBe(false);
+  });
+
   it("the nonce is read from the token for op status", () => {
     expect(nonceOf(fakeToken(7))).toBe(fakeNonce(7));
     expect(nonceOf("o1.bad.token")).toBeNull();
+  });
+});
+
+describe("Sol r1 LOW 2: every wait on Jarvis is bounded; nothing is resent", () => {
+  const slowTimer = (s: ReturnType<typeof server>) => s.timers.filter((t) => t.ms === ANSWER_WAIT_MS && !t.cleared).at(-1);
+
+  it("an action POST that never answers goes to op status after the bound, and is never resent", async () => {
+    const s = await filled({ open: true });
+    s.gate.hold[ACT] = [new Promise<void>(() => {})];
+    const op = s.u.freeze("k", ACT, {})!;
+    s.reads[`/m/api/ops/${op.n}`] = { ok: true, body: { state: "running", outcome: null, code: null } };
+    let out: Outcome | null = null;
+    void s.u.run(op).then((o) => { out = o; });
+    await s.settle();
+    expect(out).toBeNull();
+    expect(ANSWER_WAIT_MS).toBe(30_000);
+    slowTimer(s)!.fn();
+    await s.settle();
+    expect(out).toEqual({ kind: "recovered", why: "lost", status: { state: "running", outcome: null, code: null } });
+    expect(s.acts().length).toBe(1);
+    expect(s.gets).toContain(`/m/api/ops/${op.n}`);
+  });
+
+  it("a status read that never answers is Unknown after the bound; the op stays uncertain", async () => {
+    const s = await filled({ open: true });
+    s.queue[ACT] = [{ status: 0, body: {}, offline: true }];
+    s.gate.never.push("/m/api/ops/");
+    let out: Outcome | null = null;
+    void s.u.run(s.u.freeze("k", ACT, {})!).then((o) => { out = o; });
+    await s.settle();
+    expect(out).toBeNull();
+    slowTimer(s)!.fn();
+    await s.settle();
+    expect(out).toEqual({ kind: "recovered", why: "lost", status: null });
+    expect(s.u.words(out!)).toBe("No answer came back. Unknown: check at the desk.");
+    expect(s.u.unsure.has("k")).toBe(true);
+    expect(s.acts().length).toBe(1);
+  });
+
+  it("an unlock that never answers is unlock-lost after the bound, and me is read", async () => {
+    const s = await filled();
+    s.gate.hold[UNLOCK_URL] = [new Promise<void>(() => {})];
+    let out: Outcome | null = null;
+    void s.u.run(s.u.freeze("k", ACT, {})!).then((o) => { out = o; });
+    await s.settle();
+    slowTimer(s)!.fn();
+    await s.settle();
+    expect(out).toEqual({ kind: "unlock-lost" });
+    expect(s.gets).toContain(ME_URL);
+    expect(s.acts().length).toBe(0);
+  });
+
+  it("each bounded wait's timer is cleared once its answer came", async () => {
+    const s = await filled({ open: true });
+    const out = await s.u.run(s.u.freeze("k", ACT, {})!);
+    expect(out.kind).toBe("done");
+    const t = s.timers.filter((x) => x.ms === ANSWER_WAIT_MS);
+    expect(t.length).toBeGreaterThan(0);
+    expect(t.every((x) => x.cleared)).toBe(true);
   });
 });
 

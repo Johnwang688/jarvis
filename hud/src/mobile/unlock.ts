@@ -47,6 +47,11 @@ export const DEFAULT_TTL_S = 600;
 export const TAKE_MARGIN_MS = 30_000;
 const TOKEN_RE = /^o1\.([A-Za-z0-9_-]{1,400})\.[A-Za-z0-9_-]{43}$/;
 const NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
+/** The longest the flow waits on one request to Jarvis (an action, an unlock step, an op status read). Past it,
+ * the request's fate is unknown: an action goes to op status (never resent), a status read is "Unknown". */
+export const ANSWER_WAIT_MS = 30_000;
+/** A request that did not answer within `ANSWER_WAIT_MS` (or threw). */
+const SLOW: unique symbol = Symbol("slow");
 /** What a 502 or 504 means on a POST: the proxy answered, so the request's fate is unknown. */
 const PROXY_DOWN: ReadonlySet<number> = new Set([502, 504]);
 
@@ -321,10 +326,24 @@ export class Unlock {
   /** Bumped by every unlock that opened the window: a 423 to a request sent before one is stale news (Opus L1). */
   private unlocks = 0;
 
+  private readonly timer: Timer;
+
   constructor(private readonly deps: UnlockDeps) {
     const timer = deps.timer ?? realTimer;
+    this.timer = timer;
     this.pool = new TokenPool({ fetchJson: deps.fetchJson, now: deps.now, timer, signedOut: deps.signedOut });
     this.mirror = new Mirror(deps.now);
+  }
+
+  /** A request, bounded (Sol r1 LOW 2): its answer, or SLOW once `ANSWER_WAIT_MS` passes (or it throws). A late
+   * answer after that is dropped: the flow has already moved on to recovery, and nothing is ever resent. */
+  private bounded<T>(request: Promise<T>): Promise<T | typeof SLOW> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: T | typeof SLOW) => { if (!done) { done = true; this.timer.clear(h); resolve(v); } };
+      const h = this.timer.set(() => finish(SLOW), ANSWER_WAIT_MS);
+      request.then((v) => finish(v), () => finish(SLOW));
+    });
   }
 
   /** The tap: a token from the pool, frozen with the URL and a detached copy of the body. Null: the pool is empty. */
@@ -390,8 +409,8 @@ export class Unlock {
     const epoch = this.lockEpoch;
     const unlocks = this.unlocks;
     const sentAt = this.deps.now();
-    const got = await this.deps.postJson(op.url, op.body);
-    if ("offline" in got || PROXY_DOWN.has(got.status)) {
+    const got = await this.bounded(this.deps.postJson(op.url, op.body));
+    if (got === SLOW || "offline" in got || PROXY_DOWN.has(got.status)) {
       this.reached(false);
       this.reread();
       return this.recover(op, "lost");
@@ -433,8 +452,8 @@ export class Unlock {
 
   /** A 401 (rule 9): the `me` probe decides. Signed out, or the words of a refusal; never "locked". */
   private async unauthorized(status: number, body: Json, as: "refused" | "unlock-refused"): Promise<Outcome> {
-    const me = await this.deps.fetchJson(ME_URL);
-    if (!me.ok && me.why === "signed-out") {
+    const me = await this.bounded(this.deps.fetchJson(ME_URL));
+    if (me !== SLOW && !me.ok && me.why === "signed-out") {
       this.deps.signedOut();
       return { kind: "signed-out" };
     }
@@ -456,8 +475,8 @@ export class Unlock {
 
   private async doUnlock(st: RunState, stage?: (s: Stage) => void): Promise<true | Outcome> {
     stage?.("unlocking");
-    const opts = await this.deps.postJson(UNLOCK_OPTIONS_URL, {});
-    if ("offline" in opts || PROXY_DOWN.has(opts.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
+    const opts = await this.bounded(this.deps.postJson(UNLOCK_OPTIONS_URL, {}));
+    if (opts === SLOW || "offline" in opts || PROXY_DOWN.has(opts.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
     this.reached(true);
     if (opts.status === 401) return this.unauthorized(401, opts.body, "unlock-refused");
     const publicKey = opts.body.publicKey;
@@ -476,9 +495,9 @@ export class Unlock {
       return { kind: "cancelled" };
     }
     st.unlockTried = true;
-    const got = await this.deps.postJson(UNLOCK_URL, { assertion });
+    const got = await this.bounded(this.deps.postJson(UNLOCK_URL, { assertion }));
     // The assertion may have verified and opened the window with only its answer lost: `me` decides the pill.
-    if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
+    if (got === SLOW || "offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
     this.reached(true);
     if (got.status === 200 && got.body.unlocked === true) {
       this.unlocks += 1;
@@ -494,9 +513,10 @@ export class Unlock {
   private async recover(op: FrozenOp, why: "duplicate" | "lost" | "uncertain", relocked = false): Promise<Outcome> {
     let status: OpStatus | null = null;
     if (op.n) {
-      const got = await this.deps.fetchJson(opStatusUrl(op.n));
-      if (!got.ok && got.why === "signed-out") { this.deps.signedOut(); return { kind: "signed-out" }; }
-      status = got.ok ? parseOpStatus(got.body) : null;
+      // A status read that never answers is "Unknown: check at the desk" after the bound, never a wait forever.
+      const got = await this.bounded(this.deps.fetchJson(opStatusUrl(op.n)));
+      if (got !== SLOW && !got.ok && got.why === "signed-out") { this.deps.signedOut(); return { kind: "signed-out" }; }
+      status = got !== SLOW && got.ok ? parseOpStatus(got.body) : null;
     }
     const id = op.n ?? op.token;
     if (definite(status)) this.forget(op.key, id); else this.remember(op.key, id);
@@ -525,18 +545,28 @@ export class Unlock {
     if (!ids) return;
     for (const id of [...ids]) {
       if (!NONCE_RE.test(id)) continue;
-      const got = await this.deps.fetchJson(opStatusUrl(id));
+      const got = await this.bounded(this.deps.fetchJson(opStatusUrl(id)));
+      if (got === SLOW) continue;
       if (!got.ok && got.why === "signed-out") { this.deps.signedOut(); return; }
       if (got.ok && definite(parseOpStatus(got.body))) this.forget(key, id);
     }
   }
 
-  /** Lock now: the window ends on the server; the mirror follows only a 200. */
-  async lockNow(): Promise<"locked" | "unreached" | "refused" | "signed-out"> {
-    const got = await this.deps.postJson(LOCK_URL, {});
+  /** Lock now: the window ends on the server; the mirror follows only a 200, and only if no unlock finished
+   * while it was out ("overtaken": `me` is read and followed instead, Sol r1 LOW 1). */
+  async lockNow(): Promise<"locked" | "overtaken" | "unreached" | "refused" | "signed-out"> {
+    const unlocks = this.unlocks;
+    const got = await this.bounded(this.deps.postJson(LOCK_URL, {}));
+    if (got === SLOW) { this.reread(); return "unreached"; }
     if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return "unreached"; }
     this.reached(true);
     if (got.status === 200) {
+      // A delayed acknowledgement: an unlock completed after this was sent, so the server may be open again
+      // (a 423, a fresh unlock, an action that slid it). Its 200 locks nothing here: `me` says what holds.
+      if (this.unlocks !== unlocks) {
+        this.reread();
+        return "overtaken";
+      }
       // An action in flight that answers 2xx after this does not slide the pill back open (Opus L2).
       this.lockEpoch += 1;
       this.mirror.lock();
