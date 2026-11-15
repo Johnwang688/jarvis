@@ -233,13 +233,15 @@ def run(browser, check, until):
         # forged by markup): an SVG is the app's only where code puts one, as the direct child of a
         # code-built control (the brand's orb, the lock pill's icon). Add a slot here with each new
         # icon. No SVG, of any class, may sit inside a region that shows server text.
-        icon_slots = ('[data-testid="m-brand"] > .m-orb > svg, '
-                      '[data-testid="m-lock-pill"] > svg.m-icon:first-child')
+        header = 'html > body > main#app.app-root > .app > header.top'
+        icon_slots = (f'{header} > button[data-testid="m-brand"] > .m-orb > svg, '
+                      f'{header} > .m-menu > button[data-testid="m-lock-pill"] > svg.m-icon:first-child')
         server_text = (".plain-text, .chat-title, .group, .subtitle, .brief, .m-notice, .headline, .m-why, "
                        ".reason, .pr-note, .pr-why, .pr-title, .pr-fixline, .m-error, .offline, .as-text, "
                        ".as-line, .m-review-text, .m-review-receipt, .card-line, .m-band-note, .m-deadline, "
                        ".option-text, .step-text, .step-body, .m-thread-title, .row-title, .msg-bubble, "
-                       ".msg-body, .diff-status, .m-flash, [data-testid$='-note'], [role='status']")
+                       ".msg-body, .diff-status, .m-flash, .m-thread-project, .m-thread-provider, .m-limited, "
+                       ".tool, [data-testid$='-note'], [role='status']")
         other_markup = MARKUP.replace("svg, ", "")
         return (page.locator(f".app :is({other_markup})").count() == 0
                 and page.locator(".app svg").evaluate_all("""(nodes, slots) => nodes.every(e =>
