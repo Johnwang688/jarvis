@@ -767,16 +767,21 @@ def _nav_checks(page, mock, check, until):
     for e in _st(mock)["entries"]:
         if e["thread_id"] == "t6":
             e["rows"] = mock_inbox.state(mock)["rows"]
+    for t in mock.world["threads"]:
+        if t["id"] == "t6":
+            t["title"] = "your move on the long thread with a long title"
     _fresh(page, mock, until, SINGLE)
     until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-row"][data-id="t6"]').hover()      # the row's menu button shows on hover and takes room
+    time.sleep(0.2)
     m = page.evaluate("""() => {
       const row = document.querySelector('[data-testid="working-row"][data-id="t6"]');
       const btn = row.querySelector('button.ttl-btn'), chip = row.querySelector('.wchip'), hint = row.querySelector('.whint');
-      return {title: btn.scrollWidth <= btn.clientWidth + 1, chip: chip ? chip.getBoundingClientRect().width : 0,
+      return {title: btn.clientWidth, chip: chip ? chip.getBoundingClientRect().width : 0,
               hint: hint.getBoundingClientRect().width, text: row.querySelector('[data-testid="working-name-t6"]').textContent};
     }""")
-    check("a hinted row keeps its whole title: the project chip shrinks first [mutation: chip does not yield]",
-          m["title"], str(m))
+    check("a hinted row whose title needs the room: the project chip gives way first, to almost nothing, and the hint stays "
+          "whole [mutation: chip does not yield]", m["chip"] < 12 and m["hint"] > 40, str(m))
     _shot(page, "r1-hint-row")
     mock_inbox.state(mock)["rows"] = []
 
