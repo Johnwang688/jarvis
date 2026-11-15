@@ -253,6 +253,8 @@ describe("the review of #329's fixes, on the phone", () => {
   it("MED 1: a re-read that drops a confirmed item closes the confirmation; nothing is sent", async () => {
     const h = harness(report({ opens_here: true }));
     await confirmingAandB(h);
+    // The set the drawn confirm button holds (captured at draw time).
+    const stale = h.app.reviewConfirmed;
     const without = report({ opens_here: true });
     (without.overnight as unknown[]).splice(1, 1);
     h.gets["/m/api/review"] = { ok: true, body: without };
@@ -263,7 +265,7 @@ describe("the review of #329's fixes, on the phone", () => {
     expect(h.root.querySelector('[data-testid="m-review-flash"]')!.textContent).toContain("Something you selected changed");
     expect([...h.app.reviewSel]).toEqual(["defer:a"]);
     // A stale tap on the old "Approve with Face ID" approves nothing.
-    await h.app.approveSelected();
+    await h.app.approveSelected(stale);
     expect(h.posts).toEqual([]);
     expect(h.credential).not.toHaveBeenCalled();
   });

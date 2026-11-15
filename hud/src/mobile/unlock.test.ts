@@ -30,7 +30,7 @@ function server(opts: { open?: boolean } = {}) {
   };
   const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
   const signedOut = vi.fn();
-  const gate: { unlock: Promise<void> | null } = { unlock: null };
+  const gate: { unlock: Promise<void> | null; hold: Record<string, Promise<void>[]> } = { unlock: null, hold: {} };
   let active: boolean | null = null;
   const u = new Unlock({
     fetchJson: async (path) => {
@@ -41,6 +41,9 @@ function server(opts: { open?: boolean } = {}) {
     postJson: async (path, value) => {
       posts.push({ path, body: JSON.parse(JSON.stringify(value)) });
       if (path === UNLOCK_URL && gate.unlock) await gate.unlock;
+      // A held path answers only when its promise resolves (one hold per request, in order).
+      const held = gate.hold[path]?.shift();
+      if (held) await held;
       const q = queue[path];
       if (q && q.length) return q.shift()!;
       return fixed[path] ?? { status: 200, body: { ok: true } };
@@ -233,9 +236,20 @@ describe("rule 5: no automatic retry", () => {
       const out = await s.u.run(s.u.freeze("k", ACT, {})!);
       expect(out.kind).toBe(kind);
       expect(s.paths()).toEqual(paths);
-      expect(s.u.words(out)).toMatch(/nothing was sent/);
+      // Opus L4: the action POST went (and was refused with the 423): "nothing was done", never "nothing was sent".
+      expect(s.u.words(out)).toMatch(/nothing was done/);
+      expect(s.u.words(out)).not.toMatch(/nothing was sent/i);
     });
   }
+
+  it("on the locked shortcut (no action POST yet) the same failures say nothing was sent", async () => {
+    const s = await filled();
+    s.credential.mockResolvedValueOnce(null);
+    const out = await s.u.run(s.u.freeze("k", ACT, {})!);
+    expect(out).toEqual({ kind: "cancelled" });
+    expect(s.acts().length).toBe(0);
+    expect(s.u.words(out)).toBe("Cancelled, or Face ID did not verify: nothing was sent.");
+  });
 
   it("an ambiguous answer (no response) is never resent: op status is read instead", async () => {
     const s = await filled({ open: true });
@@ -398,24 +412,64 @@ describe("rule 7: outcome recovery, in fixed words", () => {
     expect(s.u.words(out)).toBe("Jarvis could not say how it ended. Unknown: check at the desk.");
   });
 
-  it("uncertainty survives a 410 on the same control; a definite answer clears it", async () => {
+  it("uncertainty survives a 410 on the same control; only that op's own definite status clears it", async () => {
     const s = await filled({ open: true });
-    s.queue[ACT] = [{ status: 0, body: {}, offline: true }, { status: 410, body: { error: "expired", expired: true } }];
-    const first = await s.u.run(s.u.freeze("pr:x:merge", ACT, {})!);
+    s.queue[ACT] = [{ status: 0, body: {}, offline: true }, { status: 410, body: { error: "expired", expired: true } },
+      { status: 410, body: { error: "expired", expired: true } }];
+    const a = s.u.freeze("pr:x:merge", ACT, {})!;
+    const first = await s.u.run(a);
     expect(first.kind).toBe("recovered");
     expect(s.u.unsure.has("pr:x:merge")).toBe(true);
     await s.settle();
     const second = await s.u.run(s.u.freeze("pr:x:merge", ACT, {})!);
     expect(second.kind).toBe("expired");
     const words = s.u.words(second, "pr:x:merge");
-    expect(words).toContain("still unknown");
+    expect(words).toBe("This tap expired and was refused unrun. The earlier tap is still unknown: check at the desk.");
     expect(words).not.toContain("nothing was done");
+    expect(words).not.toContain("before it was sent");
     expect(s.u.unsure.has("pr:x:merge")).toBe(true);
+    // The earlier op's own status settles: the next 410 reads it and says the plain words.
+    s.reads[`/m/api/ops/${a.n}`] = { ok: true, body: { state: "completed", outcome: "ok", code: "merged" } };
     await s.settle();
-    await s.u.run(s.u.freeze("pr:x:merge", ACT, {})!);
+    const third = await s.u.run(s.u.freeze("pr:x:merge", ACT, {})!);
     expect(s.u.unsure.has("pr:x:merge")).toBe(false);
+    expect(s.u.words(third, "pr:x:merge")).toBe("This tap expired: nothing was done. Tap again.");
     expect(definite({ state: "completed", outcome: "ok", code: "merged" })).toBe(true);
     expect(definite({ state: "running", outcome: null, code: null })).toBe(false);
+  });
+
+  it("Sol LOW 2: A lost (unknown), B's 202 on the same control, C's 410: C still carries A's warning", async () => {
+    const s = await filled({ open: true });
+    s.queue[ACT] = [{ status: 0, body: {}, offline: true }, { status: 202, body: { ok: true } },
+      { status: 410, body: { error: "expired", expired: true } }];
+    const a = s.u.freeze("pr:x:update", ACT, {})!;
+    expect((await s.u.run(a)).kind).toBe("recovered");      // A's status: unreadable (404 here), so unknown
+    await s.settle();
+    expect((await s.u.run(s.u.freeze("pr:x:update", ACT, {})!)).kind).toBe("done");
+    expect(s.u.unsure.get("pr:x:update")).toEqual(new Set([a.n]));   // B's 2xx never clears A
+    await s.settle();
+    const c = await s.u.run(s.u.freeze("pr:x:update", ACT, {})!);
+    expect(c.kind).toBe("expired");
+    expect(s.u.words(c, "pr:x:update")).toContain("The earlier tap is still unknown");
+    expect(s.gets.filter((g) => g === `/m/api/ops/${a.n}`).length).toBe(2);   // read at A's loss and at C's 410
+  });
+
+  it("Opus L3: a late 423 refuses the op after admission; our resend's duplicate then says locked before it ran", async () => {
+    const s = await filled({ open: true });
+    s.queue[ACT] = [{ status: 423, body: { error: "locked", unlock: true } },
+      { status: 409, body: { error: "already sent", duplicate: true, state: "refused" } }];
+    const op = s.u.freeze("k", ACT, {})!;
+    s.reads[`/m/api/ops/${op.n}`] = { ok: true, body: { state: "refused", outcome: null, code: null } };
+    const out = await s.u.run(op);
+    expect(out).toEqual({ kind: "recovered", why: "duplicate", status: { state: "refused", outcome: null, code: null }, relocked: true });
+    expect(s.u.words(out)).toBe("Locked before it ran: nothing was done. Tap again.");
+    expect(s.acts().length).toBe(2);
+    // A duplicate with no 423 before it keeps the plain words.
+    expect(s.u.words({ kind: "recovered", why: "duplicate", status: { state: "refused", outcome: null, code: null } }))
+      .toBe("This tap was already sent. Not done.");
+    // ... and so does our resend's duplicate when the op is anything but refused.
+    expect(s.u.words({ kind: "recovered", why: "duplicate", status: { state: "completed", outcome: "ok", code: "merged" }, relocked: true }))
+      .toBe("This tap was already sent. Done.");
   });
 });
 
@@ -489,6 +543,102 @@ describe("rule 2: the mirror, and Lock now", () => {
     expect(s.u.mirror.open()).toBe(true);
   });
 
+  it("Opus L2: a Lock now while an action is out is not undone on the pill by that action's 2xx", async () => {
+    const s = await filled({ open: true });
+    let release!: () => void;
+    s.gate.hold[ACT] = [new Promise<void>((r) => { release = r; })];
+    const running = s.u.run(s.u.freeze("k", ACT, {})!);
+    await s.settle();
+    expect(await s.u.lockNow()).toBe("locked");
+    release();
+    expect((await running).kind).toBe("done");
+    expect(s.u.mirror.open()).toBe(false);
+  });
+
+  it("Opus L2: a 423 to another op while one is out stops that one's 2xx from sliding the pill open", async () => {
+    const s = await filled({ open: true });
+    let release!: () => void;
+    s.gate.hold[ACT] = [new Promise<void>((r) => { release = r; })];
+    const merge = s.u.run(s.u.freeze("a", ACT, {})!);
+    await s.settle();
+    s.queue["/m/api/other"] = [{ status: 423, body: { error: "locked", unlock: true } }];
+    s.credential.mockResolvedValueOnce(null);
+    expect((await s.u.run(s.u.freeze("b", "/m/api/other", {})!)).kind).toBe("cancelled");
+    release();
+    expect((await merge).kind).toBe("done");
+    expect(s.u.mirror.open()).toBe(false);
+  });
+
+  it("Opus L2: the slide is from the send time, not the answer's", async () => {
+    const s = await filled({ open: true });
+    let release!: () => void;
+    s.gate.hold[ACT] = [new Promise<void>((r) => { release = r; })];
+    const t0 = s.u.mirror.until - 3000 * 1000;           // filled({open}) is me's unlock_s 3000 at the clock's start
+    const running = s.u.run(s.u.freeze("k", ACT, {})!);
+    await s.settle();
+    s.tick(120_000);
+    release();
+    await running;
+    expect(s.u.mirror.until).toBe(t0 + 3_600_000);
+  });
+
+  it("Opus L1: an unlock whose answer was lost reads me again; me open, the pill says Unlocked", async () => {
+    const s = await filled();
+    s.queue[UNLOCK_URL] = [{ status: 0, body: {}, offline: true }];
+    s.reads[ME_URL] = { ok: true, body: { signed_in: true, unlock_s: 3600 } };
+    const out = await s.u.run(s.u.freeze("k", ACT, {})!);
+    expect(out.kind).toBe("unlock-lost");
+    expect(s.u.words(out)).toBe("No answer to the unlock: nothing was sent. Tap again.");
+    await s.settle();
+    expect(s.gets).toContain(ME_URL);
+    expect(s.u.mirror.open()).toBe(true);
+    expect(s.acts().length).toBe(0);
+  });
+
+  it("Opus L1: an action whose answer was lost reads me again", async () => {
+    const s = await filled({ open: true });
+    s.queue[ACT] = [{ status: 0, body: {}, offline: true }];
+    s.reads[ME_URL] = { ok: true, body: { signed_in: true, unlock_s: 0 } };
+    await s.u.run(s.u.freeze("k", ACT, {})!);
+    await s.settle();
+    expect(s.gets).toContain(ME_URL);
+    expect(s.u.mirror.open()).toBe(false);
+  });
+
+  it("Opus L1: B's 423 arrives after A's unlock finished; B's Face ID cancelled; me decides and the pill says Unlocked", async () => {
+    const s = await filled();                            // locked: A takes the locked path
+    let releaseB!: () => void;
+    const B = "/m/api/other";
+    s.gate.hold[B] = [new Promise<void>((r) => { releaseB = r; })];
+    s.queue[B] = [{ status: 423, body: { error: "locked", unlock: true } }];
+    // B was sent while the mirror said open (a stale me), before A's unlock.
+    s.u.mirror.fromMe(3000);
+    const b = s.u.run(s.u.freeze("b", B, {})!);
+    await s.settle();
+    s.u.mirror.lock();
+    const a = await s.u.run(s.u.freeze("a", ACT, {})!);
+    expect(a.kind).toBe("done");
+    expect(s.u.mirror.open()).toBe(true);
+    s.reads[ME_URL] = { ok: true, body: { signed_in: true, unlock_s: 3500 } };
+    s.credential.mockResolvedValueOnce(null);           // the owner cancels B's Face ID
+    const meBefore = s.gets.filter((g) => g === ME_URL).length;
+    releaseB();
+    expect((await b).kind).toBe("cancelled");
+    await s.settle();
+    expect(s.gets.filter((g) => g === ME_URL).length).toBe(meBefore + 1);
+    expect(s.u.mirror.open()).toBe(true);
+  });
+
+  it("a 423 with no unlock since it was sent does not read me (local state holds)", async () => {
+    const s = await filled({ open: true });
+    s.queue[ACT] = [{ status: 423, body: { error: "locked", unlock: true } }];
+    s.credential.mockResolvedValueOnce(null);
+    await s.u.run(s.u.freeze("k", ACT, {})!);
+    await s.settle();
+    expect(s.gets).not.toContain(ME_URL);
+    expect(s.u.mirror.open()).toBe(false);
+  });
+
   it("the nonce is read from the token for op status", () => {
     expect(nonceOf(fakeToken(7))).toBe(fakeNonce(7));
     expect(nonceOf("o1.bad.token")).toBeNull();
@@ -500,10 +650,14 @@ describe("words for every outcome the flow can end in", () => {
     const s = server();
     const outs: [Outcome, string][] = [
       [{ kind: "cancelled" }, "Cancelled, or Face ID did not verify: nothing was sent."],
+      [{ kind: "cancelled", sent: true }, "Cancelled, or Face ID did not verify: nothing was done."],
       [{ kind: "needs-tap" }, "Face ID needs a fresh tap: press Unlock and send."],
       [{ kind: "unlock-lost" }, "No answer to the unlock: nothing was sent. Tap again."],
+      [{ kind: "unlock-lost", sent: true }, "No answer to the unlock: nothing was done. Tap again."],
       [{ kind: "unlock-refused", status: 409, body: {} }, "The unlock expired or was replaced: nothing was sent. Tap again."],
+      [{ kind: "unlock-refused", status: 409, body: {}, sent: true }, "The unlock expired or was replaced: nothing was done. Tap again."],
       [{ kind: "unlock-refused", status: 503, body: {} }, "Passkeys are unavailable at Jarvis: nothing was sent."],
+      [{ kind: "unlock-refused", status: 401, body: {}, sent: true }, "Not accepted: Face ID was not verified. Nothing was done."],
       [{ kind: "expired" }, "This tap expired: nothing was done. Tap again."],
       [{ kind: "locked-again" }, "Locked again before it could be sent: nothing was done. Tap again."],
       [{ kind: "recovered", why: "lost", status: { state: "completed", outcome: "ok", code: "merged" } }, "No answer came back. Done."],

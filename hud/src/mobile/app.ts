@@ -59,7 +59,7 @@
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
-import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Secure } from "./card";
+import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
@@ -140,6 +140,8 @@ const RETRY_MS = 4000;
 /** M2 (phone audit): what the card says while it waits on Face ID, then on Jarvis. */
 export const ASKING_FACE_ID = "Asking for Face ID…";
 export const SENDING = "Sending…";
+/** Opus L5: a sheet opened again while this row's earlier gated answer is still out. */
+export const STILL_ANSWERING = "Your earlier answer to this is still being sent…";
 /** WS-5c §5.4: the Always route's words when the rule changed since it was read (`remote_answer.RULE_CHANGED`). */
 export const RULE_CHANGED = "the rule changed: read it again";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
@@ -148,6 +150,9 @@ const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-den
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
 const TIME_TICK_MS = 60_000;
+
+/** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
+interface ThreadDone { id: string; busy: boolean; note: string; token: string | null; until: number }
 
 /** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
 interface OpenThread {
@@ -265,7 +270,7 @@ export class PhoneApp {
   readonly tapAgain = new Map<string, string>();
   private readonly frozen = new Map<string, FrozenOp>();
   /** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
-  threadDone: { id: string; busy: boolean; note: string; token: string | null; until: number } | null = null;
+  threadDone: ThreadDone | null = null;
   private readonly pill: HTMLButtonElement;
   private readonly unlockTimer: Timer;
   /** The open chat's Needs-you tray folded to its bar by the owner. */
@@ -304,6 +309,8 @@ export class PhoneApp {
       signedOut: () => this.signedOut(),
       reached: (ok) => this.setOnline(ok),
       changed: () => this.renderPill(),
+      // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
+      reread: () => { if (!this.stopped) void this.probe(); },
     });
     this.tasksReader = serialRead(() => this.read("/m/api/tasks"), (r) => this.applyTasks(r));
     const frame = el("div", "app");
@@ -629,13 +636,14 @@ export class PhoneApp {
   }
 
   /** Approve selected, step two: exactly the confirmed set (ids and tags), frozen with its op token, as ONE
-   * gated action (WS-5c): Face ID once if the phone is locked; all or nothing at the daemon. */
-  async approveSelected(): Promise<void> {
+   * gated action (WS-5c): Face ID once if the phone is locked; all or nothing at the daemon. `confirmed` is the
+   * set the drawn confirmation was built from (captured when its button was drawn); a different one is refused. */
+  async approveSelected(confirmed: readonly { id: string; tag: string }[] | null): Promise<void> {
     const report = this.review;
-    if (!report || this.reviewBusy || !this.reviewConfirming || !this.reviewConfirmed) return;
+    if (!report || this.reviewBusy || !this.reviewConfirming || !confirmed || this.reviewConfirmed !== confirmed) return;
     // Exactly what the confirmation showed, and only while it still holds.
-    if (confirmedChanged(report, this.reviewConfirmed).length) { this.checkConfirmed(report); this.render(); return; }
-    const items = this.reviewConfirmed.map((c) => ({ id: c.id, tag: c.tag }));
+    if (confirmedChanged(report, confirmed).length) { this.checkConfirmed(report); this.render(); return; }
+    const items = confirmed.map((c) => ({ id: c.id, tag: c.tag }));
     this.reviewBusy = true;
     this.reviewFlash = "";
     this.render();
@@ -808,7 +816,7 @@ export class PhoneApp {
 
   async denyCard(): Promise<void> {
     const card = this.card;
-    if (!card || card.busy) return;
+    if (!card || card.busy || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = SENDING;
@@ -885,9 +893,13 @@ export class PhoneApp {
       words = this.gatedWords(out, card.rowId, action);
     }
     if (this.card !== card) {
-      // The sheet closed while it ran: the words go to the row and the list's line.
+      // The sheet closed while it ran: the words go to the row and the list's line, and to the same row's
+      // sheet if the owner opened it again meanwhile (its AUTHORIZE was off while this ran, Opus L5).
       this.notes.set(card.rowId, words);
       this.flash = words;
+      const again = this.card && this.card.rowId === card.rowId && !this.card.busy ? this.card : null;
+      if (again && ok) this.card = null;
+      else if (again) { again.notice = words; this.focusNotice = true; }
       this.render();
       if (ok) void this.loadInbox();
       return;
@@ -911,23 +923,26 @@ export class PhoneApp {
     if (out !== "not-ready" && out.kind === "refused" && out.status === 409) void this.loadCard();
   }
 
-  /** AUTHORIZE: a gated action (WS-5c): Face ID once if the phone is locked, then the frozen answer. */
-  async allowCard(): Promise<void> {
-    const card = this.card;
-    if (!card || card.busy) return;
+  /** AUTHORIZE: a gated action (WS-5c): Face ID once if the phone is locked, then the frozen answer. `card` is
+   * the sheet the button was drawn on. The row is held in `answering` until the answer settles, so a sheet
+   * closed and opened again meanwhile cannot mint a second op for the same approval (Opus L5). */
+  async allowCard(card: CardState | null = this.card): Promise<void> {
+    if (!card || this.card !== card || card.busy || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = this.firstStage(SENDING);
+    this.answering.add(card.rowId);
     this.render();
     const out = await this.gated(card.rowId, "allow", this.path(card.rowId, "answer"), { decision: "allow" },
       (s) => { card.progress = this.stageWords(s, SENDING); if (this.card === card) this.render(); });
+    this.answering.delete(card.rowId);
     this.gatedCardFinish(card, out, "allow", "Authorized.");
   }
 
   /** ALWAYS, step one: the rule it would write, read without a challenge (`answer/rule`, WS-5c §5.4). */
   async alwaysCard(): Promise<void> {
     const card = this.card;
-    if (!card || card.busy) return;
+    if (!card || card.busy || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = "Reading the rule ALWAYS would write…";
@@ -957,18 +972,20 @@ export class PhoneApp {
     this.render();
   }
 
-  /** ALWAYS, step two: the owner read the rule; one confirm tap freezes `{decision: "always", preview, op}`. */
-  async confirmAlways(): Promise<void> {
-    const card = this.card;
-    const rule = card?.rule;
-    if (!card || card.busy || !rule) return;
+  /** ALWAYS, step two: the owner read the rule; one confirm tap freezes `{decision: "always", preview, op}`.
+   * `card` and `rule` are the sheet and the rule its Confirm was drawn with: the preview sent is that rule's,
+   * and a rule read again since (another object) is refused, never substituted. Held in `answering` (Opus L5). */
+  async confirmAlways(card: CardState | null = this.card, rule: Rule | null = card?.rule ?? null): Promise<void> {
+    if (!card || this.card !== card || card.busy || !rule || card.rule !== rule || this.answering.has(card.rowId)) return;
     card.busy = true;
     card.notice = "";
     card.progress = this.firstStage(SENDING);
+    this.answering.add(card.rowId);
     this.render();
     const out = await this.gated(card.rowId, "always", this.path(card.rowId, "answer"),
       { decision: "always", preview: rule.preview },
       (s) => { card.progress = this.stageWords(s, SENDING); if (this.card === card) this.render(); });
+    this.answering.delete(card.rowId);
     if (out !== "not-ready" && out.kind === "refused" && out.status === 409 && out.body.error === RULE_CHANGED
         && this.card === card) {
       // Rule 8: the rule changed. It is read again and shown; only a new confirm tap sends.
@@ -1413,14 +1430,18 @@ export class PhoneApp {
     return entry && entry.seq !== null ? entry : null;
   }
 
-  /** Done on the open chat: a gated action bound to the chat in its URL and its `seq` as drawn (frozen at the tap). */
-  async doneThread(id: string): Promise<void> {
-    const entry = this.doneEntry(id);
-    if (!entry || (this.threadDone?.id === id && this.threadDone.busy)) return;
+  /**
+   * Done on the open chat: a gated action bound to the chat in its URL and its `seq` AS DRAWN. `seq` is captured
+   * when the menu item was drawn (doneControls) and frozen at the tap: the working set is never read again here,
+   * so a background read that brought a newer `seq` cannot change what is sent (Sol MED 1). If the thread moved
+   * on since it was drawn, the server's 409 is the right answer.
+   */
+  async doneThread(id: string, seq: number): Promise<void> {
+    if (this.threadDone?.id === id && this.threadDone.busy) return;
     const st = { id, busy: true, note: this.firstStage("Marking it done…"), token: null as string | null, until: 0 };
     this.threadDone = st;
     this.render();
-    const out = await this.gated("thread:" + id, "done", `/m/api/working/${encodeURIComponent(id)}/done`, { seq: entry.seq },
+    const out = await this.gated("thread:" + id, "done", `/m/api/working/${encodeURIComponent(id)}/done`, { seq },
       (s) => { st.note = this.stageWords(s, "Marking it done…"); if (this.threadDone === st) this.render(); });
     if (out !== "not-ready" && out.kind === "signed-out") return;
     st.busy = false;
@@ -1441,14 +1462,15 @@ export class PhoneApp {
     if (this.threadDone === st) this.render();
   }
 
-  /** Undo, within its window, with Done's own token: a gated action of its own (a fresh op token). */
-  async undoThread(id: string): Promise<void> {
-    const st = this.threadDone;
-    if (!st || st.id !== id || st.busy || !st.token || this.now() >= st.until) return;
+  /** Undo, within its window, with Done's own token: a gated action of its own (a fresh op token). `drawn` and
+   * `token` are the Done and its undo token the button was drawn with; anything else since is refused. */
+  async undoThread(id: string, drawn: ThreadDone | null = this.threadDone, token: string | null = drawn?.token ?? null): Promise<void> {
+    const st = drawn;
+    if (!st || this.threadDone !== st || st.id !== id || st.busy || !token || st.token !== token || this.now() >= st.until) return;
     st.busy = true;
     st.note = this.firstStage("Undoing…");
     this.render();
-    const out = await this.gated("thread:" + id, "undo", `/m/api/working/${encodeURIComponent(id)}/undo`, { token: st.token },
+    const out = await this.gated("thread:" + id, "undo", `/m/api/working/${encodeURIComponent(id)}/undo`, { token },
       (s) => { st.note = this.stageWords(s, "Undoing…"); if (this.threadDone === st) this.render(); });
     if (out !== "not-ready" && out.kind === "signed-out") return;
     st.busy = false;
@@ -2032,7 +2054,16 @@ export class PhoneApp {
         const id = scope.slice(5);
         alive = this.tab === "tasks" && this.task?.id === id && this.taskWrite?.id === id && this.taskWrite.confirming === "cancel";
       } else if (scope.startsWith("thread:")) alive = this.tab === "chats" && this.thread?.id === scope.slice(7);
-      else alive = !!this.inbox?.some((r) => r.id === scope) || (!!this.review && allItems(this.review).some((i) => i.row.id === scope));
+      else {
+        const row = this.inbox?.find((r) => r.id === scope) ?? (this.review ? allItems(this.review).find((i) => i.row.id === scope)?.row : undefined);
+        alive = !!row;
+        // A PR action's frozen head and card must still be the row's: a changed row is a new decision.
+        const body = this.frozen.get(scope)?.body;
+        if (row && body && typeof body.head === "string") {
+          const view = prRowOf(row);
+          alive = !!view && view.head === body.head && view.card === body.card;
+        }
+      }
       if (!alive) { this.tapAgain.delete(scope); this.frozen.delete(scope); }
     }
   }
@@ -2071,12 +2102,19 @@ export class PhoneApp {
     }
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
     if (!this.card) { this.sheetHost.replaceChildren(); return; }
-    const view = cardView(this.card, {
+    // Captured as drawn: AUTHORIZE answers this card, Confirm ALWAYS sends this rule's preview.
+    const card = this.card;
+    const rule = card.rule;
+    // Opus L5: this row's earlier gated answer is still out (the sheet was closed and opened again): every
+    // answer stays off until it settles, so a second AUTHORIZE cannot mint a second op.
+    const drawn: CardState = !card.busy && this.answering.has(card.rowId)
+      ? { ...card, busy: true, progress: card.progress || STILL_ANSWERING } : card;
+    const view = cardView(drawn, {
       back: () => this.goBack(),
       deny: () => void this.denyCard(),
-      allow: () => void this.allowCard(),
+      allow: () => void this.allowCard(card),
       always: () => void this.alwaysCard(),
-      confirmAlways: () => void this.confirmAlways(),
+      confirmAlways: () => void this.confirmAlways(card, rule),
       cancelAlways: () => this.cancelAlways(),
       // AS: the owner's own open or close of the command, kept across a re-read of the card.
       toggleCommand: (o) => { if (this.card) { this.card.expanded = o; this.render(); } },
@@ -2275,12 +2313,14 @@ export class PhoneApp {
     const undoing = !!st?.token && this.now() < st.until;
     const pending = this.tapAgain.get("thread:" + id);
     let menu: HTMLElement | null = null;
-    if (entry && !undoing) {
+    if (entry && entry.seq !== null && !undoing) {
+      // The seq this item is drawn with is the one its tap sends (Sol MED 1): captured here, never re-read.
+      const seq = entry.seq;
       menu = menuView({
         id: "m-thread-more", label: "Chat actions", open: this.menuOpen === "thread",
         toggle: (o) => this.toggleMenu(o ? "thread" : null),
         items: [{ id: "done", testid: "m-thread-done", label: pending === "done" ? UNLOCK_AND_SEND : "Done",
-          disabled: !!st?.busy || !this.online, onSelect: () => void this.doneThread(id) }],
+          disabled: !!st?.busy || !this.online, onSelect: () => void this.doneThread(id, seq) }],
       });
     }
     let note: HTMLElement | null = null;
@@ -2291,7 +2331,8 @@ export class PhoneApp {
       line.setAttribute("role", "status");
       note.append(line);
       if (undoing) {
-        const undo = tap(pending === "undo" ? UNLOCK_AND_SEND : "Undo", () => void this.undoThread(id), "quiet m-send", "m-thread-undo");
+        const token = st.token;
+        const undo = tap(pending === "undo" ? UNLOCK_AND_SEND : "Undo", () => void this.undoThread(id, st, token), "quiet m-send", "m-thread-undo");
         undo.disabled = st.busy || !this.online;
         note.append(undo);
       }
@@ -2312,6 +2353,8 @@ export class PhoneApp {
   }
 
   private reviewActions(): ReviewActions {
+    // The confirmed set this draw shows: the confirm button sends exactly it (never a later re-read).
+    const confirmed = this.reviewConfirmed;
     return {
       toggle: (item) => {
         if (this.reviewBusy) return;
@@ -2331,7 +2374,7 @@ export class PhoneApp {
         this.reviewConfirming = true;
         this.render();
       },
-      approveConfirm: () => void this.approveSelected(),
+      approveConfirm: () => void this.approveSelected(confirmed),
       approveCancel: () => { if (!this.reviewBusy) { this.reviewConfirming = false; this.reviewConfirmed = null; this.render(); } },
       leaveSelected: () => void this.leaveSelected(),
       retry: (row) => void this.retryDeferred(row).then(() => {

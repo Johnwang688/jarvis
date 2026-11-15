@@ -209,6 +209,12 @@ class Phone:
                 data = response.read()
                 if request.method == "POST":
                     self.posts.append((url.path, json.loads(body or b"null"), response.status))
+                    # The daemon's own answer, in step with `posts` (a check can hold its exact words).
+                    try:
+                        answer = json.loads(data or b"null")
+                    except ValueError:
+                        answer = None
+                    self.answers.append((url.path, response.status, answer))
                 route.fulfill(status=response.status, headers={k: v for k, v in response.getheaders()}, body=data)
             finally:
                 conn.close()
@@ -241,6 +247,7 @@ class Phone:
             return {"status": status, "headers": headers, "body": data}
 
         self.posts: list = []
+        self.answers: list = []
         self.before_forward = None
         self.ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True,
                                        service_workers="block", device_scale_factor=2)

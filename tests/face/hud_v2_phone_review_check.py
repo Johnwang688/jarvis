@@ -339,7 +339,9 @@ def run(browser, check, until):
         until(lambda: page.locator('[data-testid="m-review-flash"]').count() == 1, timeout=3)
         check("a 409 changed unticks that item and explains",
               [t[1] for t in ticks()] == [True, False, False, False]
-              and "Nothing was approved" in page.locator('[data-testid="m-review-flash"]').inner_text()
+              # Opus L6: the final 409's own words (a changed set), not any refusal's.
+              and page.locator('[data-testid="m-review-flash"]').inner_text()
+              == "Nothing was approved: something you selected changed. Look again, then confirm again."
               and "Unticked" in page.locator('[data-id="defer:b"] [data-testid="m-review-note"]').inner_text(),
               str(ticks()))
         # A chip lands on its chat.

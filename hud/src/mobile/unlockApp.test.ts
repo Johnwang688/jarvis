@@ -34,6 +34,8 @@ function harness(opts: { unlockS?: number; rows?: unknown[] } = {}) {
   const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
   const signedOut = vi.fn();
   const timers: { fn: () => void; ms: number }[] = [];
+  // A held path answers only when released (one hold per request).
+  const holds: Record<string, Promise<void>[]> = {};
   const root = document.createElement("main");
   document.body.replaceChildren(root);
   gets["/m/api/inbox"] = { ok: true, body: { rows: opts.rows ?? [] } };
@@ -50,7 +52,12 @@ function harness(opts: { unlockS?: number; rows?: unknown[] } = {}) {
   const app = new PhoneApp({
     root, onSignedOut: signedOut, signOut: async () => {},
     fetchJson: async (path) => { fetched.push(path); return gets[path.split("?")[0]] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } }; },
-    postJson: async (path, value) => { posts.push({ path, value }); return replies[path] ?? { status: 200, body: { ok: true } }; },
+    postJson: async (path, value) => {
+      posts.push({ path, value });
+      const held = holds[path]?.shift();
+      if (held) await held;
+      return replies[path] ?? { status: 200, body: { ok: true } };
+    },
     getCredential: credential,
     openStream: () => { stream = new Stream(); return stream; },
     setTimer: (fn) => { queueMicrotask(fn); return 0; },
@@ -60,7 +67,8 @@ function harness(opts: { unlockS?: number; rows?: unknown[] } = {}) {
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   const q = (id: string) => root.querySelector<HTMLElement>(`[data-testid="${id}"]`);
   const click = async (id: string) => { q(id)!.click(); await settle(); };
-  return { app, root, posts, replies, gets, fetched, credential, signedOut, timers, settle, q, click,
+  const hold = (path: string) => { let open!: () => void; (holds[path] ??= []).push(new Promise((r) => { open = r; })); return () => open(); };
+  return { app, root, posts, replies, gets, fetched, credential, signedOut, timers, settle, q, click, hold,
     stream: () => stream!, tick: (ms: number) => { clock += ms; } };
 }
 
@@ -168,6 +176,110 @@ describe("rule 9: a POST 401 is signed out, never locked", () => {
   });
 });
 
+describe("Opus L1 in the app: the pill follows me when local state cannot be trusted", () => {
+  it("an unlock whose answer was lost: the app probes me, and me open makes the pill say Unlocked", async () => {
+    const h = harness({ rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("locked");
+    h.replies["/m/api/unlock"] = { status: 0, body: {}, offline: true };
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null }, unlock_s: 3600 } };
+    const before = h.fetched.filter((f) => f === "/m/api/me").length;
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.settle();
+    expect(h.fetched.filter((f) => f === "/m/api/me").length).toBeGreaterThan(before);
+    expect(h.q("m-lock-pill")!.dataset.state).toBe("unlocked");
+    expect(actionPosts(h.posts)).toEqual([]);
+    expect(h.q("m-card-notice")!.textContent).toBe("No answer to the unlock: nothing was sent. Tap again.");
+  });
+});
+
+describe("Opus L5: a sheet closed and opened again while its answer is out", () => {
+  it("AUTHORIZE (and ALWAYS, Deny) stay off on the reopened sheet; a tap there mints no second op", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.app.start();
+    await h.settle();
+    const release = h.hold("/m/api/inbox/appr%3Ar1/answer");
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    expect(actionPosts(h.posts).length).toBe(1);
+    // The owner closes the sheet mid-send and opens it again.
+    await h.click("m-back");
+    // The list's Review is off while the answer is out; the sheet can still be opened from elsewhere
+    // (the open chat's tray, the review): opened again here as those do.
+    expect((h.q("m-item-review") as HTMLButtonElement).disabled).toBe(true);
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    expect(h.app.card?.detail).toBeTruthy();
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    expect((h.q("approval-always") as HTMLButtonElement).disabled).toBe(true);
+    expect((h.q("approval-deny") as HTMLButtonElement).disabled).toBe(true);
+    expect(h.q("m-card-notice")!.textContent).toBe("Your earlier answer to this is still being sent…");
+    const reads = h.app.unlock.pool.reads;
+    await h.app.allowCard();
+    await h.app.denyCard();
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.app.unlock.pool.reads).toBe(reads);
+    // The first answer lands: the reopened sheet closes with its words.
+    release();
+    await h.settle();
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.app.card).toBeNull();
+    expect(h.q("m-flash")!.textContent).toBe("Authorized.");
+  });
+
+  it("a refusal that lands after the reopen shows its words on the reopened sheet, whose AUTHORIZE is back", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 409, body: { error: "already answered" } };
+    h.app.start();
+    await h.settle();
+    const release = h.hold("/m/api/inbox/appr%3Ar1/answer");
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    await h.click("m-back");
+    h.app.openCard(h.app.inbox![0]);
+    await h.settle();
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    release();
+    await h.settle();
+    expect(h.q("m-card-notice")!.textContent).toBe("Already answered.");
+    expect((h.q("approval-allow") as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("draw-time capture: Confirm ALWAYS sends the rule it was drawn with", () => {
+  it("a rule replaced under the drawn Confirm (no redraw) is refused, never substituted", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    const preview = "a".repeat(64);
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "Bash" }, rule_words: "Bash npm test", resolution: "r", preview } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-always");
+    const confirm = h.q("m-rule-confirm")!;
+    h.app.card!.rule = { words: "other", entry: null, resolution: "", preview: "b".repeat(64) };   // no redraw
+    confirm.click();
+    await h.settle();
+    expect(actionPosts(h.posts)).toEqual([]);
+  });
+
+  it("the drawn rule's preview is what is sent", async () => {
+    const h = harness({ unlockS: 1800, rows: [APPR] });
+    const preview = "a".repeat(64);
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "Bash" }, rule_words: "Bash npm test", resolution: "r", preview } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-always");
+    await h.click("m-rule-confirm");
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].value.decision).toBe("always");
+    expect(acts[0].value.preview).toBe(preview);
+  });
+});
+
 describe("rule 6 on the card: Unlock and send", () => {
   it("AUTHORIZE becomes Unlock and send, resumes the same op, and is dropped when the sheet closes", async () => {
     const h = harness({ rows: [APPR] });
@@ -220,6 +332,46 @@ describe("Done and Undo from an open chat (WS-5c §5.6)", () => {
     expect(h.q("m-thread-done-note")!.textContent).toContain("Undone");
   });
 
+  it("Sol MED 1: Done sends the seq it was DRAWN with, not one a background read brought since", async () => {
+    // The mutant this pins: doneThread reading the working set again at the tap would send 8.
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 409, body: { error: "changed since you read it" } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.click("m-thread-more");                      // the menu, and its Done, drawn with seq 7
+    const done = h.q("m-thread-done")!;
+    // A background working read brings seq 8; the open chat is not drawn again.
+    h.gets["/m/api/working"] = { ok: true, body: { entries: [{ thread_id: T1, project_id: "p1", project: "Calc", title: "Fix it",
+      status: "unread", last: "2026-11-15T10:05:00Z", seq: 8 }], more: false, total: 1 } };
+    await h.app.loadWorking(true);
+    await h.settle();
+    expect(h.app.entries![0].seq).toBe(8);
+    expect(h.q("m-thread-done")).toBe(done);             // the same drawn control
+    done.click();
+    await h.settle();
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].value.seq).toBe(7);
+    expect(h.q("m-thread-done-note")!.textContent).toBe("Not done. Changed since you read it.");
+  });
+
+  it("Undo sends the undo token its button was drawn with", async () => {
+    const h = harness({ unlockS: 1800 });
+    h.replies[`/m/api/working/${T1}/done`] = { status: 200, body: { thread_id: T1, done: true, token: "u".repeat(32), undo_s: 10 } };
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.app.doneThread(T1, 7);
+    const undo = h.q("m-thread-undo")!;
+    h.app.threadDone!.token = "v".repeat(32);            // replaced under the drawn button: refused, never substituted
+    undo.click();
+    await h.settle();
+    expect(h.posts.filter((p) => p.path.endsWith("/undo"))).toEqual([]);
+  });
+
   it("Undo is gone once its window ends; a refused Done says why", async () => {
     const h = harness({ unlockS: 1800 });
     h.replies[`/m/api/working/${T1}/done`] = { status: 200, body: { thread_id: T1, done: true, token: "u".repeat(32), undo_s: 10 } };
@@ -227,7 +379,7 @@ describe("Done and Undo from an open chat (WS-5c §5.6)", () => {
     await h.settle();
     await h.app.openThread(T1);
     await h.settle();
-    await h.app.doneThread(T1);
+    await h.app.doneThread(T1, 7);
     expect(h.q("m-thread-undo")).not.toBeNull();
     h.tick(10_001);
     h.timers.at(-1)!.fn();
@@ -235,7 +387,7 @@ describe("Done and Undo from an open chat (WS-5c §5.6)", () => {
     await h.app.undoThread(T1);
     expect(h.posts.filter((p) => p.path.endsWith("/undo"))).toEqual([]);
     h.replies[`/m/api/working/${T1}/done`] = { status: 409, body: { error: "it still needs you", why_not: "an approval is waiting" } };
-    await h.app.doneThread(T1);
+    await h.app.doneThread(T1, 7);
     expect(h.q("m-thread-done-note")!.textContent).toBe("Not done. It still needs you. An approval is waiting.");
   });
 });

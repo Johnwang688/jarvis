@@ -375,6 +375,36 @@ describe("the phone's PR actions: gated actions (WS-5c), bound to what was drawn
     expect(h.button(11, "m-pr-act-merge")!.textContent).not.toBe("Unlock and send");
   });
 
+  it("Opus nit: an Unlock and send whose row's head or card changed is dropped; the row's own button returns", async () => {
+    const h = harness([prRow(11)]);
+    (h.app.unlock as any).deps.activation = () => false;
+    h.credential.mockRejectedValueOnce(new Error("NotAllowedError"));
+    h.app.start();
+    await h.settle();
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    expect(h.button(11, "m-pr-act-merge")!.textContent).toBe("Unlock and send");
+    // A re-read: the same row, with a new card (and head). The frozen op is for the old ones: dropped.
+    h.gets["/m/api/inbox"] = { ok: true, body: { rows: [prRow(11, { head: headOf(99), card: cardOf(99) })] } };
+    await h.app.loadInbox();
+    await h.settle();
+    expect(h.app.tapAgain.size).toBe(0);
+    expect(h.button(11, "m-pr-act-merge")!.textContent).not.toBe("Unlock and send");
+  });
+
+  it("an Unlock and send whose row is re-read unchanged is kept", async () => {
+    const h = harness([prRow(11)]);
+    (h.app.unlock as any).deps.activation = () => false;
+    h.credential.mockRejectedValueOnce(new Error("NotAllowedError"));
+    h.app.start();
+    await h.settle();
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    await h.app.loadInbox();
+    await h.settle();
+    expect(h.button(11, "m-pr-act-merge")!.textContent).toBe("Unlock and send");
+  });
+
   it("an empty pool sends nothing and says try again", async () => {
     const h = harness([prRow(11)]);
     Object.defineProperty(h.gets, "/m/api/ops/tokens", { value: { ok: false, why: "error", status: 429 }, configurable: true });

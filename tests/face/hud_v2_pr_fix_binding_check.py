@@ -31,6 +31,7 @@ class FixSummaryBinding(unittest.TestCase):
     def test_merge_rejects_fix_summary_that_landed_after_the_phone_drew(self):
         from playwright.sync_api import sync_playwright
         from jarvis.v2.pr_summary import card_key
+        from jarvis.v2.pr_merge import CHANGED
 
         with sync_playwright() as pw, ExitStack() as cleanups:
             browser = pw.chromium.launch(headless=True)
@@ -82,6 +83,14 @@ class FixSummaryBinding(unittest.TestCase):
             def acts_sent(before):
                 return [(body, status) for path, body, status in phone.posts[before:] if path == "/m/api/inbox/pr"]
 
+            def final_error(before):
+                """The final answer's own words (Opus L6: not any 409, the stale-card refusal)."""
+                answers = [a for path, _st, a in phone.answers[before:] if path == "/m/api/inbox/pr"]
+                return answers[-1].get("error") if answers and isinstance(answers[-1], dict) else None
+
+            def notice():
+                return phone.row(pmc.ROW).locator('[data-testid="m-pr-notice"]').inner_text()
+
             # 1. A locked phone: Face ID first, then the act, which refuses the unseen card.
             before = len(phone.posts)
             shown.locator('[data-testid="m-pr-act-merge"]').click()
@@ -92,6 +101,8 @@ class FixSummaryBinding(unittest.TestCase):
             self.assertEqual([st for _b, st in sent], [409])
             self.assertEqual({k: v for k, v in sent[0][0].items() if k != "op"}, drawn)
             self.assertFalse(bool(prs.run.acts()), f"unseen fix summary authorized a merge; phone responses: {sent}")
+            self.assertEqual(final_error(before), CHANGED)
+            self.assertTrue(phone.pump(lambda: notice() == "Changed since you read it."), notice())
 
             # 2. A stale client: the phone draws the old card again and believes its window open (it is: the
             # unlock above); the daemon's card moves again, unseen; and as the act arrives the window is ended at
@@ -125,6 +136,8 @@ class FixSummaryBinding(unittest.TestCase):
             # The one resend is the same frozen request: same head, card and op token.
             self.assertEqual(sent[1][0], sent[0][0])
             self.assertEqual({k: v for k, v in sent[1][0].items() if k != "op"}, drawn)
+            self.assertEqual(final_error(before), CHANGED)
+            self.assertTrue(phone.pump(lambda: notice() == "Changed since you read it."), notice())
             phone.page.wait_for_timeout(600)
             self.assertEqual(len(acts_sent(before)), 2, "the stale refusal was sent again")
             self.assertFalse(bool(prs.run.acts()), f"unseen fix summary authorized a merge; phone responses: {sent}")

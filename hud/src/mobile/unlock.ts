@@ -22,7 +22,8 @@
 //     resumes the SAME frozen op and token through rule 3.
 //  7. **Outcome recovery.** After a duplicate, a lost answer or an uncertain one, `GET /m/api/ops/<n>`
 //     and one total table of fixed words (`opWords`); never `prRow.resultOk`. A tap shown as
-//     uncertain stays so across a later 410 on the same control.
+//     uncertain stays so across a later 410 on the same control: each uncertain op's nonce is kept
+//     until ITS OWN status settles it (a later op's 2xx on the control never clears it).
 //  8. **Always** freezes `{decision: "always", preview, op}` (app.ts and card.ts).
 //  9. **A 401 is signed out** (the `me` probe), never locked.
 
@@ -160,8 +161,9 @@ export class Mirror {
     const s = typeof unlockS === "number" && unlockS > 0 && unlockS <= UNLOCK_S ? unlockS : UNLOCK_S;
     this.until = this.now() + s * 1000;
   }
-  /** A gated action's 2xx: the server's `require_unlocked` slid it (so it was open). */
-  slideGated(): void { this.until = this.now() + UNLOCK_S * 1000; }
+  /** A gated action's 2xx: the server's `require_unlocked` slid it (so it was open), from when the
+   * request was SENT (`at`, the phone's clock), never later than that; an hour already further out stays. */
+  slideGated(at: number = this.now()): void { this.until = Math.max(this.until, at + UNLOCK_S * 1000); }
   /** A session-only action's 2xx (`touch_unlock`): slides an open window, never opens one. */
   slideSession(): void { if (this.open()) this.until = this.now() + UNLOCK_S * 1000; }
   lock(): void { this.until = 0; }
@@ -265,21 +267,22 @@ export type Outcome =
   | { kind: "done"; status: number; body: Json }
   /** A definite refusal (400, 404, 409, 429, 503 ...): the caller says the daemon's words. */
   | { kind: "refused"; status: number; body: Json }
-  /** Face ID was cancelled or did not verify: nothing was sent. */
-  | { kind: "cancelled" }
+  /** Face ID was cancelled or did not verify. `sent`: the action POST went first and was refused (a 423). */
+  | { kind: "cancelled"; sent?: true }
   /** The tap's activation lapsed before Face ID: "Unlock and send" resumes the same op. */
   | { kind: "needs-tap" }
-  /** The unlock was refused (409, 503, 401 with the session still on ...): nothing was sent. */
-  | { kind: "unlock-refused"; status: number; body: Json }
-  /** The unlock had no answer: nothing was sent. */
-  | { kind: "unlock-lost" }
+  /** The unlock was refused (409, 503, 401 with the session still on ...): the action did not run. */
+  | { kind: "unlock-refused"; status: number; body: Json; sent?: true }
+  /** The unlock had no answer: the action did not run (the window itself may have opened: `me` is read again). */
+  | { kind: "unlock-lost"; sent?: true }
   /** 410: the token expired or predates a restart. */
   | { kind: "expired" }
   /** A second 423. */
   | { kind: "locked-again" }
   | { kind: "signed-out" }
-  /** After a duplicate, a lost answer or an uncertain one: what op status says. */
-  | { kind: "recovered"; why: "duplicate" | "lost" | "uncertain"; status: OpStatus | null };
+  /** After a duplicate, a lost answer or an uncertain one: what op status says. `relocked`: the duplicate
+   * answered this op's own resend after a 423 (a late 423 can refuse an op after admission, Opus L3). */
+  | { kind: "recovered"; why: "duplicate" | "lost" | "uncertain"; status: OpStatus | null; relocked?: true };
 
 export type Stage = "unlocking" | "sending";
 
@@ -297,17 +300,26 @@ export interface UnlockDeps {
   reached?: (ok: boolean) => void;
   /** The mirror changed (the pill redraws). */
   changed?: () => void;
+  /** Read `me` again (the app's probe): when local state cannot be trusted about the window (Opus L1).
+   * Absent, `me` is read here and the mirror follows it. */
+  reread?: () => void;
 }
 
-interface RunState { unlockTried: boolean; sends: number }
+/** One op's run: whether an unlock was tried for it, how often its action POST went, and whether a 423 answered it. */
+interface RunState { unlockTried: boolean; sends: number; after423: boolean }
 
 export class Unlock {
   readonly pool: TokenPool;
   readonly mirror: Mirror;
   private unlocking: Promise<true | Outcome> | null = null;
   private readonly runs = new WeakMap<FrozenOp, { state: RunState; promise: Promise<Outcome> | null }>();
-  /** Controls whose last tap is still unknown (rule 7: kept across a later 410). */
-  readonly unsure = new Set<string>();
+  /** Rule 7: control -> the ids (nonces) of its ops whose outcome is still unknown. Each stays until op
+   * status for THAT op settles it (Sol LOW 2); another op's answer on the control never clears it. */
+  readonly unsure = new Map<string, Set<string>>();
+  /** Bumped by a Lock now 200 and by every 423: a 2xx to a request sent before the bump does not slide (Opus L2). */
+  private lockEpoch = 0;
+  /** Bumped by every unlock that opened the window: a 423 to a request sent before one is stale news (Opus L1). */
+  private unlocks = 0;
 
   constructor(private readonly deps: UnlockDeps) {
     const timer = deps.timer ?? realTimer;
@@ -344,49 +356,76 @@ export class Unlock {
 
   private entry(op: FrozenOp) {
     let held = this.runs.get(op);
-    if (!held) { held = { state: { unlockTried: false, sends: 0 }, promise: null }; this.runs.set(op, held); }
+    if (!held) { held = { state: { unlockTried: false, sends: 0, after423: false }, promise: null }; this.runs.set(op, held); }
     return held;
   }
 
   private reached(ok: boolean): void { this.deps.reached?.(ok); }
   private changed(): void { this.deps.changed?.(); }
 
+  /** `me` decides the mirror (Opus L1): after a lost unlock, a lost action, or a 423 older than an unlock. */
+  private reread(): void {
+    if (this.deps.reread) { this.deps.reread(); return; }
+    void this.deps.fetchJson(ME_URL).then((me) => { if (me.ok) this.fromMe(me.body); });
+  }
+
+  /** An unlock's failure, for THIS op: whether its action POST already went (and was refused with a 423). */
+  private forOp(u: Outcome, st: RunState): Outcome {
+    if (u.kind !== "cancelled" && u.kind !== "unlock-lost" && u.kind !== "unlock-refused") return u;
+    const rest = { ...u };
+    delete rest.sent;
+    return st.sends > 0 ? { ...rest, sent: true } : rest;
+  }
+
   private async locked(op: FrozenOp, st: RunState, stage?: (s: Stage) => void): Promise<Outcome> {
     const u = await this.unlock(st, stage);
-    if (u !== true) return u;
+    if (u !== true) return this.forOp(u, st);
     return this.send(op, st, stage);
   }
 
   private async send(op: FrozenOp, st: RunState, stage?: (s: Stage) => void): Promise<Outcome> {
     stage?.("sending");
     st.sends += 1;
+    // What the window looked like when this request left: its answer is judged against that, not later state.
+    const epoch = this.lockEpoch;
+    const unlocks = this.unlocks;
+    const sentAt = this.deps.now();
     const got = await this.deps.postJson(op.url, op.body);
     if ("offline" in got || PROXY_DOWN.has(got.status)) {
       this.reached(false);
+      this.reread();
       return this.recover(op, "lost");
     }
     this.reached(true);
     const { status, body } = got;
     if (status >= 200 && status < 300) {
-      this.mirror.slideGated();
-      this.changed();
-      this.unsure.delete(op.key);
+      // A Lock now (or a 423) since it was sent: this late answer does not slide the window back open.
+      if (this.lockEpoch === epoch) {
+        this.mirror.slideGated(sentAt);
+        this.changed();
+      }
       return { kind: "done", status, body };
     }
     if (status === 423) {
       // The mirror was wrong (Lock now elsewhere, the desk, a restart): it is locked.
+      this.lockEpoch += 1;
       this.mirror.lock();
       this.changed();
+      // An unlock finished while this request was out: the 423 may predate it, so `me` says what holds.
+      if (this.unlocks !== unlocks) this.reread();
+      st.after423 = true;
       if (st.unlockTried || st.sends > 1) return { kind: "locked-again" };
       const u = await this.unlock(st, stage);
-      if (u !== true) return u;
+      if (u !== true) return this.forOp(u, st);
       return this.send(op, st, stage);
     }
     if (status === 410) {
       void this.pool.refill();
+      // A 410 is definite for this tap; an earlier unknown tap on the control is looked at again first.
+      await this.settle(op.key);
       return { kind: "expired" };
     }
-    if (status === 409 && body.duplicate === true) return this.recover(op, "duplicate");
+    if (status === 409 && body.duplicate === true) return this.recover(op, "duplicate", st.after423);
     if (body.uncertain === true) return this.recover(op, "uncertain");
     if (status === 401) return this.unauthorized(status, body, "refused");
     return { kind: "refused", status, body };
@@ -418,7 +457,7 @@ export class Unlock {
   private async doUnlock(st: RunState, stage?: (s: Stage) => void): Promise<true | Outcome> {
     stage?.("unlocking");
     const opts = await this.deps.postJson(UNLOCK_OPTIONS_URL, {});
-    if ("offline" in opts || PROXY_DOWN.has(opts.status)) { this.reached(false); return { kind: "unlock-lost" }; }
+    if ("offline" in opts || PROXY_DOWN.has(opts.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
     this.reached(true);
     if (opts.status === 401) return this.unauthorized(401, opts.body, "unlock-refused");
     const publicKey = opts.body.publicKey;
@@ -438,9 +477,11 @@ export class Unlock {
     }
     st.unlockTried = true;
     const got = await this.deps.postJson(UNLOCK_URL, { assertion });
-    if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return { kind: "unlock-lost" }; }
+    // The assertion may have verified and opened the window with only its answer lost: `me` decides the pill.
+    if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
     this.reached(true);
     if (got.status === 200 && got.body.unlocked === true) {
+      this.unlocks += 1;
       this.mirror.opened(got.body.unlock_s);
       this.changed();
       return true;
@@ -450,15 +491,44 @@ export class Unlock {
   }
 
   /** Rule 7: what op status says, never success by default and never a new token. */
-  private async recover(op: FrozenOp, why: "duplicate" | "lost" | "uncertain"): Promise<Outcome> {
+  private async recover(op: FrozenOp, why: "duplicate" | "lost" | "uncertain", relocked = false): Promise<Outcome> {
     let status: OpStatus | null = null;
     if (op.n) {
       const got = await this.deps.fetchJson(opStatusUrl(op.n));
       if (!got.ok && got.why === "signed-out") { this.deps.signedOut(); return { kind: "signed-out" }; }
       status = got.ok ? parseOpStatus(got.body) : null;
     }
-    if (definite(status)) this.unsure.delete(op.key); else this.unsure.add(op.key);
-    return { kind: "recovered", why, status };
+    const id = op.n ?? op.token;
+    if (definite(status)) this.forget(op.key, id); else this.remember(op.key, id);
+    return relocked ? { kind: "recovered", why, status, relocked: true } : { kind: "recovered", why, status };
+  }
+
+  /** Whether a control has an op whose outcome is still unknown. */
+  isUnsure(key: string): boolean { return !!this.unsure.get(key)?.size; }
+
+  private remember(key: string, id: string): void {
+    const ids = this.unsure.get(key) ?? new Set<string>();
+    ids.add(id);
+    this.unsure.set(key, ids);
+  }
+
+  private forget(key: string, id: string): void {
+    const ids = this.unsure.get(key);
+    if (!ids) return;
+    ids.delete(id);
+    if (!ids.size) this.unsure.delete(key);
+  }
+
+  /** Rule 7: each still-unknown op on the control, read again; only its own definite status settles it. */
+  private async settle(key: string): Promise<void> {
+    const ids = this.unsure.get(key);
+    if (!ids) return;
+    for (const id of [...ids]) {
+      if (!NONCE_RE.test(id)) continue;
+      const got = await this.deps.fetchJson(opStatusUrl(id));
+      if (!got.ok && got.why === "signed-out") { this.deps.signedOut(); return; }
+      if (got.ok && definite(parseOpStatus(got.body))) this.forget(key, id);
+    }
   }
 
   /** Lock now: the window ends on the server; the mirror follows only a 200. */
@@ -467,6 +537,8 @@ export class Unlock {
     if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return "unreached"; }
     this.reached(true);
     if (got.status === 200) {
+      // An action in flight that answers 2xx after this does not slide the pill back open (Opus L2).
+      this.lockEpoch += 1;
       this.mirror.lock();
       this.changed();
       return "locked";
@@ -494,24 +566,31 @@ export class Unlock {
       case "signed-out":
         return "";
       case "cancelled":
-        return "Cancelled, or Face ID did not verify: nothing was sent.";
+        return `Cancelled, or Face ID did not verify: ${nothing(outcome.sent)}.`;
       case "needs-tap":
         return "Face ID needs a fresh tap: press Unlock and send.";
       case "unlock-lost":
-        return "No answer to the unlock: nothing was sent. Tap again.";
-      case "unlock-refused":
-        if (outcome.status === 409) return "The unlock expired or was replaced: nothing was sent. Tap again.";
-        if (outcome.status === 503) return "Passkeys are unavailable at Jarvis: nothing was sent.";
-        if (outcome.status === 401) return "Not accepted: Face ID was not verified. Nothing was sent.";
-        if (outcome.status === 429) return "Too many requests from this phone: nothing was sent. Wait a minute.";
-        return `Not unlocked (${outcome.status}): nothing was sent.`;
+        return `No answer to the unlock: ${nothing(outcome.sent)}. Tap again.`;
+      case "unlock-refused": {
+        const n = nothing(outcome.sent);
+        if (outcome.status === 409) return `The unlock expired or was replaced: ${n}. Tap again.`;
+        if (outcome.status === 503) return `Passkeys are unavailable at Jarvis: ${n}.`;
+        if (outcome.status === 401) return `Not accepted: Face ID was not verified. ${n[0].toUpperCase() + n.slice(1)}.`;
+        if (outcome.status === 429) return `Too many requests from this phone: ${n}. Wait a minute.`;
+        return `Not unlocked (${outcome.status}): ${n}.`;
+      }
       case "expired":
-        return key && this.unsure.has(key)
-          ? "This tap expired before it was sent. The earlier tap is still unknown: check at the desk."
+        // A 410 means the request reached Jarvis and was refused unrun.
+        return key && this.isUnsure(key)
+          ? "This tap expired and was refused unrun. The earlier tap is still unknown: check at the desk."
           : "This tap expired: nothing was done. Tap again.";
       case "locked-again":
         return "Locked again before it could be sent: nothing was done. Tap again.";
       case "recovered": {
+        // Our own resend after a 423 met its token already used: the 423 refused it after admission.
+        if (outcome.why === "duplicate" && outcome.relocked && outcome.status?.state === "refused") {
+          return "Locked before it ran: nothing was done. Tap again.";
+        }
         const lead = outcome.why === "duplicate" ? "This tap was already sent."
           : outcome.why === "lost" ? "No answer came back." : "Jarvis could not say how it ended.";
         return `${lead} ${opWords(outcome.status)}.`;
@@ -520,6 +599,11 @@ export class Unlock {
   }
 
   stop(): void { this.pool.stop(); }
+}
+
+/** What did not happen: on the 423 path the action POST went and was refused, so "nothing was done". */
+function nothing(sent: true | undefined): string {
+  return sent ? "nothing was done" : "nothing was sent";
 }
 
 /** An empty pool's words (rule 1). */
