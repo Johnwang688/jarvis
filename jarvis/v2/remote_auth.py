@@ -68,22 +68,44 @@ on the remote listener (`projects.is_owner` is false there by construction):
 the request arrived on this daemon's remote listener, `Host` is exactly the
 configured name, a valid session cookie names an active passkey, and any
 method but GET/HEAD carries exactly `Origin: https://<host>`. Refusals are
-400 (Host), 403 (Origin), 401 (session), with no body detail. Item 5, a fresh
-assertion per Allow and Always, is P-4's: `answer_options` issues a
-challenge bound to one approval, one answer ("allow" or "always"), the
-session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
-single use, 60 s, at most 4 per session), and `answer_verify` checks it as
-`login_verify` checks a sign-in, plus that binding and that the credential
-is the session's own passkey; P-5's irreversible task verb (cancel) takes
-the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
+400 (Host), 403 (Origin), 401 (session), with no body detail.
+
+**Item 5 is the unlock window (WS-5c, replacing PH-4's fresh assertion per
+action; `docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5).** One
+passkey assertion opens it: `unlock_options` issues a challenge bound to
+`unlock:<session id>`, "unlock", the session, its passkey and the session's
+`_unlock_gen` (single use, 60 s, one per session: asking again replaces
+it), and `unlock_verify` checks it as `login_verify` checks a sign-in, plus
+that binding, the generation and the session's own passkey, saves the
+counter, and only then opens `_unlocks[token hash]` for `UNLOCK_S` (1 h) on
+the monotonic clock, in memory only (a restart locks every phone). Every
+gated action (Allow, Always, a deferral's Approve and retry, cancel, every
+PR action, Approve selected, Done, Undo) calls `require_unlocked`, which
+slides it, or raises `Locked`: exactly `locked_reply()`, 423
+`{"error": "locked", "unlock": true}`, never 401, taken before `AuthError`
+by every catch. A session-only action slides an open window
+(`touch_unlock`) and never opens one; reads, the stream, `me`, stt and push
+never touch it. Every ending (Lock now, logout, the desk's End, a revoke,
+expiry or prune, a session found ended) runs `_end_unlock` under the lock:
+the window goes, the session's unlock challenges are deleted and its
+generation is bumped (Lock now), or retired with its ops (every other).
+
+**Op tokens (§5.3a)**: each gated action spends one server-issued token
+(`issue_ops`: HMAC-SHA256 under `_op_key`, 32 random bytes made at start,
+over `{sid, n, t}` with the server's issue time), checked after the window:
+signature (410: forged or from before a restart) and session (400) outside
+any lock, then in `Ops.admit`, as one step under its lock with one `now`, the
+token's time (410), pruning, a duplicate (409, never run again), the rate
+and the capacity (429, `Rate.take_if`), and the `running` record. Records
+are kept until the token expires, never for a running op, never evicted;
+`op_status` reads one back by this session's digest only.
+
 Past the session, `api_route` hands P-7's `POST /m/api/stt` to
 `remote_stt`, P-6's push paths to `push`, the morning review's
-`/m/api/review...` to `review` (its Approve selected's assertion bound to
-`defers:<56 hex>`, `review.subject`), PM-D's PR actions
-(`/m/api/inbox/pr...`) to `pr_merge` (each assertion bound to `pr:<56 hex>`,
-`pr_merge.subject`, its own family and budget), P-4's answer paths to
-`remote_answer`, P-5's writes to `remote_write`, and every other path but
-logout and `me` to `remote_api` (P-3's reads and event stream); a logout,
+`/m/api/review...` to `review`, PM-D's PR action (`/m/api/inbox/pr`) to
+`pr_merge`, P-4's answer paths to `remote_answer`, P-5's writes and WS-5c's
+Done and Undo to `remote_write`, and every other path but logout, `me` and
+the unlock and op routes to `remote_api` (P-3's reads and event stream); a logout,
 the desk's End and a revoke tell `on_end` (P-6 deletes that session's or
 passkey's push subscriptions); `session_live` is the
 stream's check, which does not touch last-seen. `recently_active` is
@@ -138,43 +160,45 @@ CHALLENGE_BYTES = 32
 # is evicted. Registration ones exist only while a window is open.
 MAX_LOGIN_CHALLENGES = 32
 MAX_REGISTER_CHALLENGES = 8
-# Per-answer challenges (PH-4, P-4): their own pool, only for a signed-in
-# phone, so neither sign-ins nor answers can crowd the other out; and capped
-# per session, never across sessions (review of PR #313), so one session's
-# abandoned prompts can never refuse another's. The same session asking again
-# for the same card and answer replaces its earlier challenge.
-MAX_ANSWER_CHALLENGES_PER_SESSION = 4
+# The unlock window (WS-5c, `docs/plans/2026-11-15-ws5-phone-working-set-plan.md`
+# §5): one passkey assertion opens it for `UNLOCK_S`, and every gated action
+# (Allow, Always, a deferral's Approve and retry, cancel, every PR action,
+# Approve selected, Done and Undo) slides it. In memory only, on the
+# monotonic clock: a restart locks every phone. No hard stop but the session.
+UNLOCK_S = 3600
+# Unlock challenges: their own pool, only for a signed-in phone, at most one
+# per session (asking again replaces the earlier one), so the bound across
+# sessions is one per session.
+MAX_UNLOCK_CHALLENGES_PER_SESSION = 1
 ANSWER_NONCE_BYTES = 32
-# What a per-answer challenge binds: PH-4's sha256(req_id ‖ answer ‖ nonce),
-# each part delimited (a req_id is `token_urlsafe`, never a NUL).
-ANSWER_DOMAIN = b"jarvis-phone-answer-v1\x00"
-ANSWER_DECISIONS = ("allow", "always")
-# P-5: a task verb that cannot be undone takes the same per-answer assertion,
-# bound to `task:<task id>` and the verb (a cancel ends the task for good:
-# `CANCELLED` is terminal and only a blocked task resumes). An approval's
-# req_id (`token_urlsafe`) never holds a colon, so the two never meet; and a
-# verb's subject never takes an approval's answer, nor the reverse.
-TASK_DECISIONS = ("cancel",)
-_TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
-# QH: an Approve and retry of a deferred approval (`remote_answer.defer_binding`):
-# one deferral, `defer:<id>`; the morning review's Approve selected
-# (`review.subject`, MR-6): a set, `defers:<56 hex>` over every id and its tag.
-# Only "allow" is ever an answer for either.
-DEFER_DECISIONS = ("allow",)
-_DEFER_SUBJECT = re.compile(r"defer:[A-Za-z0-9_-]{1,58}|defers:[0-9a-f]{56}")
-# PM-D: the owner's action on an inbox PR row (`pr_merge.subject`): `pr:` and
-# 56 hex of a digest of the repository, number, head, card and action. Fix is
-# PM-E's (its route answers 501 until then); its subject is the same family.
-PR_DECISIONS = ("merge", "merge_as_is", "update", "fix")
-_PR_SUBJECT = re.compile(r"pr:[0-9a-f]{56}")
+# What an unlock challenge binds: sha256(subject ‖ "unlock" ‖ nonce), each part
+# delimited, under its own domain. The subject is `unlock:<session id>`.
+UNLOCK_DOMAIN = b"jarvis-phone-unlock-v1\x00"
+UNLOCK_DECISIONS = ("unlock",)
+_UNLOCK_SUBJECT = re.compile(r"unlock:s-[0-9a-f]{16}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
-# The most answer challenges there can be at once (a bound, never a shared cap):
-# per session, one budget per family (an approval's answer, a task verb, a
-# deferral's Approve and retry, a morning review's set; review of #329, LOW 4).
-ANSWER_FAMILIES = ("approval", "task", "defer", "review", "pr")
-MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * len(ANSWER_FAMILIES)
+# The challenge families a signed-in phone can hold (WS-5c removed the
+# per-action ones: approval, task, defer, review, pr), and the most there can
+# be at once (a bound, never a shared cap).
+ANSWER_FAMILIES = ("unlock",)
+MAX_ANSWER_CHALLENGES = MAX_UNLOCK_CHALLENGES_PER_SESSION * MAX_SESSIONS * len(ANSWER_FAMILIES)
+# Operation tokens (WS-5c §5.3a): replay protection without per-action
+# challenges. Server-issued, signed with a key made at start and held only in
+# memory (a restart makes every earlier token fail), good for `OP_TTL_S` from
+# the server's own issue time, at most `OP_FUTURE_S` ahead of now.
+OP_TTL_S = 600
+OP_FUTURE_S = 1.0
+OP_TOKENS = 4             # handed out per request
+OP_KEY_BYTES = 32
+OP_NONCE_BYTES = 16
+OP_DOMAIN = b"jarvis-phone-op-v1\x00"
+OP_ISSUE_RATE = 30        # token requests per `OP_ISSUE_S`, per session
+OP_ISSUE_S = 60.0
+# The `Ops` store's bounds: a full store refuses (429), never evicts.
+OPS_PER_SESSION = 64
+OPS_MAX = OPS_PER_SESSION * MAX_SESSIONS
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
 UA_CAP = 160
@@ -192,15 +216,47 @@ _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206
 
 
 class AuthError(Exception):
-    """A refusal with its status and a fixed word: never the input, never why."""
+    """A refusal with its status and a fixed word: never the input, never why.
+    `extra` holds fixed, code-written fields only (an op's `duplicate` and
+    `state`, an expired token's `expired`)."""
 
-    def __init__(self, status: int, word: str):
+    def __init__(self, status: int, word: str, extra: dict | None = None):
         super().__init__(word)
         self.status = status
         self.word = word
+        self.extra = dict(extra or {})
 
 
 UNAUTHORIZED = "unauthorized"
+LOCKED = "locked"
+
+
+class Locked(AuthError):
+    """WS-5c §5.3: a gated action while this session's unlock window is
+    closed. Always exactly `locked_reply()`, never a 401 (the phone reads a
+    401 as signed out), and every catch takes it before `AuthError`."""
+
+    def __init__(self):
+        super().__init__(423, LOCKED, {"unlock": True})
+
+
+def locked_reply() -> tuple[int, dict, list]:
+    """The one answer for a closed window: 423 {"error": "locked", "unlock": true}."""
+    return 423, {"error": LOCKED, "unlock": True}, []
+
+
+# The statuses whose own words a phone route passes on (code-written, fixed);
+# anything else is the status's fixed word (`WORDS`).
+OWN_WORDS = (409, 410, 429, 503)
+
+
+def auth_reply(exc: AuthError) -> tuple[int, dict, list]:
+    """An `AuthError` as a phone route answers it (`Locked` is taken first,
+    by every catch): its own words for 409, 410, 429 and 503 plus its fixed
+    extra fields; else the status's fixed word."""
+    if exc.status in OWN_WORDS:
+        return exc.status, {"error": exc.word, **exc.extra}, []
+    return exc.status, {"error": WORDS.get(exc.status, UNAUTHORIZED)}, []
 
 
 def _refuse(why: str) -> AuthError:
@@ -265,7 +321,255 @@ def _client_challenge(credential) -> str:
     return challenge
 
 
-INSTALL_WEBAUTHN = "passkeys need the webauthn package: uv pip install -e . in the daemon's venv"
+# -- operation tokens and the Ops store (WS-5c §5.3a) ------------------------------------
+
+_OP_TOKEN = re.compile(r"o1\.([A-Za-z0-9_-]{1,400})\.([A-Za-z0-9_-]{43})")
+_OP_NONCE = re.compile(r"[A-Za-z0-9_-]{22}")          # 16 bytes, base64url
+FORGED_OP = ("this tap is from before Jarvis restarted, or is not genuine: nothing was done by "
+             "this request")
+EXPIRED_OP = "this tap expired: nothing was done by this request"
+OP_DUPLICATE = "already sent"
+OP_REUSED = "op token reused"
+OPS_FULL = "too many actions are still recorded; wait a minute"
+RATE_WORD = "too many writes from this phone; wait a minute"
+OP_ISSUE_WORD = "too many requests for tap tokens; wait a minute"
+OP_STATES = ("running", "completed", "refused", "uncertain")
+# The fixed words a confirmed result is recorded as, per family (Sol r5-2,
+# r6-2): never model text, never a response body. A PR result is
+# `PrActions._outcome`'s phrase; "changed" is the 422 exception path
+# (`pr_merge.py`), never a normal return.
+PR_CODES = {"merged": "merged", "updated": "updated", "update requested": "update_requested",
+            "not updated": "not_updated", "not read again": "not_read_again", "changed": "changed",
+            "queued": "queued", "head moved": "head_moved", "closed": "closed",
+            "not mergeable": "not_mergeable"}
+OP_CODES = {"pr": frozenset(PR_CODES.values()),
+            "approval": frozenset({"allowed", "always_written"}),
+            "task": frozenset({"cancelled"}),
+            "working": frozenset({"done", "undone"}),
+            "review": frozenset({"approved"})}
+
+
+def parse_op(token) -> dict:
+    """Step 1 of §5.3: an op token's shape, or 400. `o1.` ‖ base64url of the
+    payload `{sid, n, t}` ‖ `.` ‖ base64url of its HMAC-SHA256. Only shape:
+    the signature and the session are `RemoteAuth.verify_op`'s (after the
+    window), the time `Ops.admit`'s (inside its lock)."""
+    if not isinstance(token, str):
+        raise AuthError(400, "bad request")
+    found = _OP_TOKEN.fullmatch(token)
+    if found is None:
+        raise AuthError(400, "bad request")
+    try:
+        payload, mac = unb64url(found.group(1)), unb64url(found.group(2))
+        fields = json.loads(payload)
+    except (ValueError, UnicodeDecodeError):
+        raise AuthError(400, "bad request") from None
+    if (not isinstance(fields, dict) or set(fields) != {"sid", "n", "t"} or len(mac) != 32
+            or not isinstance(fields["sid"], str) or not _SESSION_ID.fullmatch(fields["sid"])
+            or not isinstance(fields["n"], str) or not _OP_NONCE.fullmatch(fields["n"])
+            or not _is_num(fields["t"])):
+        raise AuthError(400, "bad request")
+    return {"payload": payload, "mac": mac, "sid": fields["sid"], "n": fields["n"], "t": float(fields["t"])}
+
+
+def op_digest(method: str, path: str, body: dict) -> str:
+    """What one op token is spent on: sha256 of the method, the path and the
+    canonical body without the token."""
+    data = {k: v for k, v in body.items() if k != "op"} if isinstance(body, dict) else {}
+    text = "\x00".join((method, path, json.dumps(data, sort_keys=True, separators=(",", ":"),
+                                                 ensure_ascii=True, default=str)))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def op_outcome(family: str, status: int, payload, result) -> tuple[str, str]:
+    """(outcome, code) of an op whose mutation returned: `ok` only when the
+    route's own answer says so (a 2xx with `ok` true, or a 2xx of a family
+    whose answer has no `ok`), `unknown` for "not read again" and the 409
+    uncertain reply, else `failed`; the code from the family's fixed words,
+    else `other`."""
+    payload = payload if isinstance(payload, dict) else {}
+    if family == "pr" and isinstance(result, str):
+        result = PR_CODES.get(result)
+    code = result if isinstance(result, str) and result in OP_CODES.get(family, ()) else "other"
+    if code == "not_read_again" or payload.get("uncertain") is True:
+        return "unknown", code
+    if 200 <= status < 300:
+        if "ok" in payload:
+            return ("ok" if payload["ok"] is True else "failed"), code
+        return "ok", code
+    return "failed", code
+
+
+def op_words(state: str, outcome, code) -> str:
+    """What the phone shows for an op's recorded state (§5.3a): "Done" only
+    for a completed op whose result was confirmed and is not an Update
+    GitHub only accepted (Sol r6-1)."""
+    if state == "running":
+        return "Still running"
+    if state == "refused" or (state == "completed" and outcome == "failed"):
+        return "Not done"
+    if state == "completed" and outcome == "ok":
+        return "Update requested; check at the desk" if code == "update_requested" else "Done"
+    if state == "completed":
+        return "Finished; check at the desk"
+    return "Unknown: check at the desk"
+
+
+class Op:
+    """One admitted operation: its key, its reservation, and how far the
+    route got (`admitted`, then `mutating` immediately before the mutation
+    call, then `returned` once it returned). `result` is the code-written
+    result the route saw (`op_outcome`)."""
+
+    def __init__(self, ops: "Ops", key: tuple[str, str], reservation: str):
+        self.ops = ops
+        self.key = key
+        self.reservation = reservation
+        self.phase = "admitted"
+        self.result = None
+
+    def mutating(self) -> None:
+        self.phase = "mutating"
+
+    def returned(self) -> None:
+        self.phase = "returned"
+
+
+class Ops:
+    """The admitted operations, by (session digest, nonce): `{state, digest,
+    reservation, expires, outcome, code}`, kept until the token's own expiry
+    and never for a `running` one. One lock serialises admission, every state
+    change and pruning; nothing is evicted (a full store is 429). The lock
+    order is always this lock, then the session rate's (`Rate.take_if`)."""
+
+    def __init__(self, mono):
+        self.mono = mono
+        self._lock = threading.Lock()
+        self._records: dict[tuple[str, str], dict] = {}
+
+    def _prune(self, now: float) -> None:
+        # A running record is never pruned: its token is refused (410) by the
+        # same snapshot's time check before this runs.
+        self._records = {k: r for k, r in self._records.items()
+                         if r["state"] == "running" or now < r["expires"]}
+
+    def admit(self, session_digest: str, n: str, t: float, digest: str, rate) -> str:
+        """Step 4 of §5.3, as one step under the lock with one `now`: the
+        token's time (410), pruning, a duplicate (409), the rate and the
+        capacity (429, through `rate(room)`, which records a write only when
+        both pass), then the record, `running`. Returns its reservation."""
+        with self._lock:
+            now = self.mono()
+            if not (t <= now + OP_FUTURE_S and now < t + OP_TTL_S):
+                raise AuthError(410, EXPIRED_OP, {"expired": True})
+            self._prune(now)
+            key = (session_digest, n)
+            found = self._records.get(key)
+            if found is not None:
+                if hmac.compare_digest(found["digest"], digest):
+                    raise AuthError(409, OP_DUPLICATE, {"duplicate": True, "state": found["state"]})
+                raise AuthError(409, OP_REUSED)
+
+            def room() -> bool:
+                # Called by `Rate.take_if` with this lock already held: it
+                # reads the records and never takes the lock again.
+                mine = sum(1 for k in self._records if k[0] == session_digest)
+                return mine < OPS_PER_SESSION and len(self._records) < OPS_MAX
+            verdict = rate(room)
+            if verdict == "rate":
+                raise AuthError(429, RATE_WORD)
+            if verdict != "go":
+                raise AuthError(429, OPS_FULL)
+            reservation = secrets.token_hex(16)
+            self._records[key] = {"state": "running", "digest": digest, "reservation": reservation,
+                                  "expires": t + OP_TTL_S, "outcome": None, "code": None}
+            return reservation
+
+    def mark(self, key, reservation: str, state: str, outcome=None, code=None) -> bool:
+        """A running record's terminal state, named by its reservation: one
+        that does not match (pruned, retired, another record) changes
+        nothing. No state ever releases the token."""
+        if state not in OP_STATES or state == "running":
+            return False
+        with self._lock:
+            record = self._records.get(key)
+            if (record is None or record["state"] != "running"
+                    or not hmac.compare_digest(record["reservation"], reservation)):
+                return False
+            record.update(state=state, outcome=outcome, code=code)
+            return True
+
+    def settle(self, op: Op, answer, family: str) -> None:
+        """The state of `op` from how far its route got and what it
+        answered: never mutated (an exception or a definite refusal)
+        `refused`; an exception after `mutating` before the call returned
+        `uncertain`; the call returned `completed`, with its outcome (an
+        exception while the answer was built: `unknown`)."""
+        if op.phase == "admitted":
+            self.mark(op.key, op.reservation, "refused")
+        elif op.phase == "mutating":
+            self.mark(op.key, op.reservation, "uncertain", "unknown")
+        elif answer is None:
+            self.mark(op.key, op.reservation, "completed", "unknown",
+                      op_outcome(family, 409, {"uncertain": True}, op.result)[1])
+        else:
+            outcome, code = op_outcome(family, answer[0], answer[1], op.result)
+            self.mark(op.key, op.reservation, "completed", outcome, code)
+
+    def status(self, session_digest: str, n: str) -> dict:
+        """`{state, outcome, code, words}` of this session's op `n`; another
+        session's, a pruned one or one never admitted is `unknown`."""
+        with self._lock:
+            record = self._records.get((session_digest, n))
+            if record is None:
+                return {"state": "unknown", "outcome": None, "code": None,
+                        "words": op_words("unknown", None, None)}
+            return {"state": record["state"], "outcome": record["outcome"], "code": record["code"],
+                    "words": op_words(record["state"], record["outcome"], record["code"])}
+
+    def retire(self, session_digest: str) -> None:
+        """A session ended: every record of it goes (its tokens can never
+        verify again: their `sid` no longer exists)."""
+        with self._lock:
+            self._records = {k: r for k, r in self._records.items() if k[0] != session_digest}
+
+    def count(self, session_digest: str | None = None) -> int:
+        with self._lock:
+            if session_digest is None:
+                return len(self._records)
+            return sum(1 for k in self._records if k[0] == session_digest)
+
+
+def gated(handler, session: dict, path: str, body: dict, op: dict, family: str, act):
+    """Steps 2 to 6 of §5.3 for one gated action whose body (and op token,
+    `parse_op`) already passed step 1: the window (423; nothing else runs),
+    the token's signature and session (400, 410), admission (410, 409, 429),
+    QH-3's presence, then `act(ticket)`, the route's act-time checks and its
+    mutation, which answers `(status, payload, headers)` and calls
+    `ticket.mutating()` immediately before the mutation and
+    `ticket.returned()` once it returned. The op's state is settled however
+    `act` ends."""
+    from . import remote_write
+    auth = handler.remote_auth
+    rate = remote_write.rate_of(handler.server)
+    digest = session.get("token_sha256") or ""
+    ticket = auth.admit_op(session, handler.command, path, body, op,
+                           lambda room: rate.take_if(digest, remote_write.clock(), room))
+    seen = getattr(getattr(handler, "daemon", None), "owner_seen", None)
+    if callable(seen):
+        try:
+            seen()                      # QH-3: an authorised gated action is presence
+        except Exception as exc:  # noqa: BLE001 — never why an action fails
+            LOG.warning("phone: presence not recorded (%s)", type(exc).__name__)
+    answer = None
+    try:
+        answer = act(ticket)
+        return answer
+    finally:
+        auth.ops.settle(ticket, answer, family)
+
+
+INSTALL_WEBAUTHN ="passkeys need the webauthn package: uv pip install -e . in the daemon's venv"
 
 
 def _webauthn():
@@ -376,6 +680,18 @@ class RemoteAuth:
         # revoked: `fn("session", id)` / `fn("passkey", key)`. P-6's push
         # deletes the subscriptions that belonged to it (push.Push.ended).
         self.on_end: list = []
+        # WS-5c: each session's unlock window, by token hash: {passkey,
+        # until (monotonic)}; and its generation, bumped by every ending, which
+        # an unlock challenge must still carry when it is verified. Memory
+        # only: a restart locks every phone.
+        self._unlocks: dict[str, dict] = {}
+        self._unlock_gen: dict[str, int] = {}
+        # §5.3a: the op tokens' signing key, this process's own (a restart
+        # makes every earlier token fail), the admitted ops, and each
+        # session's recent token requests.
+        self._op_key = secrets.token_bytes(OP_KEY_BYTES)
+        self.ops = Ops(lambda: self.mono())
+        self._issued: dict[str, list] = {}
 
     # -- files -----------------------------------------------------------------------
 
@@ -558,24 +874,19 @@ class RemoteAuth:
         self._challenges = {k: c for k, c in self._challenges.items() if c["expires"] > now}
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
-        if kind == "answer":
-            # Per session (`answer_options`), and per family (P-5; the
-            # deferrals' own since the review of #329, LOW 4): a task verb's
-            # prompts, a deferral's or a morning review's and an approval's
-            # are counted apart, so abandoned cancel or group prompts can
-            # never refuse a live card's Allow, nor the reverse. Bounded by
-            # MAX_SESSIONS times that, per family.
+        if kind == "unlock":
+            # Per session (`unlock_options` replaces this session's earlier
+            # one first), so one session's prompts never refuse another's.
             mine = [c for c in self._challenges.values()
-                    if c["kind"] == "answer" and c.get("session") == extra.get("session")
-                    and c.get("family", "approval") == extra.get("family", "approval")]
-            full = len(mine) >= MAX_ANSWER_CHALLENGES_PER_SESSION
+                    if c["kind"] == "unlock" and c.get("session") == extra.get("session")]
+            full = len(mine) >= MAX_UNLOCK_CHALLENGES_PER_SESSION
         else:
             cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
             full = sum(1 for c in self._challenges.values() if c["kind"] == kind) >= cap
         if full:
             # Refused, never evicting a pending one (module note).
             raise AuthError(429, "too many sign-ins in progress; try again in a minute"
-                            if kind != "answer" else "too many answers in progress; try again in a minute")
+                            if kind != "unlock" else "too many unlocks in progress; try again in a minute")
         if challenge is None:
             challenge = secrets.token_bytes(CHALLENGE_BYTES)
         self._challenges[b64url(challenge)] = {"kind": kind, "expires": now + CHALLENGE_S, **extra}
@@ -723,91 +1034,111 @@ class RemoteAuth:
                      stored["key"], session["advisory"]["login"] or "nothing")
             return token, dict(session)
 
-    # -- per-answer assertions (PH-4, P-4) -------------------------------------------------
+    # -- the unlock window (WS-5c §5.1, §5.2) -------------------------------------------
 
     @staticmethod
-    def answer_challenge(req_id: str, decision: str, nonce: bytes) -> bytes:
-        """PH-4's challenge: sha256(req_id ‖ answer ‖ nonce), each part
-        delimited, under a fixed domain prefix."""
-        return hashlib.sha256(ANSWER_DOMAIN + req_id.encode("utf-8") + b"\x00"
-                              + decision.encode("ascii") + b"\x00" + nonce).digest()
+    def unlock_challenge(subject: str, nonce: bytes) -> bytes:
+        """An unlock's challenge: sha256(subject ‖ "unlock" ‖ nonce), each
+        part delimited, under its own domain prefix."""
+        return hashlib.sha256(UNLOCK_DOMAIN + subject.encode("utf-8") + b"\x00"
+                              + b"unlock" + b"\x00" + nonce).digest()
 
     def _session_passkey(self, session: dict) -> dict:
         """The session's own passkey, still paired and unrevoked, of a
-        session that still holds; else 401."""
-        row = self._sessions.get(session.get("token_sha256")) if isinstance(session, dict) else None
+        session that still holds; else 401 (and a session found ended has
+        its window, challenges and ops retired: §5.8)."""
+        digest = session.get("token_sha256") if isinstance(session, dict) else None
+        row = self._sessions.get(digest) if isinstance(digest, str) else None
         if row is None or self._expired(row, self.wall()):
+            if isinstance(digest, str):
+                self._end_unlock(digest, retire=True, why="the session ended")
             raise _refuse("the session ended")
         passkey = self._by_key(row["passkey"])
         if passkey is None or passkey.get("revoked") is not None:
+            self._end_unlock(digest, retire=True, why="the passkey was revoked")
             raise _refuse("the session's passkey is revoked")
         return passkey
 
-    def answer_options(self, session: dict, req_id: str, decision: str) -> dict:
-        """The request options for one answer (PH-4): a challenge bound to
-        this approval, this exact answer ("allow" or "always"; or, P-5, the
-        task `task:<id>` and "cancel", `TASK_DECISIONS`), this session
-        and its passkey; single use, `CHALLENGE_S` on the monotonic clock,
-        at most `MAX_ANSWER_CHALLENGES_PER_SESSION` per session (asking again
-        for the same card and answer replaces the earlier one). `allowCredentials`
-        names the session's own passkey only."""
+    def _end_unlock(self, digest: str, *, retire: bool = False, why: str = "") -> None:
+        """Under `self._lock`: the window of the session with this token hash
+        ends, every unlock challenge it holds is deleted (so an assertion
+        signed before and delivered after is 409: Sol r2-1), and its
+        generation is bumped. `retire` (the session itself ended): its
+        generation entry, its ops and its token-request record go instead."""
+        had = self._unlocks.pop(digest, None) is not None
+        self._challenges = {k: c for k, c in self._challenges.items()
+                            if not (c["kind"] == "unlock" and c.get("session") == digest)}
+        if retire:
+            self._unlock_gen.pop(digest, None)
+            self._issued.pop(digest, None)
+            self.ops.retire(digest)
+        else:
+            self._unlock_gen[digest] = self._unlock_gen.get(digest, 0) + 1
+        if had:
+            LOG.info("phone: an unlock window ended (%s)", why or "ended")
+
+    def _open_unlock(self, digest: str, passkey: dict) -> dict | None:
+        """The session's window when it is open and was opened by this
+        passkey, else None (a lapsed one is dropped)."""
+        held = self._unlocks.get(digest)
+        if held is None:
+            return None
+        if held["passkey"] != passkey["key"] or not self.mono() < held["until"]:
+            self._unlocks.pop(digest, None)
+            LOG.info("phone: an unlock window lapsed")
+            return None
+        return held
+
+    def unlock_options(self, session: dict) -> dict:
+        """The request options for one unlock (§5.2): a challenge bound to
+        `unlock:<session id>`, "unlock", this session, its passkey and its
+        generation now; single use, `CHALLENGE_S` on the monotonic clock, at
+        most one per session (asking again replaces the earlier one).
+        `allowCredentials` names the session's own passkey only."""
         webauthn, structs = _webauthn()
-        if not isinstance(req_id, str) or not req_id or len(req_id) > 64:
-            raise AuthError(400, "bad request")
-        task = _TASK_SUBJECT.fullmatch(req_id) is not None
-        defer = _DEFER_SUBJECT.fullmatch(req_id) is not None
-        pr = _PR_SUBJECT.fullmatch(req_id) is not None
-        allowed = (TASK_DECISIONS if task else DEFER_DECISIONS if defer else PR_DECISIONS if pr
-                   else ANSWER_DECISIONS)
-        if decision not in allowed or (not task and not defer and not pr and ":" in req_id):
-            raise AuthError(400, "bad request")
         with self._lock:
             self._require_usable()
             passkey = self._session_passkey(session)
-            # This session asking again for this card and this answer: the
-            # earlier challenge goes (its prompt was abandoned or retried).
-            # A morning review's set (`defers:`) replaces every earlier set of
-            # this session: only the latest confirmation can be answered.
-            group = req_id.startswith("defers:")
-
-            def replaced(c) -> bool:
-                if c["kind"] != "answer" or c.get("session") != session["token_sha256"]:
-                    return False
-                if group and str(c.get("req_id", "")).startswith("defers:"):
-                    return True
-                return c.get("req_id") == req_id and c.get("decision") == decision
-            self._challenges = {k: c for k, c in self._challenges.items() if not replaced(c)}
+            digest = session["token_sha256"]
+            subject = "unlock:" + self._sessions[digest]["id"]
+            self._challenges = {k: c for k, c in self._challenges.items()
+                                if not (c["kind"] == "unlock" and c.get("session") == digest)}
             nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
-            challenge = self.answer_challenge(req_id, decision, nonce)
-            self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
-                        session=session["token_sha256"], passkey=passkey["key"], task=task,
-                        family="task" if task else ("review" if group else "defer") if defer
-                        else "pr" if pr else "approval")
+            challenge = self.unlock_challenge(subject, nonce)
+            self._issue("unlock", challenge, subject=subject, decision="unlock", nonce=nonce,
+                        session=digest, passkey=passkey["key"],
+                        generation=self._unlock_gen.get(digest, 0))
             options = webauthn.generate_authentication_options(
                 rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
                 allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
                 user_verification=structs.UserVerificationRequirement.REQUIRED)
             return json.loads(webauthn.options_to_json(options))
 
-    def answer_verify(self, session: dict, credential, req_id: str, decision: str) -> None:
-        """Verify one answer's assertion (PH-4), or raise: its challenge is
-        spent first (a failed attempt spends it too; unknown, used or
-        expired is 409); it must have been issued for exactly this approval,
-        this answer, this session and its passkey (an Allow's assertion is
-        never an Always, nor any other card's); the credential is the
-        session's own passkey, unrevoked; `crossOrigin` is not true;
+    def unlock_verify(self, session: dict, credential) -> dict:
+        """Open this session's window for one verified assertion (§5.2), all
+        under `self._lock`: the challenge is spent first (unknown, used,
+        expired, replaced or deleted by an ending: 409); it must have been
+        issued for this session's subject, "unlock", this session and the
+        generation it still has (else 409), and its passkey; the credential is
+        the session's own passkey, unrevoked; `crossOrigin` is not true;
         origin, rpId, the UV flag, the signature and the counter rule as at
-        sign-in. Every failure but the challenge's is 401, with no detail."""
+        sign-in (each 401, no detail). The counter is saved (a failed save is
+        503 and the window stays closed); only then does the window open."""
         webauthn, _structs = _webauthn()
         with self._lock:
             self._require_usable()
             key = _client_challenge(credential)
-            challenge, entry = self._spend(key, "answer")
-            if (entry.get("req_id") != req_id or entry.get("decision") != decision
-                    or entry.get("session") != session.get("token_sha256")
-                    or not hmac.compare_digest(challenge, self.answer_challenge(
-                        entry["req_id"], entry["decision"], entry["nonce"]))):
-                raise _refuse("the assertion was issued for another answer")
+            challenge, entry = self._spend(key, "unlock")
+            digest = session.get("token_sha256") if isinstance(session, dict) else None
+            row = self._sessions.get(digest) if isinstance(digest, str) else None
+            if (row is None or entry.get("session") != digest or entry.get("decision") != "unlock"
+                    or entry.get("subject") != "unlock:" + row["id"]
+                    or not _UNLOCK_SUBJECT.fullmatch(str(entry.get("subject")))
+                    or not hmac.compare_digest(challenge, self.unlock_challenge(entry["subject"],
+                                                                                entry["nonce"]))):
+                raise _refuse("the assertion was issued for another unlock")
+            if entry.get("generation") != self._unlock_gen.get(digest, 0):
+                raise AuthError(409, "challenge expired")
             passkey = self._session_passkey(session)
             if entry.get("passkey") != passkey["key"]:
                 raise _refuse("the assertion was issued for another passkey")
@@ -825,19 +1156,125 @@ class RemoteAuth:
                     credential_current_sign_count=passkey["sign_count"],
                     require_user_verification=REQUIRE_UV)
             except Exception as exc:     # noqa: BLE001
-                raise _refuse(f"answer assertion: {type(exc).__name__}") from None
+                raise _refuse(f"unlock assertion: {type(exc).__name__}") from None
             if REQUIRE_UV and not verified.user_verified:
-                raise _refuse("answer assertion without user verification")
+                raise _refuse("unlock assertion without user verification")
             if not counter_ok(passkey["sign_count"], int(verified.new_sign_count)):
                 raise _refuse("signature counter did not increase")
             now = self.wall()
             updated = dict(passkey, sign_count=int(verified.new_sign_count), last_used=now)
             rows = [updated if p is passkey else p for p in self._passkeys]
-            # The counter is saved before the answer counts: a write that
+            # The counter is saved before the window opens: a write that
             # fails refuses it (503), so a counter can never go back.
             self._write_passkeys(rows, self._user_handle)
             self._passkeys = rows
-            LOG.info("phone: passkey %s verified an answer (%s)", passkey["key"], decision)
+            self._unlocks[digest] = {"passkey": passkey["key"], "until": self.mono() + UNLOCK_S}
+            LOG.info("phone: passkey %s unlocked session %s for %d s", passkey["key"], row["id"], UNLOCK_S)
+            return {"unlocked": True, "unlock_s": UNLOCK_S}
+
+    def require_unlocked(self, session: dict) -> None:
+        """Every gated action's check (§5.3), in place of a per-action
+        assertion: the phone state usable (503), the session live and its
+        passkey unrevoked (401), and its window open, opened by that passkey
+        (else `Locked`, 423). It slides the window: `UNLOCK_S` from now."""
+        with self._lock:
+            self._require_usable()
+            passkey = self._session_passkey(session)
+            held = self._open_unlock(session["token_sha256"], passkey)
+            if held is None:
+                raise Locked()
+            held["until"] = self.mono() + UNLOCK_S
+
+    def touch_unlock(self, session: dict) -> None:
+        """A session-only action (Deny, Withdraw, Start, Resume, a message, an
+        answer, Leave): an **open** window slides; a closed one stays closed.
+        Never raises."""
+        with self._lock:
+            if self._broken or not isinstance(session, dict):
+                return
+            digest = session.get("token_sha256")
+            row = self._sessions.get(digest) if isinstance(digest, str) else None
+            if row is None or self._expired(row, self.wall()):
+                return
+            passkey = self._by_key(row["passkey"])
+            if passkey is None or passkey.get("revoked") is not None:
+                return
+            held = self._open_unlock(digest, passkey)
+            if held is not None:
+                held["until"] = self.mono() + UNLOCK_S
+
+    def unlock_left(self, session: dict) -> int:
+        """`me`'s `unlock_s`: whole seconds left in this session's window (0
+        when closed). A read: it never slides the window."""
+        with self._lock:
+            digest = session.get("token_sha256") if isinstance(session, dict) else None
+            held = self._unlocks.get(digest) if isinstance(digest, str) else None
+            row = self._sessions.get(digest) if isinstance(digest, str) else None
+            if held is None or row is None or held["passkey"] != row["passkey"]:
+                return 0
+            return max(0, int(held["until"] - self.mono()))
+
+    def lock(self, session: dict) -> dict:
+        """Lock now (`POST /m/api/lock`): this session's window ends and its
+        pending unlock challenges are deleted; the session stays."""
+        with self._lock:
+            digest = session.get("token_sha256") if isinstance(session, dict) else None
+            if isinstance(digest, str):
+                self._end_unlock(digest, why="Lock now")
+            LOG.info("phone: session %s locked from the phone", session.get("id"))
+            return {"unlocked": False}
+
+    # -- operation tokens (WS-5c §5.3a) ---------------------------------------------------
+
+    def _op_token(self, sid: str, now: float) -> str:
+        payload = json.dumps({"sid": sid, "n": b64url(secrets.token_bytes(OP_NONCE_BYTES)), "t": now},
+                             sort_keys=True, separators=(",", ":")).encode("ascii")
+        mac = hmac.new(self._op_key, OP_DOMAIN + payload, hashlib.sha256).digest()
+        return "o1." + b64url(payload) + "." + b64url(mac)
+
+    def issue_ops(self, session: dict) -> dict:
+        """`GET /m/api/ops/tokens`: `OP_TOKENS` fresh tokens for this
+        session, issued now by the server's clock. Session only, a read: it
+        never slides the window, and stores nothing but the request's time
+        (`OP_ISSUE_RATE` per `OP_ISSUE_S`, 429 past it)."""
+        with self._lock:
+            self._require_usable()
+            self._session_passkey(session)
+            digest = session["token_sha256"]
+            now = self.mono()
+            for key in [k for k, seen in self._issued.items() if not seen or now - seen[-1] >= OP_ISSUE_S]:
+                del self._issued[key]
+            seen = [at for at in self._issued.get(digest, []) if now - at < OP_ISSUE_S]
+            if len(seen) >= OP_ISSUE_RATE:
+                raise AuthError(429, OP_ISSUE_WORD)
+            seen.append(now)
+            self._issued[digest] = seen
+            sid = self._sessions[digest]["id"]
+            return {"tokens": [self._op_token(sid, now) for _ in range(OP_TOKENS)], "ttl_s": OP_TTL_S}
+
+    def verify_op(self, session: dict, op: dict) -> None:
+        """Checks 2 and 3 of §5.3a (outside any lock): the HMAC under this
+        process's key (else 410: forged, or from before a restart), and the
+        token's session is this one (else 400)."""
+        mac = hmac.new(self._op_key, OP_DOMAIN + op["payload"], hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, op["mac"]):
+            raise AuthError(410, FORGED_OP)
+        if not isinstance(session, dict) or op["sid"] != session.get("id"):
+            raise AuthError(400, "bad request")
+
+    def admit_op(self, session: dict, method: str, path: str, body: dict, op: dict, rate) -> Op:
+        """Steps 2 to 4 of §5.3, in order: `require_unlocked` (423, and
+        nothing else runs), `verify_op` (400, 410), then `Ops.admit` (410,
+        409, 429). The admitted `Op`."""
+        self.require_unlocked(session)
+        self.verify_op(session, op)
+        digest = session["token_sha256"]
+        reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)
+        return Op(self.ops, (digest, op["n"]), reservation)
+
+    def op_status(self, session: dict, n: str) -> dict:
+        """`GET /m/api/ops/<n>`: this session's op `n` only (`Ops.status`)."""
+        return self.ops.status(session.get("token_sha256") or "", n)
 
     def passkey_ready(self, session: dict | None = None) -> tuple[bool, str]:
         """§4.1 condition 4, without the assertion: the passkeys read, and a
@@ -898,13 +1335,17 @@ class RemoteAuth:
     def _prune_sessions(self) -> bool:
         now = self.wall()
         active = {p["key"] for p in self._active()}
-        before = len(self._sessions)
+        before = set(self._sessions)
         self._sessions = {h: r for h, r in self._sessions.items()
                           if r["passkey"] in active and not self._expired(r, now)}
         while len(self._sessions) > MAX_SESSIONS:
             oldest = min(self._sessions, key=lambda h: self._sessions[h]["last_seen"])
             del self._sessions[oldest]
-        return len(self._sessions) != before
+        gone = before - set(self._sessions)
+        for digest in gone:
+            # Expiry, a revoked passkey, or `MAX_SESSIONS` eviction (§5.8).
+            self._end_unlock(digest, retire=True, why="the session was pruned")
+        return bool(gone)
 
     def session_for(self, cookie_values: list[str] | None) -> dict | None:
         """The live session the request's `Cookie` header(s) name, or None:
@@ -927,6 +1368,7 @@ class RemoteAuth:
             passkey = self._by_key(row["passkey"])
             if passkey is None or passkey.get("revoked") is not None or self._expired(row, now):
                 del self._sessions[digest]
+                self._end_unlock(digest, retire=True, why="the session expired or its passkey was revoked")
                 self._try_save_sessions()
                 return None
             row["last_seen"] = max(row["last_seen"], now)
@@ -945,12 +1387,13 @@ class RemoteAuth:
             if self._broken or not isinstance(digest, str):
                 return False
             row = self._sessions.get(digest)
-            if row is None:
+            passkey = self._by_key(row["passkey"]) if row is not None else None
+            if (row is None or passkey is None or passkey.get("revoked") is not None
+                    or self._expired(row, self.wall())):
+                # Found ended: its window, challenges and ops go (§5.8).
+                self._end_unlock(digest, retire=True, why="the session ended")
                 return False
-            passkey = self._by_key(row["passkey"])
-            if passkey is None or passkey.get("revoked") is not None:
-                return False
-            return not self._expired(row, self.wall())
+            return True
 
     def _try_save_sessions(self) -> None:
         try:
@@ -961,6 +1404,7 @@ class RemoteAuth:
     def logout(self, session: dict) -> None:
         with self._lock:
             self._sessions.pop(session["token_sha256"], None)
+            self._end_unlock(session["token_sha256"], retire=True, why="signed out")
             self._try_save_sessions()
             LOG.info("phone: session %s signed out", session["id"])
             self._ended("session", session["id"])
@@ -971,6 +1415,7 @@ class RemoteAuth:
             for digest, row in list(self._sessions.items()):
                 if row["id"] == session_id:
                     del self._sessions[digest]
+                    self._end_unlock(digest, retire=True, why="ended from the HUD")
                     self._try_save_sessions()
                     LOG.info("phone: session %s ended from the HUD", session_id)
                     self._ended("session", session_id)
@@ -1000,6 +1445,10 @@ class RemoteAuth:
                 self._mark_saved()
                 LOG.info("phone: passkey %s revocation saved on retry", key)
                 return True
+            # In memory, before the save that may fail (Sol r4): the passkey
+            # is marked revoked, its sessions go, and each one's window,
+            # challenges and ops are retired.
+            ended = [h for h, r in self._sessions.items() if r["passkey"] == key]
             self._sessions = {h: r for h, r in self._sessions.items() if r["passkey"] != key}
             rows = [dict(p, revoked=self.wall(), unsaved=True) if p is passkey else p
                     for p in self._passkeys]
@@ -1008,6 +1457,8 @@ class RemoteAuth:
                 rows.remove(old)
             self._passkeys = rows
             self._unsaved = True
+            for digest in ended:
+                self._end_unlock(digest, retire=True, why="the passkey was revoked")
             self._try_save_sessions()
             LOG.info("phone: passkey %s revoked", key)
             # Before the write that may fail (503): the revoke holds in
@@ -1033,6 +1484,16 @@ class RemoteAuth:
                       ", ".join(keys) or "(unknown)")
             return keys
 
+    def _unlocked_until(self, digest: str, row: dict) -> float | None:
+        """WS-5c §5.8: when this session's window ends as it stands, on the
+        wall clock (the desk shows "unlocked until HH:MM"), or None when it is
+        closed. A read: it never slides the window."""
+        held = self._unlocks.get(digest)
+        if held is None or held["passkey"] != row["passkey"]:
+            return None
+        left = held["until"] - self.mono()
+        return self.wall() + left if left > 0 else None
+
     def _mark_saved(self) -> None:
         """The file now has every revocation: drop the in-memory marks."""
         if not self._unsaved:
@@ -1051,10 +1512,11 @@ class RemoteAuth:
                 self._try_save_sessions()
             window = self._window_open()
             sessions_of: dict[str, list] = {}
-            for row in sorted(self._sessions.values(), key=lambda r: -r["last_seen"]):
+            for digest, row in sorted(self._sessions.items(), key=lambda kv: -kv[1]["last_seen"]):
                 sessions_of.setdefault(row["passkey"], []).append(
                     {"id": row["id"], "ua": row["ua"], "created": row["created"],
-                     "last_seen": row["last_seen"], "advisory": dict(row["advisory"])})
+                     "last_seen": row["last_seen"], "advisory": dict(row["advisory"]),
+                     "unlocked_until": self._unlocked_until(digest, row)})
             passkeys = [{"key": p["key"], "created": p["created"], "last_used": p["last_used"],
                          "backed_up": p["backed_up"], "sessions": sessions_of.get(p["key"], [])}
                         for p in self._active()]
@@ -1139,8 +1601,8 @@ def is_remote_owner(handler) -> bool:
 # -- the phone's routes (on the remote listener only) ------------------------------
 
 WORDS = {400: "bad request", 401: UNAUTHORIZED, 403: "cross-origin request refused",
-         404: "not found", 409: "conflict", 413: "request body too large",
-         503: "passkeys unavailable"}
+         404: "not found", 409: "conflict", 410: "gone", 413: "request body too large",
+         423: LOCKED, 429: "too many requests", 503: "passkeys unavailable"}
 
 PAIR_OPTIONS = "/m/api/pair/options"
 PAIR_VERIFY = "/m/api/pair/verify"
@@ -1148,6 +1610,13 @@ LOGIN_OPTIONS = "/m/api/login/options"
 LOGIN_VERIFY = "/m/api/login/verify"
 LOGOUT = "/m/api/logout"
 ME = "/m/api/me"
+# WS-5c: the unlock window, Lock now, and the op tokens with their status.
+UNLOCK_OPTIONS = "/m/api/unlock/options"
+UNLOCK = "/m/api/unlock"
+LOCK = "/m/api/lock"
+OPS_TOKENS = "/m/api/ops/tokens"
+OPS_PREFIX = "/m/api/ops/"
+UNLOCK_ROUTES = {UNLOCK_OPTIONS: "POST", UNLOCK: "POST", LOCK: "POST", OPS_TOKENS: "GET"}
 # The only routes a request without a session reaches, POST each.
 OPEN_ROUTES = frozenset({PAIR_OPTIONS, PAIR_VERIFY, LOGIN_OPTIONS, LOGIN_VERIFY})
 
@@ -1212,13 +1681,19 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
             auth.logout(session)
             return 200, {"signed_in": False}, [("Set-Cookie", cleared_cookie())]
         if path == ME and method in ("GET", "HEAD"):
-            # §4.1's last result, to show (P-4): never what authorizes.
+            # §4.1's last result, to show (P-4): never what authorizes; and
+            # the seconds left in the unlock window (WS-5c), a read that never
+            # slides it.
             return 200, {"signed_in": True, "paired": True,
                          "session": {"created": session["created"],
                                      "ends": session["created"] + ABSOLUTE_S},
-                         "secure": secure_view(getattr(handler, "daemon", None))}, []
+                         "secure": secure_view(getattr(handler, "daemon", None)),
+                         "unlock_s": auth.unlock_left(session)}, []
         if path in (LOGOUT, ME):
             return 404, {"error": WORDS[404]}, []
+        unlocked = _unlock_route(handler, auth, path, session, body)
+        if unlocked is not None:
+            return unlocked
         # P-7's push to talk (`remote_stt`): a clip in, its text out, never sent.
         from . import remote_stt
         heard = remote_stt.route(handler, path, session, body)
@@ -1255,9 +1730,65 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
             return written
         from . import remote_api
         return remote_api.route(handler, path, session)
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, UNAUTHORIZED)
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
+
+
+_OPS_PATH = re.compile(r"/m/api/ops/([A-Za-z0-9_-]{1,64})")
+
+
+def _query_of(handler) -> str:
+    from urllib.parse import urlsplit
+    return urlsplit(getattr(handler, "path", "") or "").query
+
+
+def _unlock_route(handler, auth: RemoteAuth, path: str, session: dict, body: bytes):
+    """WS-5c's own routes past the session check, or None for any other path:
+
+      POST /m/api/unlock/options {}            the unlock challenge (§5.2)
+      POST /m/api/unlock         {assertion}   open the window
+      POST /m/api/lock           {}            Lock now: end it
+      GET  /m/api/ops/tokens                   fresh op tokens (§5.3a), a read
+      GET  /m/api/ops/<n>                      one op's recorded state, a read
+
+    A query string is 400; another method 405. Neither read slides the
+    window, and each re-checks the session before it answers (401)."""
+    want = UNLOCK_ROUTES.get(path)
+    status_read = want is None and path.startswith(OPS_PREFIX)
+    if want is None and not status_read:
+        return None
+    method = handler.command
+    if method != (want or "GET"):
+        return 405, {"error": "method not allowed"}, [("Allow", want or "GET")]
+    if _query_of(handler):
+        return 400, {"error": WORDS[400]}, []
+    digest = session.get("token_sha256")
+    if status_read:
+        found = _OPS_PATH.fullmatch(path)
+        if found is None or not _OP_NONCE.fullmatch(found.group(1)):
+            return 400, {"error": WORDS[400]}, []
+        payload = auth.op_status(session, found.group(1))
+        if not auth.session_live(digest):
+            return 401, {"error": UNAUTHORIZED}, []
+        return 200, payload, []
+    if path == OPS_TOKENS:
+        payload = auth.issue_ops(session)
+        if not auth.session_live(digest):
+            return 401, {"error": UNAUTHORIZED}, []
+        return 200, payload, []
+    value = _json_body(body)
+    if path == UNLOCK:
+        credential = value.get("assertion")
+        if set(value) != {"assertion"} or not isinstance(credential, dict):
+            raise AuthError(400, "bad request")
+        return 200, auth.unlock_verify(session, credential), []
+    if value:
+        raise AuthError(400, "bad request")
+    if path == UNLOCK_OPTIONS:
+        return 200, {"publicKey": auth.unlock_options(session)}, []
+    return 200, auth.lock(session), []
 
 
 # -- the HUD's owner-only routes (the HUD listener) --------------------------------

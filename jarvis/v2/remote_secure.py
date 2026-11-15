@@ -21,8 +21,10 @@ these holds. Each is a check here, by name:
   passkey       the passkeys file reads, and a paired, unrevoked passkey
                 exists (registration and every assertion require user
                 verification, `remote_auth.REQUIRE_UV`); before an answer,
-                the session's own passkey is that. The answer's assertion is
-                fresh and user-verified (`RemoteAuth.answer_verify`);
+                the session's own passkey is that. This is readiness only,
+                for reads and actions alike: whether the session's unlock
+                window is open is `RemoteAuth.require_unlocked`'s, checked
+                apart from this monitor (WS-5c §5.5);
   listeners     nothing else listens on the port: in WSL, `/usr/bin/ss`
                 lists exactly one listener on it, 127.0.0.1, whose socket
                 inode is the listener's own; on Windows,
@@ -31,7 +33,7 @@ these holds. Each is a check here, by name:
                 then its end line (`windows_listeners_argv`).
 
 **When it runs.** At start-up and every `INTERVAL_S` (5 minutes), from a
-thread of its own; and **again, in full, before every verified answer and
+thread of its own; and **again, in full, before every gated answer and
 every private card's detail** (`check`), never from a cache. The last result
 is kept only to show it (`view`: the phone's `/m/api/me`, the desk's
 `/status`), never to authorize, so a failure is never masked by an older

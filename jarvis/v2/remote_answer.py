@@ -1,5 +1,6 @@
 """Answering from the phone (phone surface design PH-4, PH-7, §4.1, §5;
-work package P-4).
+work package P-4; the unlock window of WS-5c,
+`docs/plans/2026-11-15-ws5-phone-working-set-plan.md` §5).
 
 Every route here is under `/m/api/` on the remote listener and is reached
 only through `remote_auth.api_route`, **after** `remote_auth.owner_status`
@@ -9,30 +10,30 @@ Origin). Nothing here is the HUD, and `projects.is_owner` is never true on
 this listener.
 
     GET  /m/api/inbox/<id>/detail           an approval's card, to answer it
-    POST /m/api/inbox/<id>/answer/options   {decision: "allow"|"always"}
+    GET  /m/api/inbox/<id>/answer/rule      the rule an Always would write, and its preview
     POST /m/api/inbox/<id>/answer           an answer, any answerable kind
     POST /m/api/inbox/decisions/<id>        a decision's answer (B1)
 
-**Deny cheap, authorize deliberate, made physical (PH-4).** Deny
+**Deny cheap, authorize deliberate (PH-4, as WS-5c amends it).** Deny
 (`{decision: "deny"}`) needs the session only, on any card, a HUD-only one
-included. Allow and Always each need their own passkey assertion: the phone
-asks `answer/options` for a challenge bound to this approval, this exact
-answer and this session (`RemoteAuth.answer_options`: single use, 60 s, at
-most 4 per session), the owner verifies on the phone (Face ID or the passcode),
-and `answer` carries `{decision, assertion}`. The assertion is verified
-(`RemoteAuth.answer_verify`: origin, rpId, the UV flag, the counter rule,
-`crossOrigin` not true, the session's own passkey) **before** anything is
-answered, and an assertion for Allow is never an Always, nor any other
-card's.
+included. Allow (`{decision: "allow", op}`) and Always (`{decision:
+"always", preview, op}`) are gated actions: they need the session's unlock
+window open (one passkey assertion opens it for an hour and every gated
+action slides it: `RemoteAuth.require_unlocked`, 423 `locked_reply()` when
+closed) and spend one server-issued op token (`remote_auth.gated`: a
+duplicate is 409 and never runs again). The order is fixed: the body's
+shape and the token's (400), the window (423, nothing else runs), the token
+(410, 400), its admission (410, 409, 429), then every act-time check below
+(409), then the answer.
 
-**HUD authority only under §4.1 (PH-7, O-3).** After the assertion, every
-§4.1 check runs again, in full (`remote_secure.SecureMonitor.check`, with
-this session and this request). All pass: the answer carries
-`owner_verified=True`, the HUD's authority: Always, and the HUD-only
-(Browser) cards. Any fails ("limited"): Discord's authority. Allow on an
-ordinary card still goes (`owner_verified=False`); Always is refused (409),
-and a HUD-only card says "answer at the desk" (409). The only other caller
-that may pass `owner_verified=True` is the HUD's own route.
+**HUD authority only under §4.1 (PH-7, O-3).** At act time every §4.1 check
+runs again, in full (`remote_secure.SecureMonitor.check`, with this session
+and this request). All pass: the answer carries `owner_verified=True`, the
+HUD's authority: Always, and the HUD-only (Browser) cards. Any fails
+("limited"): Discord's authority. Allow on an ordinary card still goes
+(`owner_verified=False`); Always is refused (409), and a HUD-only card says
+"answer at the desk" (409). The only other caller that may pass
+`owner_verified=True` is the HUD's own route.
 
 **The owner never authorizes what they cannot fully see.** The card the
 phone answers from is the HUD's own projection (`ApprovalRequest.to_json`,
@@ -42,7 +43,7 @@ But the phone's scrub (`remote_api._scrub`: `chat_reads.scrub` plus labelled
 values) still applies to everything sent off the box. **If it would change
 any field of the card, Allow and Always are refused** ("this card has
 withheld text: answer it at the desk"): the phone is sent the scrubbed card
-and may only Deny it. Checked at the detail, at the options and again at
+and may only Deny it. Checked at the detail, at the rule read and again at
 the answer.
 
 **A HUD-only card's private detail** (`owner_details`) is sent only by
@@ -50,26 +51,30 @@ the answer.
 session, and only while every §4.1 check holds (fresh). It never enters the
 inbox list (`remote_api.inbox`, the private projection), the event stream
 (`remote_api.stream_record`, ids only), a push or a log line: nothing here
-logs a card, an argument or an answer's text.
+logs a card, an argument or an answer's text. A read: it works while
+locked and never slides the window.
 
-**Always shows its rule first.** `answer/options` for "always" returns the
-exact entry `PendingApprovals.resolve(always=True)` would write
-(`PendingApprovals.always_rule`, a dry run that writes nothing), and the
-phone shows it before the passkey prompt. The entry is written only by the
-verified answer.
+**Always shows its rule first, read without a challenge (WS-5c §5.4).**
+`GET .../answer/rule` runs the checks Always's options ran (pending, §4.1,
+`_gate`) and returns exactly `RULE_FIELDS`: the entry
+`PendingApprovals.resolve(always=True)` would write (`always_rule`, a dry
+run), keys only from `RULE_ENTRY_FIELDS`, its sentence, the resolution, and
+`preview` (`preview_of`). An entry with another key, or a part the phone's
+scrub would change, is shown only at the desk (409): never a partial rule.
+Its own final `session_live` check holds before it leaves. The Always sends
+`preview`; the server recomputes the rule at act time, and another digest is
+409 (`RULE_CHANGED`). The preview binds the rule's freshness, not that a
+human saw it: inside the window the session is the owner's authority.
 
 **A deferred approval (QH, `quiet_defer.py`).** Leave it (`{action:
 "leave"}`) needs the session only. Approve and retry (`{action: "retry",
-assertion}`) needs its own passkey assertion, asked for at `answer/options`
-with `{decision: "allow"}` and bound to `defer:<id>` (a namespace no
-approval's id can take: theirs hold no colon), this answer and this
-session, verified before anything is written, single use. A card the
-phone's scrub would change is refused (`WITHHELD`), and a HUD-only one is
-never granted. The grant itself is `quiet_defer.answer` with `via="phone"`
-and `verified` true, passed by `_answer_deferred` only, after the assertion.
-A morning review's Approve selected (`review.py`, MR-6) is its own route
-and its own subject (`defers:`); a `defer:<id>` assertion never answers it,
-nor the reverse.
+op}`) is gated, bound to the deferral id in the URL; at act time the full
+`_deferral` lookup runs (still waiting, grantable, under a day, its card
+whole), then `_gate_deferral` (HUD-only while limited, a scrub-changed
+card). No tag is added (the morning review's Approve selected keeps its
+tags and its locked-store check: `review.py`). The grant itself is
+`quiet_defer.answer` with `via="phone"` and `verified` true, passed by
+`_answer_deferred` only, after admission.
 
 **Questions, task questions and decisions** need the session only, as on
 the HUD, through the inbox's own dispatch (`inbox.answer`, IN-2) with
@@ -81,14 +86,20 @@ only, Deny's footing: it refuses work an agent proposed, inside the
 proposal's grace window, through the inbox's own dispatch
 (`TaskControl.cancel`, as `POST /tasks/<id>/cancel`), and it is recorded in
 the task's journal as the phone's (`remote_write.record`). Cancelling a task
-that already runs is `remote_write`'s, and takes the passkey.
+that already runs is `remote_write`'s, and is gated. A session-only answer
+that lands slides an open window (`touch_unlock`) and never opens one.
 
 SELF_PROTECTED: it decides what the phone may answer, and with whose
-authority. Tests: tests/v2/remote_answer_check.py.
+authority. Tests: tests/v2/remote_answer_check.py, tests/v2/remote_unlock_check.py.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
+import re
+from urllib.parse import urlsplit
 
 LOG = logging.getLogger(__name__)
 
@@ -96,7 +107,15 @@ API = "/m/api/"
 WITHHELD = "this card has withheld text: answer it at the desk"
 AT_DESK = "answer at the desk"
 NO_ALWAYS = "this card takes no Always"
+GONE = "this item is no longer waiting; it was answered or its source has gone"
 DECISIONS = ("allow", "always", "deny")
+# WS-5c §5.4: Always's rule as the phone may be sent it, and its digest.
+RULE_FIELDS = ("rule", "rule_words", "resolution", "preview")
+RULE_ENTRY_FIELDS = ("tool", "prefix")
+RULE_AT_DESK = "this rule is shown only at the desk"
+RULE_CHANGED = "the rule changed: read it again"
+PREVIEW_DOMAIN = b"jarvis-phone-always-v1\x00"
+_PREVIEW = re.compile(r"[0-9a-f]{64}")
 
 
 class _Refused(Exception):
@@ -114,8 +133,8 @@ def _match(parts: list[str]):
         return "detail", parts[1]
     if len(parts) == 3 and parts[0] == "inbox" and parts[2] == "answer":
         return "answer", parts[1]
-    if len(parts) == 4 and parts[0] == "inbox" and parts[2] == "answer" and parts[3] == "options":
-        return "options", parts[1]
+    if len(parts) == 4 and parts[0] == "inbox" and parts[2] == "answer" and parts[3] == "rule":
+        return "rule", parts[1]
     return None
 
 
@@ -274,19 +293,6 @@ def _row_builder():
     return _row
 
 
-def defer_binding(record_id) -> str:
-    """What one Approve and retry's assertion is bound to, in place of an
-    approval's `req_id` in `RemoteAuth.answer_challenge` (sha256 of the
-    binding, the answer "allow" and a nonce): `defer:<id>` (an approval's id
-    holds no colon, so neither can stand for the other). A morning review's
-    Approve selected binds its whole set to `review.subject` (`defers:` and
-    56 hex of a digest of every id and its tag, MR-6), even for one item;
-    neither route takes the other's assertion."""
-    if not isinstance(record_id, str) or not record_id or "\n" in record_id or ":" in record_id:
-        raise _Refused(400, "bad request")
-    return f"defer:{record_id}"
-
-
 def _gate_deferral(record: dict, secure: dict) -> None:
     """`_gate`'s refusals for an Allow, for a deferred card: a HUD-only one
     while limited (never granted anyway) and one the phone's scrub would
@@ -297,38 +303,58 @@ def _gate_deferral(record: dict, secure: dict) -> None:
         raise _Refused(409, WITHHELD)
 
 
-def _defer_key(record_id: str) -> str:
-    return defer_binding(record_id)
+# -- Always's rule, read without a challenge (WS-5c §5.4) ---------------------------
 
 
-def options(handler, daemon, session, row: str, body: dict) -> dict:
-    """`POST .../answer/options`: the challenge for one Allow or Always
-    (PH-4), after the refusals that need no passkey; for Always, the rule.
-    For a deferred row (QH), the challenge for its Approve and retry."""
-    decision = _decision(body, ("allow", "always"))
-    if set(body) - {"decision"}:
-        raise _Refused(400, "bad request")
+def preview_of(req_id: str, entry, resolution: str) -> str:
+    """What an Always binds: sha256 of the domain, the request id, the
+    canonical JSON of the **raw** entry and the resolution, 64 hex. It binds
+    the rule's freshness (the rule written is the rule this request has
+    now), not that a human saw it: it is public, and inside the unlock
+    window the session is the owner's authority (§5.4, §9 item 2)."""
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    data = (PREVIEW_DOMAIN + req_id.encode("utf-8") + canonical.encode("ascii") + b"\x00"
+            + str(resolution).encode("utf-8"))
+    return hashlib.sha256(data).hexdigest()
+
+
+def _rule(daemon, request) -> dict:
+    """The rule an Always on `request` would write, as the phone may be sent
+    it (`RULE_FIELDS`), or a refusal. An entry with any key outside
+    `RULE_ENTRY_FIELDS`, a value that is not a string, or a `tool`, `prefix`,
+    rule sentence or resolution the phone's scrub would change is shown only
+    at the desk (409): never a partial rule."""
+    from .remote_api import _scrub
+    try:
+        entry, resolution = daemon.approvals.always_rule(request.req_id)
+    except ValueError:
+        raise _Refused(409, GONE) from None
+    if entry is not None:
+        if (not isinstance(entry, dict) or set(entry) - set(RULE_ENTRY_FIELDS)
+                or not all(isinstance(v, str) for v in entry.values())):
+            raise _Refused(409, RULE_AT_DESK)
+    words = rule_words(entry)
+    shown = [words, resolution] + (list(entry.values()) if entry else [])
+    if not isinstance(resolution, str) or any(_scrub(s) != s for s in shown):
+        raise _Refused(409, RULE_AT_DESK)
+    return {"rule": dict(entry) if entry else None, "rule_words": words, "resolution": resolution,
+            "preview": preview_of(request.req_id, entry, resolution)}
+
+
+def rule(handler, daemon, session, row: str) -> dict:
+    """`GET .../answer/rule`: the rule an Always would write and its
+    `preview`, after the checks Always's options made: the card pending,
+    §4.1, and `_gate`'s refusals (private while limited, Always while limited,
+    a card that takes none, a scrub-changed card). Session only: it works
+    while locked and never slides the window. A deferred row takes no
+    Always (409)."""
     if _split(row)[0] == "defer":
-        if decision != "allow":
-            raise _Refused(409, NO_ALWAYS)
-        record_id, _record = _deferral(daemon, row)
-        # The same checks as an Allow's options (#326 review, L5).
-        secure = _monitor(daemon).check(session=session, handler=handler)
-        _gate_deferral(_record, secure)
-        return {"decision": "allow",
-                "publicKey": handler.remote_auth.answer_options(session, _defer_key(record_id), "allow")}
+        raise _Refused(409, NO_ALWAYS)
     request = _request(daemon, row)
     secure = _monitor(daemon).check(session=session, handler=handler)
-    _gate(daemon, request, decision, secure)
-    out: dict = {"decision": decision}
-    if decision == "always":
-        try:
-            entry, resolution = daemon.approvals.always_rule(request.req_id)
-        except ValueError:
-            raise _Refused(409, "this item is no longer waiting; it was answered or its source has gone") from None
-        out.update(rule=entry, rule_words=rule_words(entry), resolution=resolution)
-    out["publicKey"] = handler.remote_auth.answer_options(session, request.req_id, decision)
-    return out
+    _gate(daemon, request, "always", secure)
+    shown = _rule(daemon, request)
+    return {k: shown[k] for k in RULE_FIELDS}
 
 
 def _gate(daemon, request, decision: str, secure: dict) -> None:
@@ -361,8 +387,23 @@ def _dispatch(daemon, row_id: str, body: dict, *, owner_verified: bool) -> dict:
         raise _Refused(409, _word(exc)) from None
 
 
-def answer(handler, daemon, session, row: str, body: dict) -> dict:
-    """`POST .../answer`: one answer to one row."""
+def _catch(fn):
+    """`fn()`'s answer, a refusal as its status: the act-time half of a
+    gated action (`remote_auth.gated`)."""
+    try:
+        return fn()
+    except _Refused as exc:
+        return exc.status, {"error": exc.word, **exc.extra}, []
+    except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
+        from .remote_write import UNCERTAIN
+        LOG.exception("phone: an answer failed (%s)", type(exc).__name__)
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
+
+
+def answer(handler, daemon, session, path: str, row: str, body: dict):
+    """`POST .../answer`: one answer to one row, as (status, payload,
+    headers)."""
+    from .remote_auth import gated, parse_op
     row_id = row
     prefix, _rest, _ = _split(row_id)
     if prefix == "prop":
@@ -378,44 +419,66 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
             LOG.exception("phone: a withdraw failed (%s)", type(exc).__name__)
             raise _Refused(409, UNCERTAIN, {"uncertain": True}) from None
         record(daemon, _rest, "withdraw")
-        return out
+        return _session_only(handler, session, out)
     if prefix == "defer":
-        return _answer_deferred(handler, daemon, session, row_id, body)
+        return _answer_deferred(handler, daemon, session, path, row_id, body)
     if prefix != "appr":
         # A question, a task question, a decision: the session is enough,
         # as on the HUD. The dispatch checks the body's shape.
-        return _dispatch(daemon, row_id, body, owner_verified=False)
+        return _session_only(handler, session, _dispatch(daemon, row_id, body, owner_verified=False))
     decision = _decision(body)
     if decision == "deny":
         if set(body) - {"decision"}:
             raise _Refused(400, "bad request")
         _request(daemon, row_id)
-        return _dispatch(daemon, row_id, {"decision": "deny"}, owner_verified=False)
-    if set(body) - {"decision", "assertion"}:
+        return _session_only(handler, session,
+                             _dispatch(daemon, row_id, {"decision": "deny"}, owner_verified=False))
+    # Allow and Always: gated (WS-5c §5.3). Step 1, the body: Allow is exactly
+    # {decision, op}; Always {decision, preview, op}.
+    want = {"decision", "op"} | ({"preview"} if decision == "always" else set())
+    if set(body) != want:
         raise _Refused(400, "bad request")
-    assertion = body.get("assertion")
-    if not isinstance(assertion, dict):
-        raise _Refused(401, "an Allow or an Always needs the passkey")
-    request = _request(daemon, row_id)
-    # PH-4 first: the assertion, bound to this card and this answer.
-    handler.remote_auth.answer_verify(session, assertion, request.req_id, decision)
-    seen = getattr(daemon, "owner_seen", None)
-    if callable(seen):
-        seen()                      # QH-3: a verified phone answer is presence
-    # Then every §4.1 check, in full, with this session and this request.
-    secure = _monitor(daemon).check(session=session, handler=handler)
-    _gate(daemon, request, decision, secure)
-    owner_verified = bool(secure.get("ok"))
-    out = _dispatch(daemon, row_id, {"decision": "allow", "always": decision == "always"},
-                    owner_verified=owner_verified)
-    return {**out, "authority": "hud" if owner_verified else "limited"}
+    preview = body.get("preview")
+    if decision == "always" and (not isinstance(preview, str) or not _PREVIEW.fullmatch(preview)):
+        raise _Refused(400, "preview must be the rule's 64-hex digest")
+    op = parse_op(body["op"])
+
+    def act(ticket):
+        def run():
+            request = _request(daemon, row_id)
+            # Every §4.1 check, in full, with this session and this request.
+            secure = _monitor(daemon).check(session=session, handler=handler)
+            _gate(daemon, request, decision, secure)
+            if decision == "always":
+                # The rule this request has now must be the rule read (§5.4).
+                shown = _rule(daemon, request)
+                if not hmac.compare_digest(shown["preview"], preview):
+                    raise _Refused(409, RULE_CHANGED)
+            owner_verified = bool(secure.get("ok"))
+            ticket.mutating()
+            out = _dispatch(daemon, row_id, {"decision": "allow", "always": decision == "always"},
+                            owner_verified=owner_verified)
+            ticket.returned()
+            ticket.result = "always_written" if decision == "always" else "allowed"
+            return 200, {**out, "authority": "hud" if owner_verified else "limited"}, []
+        return _catch(run)
+    return gated(handler, session, path, body, op, "approval", act)
 
 
-def _answer_deferred(handler, daemon, session, row_id: str, body: dict) -> dict:
-    """QH: Leave it with the session; Approve and retry only after this
-    deferral's own assertion is verified."""
+def _session_only(handler, session, out: dict):
+    """A session-only answer that landed: it slides an open unlock window,
+    never opening a closed one (WS-5c §5.1)."""
+    handler.remote_auth.touch_unlock(session)
+    return 200, out, []
+
+
+def _answer_deferred(handler, daemon, session, path: str, row_id: str, body: dict):
+    """QH: Leave it with the session; Approve and retry gated (WS-5c), bound
+    to the deferral id in the URL, with the full `_deferral` lookup and
+    `_gate_deferral` at act time."""
     from . import quiet_defer
     from .daemon import APIError
+    from .remote_auth import gated, parse_op
     action = body.get("action")
     if action not in ("retry", "leave"):
         raise _Refused(400, "action must be retry or leave")
@@ -423,39 +486,47 @@ def _answer_deferred(handler, daemon, session, row_id: str, body: dict) -> dict:
     if action == "leave":
         if set(body) - {"action"}:
             raise _Refused(400, "bad request")
-        verified = False
-    else:
-        if set(body) - {"action", "assertion"}:
-            raise _Refused(400, "bad request")
-        assertion = body.get("assertion")
-        if not isinstance(assertion, dict):
-            raise _Refused(401, "Approve and retry needs the passkey")
-        rest, _record = _deferral(daemon, row_id)
-        # The assertion, bound to this deferral and this answer, first.
-        handler.remote_auth.answer_verify(session, assertion, _defer_key(rest), "allow")
-        # Then every §4.1 check, in full, and `_gate`'s refusals, as an Allow
-        # (#326 review, L5); no monitor is a refusal.
-        secure = _monitor(daemon).check(session=session, handler=handler)
-        _rest, record = _deferral(daemon, row_id)   # still waiting and whole after the passkey
-        _gate_deferral(record, secure)
-        seen = getattr(daemon, "owner_seen", None)
-        if callable(seen):
-            seen()                  # QH-3: a verified phone answer is presence
-        verified = True
-    try:
-        return quiet_defer.answer(daemon, rest, {"action": action}, via="phone", verified=verified)
-    except APIError as exc:
-        raise _Refused(exc.status, _word(exc)) from None
+        try:
+            out = quiet_defer.answer(daemon, rest, {"action": "leave"}, via="phone", verified=False)
+        except APIError as exc:
+            raise _Refused(exc.status, _word(exc)) from None
+        return _session_only(handler, session, out)
+    if set(body) != {"action", "op"}:
+        raise _Refused(400, "bad request")
+    if not isinstance(rest, str) or not rest or "\n" in rest or ":" in rest:
+        raise _Refused(400, "bad request")
+    op = parse_op(body["op"])
+
+    def act(ticket):
+        def run():
+            # Still waiting, grantable, under a day and whole; then every
+            # §4.1 check and `_gate`'s refusals, as an Allow (#326 review, L5).
+            record_id, _record = _deferral(daemon, row_id)
+            secure = _monitor(daemon).check(session=session, handler=handler)
+            _gate_deferral(_record, secure)
+            verified = True
+            ticket.mutating()
+            try:
+                out = quiet_defer.answer(daemon, record_id, {"action": "retry"}, via="phone",
+                                         verified=verified)
+            except APIError as exc:
+                raise _Refused(exc.status, _word(exc)) from None
+            ticket.returned()
+            ticket.result = "allowed"
+            return 200, out, []
+        return _catch(run)
+    return gated(handler, session, path, body, op, "approval", act)
 
 
-def decision(handler, daemon, session, row: str, body: dict) -> dict:
+def decision(handler, daemon, session, row: str, body: dict):
     """`POST /m/api/inbox/decisions/<id>`: B1's own function, from the phone."""
     from . import inbox
     from .daemon import APIError
     try:
-        return inbox.answer_decision(daemon, row, body, via="phone")
+        out = inbox.answer_decision(daemon, row, body, via="phone")
     except APIError as exc:
         raise _Refused(exc.status, _word(exc)) from None
+    return _session_only(handler, session, out)
 
 
 def route(handler, path: str, session: dict, body: bytes):
@@ -468,30 +539,31 @@ def route(handler, path: str, session: dict, body: bytes):
         return None
     name, row = matched
     method = handler.command
-    want = "GET" if name == "detail" else "POST"
+    want = "GET" if name in ("detail", "rule") else "POST"
     if method != want:
         return 405, {"error": "method not allowed"}, [("Allow", want)]
     daemon = getattr(handler, "daemon", None)
     auth = getattr(handler, "remote_auth", None)
     if daemon is None or auth is None:
         return 404, {"error": "not found"}, []
-    from .remote_auth import AuthError, _json_body
+    from .remote_auth import AuthError, Locked, auth_reply, locked_reply, _json_body
     try:
-        if name == "detail":
-            payload = detail(handler, daemon, session, row)
-            # The detail may be private: it leaves only while the session holds.
+        if name in ("detail", "rule"):
+            if name == "rule" and urlsplit(getattr(handler, "path", "") or "").query:
+                return 400, {"error": "bad request"}, []
+            payload = (detail if name == "detail" else rule)(handler, daemon, session, row)
+            # The detail may be private, and the rule is a card's: either
+            # leaves only while the session holds.
             if not auth.session_live(session.get("token_sha256")):
                 return 401, {"error": "unauthorized"}, []
             return 200, payload, []
         value = _json_body(body)
-        if name == "options":
-            return 200, options(handler, daemon, session, row, value), []
         if name == "answer":
-            return 200, answer(handler, daemon, session, row, value), []
-        return 200, decision(handler, daemon, session, row, value), []
+            return answer(handler, daemon, session, path, row, value)
+        return decision(handler, daemon, session, row, value)
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
+    except Locked:
+        return locked_reply()
     except AuthError as exc:
-        from .remote_auth import WORDS
-        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
-        return exc.status, {"error": word}, []
+        return auth_reply(exc)
