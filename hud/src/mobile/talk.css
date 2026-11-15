@@ -1,6 +1,6 @@
 /* P-7: push to talk in a chat's message box (talk.ts). Aurora-glass tokens from
    mobile.css; no image or font is loaded, and the mic is drawn with borders
-   (no image, no svg). Since 2026-10-28 the button is a round mic icon beside
+   (no image loads). Code-built inline SVG icons are allowed. Since 2026-10-28 the button is a round mic icon beside
    the message box: 48 px, the least tap target, held, not tapped; it cannot be
    selected or long-press-menued, and takes no scroll gesture while held. Its
    words stay its own text (visually hidden); the line above the bar says what

@@ -291,7 +291,7 @@ def run(browser, check, until):
         pump(lambda: pill.get_attribute("data-state") == "unlocked")
         check("pill: Unlocked · HH:MM (VoiceOver: Unlocked until HH:MM), from the unlock",
               pill.get_attribute("data-state") == "unlocked"
-              and re.fullmatch(r"Unlocked · \d{1,2}:\d{2}( [AP]M)?", pill.inner_text().strip()) is not None
+              and re.fullmatch(r"Unlocked · \d{1,2}:\d{2}( [AP]M)?", pill.text_content().strip()) is not None
               and (pill.get_attribute("aria-label") or "").startswith("Unlocked until "), pill.inner_text())
         check("the window is open at Jarvis (unlock_left > 3500 s)", daemon.remote_auth.unlock_left(session()) > 3500)
 

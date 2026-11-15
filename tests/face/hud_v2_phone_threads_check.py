@@ -482,7 +482,7 @@ def run(browser, check, until, shots=None):
                   line.inner_text().replace("\n", "") == "Morning review · 5 left overnightOpen"
                   and line.bounding_box()["height"] >= 47.5 and not tid("m-tab-review").is_visible(), line.inner_text())
             shot4(page, f"review-line-{width}")
-            tid("m-menu").click()
+            tid("m-lock-pill").click()
             until(lambda: tid("m-menu-panel").count() == 1)
             box = tid("m-menu-panel").bounding_box()
             rows = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-menu-panel] > *')).map(e => [e.getBoundingClientRect().height, e.dataset.testid || e.dataset.menuItem])")

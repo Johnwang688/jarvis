@@ -48,7 +48,7 @@
 // and retry only.
 //
 // WS-5c, the unlock window (./unlock.ts): a lock pill in the header (it opens
-// the ⋯ menu, whose first row is Lock now); Done and Undo in an open chat's ⋯
+// its interim popover, whose first row is Lock now); Done and Undo in an open chat's ⋯
 // menu. The pill is the phone's copy of the window: it never authorizes.
 //
 // P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
@@ -57,13 +57,15 @@
 // row, card, question or decision has a mic.
 
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
-import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
+import { brandButton, orbState, renderOrb } from "./orb";
+import { lockIcon, unlockIcon } from "./icons";
+import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
-  parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
+  RUNNING_STATES, parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
 } from "./model";
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
@@ -103,6 +105,8 @@ export interface AppDeps {
   onSignedOut: (message: string) => void;
   /** The owner pressed Sign out. */
   signOut: () => Promise<void>;
+  /** RD-6 will use the whole brand to open navigation. */
+  onBrand?: () => void;
   fetchJson?: (path: string) => Promise<Got>;
   /** P-4's writes (a fake in the tests). */
   postJson?: (path: string, value: unknown) => Promise<Posted>;
@@ -115,6 +119,7 @@ export interface AppDeps {
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
   /** P-6's notifications: the browser's push and the push routes (fakes in the tests). */
   pushEnv?: PushEnv;
   pushSend?: Send;
@@ -170,6 +175,12 @@ interface OpenTask {
 export class PhoneApp {
   tab: Tab = "inbox";
   online = true;
+  failStatus: number | null = null;
+  everOpened = false;
+  private streamOpen = false;
+  private firstOpenTimedOut = false;
+  private firstOpenTimer: unknown = null;
+  private sessionEnded = false;
   lastRead: number | null = null;
   inbox: InboxRow[] | null = null;
   projects: Project[] | null = null;
@@ -244,10 +255,11 @@ export class PhoneApp {
   private readonly openStream: (url: string) => StreamLike;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
   private readonly timers = new Map<string, unknown>();
   private readonly frame: HTMLElement;
   private readonly banner: HTMLElement;
-  private readonly conn: HTMLElement;
+  private readonly brand: HTMLButtonElement;
   private readonly main: HTMLElement;
   private readonly rowScroll: RowScroll;
   private readonly tabs: Record<"inbox" | "review" | "chats", HTMLButtonElement>;
@@ -286,8 +298,20 @@ export class PhoneApp {
   private held: string | null = null;
 
   constructor(private readonly deps: AppDeps) {
-    this.fetchJson = deps.fetchJson ?? getJson;
-    this.postJson = deps.postJson ?? postJson;
+    // EVERY request this app makes goes through these two (and the push and clip wrappers below), so each
+    // outcome reaches the orb through `report`, the one path: no call site decides "offline" on its own.
+    const rawGet = deps.fetchJson ?? getJson;
+    const rawPost = deps.postJson ?? postJson;
+    this.fetchJson = async (path) => {
+      const got = await rawGet(path);
+      this.report(reachOfGot(got), got.ok ? 200 : got.status);
+      return got;
+    };
+    this.postJson = async (path, value) => {
+      const posted = await rawPost(path, value);
+      this.reportWrite(posted);
+      return posted;
+    };
     this.getCredential = deps.getCredential ?? (async (publicKey) => {
       const credential = await navigator.credentials.get({ publicKey: prepareRequest(publicKey) });
       return credential ? credentialJSON(credential as PublicKeyCredential) : null;
@@ -295,6 +319,7 @@ export class PhoneApp {
     this.openStream = deps.openStream ?? ((url) => new EventSource(url) as unknown as StreamLike);
     this.now = deps.now ?? Date.now;
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     this.setSlow = deps.setSlow ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearSlow = deps.clearSlow ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     try { this.recentAll = localStorage.getItem(RECENT_KEY) === "1"; } catch { /* no storage: it just does not last */ }
@@ -309,7 +334,9 @@ export class PhoneApp {
       }),
       now: this.now, timer: this.unlockTimer,
       signedOut: () => this.signedOut(),
-      reached: (ok) => this.setOnline(ok),
+      // Every answer Unlock gets came through the reporting `postJson`/`fetchJson` above. What is left is
+      // the request that never answered within its bound: no response, so offline (amber).
+      reached: (ok, status) => { if (!ok && status === 0) this.report("offline", 0); },
       changed: () => this.renderPill(),
       // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
       reread: () => { if (!this.stopped) void this.probe(); },
@@ -319,17 +346,16 @@ export class PhoneApp {
     frame.dataset.screen = "app";
     frame.dataset.stale = "false";
     const top = el("header", "top");
-    top.append(el("span", "brand", "Jarvis"));
-    this.conn = el("span", "conn", "connecting");
-    this.conn.dataset.testid = "m-conn";
-    top.append(this.conn);
-    // PX-4: Sign out and Notifications are behind the ⋯ (renderMenu). PX-5: the lock pill opens that menu,
-    // whose first row is Lock now. It shows the phone's copy of the window, never what authorizes.
+    this.brand = brandButton(() => this.deps.onBrand?.());
+    top.append(this.brand);
+    // Interim until RD-2 Settings: all four header rows live in the pill's popover.
+    // The pill remains the phone's copy of the unlock window, never authorization.
     this.pill = tap("Locked", () => this.toggleMenu(this.menuOpen === "app" ? null : "app"), "m-lock-pill", "m-lock-pill");
     this.pill.dataset.state = "locked";
     top.append(this.pill);
     this.menuWrap = menuView({ id: "m-menu", label: "Menu", items: [], open: false, toggle: () => {} });
     top.append(this.menuWrap);
+    this.renderOrb();
     this.banner = el("div", "offline");
     this.banner.dataset.testid = "m-offline";
     this.banner.setAttribute("role", "status");
@@ -355,13 +381,30 @@ export class PhoneApp {
       if (this.menuOpen && !(e.target instanceof Element && e.target.closest(".m-menu, .m-lock-pill"))) this.toggleMenu(null);
     });
     this.frame = frame;
-    this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
+    // The push routes and the clip upload report through the same path as every other request.
+    const rawPush = deps.pushSend ?? browserSend;
+    const pushSend: Send = async (method, path, body) => {
+      const sent = await rawPush(method, path, body);
+      this.reportWrite(sent);
+      return sent;
+    };
+    const rawTalk = deps.talkEnv ?? browserTalkEnv;
+    const talkEnv: TalkEnv = {
+      media: () => rawTalk.media(), context: () => rawTalk.context(), now: () => rawTalk.now(),
+      setTimer: (fn, ms) => rawTalk.setTimer(fn, ms), clearTimer: (handle) => rawTalk.clearTimer(handle),
+      upload: async (wav) => {
+        const uploaded = await rawTalk.upload(wav);
+        this.reportWrite(uploaded);
+        return uploaded;
+      },
+    };
+    this.notify = new Notifications(deps.pushEnv ?? browserEnv, pushSend,
       () => {
         if (this.menuOpen === "app" && !this.stopped) this.renderMenu();
         if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox();
       },
       () => { if (!this.stopped) void this.openFromNotification(); });
-    this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
+    this.talk = new Talk(talkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
       // No recording while this chat's send waits for its answer (its 202 would clear the box).
       busy: (threadId) => this.sending.has(threadId),
@@ -396,6 +439,9 @@ export class PhoneApp {
   stop(): void {
     this.stopped = true;
     this.rowScroll.stop();
+    this.clearFirstOpenTimer();
+    if (this.recoverTimer !== null) this.clearTimer(this.recoverTimer);
+    this.recoverTimer = null;
     if (this.staleTimer) clearTimeout(this.staleTimer);
     this.staleTimer = null;
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
@@ -426,23 +472,57 @@ export class PhoneApp {
 
   private signedOut(): void {
     if (this.stopped) return;
+    this.sessionEnded = true;
+    this.renderOrb();
     this.stop();
     this.deps.onSignedOut("Your session ended. Sign in again.");
   }
 
+  /**
+   * THE one path from a request's outcome to the orb (net.ts `Reach`). The reporting `fetchJson` and
+   * `postJson`, the push and clip wrappers, the stream's open and Unlock's unanswered request all end
+   * here; call sites only decide what their own view says. A refusal (any other 4xx, a 409, the daemon's
+   * own 503) changes nothing: Jarvis answered.
+   */
+  private report(reach: Reach, status: number): void {
+    if (this.stopped) return;
+    if (reach === "reached") this.setOnline(true);
+    else if (reach === "signed-out") this.signedOut();
+    else if (reach === "unreachable") this.setOnline(false, status);
+    else if (reach === "offline") this.setOnline(false, 0);
+  }
+
+  /** A write's outcome. Its 401 may be a refusal rather than the session ending, so `me` decides (WS-5c
+   * rule 9); the call site awaits the same check (`recheckSession` is shared) before saying anything. */
+  private reportWrite(posted: { status: number; body: unknown; offline?: boolean } | null): void {
+    const reach = reachOfPosted(posted);
+    if (reach === "signed-out") { if (!this.stopped) void this.recheckSession(); return; }
+    this.report(reach, posted?.status ?? 0);
+  }
+
+  private sessionCheck: Promise<void> | null = null;
+
+  /** A 401 from a write or the clip upload: is the session over? One `me` read, however many ask at once;
+   * its 401 signs out through `report`. */
+  private recheckSession(): Promise<void> {
+    if (!this.sessionCheck) {
+      this.sessionCheck = this.fetchJson("/m/api/me").then(() => undefined, () => undefined)
+        .finally(() => { this.sessionCheck = null; });
+    }
+    return this.sessionCheck;
+  }
+
   // -- reading ---------------------------------------------------------------------
 
-  /** One read: the body, or null after handling offline and signed out. */
+  /** One read: the body, or null when offline or signed out (`report` has already said which). */
   private async read(path: string): Promise<{ body: unknown } | { error: string; status: number } | null> {
     const got = await this.fetchJson(path);
     if (this.stopped) return null;
     if (got.ok) {
       this.lastRead = this.now();
-      this.setOnline(true);
       return { body: got.body };
     }
-    if (got.why === "signed-out") { this.signedOut(); return null; }
-    if (got.why === "offline") { this.setOnline(false); return null; }
+    if (got.why === "signed-out" || got.why === "offline") return null;
     return { error: errorWord(got.body) || `could not be read (${got.status})`, status: got.status };
   }
 
@@ -478,8 +558,10 @@ export class PhoneApp {
 
   /**
    * PX-2 (plan C §4.1): the In progress read. **Its failure is its own** (Sol, finding 3): it goes
-   * through `fetchJson`, never `read()`, so a 502/503/504 here never turns the app offline and never
-   * stamps "last read". A 401 still ends the session. One policy for every trigger (Sol, finding 5):
+   * through `fetchJson`, never `read()`, so the route's own refusal (the daemon's 503 "the In progress
+   * list is not running", with its words) never turns the app offline and never stamps "last read".
+   * Like every request it still reports through `report`: a 401 ends the session, and the proxy's
+   * 502/503/504 (no daemon words: Jarvis is down) is "Jarvis unreachable". One policy for every trigger (Sol, finding 5):
    * `force` (the list shown, the stream reopened, coming back online, a resync) reads now; the rest
    * (working_changed, an inbox change, a turn starting or ending) read after a one-second debounce
    * and, while a retry is waiting, leave the next read to its timer. A failed read arms ONE 30 s
@@ -494,7 +576,6 @@ export class PhoneApp {
 
   private applyWorking(got: Got): void {
     if (this.stopped) return;
-    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
     const parsed = got.ok ? parseWorkingList(got.body) : null;
     if (parsed) {
       this.entries = parsed.entries;
@@ -509,6 +590,7 @@ export class PhoneApp {
         this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
       }
     }
+    this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
   }
 
@@ -519,11 +601,11 @@ export class PhoneApp {
 
   /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
   async loadMe(): Promise<void> {
-    // Display only: a failure here changes nothing (the reads and the
-    // stream decide offline and signed out).
+    // Display only. Its outcome (a 401, the proxy's 502/503/504, no answer) reached the orb in `fetchJson`.
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped || !got.ok) return;
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+    this.renderOrb();
     // WS-5c rule 2: the window's mirror follows `me.unlock_s` (display and path only).
     this.unlock.fromMe(got.body);
     if (this.tab === "inbox") this.renderInbox();
@@ -732,13 +814,11 @@ export class PhoneApp {
     return `/m/api/inbox/${encodeURIComponent(rowId)}/${tail}`;
   }
 
-  /** A write's answer: null after handling offline and signed out. */
+  /** A write's answer: null when it met no Jarvis (`report` has already told the orb). */
   private async post(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
-    if ("offline" in got) { this.setOnline(false); return null; }
-    if (OFFLINE.has(got.status)) { this.setOnline(false); return null; }
-    this.setOnline(true);
+    if ("offline" in got || OFFLINE.has(got.status)) return null;
     this.slid(got.status);
     return got;
   }
@@ -753,9 +833,9 @@ export class PhoneApp {
   /** A refusal's words. A 401 is the session ending (the `me` probe signs out); never "locked" (WS-5c rule 9). */
   private async refusedWith(status: number, body: Record<string, unknown>): Promise<string> {
     if (status === 401) {
-      const me = await this.fetchJson("/m/api/me");
-      if (!me.ok && me.why === "signed-out") { this.signedOut(); return ""; }
-      return "Not accepted (401).";
+      // The write's report already asked `me`; this waits for that same read.
+      await this.recheckSession();
+      return this.stopped ? "" : "Not accepted (401).";
     }
     const word = typeof body.error === "string" ? body.error : "";
     return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
@@ -782,9 +862,8 @@ export class PhoneApp {
     if (!card) return;
     const got = await this.fetchJson(this.path(card.rowId, "detail"));
     if (this.stopped || this.card !== card) return;
-    if (!got.ok && got.why === "signed-out") return this.signedOut();
-    // H5: offline, the card says it was not read (setOnline leaves an open card alone).
-    if (!got.ok && got.why === "offline") { this.setOnline(false); this.render(); return; }
+    // H5: offline, the card says it was not read (setOnline, from `report`, leaves an open card alone).
+    if (!got.ok && got.why === "offline") { this.render(); return; }
     if (got.ok) {
       card.detail = parseDetail(got.body);
       card.refused = card.detail ? null : "This card could not be read.";
@@ -960,9 +1039,7 @@ export class PhoneApp {
     if (this.stopped || this.card !== card) return;
     card.busy = false;
     card.progress = "";
-    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
     if (!got.ok && got.why === "offline") {
-      this.setOnline(false);
       card.rule = null;
       card.notice = "Offline: the rule could not be read.";
     } else if (!got.ok) {
@@ -1148,18 +1225,15 @@ export class PhoneApp {
   private async write(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown>; ambiguous?: boolean } | null> {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
-    if ("offline" in got || OFFLINE.has(got.status)) {
-      this.setOnline(false);
-      return { status: 0, body: {}, ambiguous: true };
-    }
-    this.setOnline(true);
+    if ("offline" in got || OFFLINE.has(got.status)) return { status: 0, body: {}, ambiguous: true };
     this.slid(got.status);
     const result = got;
     // The write took effect, or may have, but its answer failed (remote_write's UNCERTAIN).
     if (result.body.uncertain === true) return { status: result.status, body: result.body, ambiguous: true };
     if (result.status === 401) {
-      const me = await this.fetchJson("/m/api/me");
-      if (!me.ok && me.why === "signed-out") { this.signedOut(); return null; }
+      // The write's report already asked `me`; this waits for that same read.
+      await this.recheckSession();
+      if (this.stopped) return null;
     }
     return result;
   }
@@ -1245,12 +1319,6 @@ export class PhoneApp {
     // "May not have been sent" stays: it is about the words already in the box.
     if (this.composeNotes.get(threadId) !== MAYBE_SENT) this.composeNotes.delete(threadId);
     this.renderComposer(true);
-  }
-
-  /** A 401 from the clip upload: is the session over? */
-  private async recheckSession(): Promise<void> {
-    const me = await this.fetchJson("/m/api/me");
-    if (!me.ok && me.why === "signed-out") this.signedOut();
   }
 
   private firstProject(): string {
@@ -1502,16 +1570,36 @@ export class PhoneApp {
     if (this.tab === "inbox" && !this.card) this.render();
   }
 
+  private renderOrb(): void {
+    if (!this.brand) return;
+    const working = (this.entries ?? []).filter((entry) => entry.status === "working").length
+      + (this.tasks ?? []).filter((task) => RUNNING_STATES.has(task.state)).length
+      + (this.thread?.meta?.running ? 1 : 0);
+    renderOrb(this.brand, orbState({ signedOut: this.sessionEnded, online: this.online,
+      failStatus: this.failStatus, streamOpen: this.streamOpen && this.stream?.readyState === 1,
+      everOpened: this.everOpened, firstOpenTimedOut: this.firstOpenTimedOut,
+      secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
+  }
+
   /** The lock pill: the phone's copy of the window (display only). */
   private renderPill(): void {
     const pill = this.pill;
     if (!pill) return;
     const open = this.unlock.mirror.open();
     const words = pillWords(this.unlock.mirror, this.now());
-    if (pill.textContent !== words) pill.textContent = words;
+    if (pill.textContent !== words || pill.dataset.state !== (open ? "unlocked" : "locked") || !pill.querySelector("svg")) {
+      const label = el("span");
+      if (open) {
+        const prefix = el("span", "m-pill-prefix", "Unlocked · ");
+        label.append(prefix, document.createTextNode(words.replace(/^Unlocked · /, "")));
+      } else label.textContent = words;
+      pill.replaceChildren(open ? unlockIcon() : lockIcon(), label);
+    }
     pill.dataset.state = open ? "unlocked" : "locked";
     pill.setAttribute("aria-label", `${pillLabel(this.unlock.mirror, this.now())}. Open the menu`);
     pill.setAttribute("aria-haspopup", "true");
+    pill.setAttribute("aria-controls", "m-menu-panel");
+    pill.setAttribute("aria-expanded", String(this.menuOpen === "app"));
   }
 
   async loadChats(): Promise<void> {
@@ -1582,7 +1670,7 @@ export class PhoneApp {
           const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
           const fresh = page.rows.filter((row) => row.seq > last);
           open.next = Math.max(open.next, page.next);
-          if (page.thread) open.meta = page.thread;
+          if (page.thread) { open.meta = page.thread; this.renderOrb(); }
           more = page.more;
           if (fresh.length) this.appendRows(open, fresh);
         }
@@ -1608,6 +1696,7 @@ export class PhoneApp {
   private applyTasks(r: { body: unknown } | { error: string; status: number } | null): void {
     if (this.stopped || !r || !("body" in r)) return;
     this.tasks = parseTasks(r.body);
+    this.renderOrb();
     this.tasksMore = (r.body as { more?: unknown } | null)?.more === true;
     if (this.tab === "inbox" && !this.card) this.renderInbox();
     else if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
@@ -1666,17 +1755,40 @@ export class PhoneApp {
 
   // -- the stream ----------------------------------------------------------------------
 
+  private clearFirstOpenTimer(): void {
+    if (this.firstOpenTimer !== null) this.clearTimer(this.firstOpenTimer);
+    this.firstOpenTimer = null;
+  }
+
   connect(): void {
     if (this.stopped) return;
     this.stream?.close();
     const stream = this.openStream(STREAM_URL);
     this.stream = stream;
+    this.streamOpen = stream.readyState === 1;
+    if (this.streamOpen) this.everOpened = true;
+    // One launch deadline: replacing a stream must not restart the ten-second wait.
+    if (!this.everOpened && !this.firstOpenTimedOut && this.firstOpenTimer === null) {
+      this.firstOpenTimer = this.setTimer(() => {
+        if (this.stopped || this.everOpened) return;
+        this.firstOpenTimer = null;
+        this.firstOpenTimedOut = true;
+        this.renderOrb();
+      }, 10_000);
+    }
+    this.renderOrb();
     stream.onopen = () => {
       if (this.stream !== stream) return;
-      this.conn.textContent = "live";
-      this.conn.dataset.state = "live";
-      // Anything published while the stream was down is read now, and the window's mirror (WS-5c rule 2).
-      this.refreshVisible();
+      this.streamOpen = true;
+      this.everOpened = true;
+      this.clearFirstOpenTimer();
+      // An open event stream is Jarvis's own 200: reached, through the one path.
+      const recoveries = this.recoveries;
+      this.report("reached", 200);
+      this.renderOrb();
+      // Anything published while the stream was down is read now (unless coming back online just did),
+      // and the window's mirror (WS-5c rule 2).
+      if (this.recoveries === recoveries) this.refreshVisible();
       void this.loadMe();
     };
     stream.onmessage = (ev) => {
@@ -1686,22 +1798,22 @@ export class PhoneApp {
     };
     stream.onerror = () => {
       if (this.stream !== stream) return;
-      this.conn.textContent = "reconnecting";
-      this.conn.dataset.state = "down";
+      this.streamOpen = false;
+      this.renderOrb();
       void this.probe(stream);
     };
   }
 
   /** The stream dropped: is it the network, the session, or a passing break? */
   async probe(stream: StreamLike | null = this.stream): Promise<void> {
+    // Its outcome reached the orb in `fetchJson` (a refusal leaves the orb on "Reconnecting…").
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped) return;
-    if (!got.ok && got.why === "signed-out") return this.signedOut();
     if (got.ok) {
       this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+      this.renderOrb();
       this.unlock.fromMe(got.body);
     }
-    this.setOnline(got.ok);
     if (stream && stream === this.stream && stream.readyState === CLOSED) {
       this.setTimer(() => { if (this.stream === stream) this.connect(); }, RETRY_MS);
     }
@@ -1745,9 +1857,11 @@ export class PhoneApp {
 
   // -- online and offline ---------------------------------------------------------------
 
-  setOnline(online: boolean): void {
+  setOnline(online: boolean, failStatus?: number): void {
+    if (failStatus !== undefined) this.failStatus = failStatus;
     if (online === this.online) {
       if (!online) this.renderBanner();
+      else this.renderOrb();
       return;
     }
     this.online = online;
@@ -1755,25 +1869,42 @@ export class PhoneApp {
     this.renderBanner();
     // The write controls (P-5) say offline and turn off, or come back.
     if (!this.card) this.renderKeepingFocus();
-    if (online) this.refreshVisible();
+    if (online) this.recovered();
+  }
+
+  private recoverTimer: unknown = null;
+  private recoverOwed = false;
+  /** How many recovery refreshes ran (the stream's open reads only when coming back online did not). */
+  private recoveries = 0;
+
+  /**
+   * Back online: what is visible is read again, at most once per RETRY_MS. Every request reports through
+   * `report`, so one route the proxy keeps failing (a 504 on a slow route) beside routes that answer would
+   * otherwise flip offline and online forever, each flip re-reading everything: a request storm. A flip
+   * inside the window is owed and read once when it ends.
+   */
+  private recovered(): void {
+    if (this.recoverTimer !== null) { this.recoverOwed = true; return; }
+    this.recoveries += 1;
+    this.refreshVisible();
+    this.recoverTimer = this.setTimer(() => {
+      this.recoverTimer = null;
+      const owed = this.recoverOwed;
+      this.recoverOwed = false;
+      if (owed && this.online && !this.stopped) this.recovered();
+    }, RETRY_MS);
   }
 
   private renderBanner(): void {
     this.banner.hidden = this.online;
-    if (this.online) {
-      const live = this.stream?.readyState === 1;
-      this.conn.textContent = live ? "live" : "connecting";
-      this.conn.dataset.state = live ? "live" : "down";
-      return;
-    }
+    this.renderOrb();
+    if (this.online) return;
     // UX-2: "last read 3 min ago" (the clock time is the banner's title); the minute tick redraws it.
     const ago = this.lastRead !== null ? agoWords(this.lastRead, this.now()) : "";
     this.banner.textContent = ago
       ? `Offline. Nothing here is current: it was last read ${ago}.`
       : "Offline. Nothing here could be read yet.";
     this.banner.title = this.lastRead !== null ? `Last read at ${absoluteWords(this.lastRead, this.now())}` : "";
-    this.conn.textContent = "offline";
-    this.conn.dataset.state = "offline";
   }
 
   // -- navigation (PX-4) -----------------------------------------------------------------------
@@ -1819,11 +1950,11 @@ export class PhoneApp {
     if (which !== null) {
       this.frame.querySelector<HTMLElement>(`[data-testid="${id}-panel"] button`)?.focus();
     } else if (inside) {
-      this.frame.querySelector<HTMLElement>(`[data-testid="${id}"]`)?.focus();
+      this.frame.querySelector<HTMLElement>(`[data-testid="${id === "m-menu" ? "m-lock-pill" : id}"]`)?.focus();
     }
   }
 
-  /** The header's ⋯: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
+  /** The pill's interim popover: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
   private renderMenu(): void {
     const open = this.menuOpen === "app";
     const items: MenuItem[] = [];
@@ -1836,8 +1967,35 @@ export class PhoneApp {
       items.push({ id: "signout", testid: "m-signout", label: "Sign out", onSelect: () => void this.signOut() });
     }
     const next = menuView({ id: "m-menu", label: "Menu", items, open, toggle: (o) => this.toggleMenu(o ? "app" : null) });
+    // Reuse the existing rows but discard the old ⋯ opener. The stable pill is the sole opener.
+    next.querySelector(".m-more")?.remove();
+    next.prepend(this.pill);
+    const panel = next.querySelector<HTMLElement>('[data-testid="m-menu-panel"]');
+    if (panel) panel.id = "m-menu-panel";
+    next.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.stopImmediatePropagation();
+        this.toggleMenu(null);
+        this.pill.focus();
+      }
+      if (event.key === "Tab" && open) {
+        const buttons = [...next.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        const first = buttons[0], last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    }, true);
+    this.pill.setAttribute("aria-expanded", String(open));
     this.menuWrap.replaceWith(next);
     this.menuWrap = next;
+    this.menuInert();
+  }
+
+  private menuInert(): void {
+    const open = this.menuOpen === "app";
+    for (const node of [this.brand, this.main, this.tabBar, this.banner]) {
+      if (open || this.card) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+    }
   }
 
   /** The view the main area shows now, as a key: scroll is remembered per key (§3.1, D4). */
@@ -2088,6 +2246,7 @@ export class PhoneApp {
     this.dropGoneFallbacks();
     if (this.card) this.card.tapAgain = (this.tapAgain.get(this.card.rowId) as "allow" | "always" | undefined) ?? null;
     this.renderPill();
+    this.renderOrb();
     const key = this.surfaceKey();
     // PX-4: while the approval sheet is open, the view under it stays as it was drawn: its scroll, rows and
     // order are exactly what the owner left, and closing the sheet draws it again in place.
@@ -2103,6 +2262,7 @@ export class PhoneApp {
     for (const node of [this.topBar, this.banner, this.main, this.tabBar]) {
       if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
     }
+    this.menuInert();
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
     if (!this.card) { this.sheetHost.replaceChildren(); return; }
     // Captured as drawn: AUTHORIZE answers this card, Confirm ALWAYS sends this rule's preview.
@@ -2420,7 +2580,7 @@ export function startApp(deps: AppDeps): PhoneApp {
   if (typeof window !== "undefined") {
     // The keyboard never covers the message box: the app follows the visible viewport.
     followViewport(window, document.documentElement);
-    window.addEventListener("offline", () => app.setOnline(false));
+    window.addEventListener("offline", () => app.setOnline(false, 0));
     window.addEventListener("online", () => app.visible());
     // WS-5c rules 1 and 2: back in view, the window's mirror (`me`) and the op-token pool are read again.
     document.addEventListener("visibilitychange", () => {

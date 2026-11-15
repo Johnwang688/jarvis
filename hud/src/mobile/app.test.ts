@@ -358,12 +358,16 @@ function harness() {
       return answers[path] ?? answers[base] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } };
     },
     openStream: (url) => { const s = new FakeStream(url); streams.push(s); return s; },
-    setTimer: (fn) => { queueMicrotask(fn); return 0; },
+    setTimer: (fn, ms) => {
+      // The first-open deadline must elapse in time; only debounced reads run immediately.
+      if (ms === 10_000) return setTimeout(fn, ms);
+      queueMicrotask(fn); return 0;
+    },
     now: () => Date.parse("2026-10-25T10:11:12"),
   });
   const ok = (body: unknown): Got => ({ ok: true, body });
   answers["/m/api/inbox"] = ok({ rows: [] });
-  answers["/m/api/me"] = ok({ signed_in: true });
+  answers["/m/api/me"] = ok({ signed_in: true, secure: { ok: true } });
   answers["/m/api/projects"] = ok({ projects: [{ id: "cccccccc", name: "Calc", inbox: false }] });
   answers["/m/api/threads"] = ok({ threads: [{ id: "aaaaaaaa", project_id: "cccccccc", role: "chat", title: "Fix it", provider: "claude",
     updated: "2026-10-25T10:00:00Z", running: false }] });
@@ -374,6 +378,87 @@ function harness() {
 }
 
 describe("the phone app: live, offline and signed out (P-3)", () => {
+  it("keeps Notifications, Last read, Sign out and Lock now within two taps of the header pill", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    const top = h.root.querySelector(".top")!;
+    expect(top.querySelector('[data-testid="m-menu"]')).toBeNull();
+    const pill = top.querySelector<HTMLButtonElement>('[data-testid="m-lock-pill"]')!;
+    expect(top.querySelectorAll("button")).toHaveLength(2); // brand and pill
+    pill.click(); // tap one; every action/info row is now reachable
+    const panel = top.querySelector('[data-testid="m-menu-panel"]')!;
+    for (const id of ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]) {
+      expect(panel.querySelector(`[data-testid="${id}"]`), id).not.toBeNull();
+    }
+    expect(pill.getAttribute("aria-expanded")).toBe("true");
+    expect(h.root.querySelector(".main")?.hasAttribute("inert")).toBe(true);
+    panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(top.querySelector('[data-testid="m-menu-panel"]')).toBeNull();
+    expect(document.activeElement).toBe(pill);
+    expect(h.root.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+    h.app.stop();
+  });
+
+  it("recomputes the orb on open, close, secure, failed reads, recovery and working changes", async () => {
+    const h = harness();
+    const word = () => h.root.querySelector('[data-testid="m-conn"]')!.textContent;
+    h.app.start();
+    await h.settle();
+    expect(word()).toBe("Connecting…");
+    h.streams[0].open();
+    await h.settle();
+    expect(h.app.everOpened).toBe(true);
+    expect(word()).toBe("Live");
+    h.answers["/m/api/working"] = h.ok({ entries: [{ thread_id: "aaaaaaaa", project_id: null, project: "", title: "Work",
+      status: "working", last: null }], total: 1, more: false });
+    await h.app.loadWorking(true);
+    expect(word()).toBe("Live · 1 working");
+    h.answers["/m/api/tasks"] = h.ok({ tasks: [{ id: "bbbbbbbb", state: "verifying", brief: "Verify" }] });
+    await h.app.loadTasks();
+    expect(word()).toBe("Live · 2 working");
+    h.streams[0].readyState = 0;
+    h.streams[0].onerror?.(new Event("error"));
+    await h.settle();
+    expect(word()).toBe("Reconnecting…");
+    h.answers["/m/api/me"] = { ok: false, why: "offline", status: 503 };
+    await h.app.probe();
+    expect(h.app.failStatus).toBe(503);
+    expect(word()).toBe("Jarvis unreachable");
+    h.app.setOnline(false, 0);
+    expect(word()).toMatch(/^Offline · read /);
+    h.answers["/m/api/me"] = h.ok({ signed_in: true, secure: { ok: false, label: "Unverified" } });
+    await h.app.probe();
+    expect(word()).toBe("Limited connection");
+    // Offline outranks Limited (spec §4): a limited phone in airplane mode is amber Offline.
+    h.app.setOnline(false, 0);
+    expect(word()).toMatch(/^Offline · read /);
+    h.answers["/m/api/me"] = h.ok({ signed_in: true, secure: { ok: true } });
+    await h.app.probe();
+    expect(word()).toBe("Reconnecting…");
+    h.answers["/m/api/me"] = { ok: false, why: "signed-out", status: 401 };
+    await h.app.probe();
+    expect(word()).toBe("Signed out");
+    expect(h.signedOut).toHaveBeenCalledWith("Your session ended. Sign in again.");
+  });
+
+  it("updates the orb when the open thread starts or finishes without a new log row", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    h.streams[0].open();
+    await h.settle();
+    await h.app.openThread("aaaaaaaa");
+    const meta = { id: "aaaaaaaa", title: "Work", project_id: "cccccccc", role: "chat", provider: "claude", running: true };
+    h.answers["/m/api/threads/aaaaaaaa/log?after=1"] = h.ok({ rows: [], next: 1, thread: meta });
+    await h.app.moreLog();
+    expect(h.root.querySelector('[data-testid="m-conn"]')!.textContent).toBe("Live · 1 working");
+    meta.running = false;
+    await h.app.moreLog();
+    expect(h.root.querySelector('[data-testid="m-conn"]')!.textContent).toBe("Live");
+    h.app.stop();
+  });
+
   it("opens the stream, and reads the inbox again on inbox_changed", async () => {
     const h = harness();
     h.app.start();
@@ -473,7 +558,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(banner.textContent).toMatch(/last read (just now|\d+ min ago)/);
     expect(banner.title).toContain("10:11:12");
     expect(h.root.querySelector<HTMLElement>("[data-screen]")!.dataset.stale).toBe("true");
-    expect(h.root.querySelector('[data-testid="m-conn"]')!.textContent).toBe("offline");
+    expect(h.root.querySelector('[data-testid="m-conn"]')!.textContent).toMatch(/^Offline · read /);
     h.setOffline(false);
     h.streams[0].open();
     await h.settle();

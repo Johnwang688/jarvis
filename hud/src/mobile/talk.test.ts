@@ -416,6 +416,11 @@ describe("push to talk (P-7)", () => {
     const retry = h.q("m-mic-retry") as HTMLButtonElement;
     expect(retry.hidden).toBe(false);
     expect(h.line().textContent).toBe(WORDS.offline + " " + WORDS.retryHint);
+    // The upload's network failure reached the orb like any request's: offline, and Retry waits for the connection.
+    expect(h.q("m-conn")!.dataset.state).toBe("offline");
+    expect(retry.disabled).toBe(true);
+    h.app.setOnline(true);
+    await h.settle();
     // The second try sends the very same clip, and fails again: the clip is dropped.
     h.mic.reply({ status: 408, body: { error: "request timeout" } });
     retry.click();
@@ -433,6 +438,8 @@ describe("push to talk (P-7)", () => {
     await h.down();
     h.mic.ctx().feed(0.5);
     await h.up();
+    h.app.setOnline(true);
+    await h.settle();
     h.mic.reply({ status: 200, body: { text: "add a test" } });
     (h.q("m-mic-retry") as HTMLButtonElement).click();
     await h.settle();

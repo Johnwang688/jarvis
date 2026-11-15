@@ -30,6 +30,7 @@ function server(opts: { open?: boolean } = {}) {
   };
   const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
   const signedOut = vi.fn();
+  const reached = vi.fn();
   const gate: { unlock: Promise<void> | null; hold: Record<string, Promise<void>[]>; never: string[] } =
     { unlock: null, hold: {}, never: [] };
   let active: boolean | null = null;
@@ -56,11 +57,12 @@ function server(opts: { open?: boolean } = {}) {
     now: () => clock,
     timer,
     signedOut,
+    reached,
   });
   if (opts.open) u.mirror.fromMe(3000);
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   return {
-    u, posts, gets, queue, fixed, reads, timers, credential, signedOut, gate, settle,
+    u, posts, gets, queue, fixed, reads, timers, credential, signedOut, reached, gate, settle,
     tick: (ms: number) => { clock += ms; },
     setTokens: (fn: () => Got) => { tokens = fn; },
     setActive: (v: boolean | null) => { active = v; },
@@ -74,6 +76,37 @@ async function filled(opts: { open?: boolean } = {}) {
   await s.u.pool.refill();
   return s;
 }
+
+describe("Unlock reports connection health with the response status", () => {
+  it.each([LOCK_URL, UNLOCK_OPTIONS_URL, UNLOCK_URL, ACT].flatMap((path) =>
+    [502, 503, 504].map((status) => ({ path, status }))))("$path proxy $status", async ({ path, status }) => {
+    const s = await filled({ open: path === LOCK_URL || path === ACT });
+    s.queue[path] = [{ status, body: {} }];
+    if (path === LOCK_URL) {
+      const until = s.u.mirror.until;
+      await s.u.lockNow();
+      expect(s.u.mirror.open()).toBe(true);
+      expect(s.u.mirror.until).toBe(until);
+    } else {
+      const op = s.u.freeze("k", ACT, { decision: "allow" })!;
+      await s.u.run(op);
+      expect(s.posts.filter((p) => p.path === path)).toHaveLength(1);
+      if (path !== ACT) expect(s.acts()).toHaveLength(0);
+    }
+    expect(s.reached).toHaveBeenCalledWith(false, status);
+    expect(s.reached.mock.calls.at(-1)).toEqual([false, status]);
+    s.u.stop();
+  });
+
+  it("distinguishes no network from a responding refusal and recovery", async () => {
+    const s = server({ open: true });
+    s.queue[LOCK_URL] = [{ status: 503, body: {} }, { status: 0, body: {}, offline: true },
+      { status: 409, body: {} }, { status: 200, body: {} }];
+    for (let i = 0; i < 4; i++) await s.u.lockNow();
+    expect(s.reached.mock.calls).toEqual([[false, 503], [false, 0], [true, 409], [true, 200]]);
+    s.u.stop();
+  });
+});
 
 describe("WS-5c rule 1: the op-token pool", () => {
   it("fills to 4, refills when one is used, at half its life and on becoming visible", async () => {

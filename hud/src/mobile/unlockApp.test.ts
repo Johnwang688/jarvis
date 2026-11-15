@@ -87,6 +87,8 @@ describe("the lock pill and Lock now", () => {
     h.app.start();
     await h.settle();
     const pill = h.q("m-lock-pill")!;
+    expect(pill.closest(".top")).not.toBeNull();
+    expect(pill.closest(".m-menu")?.previousElementSibling?.getAttribute("data-testid")).toBe("m-brand");
     expect(pill.textContent).toBe("Locked");
     expect(pill.dataset.state).toBe("locked");
     const h2 = harness({ unlockS: 1800 });

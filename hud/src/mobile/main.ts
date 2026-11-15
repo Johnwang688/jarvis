@@ -12,6 +12,7 @@
 // Every passkey call follows a tap: iOS asks for Face ID or the passcode only
 // from a user gesture. Text from the server is set with textContent only.
 import "./mobile.css";
+import { brandButton, orbState, renderOrb } from "./orb";
 import { credentialJSON, prepareCreation, prepareRequest } from "./webauthn";
 import { startApp, type PhoneApp } from "./app";
 
@@ -94,6 +95,10 @@ function signedOut(message = ""): void {
   const lines = ["Sign in with the passkey you paired at the desk. Face ID or the passcode confirms it is you."];
   if (message) lines.push(message);
   screen("Jarvis", lines, [button("Sign in with passkey", () => void signIn())], message ? "warn" : "");
+  const brand = brandButton();
+  renderOrb(brand, orbState({ signedOut: true, online: true, failStatus: null, streamOpen: false,
+    everOpened: false, firstOpenTimedOut: false, secure: null, working: 0, lastRead: null, now: Date.now() }));
+  root().querySelector("h1")?.replaceChildren(brand);
 }
 
 let app: PhoneApp | null = null;
