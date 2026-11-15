@@ -237,9 +237,9 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       expect(warn).toEqual(r.marks.filter((m) => m === "not sent"));
     }
     for (const r of page.rows.slice(7)) expect(logRow(r).querySelector(".msg-bubble")!.textContent).toBe(r.text);
-    // The head is 12 px or more, and the warning is the theme's amber.
+    // The head is 12 px or more (0.75rem; it is 13 px now), and the warning is the theme's amber.
     const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
-    expect(/\.msg-head \{[^}]*font-size: (\d+)px/.exec(css)![1]).toBe("12");
+    expect(Number(/\.msg-head \{[^}]*font-size: ([\d.]+)rem/.exec(css)![1]) * 16).toBeGreaterThanOrEqual(12);
     expect(css).toContain(".mark-warn { color: var(--amber); }");
   });
 
@@ -465,7 +465,9 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(banner.hidden).toBe(false);
     expect(banner.textContent).toContain("Offline");
     expect(banner.textContent).toContain("Nothing here is current");
-    expect(banner.textContent).toContain("10:11:12");
+    // UX-2: relative words in the text, the clock time in the title.
+    expect(banner.textContent).toMatch(/last read (just now|\d+ min ago)/);
+    expect(banner.title).toContain("10:11:12");
     expect(h.root.querySelector<HTMLElement>("[data-screen]")!.dataset.stale).toBe("true");
     expect(h.root.querySelector('[data-testid="m-conn"]')!.textContent).toBe("offline");
     h.setOffline(false);
@@ -496,5 +498,59 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(h.signedOut).toHaveBeenCalledTimes(1);
     expect(h.streams[0].closed).toBe(true);
     expect(h.app.stopped).toBe(true);
+  });
+});
+
+describe("UX-2: relative times in the app", () => {
+  const asked = () => new Date(Date.now() - 3 * 60_000).toISOString();
+  const expires = () => new Date(Date.now() + 9 * 60_000 + 30_000).toISOString();
+
+  it("a row says 'asked 3 min ago · expires in 10 min', the clock time in each title", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = h.ok({ rows: [row({ id: "appr:t1", kind: "approval", rank: 1, asked_at: asked(), expires_at: expires(),
+      detail: { tool: "Bash", command: "ls" } })] });
+    h.app.start();
+    await h.settle();
+    const meta = h.root.querySelector<HTMLElement>('[data-testid="m-inbox-row"] .row-meta')!;
+    expect(meta.textContent).toBe("asked 3 min ago · expires in 10 min");
+    expect(meta.textContent).not.toMatch(/\d\d:\d\d/);
+    const labels = Array.from(meta.querySelectorAll<HTMLElement>('[data-testid="m-rel"]'));
+    expect(labels.map((n) => /^\d\d:\d\d:\d\d$/.test(n.title))).toEqual([true, true]);
+    h.app.stop();
+  });
+
+  it("a row with no time shows no time line", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = h.ok({ rows: [row({ id: "appr:t2", kind: "approval", rank: 1, detail: { tool: "Bash", command: "ls" } })] });
+    h.app.start();
+    await h.settle();
+    expect(h.root.querySelector(".row-meta")).toBeNull();
+    h.app.stop();
+  });
+
+  it("one coarse timer rewrites the label text each minute, and stop() clears it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const h = harness();
+      h.answers["/m/api/inbox"] = h.ok({ rows: [row({ id: "appr:t3", kind: "approval", rank: 1, asked_at: asked(), detail: { tool: "Bash", command: "ls" } })] });
+      h.app.start();
+      await h.settle();
+      const label = h.root.querySelector<HTMLElement>('[data-testid="m-rel"]')!;
+      const rowEl = h.root.querySelector('[data-testid="m-inbox-row"]')!;
+      label.textContent = "STALE";
+      vi.advanceTimersByTime(59_000);
+      expect(label.textContent).toBe("STALE");
+      vi.advanceTimersByTime(1_000);
+      expect(label.textContent).toMatch(/^asked .* ago$|^asked just now$/);
+      // Only the text moved: the row is the same node, not redrawn.
+      expect(h.root.querySelector('[data-testid="m-inbox-row"]')).toBe(rowEl);
+      expect(h.root.querySelector('[data-testid="m-rel"]')).toBe(label);
+      h.app.stop();
+      label.textContent = "STALE";
+      vi.advanceTimersByTime(120_000);
+      expect(label.textContent).toBe("STALE");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

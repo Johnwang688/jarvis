@@ -234,8 +234,8 @@ def run(browser, check, until):
         small = page.evaluate("""() => [...document.querySelectorAll(
             '[data-testid="m-review"] button, [data-testid="m-review"] .m-tick, [data-testid="m-review"] .m-choice')]
             .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid || e.className, e.getBoundingClientRect().height])
-            .filter(([, h]) => h < 44)""")
-        check("every tap target in the Review tab is at least 44 px tall", small == [], str(small[:5]))
+            .filter(([, h]) => h < 47.5)""")
+        check("every tap target in the Review tab is at least 48 px tall", small == [], str(small[:5]))
         # A withheld item ticked: Approve off, the footer names it.
         tap('[data-testid="m-review-tick"][data-id="defer:c"]')
         until(lambda: ticks()[2][1] is True, timeout=3)

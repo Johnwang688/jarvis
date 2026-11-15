@@ -232,7 +232,7 @@ describe("Turn on notifications (P-6)", () => {
     // The row is at least a tap target tall and its button is not the old full-width one.
     const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
     const rule = css.slice(css.indexOf(".notify {"), css.indexOf("}", css.indexOf(".notify {")));
-    expect(rule).toMatch(/min-height:\s*44px/);
+    expect(rule).toMatch(/min-height:\s*3\.5rem/); // 56 px: a row of the 48 px least target
     expect(on.view.querySelector("button")!.className).toBe("tap notify-act");
   });
 

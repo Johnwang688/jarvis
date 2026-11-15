@@ -29,6 +29,7 @@ import {
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
 import "./items.css";
+import { timeLabel } from "./reltime";
 import {
   ASSISTANT_ROLES, deskNote, lineKind, orderTasks,
   type ChatThread, type DiffView, type LogRow, type Project, type TaskView,
@@ -57,15 +58,6 @@ export function tap(label: string, onClick: () => void, cls = "nav", id?: string
 
 function time(at: string | null | undefined): string {
   return clockOf(at ?? null);
-}
-
-function when(at: string | null | undefined): string {
-  const ms = typeof at === "string" ? Date.parse(at) : NaN;
-  if (!Number.isFinite(ms)) return "";
-  const d = new Date(ms);
-  const today = new Date();
-  if (d.toDateString() === today.toDateString()) return clockOf(ms).slice(0, 5);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 export function empty(text: string): HTMLElement {
@@ -451,9 +443,14 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
   card.append(el("h3", "row-title", row.title || row.id));
   if (row.blocks) card.append(el("p", "row-blocks", row.blocks));
   if (row.origin) card.append(testid(el("p", "row-origin", row.origin), "m-origin"));
-  const meta = [row.asked_at ? `asked ${time(row.asked_at)}` : "", row.expires_at ? `expires ${time(row.expires_at)}` : ""]
-    .filter(Boolean).join(" · ");
-  if (meta) card.append(el("p", "row-meta", meta));
+  // UX-2: "asked 3 min ago · expires in 9 min"; the clock times stay in each label's title (tap to swap).
+  const labels = [timeLabel("ago", row.asked_at, "asked ", Date.now(), true), timeLabel("in", row.expires_at, "expires ", Date.now(), true)]
+    .filter((n): n is HTMLElement => n !== null);
+  if (labels.length) {
+    const meta = el("p", "row-meta");
+    labels.forEach((n, i) => { if (i) meta.append(" · "); meta.append(n); });
+    card.append(meta);
+  }
   const box = testid(el("div", "row-detail"), "m-detail");
   // AS-12: an approval's and a deferral's buttons come before its detail.
   const first = (row.kind === "approval" || !!deferredOf(row)) && !!answers && answersHere(row, answers);
@@ -548,7 +545,9 @@ export function chatsView(projects: Project[] | null, threads: ChatThread[], exp
       const row = tap("", () => actions.open(t), "chat", "m-chat");
       row.dataset.id = t.id;
       row.append(el("span", "chat-title", t.title || "(untitled)"));
-      const meta = el("span", "chat-meta", [t.provider, t.running ? "working" : "", when(t.updated)].filter(Boolean).join(" · "));
+      const meta = el("span", "chat-meta", [t.provider, t.running ? "working" : ""].filter(Boolean).join(" · "));
+      const updated = timeLabel("ago", t.updated);
+      if (updated) { if (meta.textContent) meta.append(" · "); meta.append(updated); }
       if (t.running) row.classList.add("running");
       row.append(meta);
       section.append(row);
@@ -736,7 +735,8 @@ export function tasksView(tasks: TaskView[] | null, open: (t: TaskView) => void)
       row.append(el("span", "task-brief", oneLine(t.brief, 140) || "(no brief)"));
       const meta = el("span", "task-meta");
       meta.append(chip(t.state));
-      meta.append(el("span", "muted", " " + when(t.updated)));
+      const updated = timeLabel("ago", t.updated);
+      if (updated) { updated.classList.add("muted"); meta.append(" ", updated); }
       row.append(meta);
       view.append(row);
     }

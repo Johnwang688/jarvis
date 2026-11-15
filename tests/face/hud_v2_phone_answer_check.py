@@ -17,7 +17,7 @@ phone:
   - a card the phone's scrub would change says so and offers Deny only;
   - hostile text in a card stays text; nothing is keyboard-defaulted (Enter
     and Space on the card answer nothing); AUTHORIZE and ALWAYS are far
-    below DENY; every button at least 44 px tall;
+    below DENY; every button at least 48 px tall;
   - a question answered from its row, and (PX-3a) by one tap on an option, once.
 
 Skipped when `hud/dist` has no phone shell (run `npm run build` in hud/).
@@ -259,7 +259,7 @@ def run(browser, check, until):
     def heights():
         return page.evaluate("""Array.from(document.querySelectorAll('.m-card button'))
             .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid, e.getBoundingClientRect().height])
-            .filter(([, h]) => h < 44)""")
+            .filter(([, h]) => h < 47.5)""")
 
     try:
         # -- pair and sign in ------------------------------------------------------------
@@ -300,7 +300,7 @@ def run(browser, check, until):
         deny_box, allow_box = box("approval-deny"), box("approval-allow")
         check("P-4 card: AUTHORIZE is far below DENY (more than 100 px)",
               allow_box["y"] - (deny_box["y"] + deny_box["height"]) > 100, f"{deny_box} {allow_box}")
-        check("P-4 card: every button is at least 44 px tall", not heights(), str(heights()))
+        check("P-4 card: every button is at least 48 px tall", not heights(), str(heights()))
         page.locator(f'{card} [data-testid="approval-deny"]').click()
         pump(lambda: "decision" in h_out)
         check("P-4 Deny: one tap answers it, no passkey", h_out.get("decision") == Decision.DENY, str(h_out))

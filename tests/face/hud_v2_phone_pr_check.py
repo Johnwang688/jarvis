@@ -384,8 +384,8 @@ def run(browser, check, until):
               and "retry" in row.locator('[data-testid="m-pr-does"]').inner_text())
         merge = row.locator('[data-testid="m-pr-act-merge"]')
         box = p.rect(pmc.ROW, '[data-testid="m-pr-act-merge"]') or {"height": 0, "x": 0}
-        check("phone: Merge is at least 44 px tall and sits at the right half [mutation: Merge at the left]",
-              box["height"] >= 44 and box["x"] > 390 / 2 - 10, str(box))
+        check("phone: Merge is at least 48 px tall and sits at the right half [mutation: Merge at the left]",
+              box["height"] >= 47.5 and box["x"] > 390 / 2 - 10, str(box))
         page.evaluate("document.activeElement && document.activeElement.blur()")
         page.keyboard.press("Enter")
         page.keyboard.press(" ")

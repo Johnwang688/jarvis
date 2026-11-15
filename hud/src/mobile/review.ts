@@ -21,12 +21,13 @@
 //     then asks for Face ID once (app.ts).
 // Every string from the daemon is set with textContent.
 
-import { clockOf, decisionOf, deferredOf, oneLine, questionOf, briefOf, type InboxRow } from "../lib/inbox";
+import { decisionOf, deferredOf, oneLine, questionOf, briefOf, type InboxRow } from "../lib/inbox";
 import {
   allItems, chipsOf, confirmationList, footerState, SECTIONS, groupItems, placeLabel, sectionTitle, summaryLine, whyWords,
   type ConfirmLine, type ReviewItem, type ReviewReport, type Section,
 } from "../lib/review";
 import { el, tap } from "./views";
+import { timeLabel } from "./reltime";
 import { AI_LABEL, recordSummary } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
 
@@ -214,7 +215,8 @@ function itemView(item: ReviewItem, state: ReviewState, a: ReviewActions): HTMLE
   card.dataset.approve = item.approve ? "1" : "0";
   card.append(el("h3", "row-title", row.title || row.id));
   if (row.origin) card.append(el("p", "row-origin", row.origin));
-  if (row.asked_at) card.append(el("p", "row-meta", `asked ${clockOf(row.asked_at).slice(0, 5)}`));
+  const asked = timeLabel("ago", row.asked_at, "asked ", Date.now(), true);
+  if (asked) { const meta = el("p", "row-meta"); meta.append(asked); card.append(meta); }
   const box = el("div", "row-detail");
   if (deferredOf(row)) deferredItem(item, state, a, box);
   else if (row.kind === "question" || row.kind === "task_question") questionItem(item, state, a, box);

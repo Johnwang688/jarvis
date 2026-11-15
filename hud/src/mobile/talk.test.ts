@@ -705,10 +705,10 @@ describe("push to talk (P-7)", () => {
     expect(h.mic.ctx().closed).toBe(1);
   });
 
-  it("the button is held, at least 44 px, and cannot scroll or select while held (talk.css)", () => {
+  it("the button is held, at least 48 px (3rem), and cannot scroll or select while held (talk.css)", () => {
     const css = readFileSync(join(__dirname, "talk.css"), "utf8");
     const rule = css.slice(css.indexOf(".tap.m-mic {"), css.indexOf("}", css.indexOf(".tap.m-mic {")));
-    expect(Number(/min-height:\s*(\d+)px/.exec(rule)![1])).toBeGreaterThanOrEqual(44);
+    expect(Number(/min-height:\s*([\d.]+)rem/.exec(rule)![1]) * 16).toBeGreaterThanOrEqual(48);
     expect(rule).toContain("touch-action: none");
     expect(rule).toContain("-webkit-user-select: none");
     expect(rule).toContain("-webkit-touch-callout: none");

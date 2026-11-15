@@ -74,7 +74,7 @@ describe("M1, L1: nothing moves the buttons; the gap holds the deadline", () => 
     expect(loud).toEqual(quiet);
     expect(quiet.indexOf("m-card-notice")).toBeGreaterThan(quiet.indexOf("m-allow-row"));
     expect(quiet.indexOf("m-deny-row")).toBeLessThan(quiet.indexOf("m-gap"));
-    const slot = /\.m-card \.m-card-notice \{[^}]*min-height: 40px/.test(CSS);
+    const slot = /\.m-card \.m-card-notice \{[^}]*min-height: 2.5rem/.test(CSS);
     expect(slot).toBe(true);
     const refused = cardView(state({ notice: "No." }), noop).querySelector<HTMLElement>('[data-testid="m-card-notice"]')!;
     expect([refused.getAttribute("role"), refused.dataset.tone]).toEqual(["status", "refused"]);
@@ -85,9 +85,11 @@ describe("M1, L1: nothing moves the buttons; the gap holds the deadline", () => 
     const view = cardView(state(), noop, at - 9 * 60_000);
     const gap = view.querySelector(".m-gap")!;
     expect(gap.querySelector('[data-testid="m-card-deadline"]')!.textContent).toBe(deadlineWords(at, at - 9 * 60_000));
-    expect(deadlineWords(at, at - 9 * 60_000)).toMatch(/^Denies automatically at \d\d:\d\d · 9 min left$/);
-    expect(deadlineWords(at, at - 30_000)).toMatch(/· under a minute left$/);
-    expect(deadlineWords(at, at + 1)).toMatch(/^Denies automatically at \d\d:\d\d$/);
+    // UX-2: a countdown, not a clock; the clock time is the line's title.
+    expect(deadlineWords(at, at - 9 * 60_000)).toBe("Denies automatically in 9 min");
+    expect(deadlineWords(at, at - 30_000)).toBe("Denies automatically in under a minute");
+    expect(deadlineWords(at, at + 1)).toBe("Denies automatically now");
+    expect(gap.querySelector<HTMLElement>('[data-testid="m-card-deadline"]')!.title).toMatch(/^Denies automatically at \d\d:\d\d:\d\d$/);
     expect(deadlineWords(null, 0)).toBe("Denies automatically when it times out");
     expect(gap.querySelectorAll("button, .as-ai, .as-text").length).toBe(0);
     expect(view.querySelector(".foot")).toBeNull();
