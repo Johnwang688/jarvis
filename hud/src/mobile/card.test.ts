@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ASKING_FACE_ID, PhoneApp, SENDING, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
+import { installUnlock } from "./unlock.fixtures";
 import { cardView, deadlineWords, limitedWords, parseDetail, PREVIEW_CHARS, previewText, rowCommand, type CardState } from "./card";
 
 const CSS = readFileSync(join(__dirname, "mobile.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -120,6 +121,7 @@ function harness(rows: unknown[]) {
   gets["/m/api/inbox"] = { ok: true, body: { rows } };
   gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null } } };
   gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: CARD };
+  installUnlock(gets, replies as Record<string, Posted>);
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
     fetchJson: async (path) => gets[path] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } },
@@ -142,7 +144,6 @@ describe("M2: the card says what it waits on", () => {
   it("Asking for Face ID… while the passkey is up, then Sending… while Jarvis answers; the buttons do not move", async () => {
     const h = harness([row({})]);
     let answer: (p: Posted) => void = () => {};
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.replies["/m/api/inbox/appr%3Ar1/answer"] = () => new Promise<Posted>((r) => { answer = r; });
     h.app.start();
     await h.settle();
@@ -164,9 +165,8 @@ describe("M2: the card says what it waits on", () => {
     expect(h.q("m-card-notice")!.dataset.tone).toBe("refused");
   });
 
-  it("a cancelled passkey: the notice in the same slot and status node, focused; nothing answered", async () => {
+  it("a cancelled Face ID: the notice in the same slot and status node, focused; nothing answered", async () => {
     const h = harness([row({})]);
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.app.start();
     await h.settle();
     await h.click("m-item-review");
@@ -175,11 +175,11 @@ describe("M2: the card says what it waits on", () => {
     expect(h.q("m-card-notice")).toBe(node);
     h.release(null);
     await h.settle();
-    expect(h.posts).toEqual(["/m/api/inbox/appr%3Ar1/answer/options"]);
+    expect(h.posts).toEqual(["/m/api/unlock/options"]);
     // One persistent role=status node (VoiceOver announces a change to it), and the focus is on it, not the page.
     expect(h.q("m-card-notice")).toBe(node);
     expect(node!.getAttribute("role")).toBe("status");
-    expect(node!.textContent).toContain("Nothing was answered");
+    expect(node!.textContent).toBe("Cancelled, or Face ID did not verify: nothing was sent.");
     expect(document.activeElement).toBe(node);
   });
 });

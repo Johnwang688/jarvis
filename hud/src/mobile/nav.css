@@ -138,3 +138,24 @@
   max-height: calc(45dvh - 3rem);
 }
 .m-tray-body[hidden] { display: none; }
+
+/* -- the lock pill (PX-5): the phone's copy of its unlock window, never what authorizes; it opens the ⋯ -- */
+.tap.m-lock-pill {
+  flex: none;
+  min-height: var(--m-tap);
+  padding: 0 0.875rem;
+  border-radius: var(--m-r-pill);
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+.tap.m-lock-pill[data-state="unlocked"] { color: var(--accent); border-color: var(--accent); }
+
+/* -- Done on an open chat (WS-5c §5.6): its words, and Undo while its window lasts -- */
+.m-thread-done {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem var(--m-gutter);
+}
+.m-thread-done .m-notice { margin: 0; flex: 1 1 auto; }

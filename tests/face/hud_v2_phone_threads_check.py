@@ -524,11 +524,13 @@ def run(browser, check, until, shots=None):
     seen_paths = sorted(set(seen))
     # Exact routes, with their methods: reads are GETs of these patterns, and the only POST is an answer.
     get_ok = [r"/m/api/(me|inbox|working|tasks|review|events|projects|threads)", r"/m/api/threads/[a-z0-9]+/log",
-              r"/m/api/tasks/[a-z0-9]+", r"/m/api/inbox/[^/]+/detail"]
-    post_ok = [r"/m/api/inbox/[^/]+/answer"]
+              r"/m/api/tasks/[a-z0-9]+", r"/m/api/inbox/[^/]+/detail",
+              # WS-5c: the op-token pool, an op's status and Always's rule (reads, session only).
+              r"/m/api/ops/tokens", r"/m/api/ops/[A-Za-z0-9_-]{22}", r"/m/api/inbox/[^/]+/answer/rule"]
+    post_ok = [r"/m/api/inbox/[^/]+/answer", r"/m/api/(unlock/options|unlock|lock)"]
     stray = [(m, p) for m, p in sorted(set(calls)) if p.startswith("/m/api/") and not (
         (m == "GET" and any(re.fullmatch(g, p) for g in get_ok)) or (m == "POST" and any(re.fullmatch(g, p) for g in post_ok)))]
-    check("PX-2 the app calls only today's routes, by method (GET reads; a POST only to an answer)", not stray,
+    check("PX-2 the app calls only today's routes plus WS-5c's, by method (GET reads; a POST only to an answer or the unlock)", not stray,
           str(stray) + " " + json.dumps(seen_paths))
     check("PX-4 no request went to any thread or task action route (only GET log and GET task)",
           not [c for c in calls if re.search(r"/m/api/(threads|tasks)/[^/]+/", c[1]) and not (c[0] == "GET" and c[1].endswith("/log"))])

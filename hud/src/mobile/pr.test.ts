@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, ASKING_FACE_ID, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
+import { installUnlock } from "./unlock.fixtures";
 import { deskNote } from "./model";
 import { inboxView, type InboxAnswers } from "./views";
 import { parseInbox } from "../lib/inbox";
@@ -206,6 +207,7 @@ function harness(rows: unknown[], secure: { ok: boolean; failed: string | null; 
   document.body.replaceChildren(root);
   gets["/m/api/inbox"] = { ok: true, body: { rows } };
   gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure } };
+  installUnlock(gets, replies as Record<string, Posted>);
   let gate: Promise<void> | null = null;
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
@@ -228,13 +230,12 @@ function harness(rows: unknown[], secure: { ok: boolean; failed: string | null; 
            hold: () => { let open!: () => void; gate = new Promise((r) => { open = r; }); return () => { gate = null; open(); }; } };
 }
 
-const OPTIONS = "/m/api/inbox/pr/options";
 const ACT = "/m/api/inbox/pr";
+const UNLOCKED = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null, label: "" }, unlock_s: 1800 } } as Got;
 
-describe("the phone's PR actions: one passkey each, bound to what was drawn", () => {
-  it("Merge: options with the drawn head and card, the passkey, then the act with its assertion; the notice says each step", async () => {
+describe("the phone's PR actions: gated actions (WS-5c), bound to what was drawn", () => {
+  it("Merge while locked: Face ID once, then the act with the drawn head and card and its op token; the notice says each step", async () => {
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 200, body: { action: "merge", publicKey: { challenge: "AAEC" } } };
     h.replies[ACT] = { status: 200, body: { ok: true, result: "merged", method: "merge", authority: "hud" } };
     h.app.start();
     await h.settle();
@@ -243,84 +244,151 @@ describe("the phone's PR actions: one passkey each, bound to what was drawn", ()
     h.button(11, "m-pr-act-merge")!.click();
     await h.settle();
     const bound = { id: `pr:${REPO}#11`, action: "merge", head: headOf(11), card: cardOf(11) };
-    expect(h.posts.map((p) => p.path)).toEqual([OPTIONS, ACT]);
-    expect(h.posts[0].value).toEqual(bound);
-    expect(h.posts[1].value).toEqual({ ...bound, assertion: { id: "cred", response: {} } });
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", ACT]);
+    const { op, ...rest } = h.posts[2].value;
+    expect(rest).toEqual(bound);
+    expect(op).toMatch(/^o1\./);
     expect(h.credential).toHaveBeenCalledWith({ challenge: "AAEC" });
     expect(seen).toBe(ASKING_FACE_ID);
     expect(h.notice(11)).toBe("Merged.");
   });
 
-  it("says Merging… while the act is on its way", async () => {
+  it("unlocked: says Merging… while the act is on its way, and asks no Face ID", async () => {
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
+    h.gets["/m/api/me"] = UNLOCKED;
     h.app.start();
     await h.settle();
-    let release: (() => void) | null = null;
-    h.credential.mockImplementationOnce(async () => { release = h.hold(); return { id: "cred", response: {} }; });
+    const release = h.hold();
     h.button(11, "m-pr-act-merge")!.click();
     await h.settle();
     expect(h.notice(11)).toBe("Merging…");
     expect(h.button(11, "m-pr-act-merge")!.disabled).toBe(true);
-    release!();
+    release();
     await h.settle();
+    expect(h.credential).not.toHaveBeenCalled();
+    expect(h.posts.map((p) => p.path)).toEqual([ACT]);
   });
 
   it("sends the row as drawn, not as read again: a read that landed under it does not change what is sent", async () => {
     // The mutant this pins: `prAct` looking the row up again in `app.inbox` at
     // click time would send the new head and card the owner never saw.
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 409, body: { error: "changed since you read it" } };
+    h.gets["/m/api/me"] = UNLOCKED;
+    h.replies[ACT] = { status: 409, body: { error: "changed since you read it" } };
     h.app.start();
     await h.settle();
     const drawn = h.button(11, "m-pr-act-merge")!;
     h.app.inbox = parseInbox([prRow(11, { head: headOf(99), card: cardOf(99) })]);    // no redraw
     drawn.click();
     await h.settle();
-    expect(h.posts[0].value).toEqual({ id: `pr:${REPO}#11`, action: "merge", head: headOf(11), card: cardOf(11) });
+    const { op: _op, ...rest } = h.posts[0].value;
+    expect(rest).toEqual({ id: `pr:${REPO}#11`, action: "merge", head: headOf(11), card: cardOf(11) });
   });
 
-  it("a 409 says the daemon's words in the row, reads the inbox again, never retries and asks no passkey", async () => {
+  it("the frozen request survives the stream's re-read and navigation during Face ID", async () => {
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 409, body: { error: "changed since you read it" } };
+    h.app.start();
+    await h.settle();
+    let release!: (v: Record<string, unknown> | null) => void;
+    h.credential.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    // While Face ID is up: the stream says the row changed, the inbox is read again with a new head and card,
+    // and the owner moves to Chats and back.
+    h.gets["/m/api/inbox"] = { ok: true, body: { rows: [prRow(11, { head: headOf(99), card: cardOf(99) })] } };
+    h.app.handle({ kind: "inbox_changed", ids: [`pr:${REPO}#11`] } as never);
+    await h.settle();
+    await h.app.loadInbox();
+    h.app.show("chats");
+    h.app.show("inbox");
+    await h.settle();
+    release({ id: "cred", response: {} });
+    await h.settle();
+    const acts = h.posts.filter((p) => p.path === ACT);
+    expect(acts.length).toBe(1);
+    const { op, ...rest } = acts[0].value;
+    expect(rest).toEqual({ id: `pr:${REPO}#11`, action: "merge", head: headOf(11), card: cardOf(11) });
+    expect(op).toMatch(/^o1\./);
+  });
+
+  it("a 409 on the act says the daemon's words in the row, reads the inbox again, and is never sent again", async () => {
+    const h = harness([prRow(11)]);
+    h.gets["/m/api/me"] = UNLOCKED;
+    h.replies[ACT] = { status: 409, body: { error: "changed since you read it: its head moved" } };
     h.app.start();
     await h.settle();
     const reads = vi.spyOn(h.app, "loadInbox");
     h.button(11, "m-pr-act-merge")!.click();
     await h.settle();
-    expect(h.posts.map((p) => p.path)).toEqual([OPTIONS]);
+    expect(h.posts.map((p) => p.path)).toEqual([ACT]);
     expect(h.credential).not.toHaveBeenCalled();
-    expect(h.notice(11)).toBe("Changed since you read it.");
+    expect(h.notice(11)).toBe("Changed since you read it: its head moved.");
     expect(reads).toHaveBeenCalled();
   });
 
-  it("a 409 on the act itself (the head moved after the passkey) is said the same way, once", async () => {
+  it("a stale client's 423: one unlock, the SAME request once more, and the final stale-card refusal is what it says", async () => {
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
-    h.replies[ACT] = { status: 409, body: { error: "changed since you read it: its head moved" } };
+    h.gets["/m/api/me"] = UNLOCKED;
+    let n = 0;
+    h.replies[ACT] = () => (++n === 1 ? { status: 423, body: { error: "locked", unlock: true } }
+      : { status: 409, body: { error: "changed since you read it" } });
     h.app.start();
     await h.settle();
     h.button(11, "m-pr-act-merge")!.click();
     await h.settle();
-    expect(h.posts.map((p) => p.path)).toEqual([OPTIONS, ACT]);
-    expect(h.notice(11)).toBe("Changed since you read it: its head moved.");
+    expect(h.posts.map((p) => p.path)).toEqual([ACT, "/m/api/unlock/options", "/m/api/unlock", ACT]);
+    expect(h.posts[3].value).toEqual(h.posts[0].value);
+    expect(h.notice(11)).toBe("Changed since you read it.");
   });
 
-  it("a cancelled passkey does nothing", async () => {
+  it("a cancelled Face ID does nothing", async () => {
     const h = harness([prRow(11)]);
-    h.replies[OPTIONS] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.credential.mockResolvedValueOnce(null);
     h.app.start();
     await h.settle();
     h.button(11, "m-pr-act-merge")!.click();
     await h.settle();
-    expect(h.posts.map((p) => p.path)).toEqual([OPTIONS]);
-    expect(h.notice(11)).toBe("Cancelled, or the passkey was not verified. Nothing was done.");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.notice(11)).toBe("Cancelled, or Face ID did not verify: nothing was sent.");
+  });
+
+  it("Face ID refused for a lapsed tap: the button reads Unlock and send, and resumes the same op once", async () => {
+    const h = harness([prRow(11)]);
+    let active = false;
+    (h.app.unlock as any).deps.activation = () => active;
+    h.credential.mockRejectedValueOnce(new Error("NotAllowedError"));
+    h.replies[ACT] = { status: 200, body: { ok: true, result: "merged" } };
+    h.app.start();
+    await h.settle();
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.button(11, "m-pr-act-merge")!.textContent).toBe("Unlock and send");
+    expect(h.notice(11)).toBe("Face ID needs a fresh tap: press Unlock and send.");
+    active = true;
+    const reads = h.app.unlock.pool.reads;
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock/options", "/m/api/unlock", ACT]);
+    expect(h.app.unlock.pool.reads).toBe(reads);
+    expect(h.notice(11)).toBe("Merged.");
+    expect(h.button(11, "m-pr-act-merge")!.textContent).not.toBe("Unlock and send");
+  });
+
+  it("an empty pool sends nothing and says try again", async () => {
+    const h = harness([prRow(11)]);
+    Object.defineProperty(h.gets, "/m/api/ops/tokens", { value: { ok: false, why: "error", status: 429 }, configurable: true });
+    h.app.start();
+    await h.settle();
+    h.button(11, "m-pr-act-merge")!.click();
+    await h.settle();
+    expect(h.posts).toEqual([]);
+    expect(h.notice(11)).toBe("Not ready: try again in a moment.");
   });
 
   it("Fix, Merge as is and Update take the same flow with their own action word", async () => {
     const h = harness([prRow(11, { actions: ["merge_as_is", "fix", "update"] })]);
-    h.replies[OPTIONS] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
+    h.gets["/m/api/me"] = UNLOCKED;
     h.replies[ACT] = (v) => ({ status: 200, body: v.action === "fix" ? { ok: true, task_id: "t0000011abcdef" }
       : { ok: true, result: v.action === "update" ? "update requested" : "merged" } });
     h.app.start();
@@ -330,14 +398,14 @@ describe("the phone's PR actions: one passkey each, bound to what was drawn", ()
       h.posts.length = 0;
       h.button(11, `m-pr-act-${action}`)!.click();
       await h.settle();
-      expect(h.posts.map((p) => [p.path, p.value.action])).toEqual([[OPTIONS, action], [ACT, action]]);
+      expect(h.posts.map((p) => [p.path, p.value.action])).toEqual([[ACT, action]]);
       expect(h.notice(11)).toContain(words);
     }
   });
 
   it("the server's refusal of a limited phone is shown; a limited app hides Merge on a flagged PR", async () => {
     const h = harness([prRow(15, { flags: FLAGGED }), prRow(11)], { ok: false, failed: "serve", label: "tailscale serve" });
-    h.replies[OPTIONS] = { status: 409, body: { error: "touches safety files: answer it at the desk" } };
+    h.replies[ACT] = { status: 409, body: { error: "touches safety files: answer it at the desk" } };
     h.app.start();
     await h.settle();
     expect(h.button(15, "m-pr-act-merge")).toBeNull();
@@ -348,17 +416,16 @@ describe("the phone's PR actions: one passkey each, bound to what was drawn", ()
     expect(h.notice(11)).toBe("Touches safety files: answer it at the desk.");
   });
 
-  it("Cancel a fix: the task's own cancel passkey flow", async () => {
+  it("Cancel a fix: the task's cancel, a gated action with its op token", async () => {
     const h = harness([fixRow(31, "running")]);
     const path = "/m/api/tasks/t0000031abcdef/cancel";
-    h.replies[path + "/options"] = { status: 200, body: { publicKey: { challenge: "AAEF" } } };
     h.replies[path] = { status: 200, body: { ok: true } };
     h.app.start();
     await h.settle();
     h.button(31, "m-pr-fix-cancel")!.click();
     await h.settle();
-    expect(h.posts.map((p) => p.path)).toEqual([path + "/options", path]);
-    expect(h.posts[1].value).toEqual({ assertion: { id: "cred", response: {} } });
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", path]);
+    expect(Object.keys(h.posts[2].value)).toEqual(["op"]);
     expect(h.notice(31)).toBe("Fix cancelled.");
   });
 });

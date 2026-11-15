@@ -18,7 +18,8 @@
 //     Approve selected (N) at the right; Approve is off while any ticked
 //     item cannot be approved (the footer names which), past 10, or on a
 //     limited phone. Approve selected first lists exactly the ticked items,
-//     then asks for Face ID once (app.ts).
+//     then sends exactly that set as one gated action (WS-5c, ./unlock.ts):
+//     Face ID once when the phone is locked, no prompt inside its hour.
 // Every string from the daemon is set with textContent.
 
 import { decisionOf, deferredOf, oneLine, questionOf, briefOf, type InboxRow } from "../lib/inbox";
@@ -30,6 +31,7 @@ import { el, tap } from "./views";
 import { timeLabel } from "./reltime";
 import { AI_LABEL, recordSummary } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
+import { UNLOCK_AND_SEND } from "./unlock";
 
 export interface ReviewState {
   report: ReviewReport | null;
@@ -56,6 +58,10 @@ export interface ReviewState {
   opened?: ReadonlyMap<string, boolean>;
   /** What the open confirmation shows, frozen when it opened (review of #330, LOW 4). */
   confirmLines?: ConfirmLine[] | null;
+  /** WS-5c: the phone believes its unlock window is open (display only: the button's words). */
+  unlocked?: boolean;
+  /** WS-5c rule 6: what needs a fresh tap for Face ID: a row id → "retry", or "review" → Approve selected. */
+  tapAgain?: ReadonlyMap<string, string>;
 }
 
 export interface ReviewActions {
@@ -114,13 +120,14 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
     label.append(box2, el("span", "", "Select"));
     box.append(label);
   }
-  // Per row: Approve and retry (the passkey first) and Leave it, far apart.
+  // Per row: Approve and retry (a gated action, WS-5c) and Leave it, far apart.
   const row = el("div", "m-review-rowacts");
   const leave = tap("Leave it", () => a.leaveOne(item.row), "quiet m-send", "m-review-leave-one");
   leave.disabled = busy || !state.online;
   row.append(leave);
   if (d.grantable && item.approve) {
-    const retry = tap("Approve and retry", () => a.retry(item.row), "quiet m-send", "m-review-retry");
+    const retry = tap(state.tapAgain?.get(id) === "retry" ? UNLOCK_AND_SEND : "Approve and retry", () => a.retry(item.row),
+      "quiet m-send", "m-review-retry");
     retry.disabled = busy || !state.online;
     row.append(retry);
   }
@@ -322,7 +329,7 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
   const n = Array.from(state.selection).filter((id) => allItems(report).some((i) => i.row.id === id)).length;
   const fs = footerState(report, state.selection, { limited });
   if (state.confirming && fs.approve) {
-    // Exactly the ticked items, before the one passkey prompt.
+    // Exactly the ticked items, before the one gated send (Face ID only when locked).
     foot.classList.add("confirming");
     foot.append(el("p", "m-ask", `Approve these ${n} once each, for 30 minutes?`));
     const list = testid(el("ol", "plain m-review-confirm"), "m-review-confirm");
@@ -342,7 +349,8 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
     foot.append(list);
     const acts = el("div", "m-review-actions");
     const back = tap("Back", a.approveCancel, "quiet m-btn", "m-review-confirm-back");
-    const go = tap("Approve with Face ID", a.approveConfirm, "quiet m-btn allow", "m-review-confirm-go");
+    const go = tap(state.tapAgain?.get("review") === "approve" ? UNLOCK_AND_SEND : state.unlocked ? "Approve" : "Approve with Face ID",
+      a.approveConfirm, "quiet m-btn allow", "m-review-confirm-go");
     back.disabled = state.groupBusy;
     go.disabled = state.groupBusy || !state.online;
     acts.append(back, go);

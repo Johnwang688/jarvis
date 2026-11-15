@@ -3,6 +3,14 @@
 Run after building hud/dist, with the same isolated HOME and browser cache
 as hud_v2_phone_pr_check.py. Uses a real phone, passkey and PR merge actor;
 only gh, the model and the fix projection are fake. No live Jarvis ports.
+
+WS-5c (PX-5): the Merge is a gated action. The first tap is on a locked phone
+(unlock/options, the passkey, unlock, then the act); the second is a stale
+client's (its window was ended at Jarvis, as by Lock now in another tab), so
+the act's 423 is followed by one unlock and ONE resend of the same request.
+Each time the check waits for the FINAL answer on `/m/api/inbox/pr`, the
+stale-card refusal, never the first 423, and holds the drawn head and card and
+"nothing merged".
 """
 from __future__ import annotations
 
@@ -65,19 +73,61 @@ class FixSummaryBinding(unittest.TestCase):
                 detail["card"] = card_key(detail)
             self.assertNotIn(unseen, slot.inner_text())
 
+            drawn = {"id": pmc.ROW, "action": "merge", "head": row["detail"]["head"], "card": drawn_card}
+
+            def final_refusal(before):
+                """The act's last answer: a 409 on /m/api/inbox/pr (a 423 is never final)."""
+                return any(path == "/m/api/inbox/pr" and status == 409 for path, _b, status in phone.posts[before:])
+
+            def acts_sent(before):
+                return [(body, status) for path, body, status in phone.posts[before:] if path == "/m/api/inbox/pr"]
+
+            # 1. A locked phone: Face ID first, then the act, which refuses the unseen card.
             before = len(phone.posts)
             shown.locator('[data-testid="m-pr-act-merge"]').click()
-            self.assertTrue(phone.pump(lambda: any(
-                path == "/m/api/inbox/pr" or
-                (path == "/m/api/inbox/pr/options" and status == 409)
-                for path, _body, status in phone.posts[before:]
-            )))
-            sent = [(path, status) for path, _body, status in phone.posts[before:]
-                    if path.startswith("/m/api/inbox/pr")]
-            self.assertFalse(
-                bool(prs.run.acts()),
-                f"unseen fix summary authorized a merge; phone responses: {sent}",
-            )
+            self.assertTrue(phone.pump(lambda: final_refusal(before)))
+            trail = [path for path, _b, _s in phone.posts[before:]]
+            self.assertEqual(trail, ["/m/api/unlock/options", "/m/api/unlock", "/m/api/inbox/pr"])
+            sent = acts_sent(before)
+            self.assertEqual([st for _b, st in sent], [409])
+            self.assertEqual({k: v for k, v in sent[0][0].items() if k != "op"}, drawn)
+            self.assertFalse(bool(prs.run.acts()), f"unseen fix summary authorized a merge; phone responses: {sent}")
+
+            # 2. A stale client: the phone draws the old card again and believes its window open (it is: the
+            # unlock above); the daemon's card moves again, unseen; and as the act arrives the window is ended at
+            # Jarvis, as Lock now in another tab would. The act is 423, then one unlock and ONE resend.
+            phone.show([row])
+            shown = phone.row(pmc.ROW)
+            self.assertTrue(phone.pump(lambda: shown.locator('[data-testid="m-pr-act-merge"]').count() == 1
+                                       and "summarizing…" in shown.locator('[data-testid="m-pr-fix-summary"]').inner_text()))
+            with source._lock:
+                detail = source._rows[pmc.ROW]["detail"]
+                detail["fix"].update(summary=unseen, summary_state="ready", note=f"fixed: {unseen} — merge?")
+                detail["card"] = card_key(detail)
+            self.assertEqual(phone.page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state"), "unlocked")
+            auth = phone.daemon.remote_auth
+            locked = []
+
+            def lock_now_elsewhere(method, path):
+                if method == "POST" and path == "/m/api/inbox/pr" and not locked:
+                    locked.append(True)
+                    for digest, srow in list(auth._sessions.items()):
+                        auth.lock({"token_sha256": digest, "id": srow["id"]})
+            phone.before_forward = lock_now_elsewhere
+            before = len(phone.posts)
+            shown.locator('[data-testid="m-pr-act-merge"]').click()
+            self.assertTrue(phone.pump(lambda: final_refusal(before)),
+                            str([(p_, s_, b_.get("error") if isinstance(b_, dict) else b_) for p_, b_, s_ in phone.posts[before:]]))
+            trail = [path for path, _b, _s in phone.posts[before:]]
+            self.assertEqual(trail, ["/m/api/inbox/pr", "/m/api/unlock/options", "/m/api/unlock", "/m/api/inbox/pr"])
+            sent = acts_sent(before)
+            self.assertEqual([st for _b, st in sent], [423, 409])
+            # The one resend is the same frozen request: same head, card and op token.
+            self.assertEqual(sent[1][0], sent[0][0])
+            self.assertEqual({k: v for k, v in sent[1][0].items() if k != "op"}, drawn)
+            phone.page.wait_for_timeout(600)
+            self.assertEqual(len(acts_sent(before)), 2, "the stale refusal was sent again")
+            self.assertFalse(bool(prs.run.acts()), f"unseen fix summary authorized a merge; phone responses: {sent}")
 
 
 if __name__ == "__main__":

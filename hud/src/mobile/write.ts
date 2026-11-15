@@ -10,8 +10,9 @@
 //     again; until then the box says "Sending…". Offline, nothing is sent and
 //     the box says so: there is no write queue.
 //   - **Every task verb asks first.** Start and Resume take a confirmation
-//     tap; Cancel takes a confirmation and then the passkey (Face ID or the
-//     passcode), because a cancelled task can never resume.
+//     tap; Cancel takes a confirmation and is a gated action (WS-5c's unlock
+//     window, ./unlock.ts: Face ID when the phone is locked), because a
+//     cancelled task can never resume.
 //   - Every string from the daemon is set with textContent.
 //
 // Pure DOM building from data, so the tests build it in jsdom.
@@ -20,6 +21,7 @@ import "./write.css";
 import { oneLine } from "../lib/inbox";
 import type { Project, TaskView } from "./model";
 import { menuView } from "./nav";
+import { UNLOCK_AND_SEND } from "./unlock";
 
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
@@ -358,9 +360,9 @@ const LABEL: Record<Verb, string> = { start: "Start", resume: "Resume", cancel: 
 const ASK: Record<Verb, string> = {
   start: "Start this task? It runs with the project's permissions; anything that needs you still asks.",
   resume: "Resume this task where it stopped?",
-  cancel: "Cancel this task? A cancelled task cannot be resumed. Your passkey confirms it.",
+  cancel: "Cancel this task? A cancelled task cannot be resumed. Face ID confirms it while this phone is locked.",
 };
-const CONFIRM: Record<Verb, string> = { start: "Start it", resume: "Resume it", cancel: "Cancel with passkey" };
+const CONFIRM: Record<Verb, string> = { start: "Start it", resume: "Resume it", cancel: "Cancel it" };
 
 export interface TaskControls {
   confirming: Verb | null;
@@ -372,6 +374,10 @@ export interface TaskControls {
   back: () => void;
   /** PX-4: the page's ⋯ menu, which holds Cancel. Absent (a plain test's controls): Cancel stays a button. */
   menu?: { open: boolean; toggle: (open: boolean) => void };
+  /** WS-5c: the phone believes it is locked (Cancel then names Face ID). Display only. */
+  locked?: boolean;
+  /** WS-5c rule 6: Cancel's Face ID needs a fresh tap: its button reads "Unlock and send". */
+  tapAgain?: boolean;
 }
 
 export function taskControlsView(task: TaskView, c: TaskControls, allowed: readonly Verb[] = verbsFor(task.state)): HTMLElement {
@@ -381,12 +387,13 @@ export function taskControlsView(task: TaskView, c: TaskControls, allowed: reado
     box.append(testid(el("p", "m-ask", ASK[verb]), "m-task-ask"));
     const row = el("div", "m-confirm-row");
     row.append(button("Not now", c.back, "quiet m-btn", "m-task-back", c.busy),
-      button(c.busy ? "Working…" : CONFIRM[verb], () => c.confirm(verb), `quiet m-btn ${verb}`, "m-task-confirm",
+      button(c.busy ? "Working…" : verb === "cancel" && c.tapAgain ? UNLOCK_AND_SEND
+        : verb === "cancel" && c.locked ? "Cancel with Face ID" : CONFIRM[verb], () => c.confirm(verb), `quiet m-btn ${verb}`, "m-task-confirm",
         c.busy || !c.online));
     box.append(row);
   } else {
-    // PX-4: Cancel is in the page's ⋯ menu, never beside Start and Resume. Its confirmation and its
-    // passkey (the branch above) are unchanged: choosing it asks, and only the passkey cancels.
+    // PX-4: Cancel is in the page's ⋯ menu, never beside Start and Resume. Its confirmation (the branch
+    // above) is unchanged: choosing it asks, and only the confirmation sends it (WS-5c's gated flow).
     for (const verb of allowed) {
       if (verb === "cancel" && c.menu) continue;
       box.append(button(LABEL[verb], () => c.ask(verb), `quiet m-btn ${verb}`, "m-task-" + verb, c.busy || !c.online));

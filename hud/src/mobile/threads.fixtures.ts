@@ -11,7 +11,7 @@ export function mkRow(id: string, rank: number, over: Partial<InboxRow> = {}): I
     asked_at: null, expires_at: null, origin: "", detail: {}, hidden: null, markable: false, ...over };
 }
 export function mkEntry(thread_id: string, status: WorkingStatus = "idle", over: Partial<WorkingItem> = {}): WorkingItem {
-  return { thread_id, project_id: "99999999", project: "Calc", title: "chat " + thread_id, status, last: "2026-11-15T10:00:00Z", ...over };
+  return { thread_id, project_id: "99999999", project: "Calc", title: "chat " + thread_id, status, last: "2026-11-15T10:00:00Z", seq: 0, ...over };
 }
 export function mkTask(id: string, state: string, over: Partial<TaskView> = {}): TaskView {
   return { id, project_id: "99999999", brief: "brief " + id, state, updated: "2026-11-15T10:00:00Z", step: 1, steps: 3,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
+import { installUnlock } from "./unlock.fixtures";
 import { reviewView, type ReviewActions, type ReviewState } from "./review";
 import { parseReview, type ReviewItem } from "../lib/review";
 
@@ -121,6 +122,7 @@ class Stream implements StreamLike {
 }
 
 function harness(review: Record<string, unknown>) {
+  const h: { queue423: boolean } = { queue423: false };
   const posts: { path: string; value: any }[] = [];
   const replies: Record<string, Posted> = {};
   const gets: Record<string, Got> = {};
@@ -130,17 +132,24 @@ function harness(review: Record<string, unknown>) {
   gets["/m/api/inbox"] = { ok: true, body: { rows: [] } };
   gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null } } };
   gets["/m/api/review"] = { ok: true, body: review };
+  installUnlock(gets, replies);
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
     fetchJson: async (path) => gets[path] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } },
-    postJson: async (path, value) => { posts.push({ path, value }); return replies[path] ?? { status: 200, body: { ok: true } }; },
+    postJson: async (path, value) => {
+      posts.push({ path, value });
+      if (h.queue423 && path === "/m/api/review/approve") { h.queue423 = false; return { status: 423, body: { error: "locked", unlock: true } }; }
+      return replies[path] ?? { status: 200, body: { ok: true } };
+    },
     getCredential: credential,
     openStream: () => new Stream(),
     setTimer: (fn) => { queueMicrotask(fn); return 0; },
   });
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   const click = async (selector: string) => { root.querySelector<HTMLElement>(selector)!.click(); await settle(); };
-  return { app, root, posts, replies, gets, credential, settle, click };
+  Object.assign(h, { app, root, posts, replies, gets, credential, settle, click });
+  return h as typeof h & { app: PhoneApp; root: HTMLElement; posts: typeof posts; replies: typeof replies; gets: typeof gets;
+    credential: typeof credential; settle: typeof settle; click: typeof click };
 }
 
 describe("the phone app's review (MR-11, MR-12)", () => {
@@ -171,9 +180,8 @@ describe("the phone app's review (MR-11, MR-12)", () => {
       .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats"]);
   });
 
-  it("tick 2 of 3, confirm: one challenge for exactly those, one passkey, then exactly those ids and tags", async () => {
+  it("tick 2 of 3, confirm: Face ID once (locked), then exactly those ids and tags with one op token", async () => {
     const h = harness(report({ opens_here: true }));
-    h.replies["/m/api/review/approve/options"] = { status: 200, body: { count: 2, publicKey: { challenge: "AAEC" } } };
     h.replies["/m/api/review/approve"] = { status: 200, body: { ok: true, approved: 2, results: [] } };
     h.app.start();
     await h.settle();
@@ -185,26 +193,31 @@ describe("the phone app's review (MR-11, MR-12)", () => {
     expect(h.credential).not.toHaveBeenCalled();
     const listed = Array.from(h.root.querySelectorAll<HTMLElement>('[data-testid="m-review-confirm-item"]')).map((x) => x.dataset.id);
     expect(listed).toEqual(["defer:a", "defer:b"]);
+    expect(h.root.querySelector('[data-testid="m-review-confirm-go"]')!.textContent).toBe("Approve with Face ID");
     await h.click('[data-testid="m-review-confirm-go"]');
     const items = [{ id: "defer:a", tag: tag("a") }, { id: "defer:b", tag: tag("b") }];
-    expect(h.posts).toEqual([
-      { path: "/m/api/review/approve/options", value: { items } },
-      { path: "/m/api/review/approve", value: { items, assertion: { id: "cred", response: {} } } }]);
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", "/m/api/review/approve"]);
+    expect(h.posts[2].value.items).toEqual(items);
+    expect(Object.keys(h.posts[2].value).sort()).toEqual(["items", "op"]);
     expect(h.credential).toHaveBeenCalledTimes(1);
     expect(h.root.querySelector('[data-testid="m-review-flash"]')!.textContent).toContain("Approved 2 once each");
     expect(h.app.reviewSel.size).toBe(0);
   });
 
-  it("a 409 changed unticks those, says why, and approves nothing", async () => {
+  it("unlocked, a stale 423: one unlock and the same set once more; the final 409 changed unticks those, approves nothing", async () => {
     const h = harness(report({ opens_here: true }));
-    h.replies["/m/api/review/approve/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null }, unlock_s: 900 } };
     h.replies["/m/api/review/approve"] = { status: 409, body: { error: "changed", changed: [{ id: "defer:b", reason: "answered" }] } };
     h.app.start();
     await h.settle();
     await h.click('[data-testid="m-review-tick"][data-id="defer:a"]');
     await h.click('[data-testid="m-review-tick"][data-id="defer:b"]');
     await h.click('[data-testid="m-review-approve"]');
+    expect(h.root.querySelector('[data-testid="m-review-confirm-go"]')!.textContent).toBe("Approve");
+    h.queue423 = true;
     await h.click('[data-testid="m-review-confirm-go"]');
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/review/approve", "/m/api/unlock/options", "/m/api/unlock", "/m/api/review/approve"]);
+    expect(h.posts[3].value).toEqual(h.posts[0].value);
     expect([...h.app.reviewSel]).toEqual(["defer:a"]);
     expect(h.root.querySelector('[data-testid="m-review-flash"]')!.textContent).toContain("Nothing was approved");
     expect(h.root.querySelector('[data-id="defer:b"] [data-testid="m-review-note"]')!.textContent).toContain("Unticked");

@@ -346,7 +346,7 @@ describe("the Needs-you tray", () => {
 });
 
 describe("the ⋯ menu", () => {
-  it("is closed until tapped, then lists Notifications, when Jarvis last answered, and Sign out last", async () => {
+  it("is closed until tapped, then lists Lock now (first), Notifications, when Jarvis last answered, and Sign out last", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness();
     h.app.start();
@@ -358,7 +358,7 @@ describe("the ⋯ menu", () => {
     expect(h.q("m-menu")!.getAttribute("aria-expanded")).toBe("true");
     const panel = h.q("m-menu-panel")!;
     const order = Array.from(panel.children).map((n) => (n as HTMLElement).dataset.testid || (n as HTMLElement).dataset.menuItem);
-    expect(order).toEqual(["m-notify", "m-menu-lastread", "m-signout"]);
+    expect(order).toEqual(["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]);
     expect(h.q("m-notify")).not.toBeNull();
     expect(h.q("m-menu-lastread")!.textContent).toMatch(/^Last read (just now|\d+ min ago)$/);
     expect(h.q("m-signout")!.textContent).toBe("Sign out");
@@ -403,8 +403,8 @@ describe("the ⋯ menu", () => {
     expect(h.root.querySelector(".subbar")!.contains(h.q("m-task-more"))).toBe(true);
     await h.click("m-task-more");
     await h.click("m-task-cancel");
-    expect(h.q("m-task-ask")!.textContent).toMatch(/Your passkey confirms it/);
-    expect(h.q("m-task-confirm")!.textContent).toBe("Cancel with passkey");
+    expect(h.q("m-task-ask")!.textContent).toMatch(/Face ID confirms it while this phone is locked/);
+    expect(h.q("m-task-confirm")!.textContent).toBe("Cancel with Face ID");
     expect(h.posts).toEqual([]);
     h.app.stop();
   });

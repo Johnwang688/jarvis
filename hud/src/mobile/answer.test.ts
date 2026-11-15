@@ -8,6 +8,7 @@ import { inboxView, type InboxAnswers } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 import { argText, browserBody, originText, reasonText } from "../lib/approvalCard";
 import { STALE_PENDING_MS } from "../lib/approvalSummary";
+import { actionPosts, installUnlock } from "./unlock.fixtures";
 
 // Hostile strings, as a model or a page could write them: each must arrive as text.
 const H = ['<img src=x onerror="window.__pwned=1">', "<script>window.__pwned=2</script>",
@@ -155,14 +156,15 @@ describe("the answering card (P-4)", () => {
     expect(view.querySelector('[data-testid="approval-always"]')).toBeNull();
   });
 
-  it("Always shows its rule, then asks again before the passkey", () => {
+  it("Always shows its rule, then takes one confirm tap (WS-5c: no Face ID inside the window)", () => {
     const confirm = vi.fn();
     const view = cardView(state(ORDINARY, { rule: { words: "From now on, allow run_command for any command whose stem is 'git'",
-      entry: { tool: "run_command", prefix: "git" }, publicKey: {} } }), { ...noop, confirmAlways: confirm });
+      entry: { tool: "run_command", prefix: "git" }, resolution: "r", preview: "a".repeat(64) } }), { ...noop, confirmAlways: confirm });
     expect(view.querySelector('[data-testid="m-rule-words"]')!.textContent).toContain("'git'");
     expect(view.querySelector('[data-testid="m-rule-entry"]')!.textContent).toBe('{"tool":"run_command","prefix":"git"}');
     expect(view.querySelector('[data-testid="approval-allow"]')).toBeNull();
     const button = view.querySelector<HTMLButtonElement>('[data-testid="m-rule-confirm"]')!;
+    expect(button.textContent).toBe("Confirm ALWAYS");
     expect(button.tabIndex).toBe(-1);
     button.click();
     expect(confirm).toHaveBeenCalledTimes(1);
@@ -189,6 +191,7 @@ function harness(rows: unknown[]) {
   document.body.replaceChildren(root);
   gets["/m/api/inbox"] = { ok: true, body: { rows } };
   gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null } } };
+  installUnlock(gets, replies);
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
     fetchJson: async (path) => gets[path] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } },
@@ -205,42 +208,89 @@ function harness(rows: unknown[]) {
 const APPR = row({ id: "appr:r1", kind: "approval", rank: 1, title: "Claude asks to use Bash", detail: { req_id: "r1", tool: "Bash" } });
 
 describe("the phone app answers (P-4)", () => {
-  it("AUTHORIZE: a challenge for this card and answer, the passkey, then the answer with its assertion", async () => {
+  it("AUTHORIZE while locked: Face ID once (unlock/options, the passkey, unlock), then the answer with its op token", async () => {
     const h = harness([APPR]);
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { decision: "allow", publicKey: { challenge: "AAEC" } } };
     h.app.start();
     await h.settle();
     await h.click("m-item-review");
     expect(h.root.querySelector('[data-testid="approval-card"]')).not.toBeNull();
     expect(h.credential).not.toHaveBeenCalled();
     await h.click("approval-allow");
-    expect(h.posts.map((p) => [p.path, p.value.decision])).toEqual([
-      ["/m/api/inbox/appr%3Ar1/answer/options", "allow"], ["/m/api/inbox/appr%3Ar1/answer", "allow"]]);
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", "/m/api/inbox/appr%3Ar1/answer"]);
     expect(h.credential).toHaveBeenCalledWith({ challenge: "AAEC" });
-    expect(h.posts[1].value.assertion).toEqual({ id: "cred", response: {} });
+    expect(h.posts[1].value).toEqual({ assertion: { id: "cred", response: {} } });
+    expect(Object.keys(h.posts[2].value).sort()).toEqual(["decision", "op"]);
+    expect(h.posts[2].value.decision).toBe("allow");
+    expect(h.posts[2].value.op).toMatch(/^o1\./);
     expect(h.root.querySelector('[data-testid="approval-card"]')).toBeNull();
     expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Authorized.");
+    // Unlocked now: the next AUTHORIZE asks nothing.
+    expect(h.app.unlock.mirror.open()).toBe(true);
   });
 
-  it("ALWAYS: the rule first, the passkey only after Confirm", async () => {
+  it("AUTHORIZE while unlocked: no Face ID, the answer alone", async () => {
     const h = harness([APPR]);
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { decision: "always",
-      rule: { tool: "run_command", prefix: "git" }, rule_words: "the rule", publicKey: { challenge: "AAED" } } };
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true, failed: null }, unlock_s: 1800 } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-allow");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/appr%3Ar1/answer"]);
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+
+  it("ALWAYS: the rule from the challenge-free rule read, one confirm tap, then {decision, preview, op}", async () => {
+    const h = harness([APPR]);
+    h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "run_command", prefix: "git" },
+      rule_words: "the rule", resolution: "run_command", preview: "b".repeat(64) } };
     h.app.start();
     await h.settle();
     await h.click("m-item-review");
     await h.click("approval-always");
     expect(h.root.querySelector('[data-testid="m-rule-words"]')!.textContent).toBe("the rule");
+    expect(h.root.querySelector('[data-testid="m-rule-confirm"]')!.textContent).toBe("Confirm ALWAYS");
     expect(h.credential).not.toHaveBeenCalled();
-    expect(h.posts.length).toBe(1);
+    expect(h.posts.length).toBe(0);
     await h.click("m-rule-confirm");
-    expect(h.credential).toHaveBeenCalledWith({ challenge: "AAED" });
-    expect(h.posts[1]).toEqual({ path: "/m/api/inbox/appr%3Ar1/answer", value: { decision: "always", assertion: { id: "cred", response: {} } } });
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(1);
+    expect(acts[0].path).toBe("/m/api/inbox/appr%3Ar1/answer");
+    expect(Object.keys(acts[0].value).sort()).toEqual(["decision", "op", "preview"]);
+    expect(acts[0].value.decision).toBe("always");
+    expect(acts[0].value.preview).toBe("b".repeat(64));
   });
 
-  it("DENY: one tap, the session only, no passkey", async () => {
+  it("ALWAYS: a changed rule (409) is read again and shown; nothing is sent until a new confirm tap", async () => {
+    const h = harness([APPR]);
+    h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
+    h.gets["/m/api/me"] = { ok: true, body: { signed_in: true, secure: { ok: true }, unlock_s: 1800 } };
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "run_command", prefix: "git" },
+      rule_words: "the old rule", resolution: "r", preview: "b".repeat(64) } };
+    h.app.start();
+    await h.settle();
+    await h.click("m-item-review");
+    await h.click("approval-always");
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 409, body: { error: "the rule changed: read it again" } };
+    h.gets["/m/api/inbox/appr%3Ar1/answer/rule"] = { ok: true, body: { rule: { tool: "run_command", prefix: "git push" },
+      rule_words: "the new rule", resolution: "r", preview: "c".repeat(64) } };
+    await h.click("m-rule-confirm");
+    expect(actionPosts(h.posts).length).toBe(1);
+    expect(h.root.querySelector('[data-testid="m-rule-words"]')!.textContent).toBe("the new rule");
+    expect(h.root.querySelector('[data-testid="m-card-notice"]')!.textContent).toBe("The rule changed: read it again, then confirm.");
+    await h.settle();
+    expect(actionPosts(h.posts).length).toBe(1);
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 200, body: { ok: true } };
+    await h.click("m-rule-confirm");
+    const acts = actionPosts(h.posts);
+    expect(acts.length).toBe(2);
+    expect(acts[1].value.preview).toBe("c".repeat(64));
+    expect(acts[1].value.op).not.toBe(acts[0].value.op);
+  });
+
+  it("DENY: one tap, the session only, no passkey and no unlock", async () => {
     const h = harness([APPR]);
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
     h.app.start();
@@ -251,18 +301,17 @@ describe("the phone app answers (P-4)", () => {
     expect(h.credential).not.toHaveBeenCalled();
   });
 
-  it("a cancelled passkey answers nothing; a refusal shows the daemon's words", async () => {
+  it("a cancelled Face ID answers nothing; a refusal shows the daemon's words", async () => {
     const h = harness([APPR]);
     h.gets["/m/api/inbox/appr%3Ar1/detail"] = { ok: true, body: ORDINARY };
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.credential.mockResolvedValueOnce(null);
     h.app.start();
     await h.settle();
     await h.click("m-item-review");
     await h.click("approval-allow");
-    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/appr%3Ar1/answer/options"]);
-    expect(h.root.querySelector('[data-testid="m-card-notice"]')!.textContent).toContain("Nothing was answered");
-    h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 409, body: { error: "answer at the desk" } };
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.root.querySelector('[data-testid="m-card-notice"]')!.textContent).toBe("Cancelled, or Face ID did not verify: nothing was sent.");
+    h.replies["/m/api/inbox/appr%3Ar1/answer"] = { status: 409, body: { error: "answer at the desk" } };
     await h.click("approval-allow");
     expect(h.root.querySelector('[data-testid="m-card-notice"]')!.textContent).toBe("Answer at the desk.");
   });
@@ -314,9 +363,8 @@ describe("the phone app answers (P-4)", () => {
       card: { tool: "Bash", command: "make deploy " + H, reason: H, args: { command: "make deploy" } }, ...detail },
     ...over } as never);
 
-  it("Approve and retry on a deferred row: a challenge for it, the passkey, then the answer with its assertion", async () => {
+  it("Approve and retry on a deferred row: a gated action (Face ID while locked), bound to the deferral in its URL", async () => {
     const h = harness([DEFER()]);
-    h.replies["/m/api/inbox/defer%3AD1/answer/options"] = { status: 200, body: { decision: "allow", publicKey: { challenge: "AAEF" } } };
     h.replies["/m/api/inbox/defer%3AD1/answer"] = { status: 200, body: { ok: true, delivery: "queued", note: "Approved once for 30 minutes." } };
     h.app.start();
     await h.settle();
@@ -324,22 +372,21 @@ describe("the phone app answers (P-4)", () => {
     expect(h.root.querySelector('[data-testid="m-command"]')!.textContent).toBe("make deploy " + H);
     expect(h.credential).not.toHaveBeenCalled();
     await h.click("m-deferred-retry");
-    expect(h.posts.map((p) => [p.path, p.value])).toEqual([
-      ["/m/api/inbox/defer%3AD1/answer/options", { decision: "allow" }],
-      ["/m/api/inbox/defer%3AD1/answer", { action: "retry", assertion: { id: "cred", response: {} } }]]);
-    expect(h.credential).toHaveBeenCalledWith({ challenge: "AAEF" });
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options", "/m/api/unlock", "/m/api/inbox/defer%3AD1/answer"]);
+    expect(Object.keys(h.posts[2].value).sort()).toEqual(["action", "op"]);
+    expect(h.posts[2].value.action).toBe("retry");
+    expect(h.credential).toHaveBeenCalledWith({ challenge: "AAEC" });
     expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Approved once for 30 minutes.");
   });
 
-  it("a cancelled passkey approves nothing; Leave it needs no passkey", async () => {
+  it("a cancelled Face ID approves nothing; Leave it needs no passkey", async () => {
     const h = harness([DEFER()]);
-    h.replies["/m/api/inbox/defer%3AD1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEF" } } };
     h.credential.mockResolvedValueOnce(null);
     h.app.start();
     await h.settle();
     await h.click("m-deferred-retry");
-    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/defer%3AD1/answer/options"]);
-    expect(h.root.querySelector('[data-testid="m-answer-note"]')!.textContent).toContain("Nothing was approved");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/unlock/options"]);
+    expect(h.root.querySelector('[data-testid="m-answer-note"]')!.textContent).toContain("nothing was sent");
     h.credential.mockClear();
     await h.click("m-deferred-leave");
     expect(h.posts[1]).toEqual({ path: "/m/api/inbox/defer%3AD1/answer", value: { action: "leave" } });
