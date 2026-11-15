@@ -1680,9 +1680,25 @@ sections below (P-4, P-5, QH, MR, PM-D) are history where they disagree.**
   else 410 `expired`), pruning, a duplicate (409 `{duplicate: true,
   state}`; the same nonce with another body is 409 "op token reused"), the
   session rate and the capacity through `Rate.take_if` (429; a capacity
-  refusal spends no rate token; lock order Ops then Rate), the `running`
+  refusal spends no rate token; 429s carry `Retry-After: 60`), the `running`
   record → QH-3's `owner_seen` → the act-time checks (409) → the mutation.
   `remote_auth.gated` runs steps 2 onward for every family.
+- **Retirement against admission (#374 fix round, Sol MED, Opus LOW-1).**
+  Admission runs under `RemoteAuth._lock`, right after `_still_unlocked`
+  (the session live and its passkey unrevoked, else 401; the window open,
+  else 423; never sliding). Every retirement (logout, End, revoke, expiry,
+  prune, a session found ended) holds the same lock and cleans the session's
+  `Ops` in it, so it lands wholly before admission or wholly after (its
+  cleanup takes the new record). Lock order: auth, then Ops, then Rate;
+  nothing holding Ops or Rate takes auth. `Op.mutating()` runs
+  `_still_unlocked` again under the lock and moves to `mutating` in the same
+  step, so End, a revoke or Lock now during a slow act-time check or a PR's
+  fresh read refuses the op (401, 423; no intent receipt, no gh) before it
+  mutates; every family's catch-all re-raises that `AuthError`. An ended
+  session keeps no record; a locked one keeps its op, `refused`. Neither
+  final check slides the window. Marking `mutating` before a call that can
+  still refuse (Fix, cancel, Allow, Always, deferred retry) reads such a
+  refusal back as `uncertain`: the safe direction.
 - **Op tokens.** `GET /m/api/ops/tokens` (session only, never slides,
   `OP_ISSUE_RATE` 30 a minute, its own final `session_live`) returns four
   `o1.<payload>.<mac>` tokens: HMAC-SHA256 under `_op_key` (32 random bytes
@@ -1720,7 +1736,8 @@ sections below (P-4, P-5, QH, MR, PM-D) are history where they disagree.**
   op}` binds the URL's thread and that thread's drawn `seq` (now in the
   phone's working read); 400 for a malformed id or `seq`, then the gate,
   the thread still visible, and `WorkingSet.done` (409 stale, out, a linked
-  rank 1–4 row or a running turn, in the daemon's words); the answer is
+  rank 1–4 row or a running turn, in the daemon's words, the last two as
+  `{error, why_not}`, scrubbed); the answer is
   exactly `{thread_id, done, token, undo_s}`. `POST
   /m/api/working/<id>/undo {token, op}` is `WorkingSet.undo` (409 for a
   wrong token, after 10 s, or after an archive). Logged "Done from the

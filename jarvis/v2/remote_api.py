@@ -282,7 +282,8 @@ DROPPED = {
     "working_entry": {
         "since": "when the thread joined; the phone draws `last`",
         "rows": "no inbox row data (P-2): the phone joins its own /m/api/inbox rows by thread_id",
-        "why_not": "Done's refusal reason; the phone's Done (WS-5c) answers it as a 409 instead",
+        "why_not": "Done's refusal reason; the phone's Done (WS-5c) answers it in its 409's "
+                   "`why_not` (scrubbed) instead of on every entry",
     },
     "working": {
         "needs_you": "inbox rows with no entry; the phone has /m/api/inbox",

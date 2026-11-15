@@ -494,22 +494,41 @@ def _approve_phone(handler, daemon, session, value):
     op = parse_op(value["op"])
 
     def act(ticket):
-        changed = check_group(daemon, items, phone=True)
-        if changed:
-            from .quiet_defer import CHANGED
-            return 409, {"error": CHANGED, "changed": changed}, []
-        secure = _monitor_check(daemon, session, handler)
-        if not secure.get("ok"):
-            status, payload = _limited_refusal(secure)
-            return status, payload, []
-        ticket.mutating()
-        out = approve(daemon, items, via="phone", unlocked=True)
-        ticket.returned()
-        if not out["ok"]:
-            return out["status"], {k: v for k, v in out.items() if k in ("error", "changed")}, []
-        ticket.result = "approved"
-        return 200, out, []
+        def run():
+            changed = check_group(daemon, items, phone=True)
+            if changed:
+                from .quiet_defer import CHANGED
+                return 409, {"error": CHANGED, "changed": changed}, []
+            secure = _monitor_check(daemon, session, handler)
+            if not secure.get("ok"):
+                status, payload = _limited_refusal(secure)
+                return status, payload, []
+            ticket.mutating()
+            out = approve(daemon, items, via="phone", unlocked=True)
+            ticket.returned()
+            if not out["ok"]:
+                return out["status"], {k: v for k, v in out.items() if k in ("error", "changed")}, []
+            ticket.result = "approved"
+            return 200, out, []
+        return _catch(run)
     return gated(handler, session, APPROVE, value, op, "review", act)
+
+
+def _catch(fn):
+    """`fn()`'s answer; an exception is never a 500 and, since it may have
+    come after the grants began, is the 409 "may not have gone through"
+    (the op settles `uncertain` once `mutating`, `refused` before). An
+    `AuthError` (`Op.mutating`'s final check: 401, or `Locked`) passes
+    through to `route`'s catch."""
+    from .remote_auth import AuthError
+    try:
+        return fn()
+    except AuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
+        from .remote_write import UNCERTAIN
+        LOG.exception("phone: Approve selected failed (%s)", type(exc).__name__)
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
 
 
 def route(handler, path: str, session: dict, body: bytes):

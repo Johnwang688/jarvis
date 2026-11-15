@@ -1182,15 +1182,62 @@ class PhoneActs(Phone):
         thread.start()
         self.assertTrue(arrived.wait(5), "the replay passed its outside checks and waits at the lock")
         self.mono.now = token["t"] + remote_auth.OP_TTL_S + 1      # past `expires`
-        # Another admission prunes the completed record.
-        other = self.ask()[0]
-        self.assertEqual(self.post_answer(f"appr:{other.req_id}", {"decision": "allow", "op": self.op()})[0], 200)
+        # Another admission prunes the completed record. Straight into the
+        # store: since #374's fix round the held replay holds the auth lock
+        # (admission runs under it, then the Ops lock), so a request's own
+        # admission would wait behind it.
+        ops.admit("0" * 64, "B" * 22, self.mono.now, "d", lambda room: "go")
         self.assertNotIn((self.session_of()["token_sha256"], token["n"]), ops._records, "pruned")
         go.set()
         thread.join(10)
         self.assertEqual(out[0][:3:2], (410, {"error": remote_auth.EXPIRED_OP, "expired": True}))
         self.assertEqual(len(p.run.acts()), 1)
         print("ok  expiry racing admission (barrier): the held replay is 410 after the prune, gh once")
+
+    def test_an_ending_during_the_fresh_read(self):
+        """Opus LOW-1 on #374, with a barrier: the desk's End, or Lock now,
+        lands while an admitted Update's fresh read runs; released, the
+        action is refused (401, or 423) at `mutating()`, before the intent
+        receipt and gh. The ended session keeps no op record."""
+        for ending in ("End", "Lock now"):
+            with self.subTest(ending=ending):
+                p = self.behind()
+                cookie = self.signed_in(self.a)
+                self.unlocked(cookie)
+                session = self.session_of(cookie)
+                body = self.tapped("update", cookie=cookie)
+                arrived, go = threading.Event(), threading.Event()
+                real = pr_merge.PrActions._fresh
+                first = []
+
+                def fresh(actor, *a, **k):
+                    if not first:
+                        first.append(1)
+                        arrived.set()
+                        go.wait(10)
+                    return real(actor, *a, **k)
+                out = []
+                with patch.object(pr_merge.PrActions, "_fresh", fresh):
+                    thread = threading.Thread(target=lambda: out.append(self.act(body, cookie)), daemon=True)
+                    thread.start()
+                    self.assertTrue(arrived.wait(5), "admitted, held in the fresh read")
+                    if ending == "End":
+                        self.assertEqual(self.hud("POST", f"/phone/sessions/{session['id']}/end")[0], 200)
+                    else:
+                        self.assertEqual(self.phone("POST", "/m/api/lock", {}, cookie=cookie)[0], 200)
+                    go.set()
+                    thread.join(10)
+                want = (401, {"error": "unauthorized"}) if ending == "End" else (423, {"error": "locked",
+                                                                                    "unlock": True})
+                self.assertEqual(out[0][:3:2], want, "[mutation: no final check in mutating()]")
+                self.assertEqual(p.run.acts(), [], "gh never ran")
+                self.assertEqual(self.receipts_via(), [])
+                path = Path(self.d.stores.root) / "inbox" / pr_merge.RECEIPTS_FILE
+                self.assertFalse(path.exists() and path.read_text().strip(), "no intent receipt either")
+                digest = session["token_sha256"]
+                self.assertEqual(self.auth.ops.count(digest), 0 if ending == "End" else 1)
+        print("ok  End or Lock now during an admitted Update's fresh read (barrier): 401 or 423 at mutating(), "
+              "no receipt, gh never ran; the ended session keeps no op record")
 
     def test_a_restart_refuses_the_old_token(self):
         """Sol r4-1: a new RemoteAuth, the same surviving session, a fresh

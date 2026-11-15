@@ -94,11 +94,15 @@ generation is bumped (Lock now), or retired with its ops (every other).
 (`issue_ops`: HMAC-SHA256 under `_op_key`, 32 random bytes made at start,
 over `{sid, n, t}` with the server's issue time), checked after the window:
 signature (410: forged or from before a restart) and session (400) outside
-any lock, then in `Ops.admit`, as one step under its lock with one `now`, the
-token's time (410), pruning, a duplicate (409, never run again), the rate
-and the capacity (429, `Rate.take_if`), and the `running` record. Records
-are kept until the token expires, never for a running op, never evicted;
-`op_status` reads one back by this session's digest only.
+any lock, then, under this object's lock (which every retirement holds), the
+session and window checked again without sliding (401, 423) and `Ops.admit`,
+as one step under its lock with one `now`: the token's time (410), pruning, a
+duplicate (409, never run again), the rate and the capacity (429 with
+`Retry-After`, `Rate.take_if`), and the `running` record. Lock order: auth,
+Ops, Rate. `Op.mutating()` checks the session and window once more, under
+the same lock, immediately before the mutation (401, 423: nothing done).
+Records are kept until the token expires, never for a running op, never
+evicted; `op_status` reads one back by this session's digest only.
 
 Past the session, `api_route` hands P-7's `POST /m/api/stt` to
 `remote_stt`, P-6's push paths to `push`, the morning review's
@@ -218,13 +222,15 @@ _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206
 class AuthError(Exception):
     """A refusal with its status and a fixed word: never the input, never why.
     `extra` holds fixed, code-written fields only (an op's `duplicate` and
-    `state`, an expired token's `expired`)."""
+    `state`, an expired token's `expired`); `headers` fixed response headers
+    (a 429's `Retry-After`)."""
 
-    def __init__(self, status: int, word: str, extra: dict | None = None):
+    def __init__(self, status: int, word: str, extra: dict | None = None, headers=()):
         super().__init__(word)
         self.status = status
         self.word = word
         self.extra = dict(extra or {})
+        self.headers = list(headers)
 
 
 UNAUTHORIZED = "unauthorized"
@@ -253,9 +259,9 @@ OWN_WORDS = (409, 410, 429, 503)
 def auth_reply(exc: AuthError) -> tuple[int, dict, list]:
     """An `AuthError` as a phone route answers it (`Locked` is taken first,
     by every catch): its own words for 409, 410, 429 and 503 plus its fixed
-    extra fields; else the status's fixed word."""
+    extra fields and headers; else the status's fixed word."""
     if exc.status in OWN_WORDS:
-        return exc.status, {"error": exc.word, **exc.extra}, []
+        return exc.status, {"error": exc.word, **exc.extra}, list(exc.headers)
     return exc.status, {"error": WORDS.get(exc.status, UNAUTHORIZED)}, []
 
 
@@ -333,6 +339,9 @@ OP_REUSED = "op token reused"
 OPS_FULL = "too many actions are still recorded; wait a minute"
 RATE_WORD = "too many writes from this phone; wait a minute"
 OP_ISSUE_WORD = "too many requests for tap tokens; wait a minute"
+# A 429's `Retry-After`, as `remote_write._written`'s (its `RATE_S`): each of
+# these words says "wait a minute".
+RETRY_AFTER = (("Retry-After", "60"),)
 OP_STATES = ("running", "completed", "refused", "uncertain")
 # The fixed words a confirmed result is recorded as, per family (Sol r5-2,
 # r6-2): never model text, never a response body. A PR result is
@@ -419,17 +428,33 @@ class Op:
     """One admitted operation: its key, its reservation, and how far the
     route got (`admitted`, then `mutating` immediately before the mutation
     call, then `returned` once it returned). `result` is the code-written
-    result the route saw (`op_outcome`)."""
+    result the route saw (`op_outcome`).
 
-    def __init__(self, ops: "Ops", key: tuple[str, str], reservation: str):
+    `guard` (with the lock it runs under) is `RemoteAuth`'s final check:
+    the session still live and its window still open, without sliding it.
+    `mutating()` runs it and moves to `mutating` in one step under that
+    lock, so an End, a revoke or a Lock now that lands after admission
+    (during a slow act-time check or a PR's fresh read) refuses the op
+    before its mutation: 401 or 423, raised past the route's catch-all,
+    and the op settles `refused` (or, for a retired session, finds no
+    record to settle)."""
+
+    def __init__(self, ops: "Ops", key: tuple[str, str], reservation: str, guard=None, lock=None):
         self.ops = ops
         self.key = key
         self.reservation = reservation
         self.phase = "admitted"
         self.result = None
+        self._guard = guard
+        self._lock = lock
 
     def mutating(self) -> None:
-        self.phase = "mutating"
+        if self._guard is None:
+            self.phase = "mutating"
+            return
+        with self._lock:
+            self._guard()           # 401 or `Locked`: the op stays `admitted`
+            self.phase = "mutating"
 
     def returned(self) -> None:
         self.phase = "returned"
@@ -440,7 +465,9 @@ class Ops:
     reservation, expires, outcome, code}`, kept until the token's own expiry
     and never for a `running` one. One lock serialises admission, every state
     change and pruning; nothing is evicted (a full store is 429). The lock
-    order is always this lock, then the session rate's (`Rate.take_if`)."""
+    order is always `RemoteAuth._lock` (admission and retirement run under
+    it), then this lock, then the session rate's (`Rate.take_if`); code
+    holding this lock or Rate's never takes `RemoteAuth._lock`."""
 
     def __init__(self, mono):
         self.mono = mono
@@ -477,9 +504,9 @@ class Ops:
                 return mine < OPS_PER_SESSION and len(self._records) < OPS_MAX
             verdict = rate(room)
             if verdict == "rate":
-                raise AuthError(429, RATE_WORD)
+                raise AuthError(429, RATE_WORD, headers=RETRY_AFTER)
             if verdict != "go":
-                raise AuthError(429, OPS_FULL)
+                raise AuthError(429, OPS_FULL, headers=RETRY_AFTER)
             reservation = secrets.token_hex(16)
             self._records[key] = {"state": "running", "digest": digest, "reservation": reservation,
                                   "expires": t + OP_TTL_S, "outcome": None, "code": None}
@@ -529,7 +556,9 @@ class Ops:
 
     def retire(self, session_digest: str) -> None:
         """A session ended: every record of it goes (its tokens can never
-        verify again: their `sid` no longer exists)."""
+        verify again: their `sid` no longer exists). Called under
+        `RemoteAuth._lock` (`_end_unlock`), which admission also holds, so
+        no admission of the session can land after it."""
         with self._lock:
             self._records = {k: r for k, r in self._records.items() if k[0] != session_digest}
 
@@ -543,12 +572,14 @@ class Ops:
 def gated(handler, session: dict, path: str, body: dict, op: dict, family: str, act):
     """Steps 2 to 6 of §5.3 for one gated action whose body (and op token,
     `parse_op`) already passed step 1: the window (423; nothing else runs),
-    the token's signature and session (400, 410), admission (410, 409, 429),
+    the token's signature and session (400, 410), the session and window
+    checked again and admission (401, 423, 410, 409, 429; `admit_op`),
     QH-3's presence, then `act(ticket)`, the route's act-time checks and its
     mutation, which answers `(status, payload, headers)` and calls
-    `ticket.mutating()` immediately before the mutation and
-    `ticket.returned()` once it returned. The op's state is settled however
-    `act` ends."""
+    `ticket.mutating()` immediately before the mutation (the session and
+    window once more: 401 or 423, an `AuthError` every route's catch-all
+    re-raises) and `ticket.returned()` once it returned. The op's state is
+    settled however `act` ends."""
     from . import remote_write
     auth = handler.remote_auth
     rate = remote_write.rate_of(handler.server)
@@ -1219,8 +1250,12 @@ class RemoteAuth:
         pending unlock challenges are deleted; the session stays."""
         with self._lock:
             digest = session.get("token_sha256") if isinstance(session, dict) else None
-            if isinstance(digest, str):
+            if isinstance(digest, str) and digest in self._sessions:
                 self._end_unlock(digest, why="Lock now")
+            elif isinstance(digest, str):
+                # Retired in between (End, revoke, expiry): its generation
+                # entry is not made again; the retirement is repeated.
+                self._end_unlock(digest, retire=True, why="the session ended")
             LOG.info("phone: session %s locked from the phone", session.get("id"))
             return {"unlocked": False}
 
@@ -1246,7 +1281,7 @@ class RemoteAuth:
                 del self._issued[key]
             seen = [at for at in self._issued.get(digest, []) if now - at < OP_ISSUE_S]
             if len(seen) >= OP_ISSUE_RATE:
-                raise AuthError(429, OP_ISSUE_WORD)
+                raise AuthError(429, OP_ISSUE_WORD, headers=RETRY_AFTER)
             seen.append(now)
             self._issued[digest] = seen
             sid = self._sessions[digest]["id"]
@@ -1262,15 +1297,35 @@ class RemoteAuth:
         if not isinstance(session, dict) or op["sid"] != session.get("id"):
             raise AuthError(400, "bad request")
 
+    def _still_unlocked(self, session: dict) -> None:
+        """Under `self._lock`: the phone state usable (503), the session
+        still live with its passkey unrevoked (401; one found ended is
+        retired), and its window still open (`Locked`, 423). It never
+        slides the window: admission's and `Op.mutating`'s final check."""
+        self._require_usable()
+        passkey = self._session_passkey(session)
+        if self._open_unlock(session["token_sha256"], passkey) is None:
+            raise Locked()
+
     def admit_op(self, session: dict, method: str, path: str, body: dict, op: dict, rate) -> Op:
         """Steps 2 to 4 of §5.3, in order: `require_unlocked` (423, and
         nothing else runs), `verify_op` (400, 410), then `Ops.admit` (410,
-        409, 429). The admitted `Op`."""
+        409, 429). The admitted `Op`.
+
+        Admission runs under `self._lock`, right after `_still_unlocked`: a
+        retirement (End, revoke, logout, expiry, prune) runs under the same
+        lock and cleans the session's ops in it, so it lands either wholly
+        before (401 here, nothing admitted) or wholly after (its cleanup
+        removes the new record). The lock order is auth, then Ops, then
+        Rate; nothing holding Ops or Rate ever takes auth."""
         self.require_unlocked(session)
         self.verify_op(session, op)
         digest = session["token_sha256"]
-        reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)
-        return Op(self.ops, (digest, op["n"]), reservation)
+        with self._lock:
+            self._still_unlocked(session)
+            reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)
+        return Op(self.ops, (digest, op["n"]), reservation,
+                  guard=lambda: self._still_unlocked(session), lock=self._lock)
 
     def op_status(self, session: dict, n: str) -> dict:
         """`GET /m/api/ops/<n>`: this session's op `n` only (`Ops.status`)."""
@@ -1709,13 +1764,15 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
         # event stream (`remote_api`), only past the session check above.
         # None from the reads: the stream answered on the socket.
         # The morning review (MR, `review.py`): its report, Approve selected
-        # (a passkey assertion bound to the whole set) and Leave selected.
+        # (gated by the unlock window and an op token, WS-5c, bound to the
+        # exact set the body names) and Leave selected.
         from . import review as _review
         answered = _review.route(handler, path, session, body)
         if answered is not None:
             return answered
-        # PM-D: the owner's Merge and Update on a PR row (`pr_merge.py`), each
-        # with its own assertion bound to the `pr:` subject.
+        # PM-D: the owner's Merge, Update and Fix on a PR row (`pr_merge.py`),
+        # gated by the unlock window and an op token (WS-5c), bound to the
+        # tapped head and card.
         from . import pr_merge
         acted = pr_merge.phone_route(handler, path, session, body)
         if acted is not None:

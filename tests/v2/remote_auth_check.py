@@ -1484,6 +1484,42 @@ class StatusAndState(Remote):
         print("ok  the unlock family only: one challenge per session, bound to unlock:<session id>; "
               "the per-action /options routes are 404")
 
+    def test_unlock_challenges_are_per_session(self):
+        """Sol LOW-3 on #374: the unlock pool is per session, never shared.
+        Two sessions each hold a pending unlock challenge at once, and each
+        opens its own window with its own; asking again in one replaces only
+        its own. (A cap counted across sessions would refuse B while A's
+        challenge is pending.)"""
+        a = self.pair()
+        self.a = a
+        one, two = self.signed_in(a), self.signed_in(a)
+        status, _, first = self.unlock_options(one)
+        self.assertEqual(status, 200, first)
+        status, _, second = self.unlock_options(two)
+        self.assertEqual(status, 200, ("B while A's challenge is pending", second,
+                                       "[mutation: the unlock cap counts across sessions]"))
+        pending = [c for c in self.auth._challenges.values() if c["kind"] == "unlock"]
+        self.assertEqual(sorted(c["session"] for c in pending),
+                         sorted(self.session_of(c)["token_sha256"] for c in (one, two)), "one each, both pending")
+        # Asking again in A replaces A's only; B's stays pending.
+        status, _, first = self.unlock_options(one)
+        self.assertEqual(status, 200, first)
+        self.assertEqual(len([c for c in self.auth._challenges.values() if c["kind"] == "unlock"]), 2)
+        for cookie, options in ((two, second), (one, first)):
+            status, _, body = self.phone("POST", "/m/api/unlock", {"assertion": a.get(options["publicKey"])},
+                                         cookie=cookie)
+            self.assertEqual((status, body), (200, {"unlocked": True, "unlock_s": remote_auth.UNLOCK_S}))
+        for cookie in (one, two):
+            self.assertEqual(self.phone("GET", "/m/api/me", cookie=cookie)[2]["unlock_s"], remote_auth.UNLOCK_S)
+        # Each session's challenge opens only its own window.
+        status, _, options = self.unlock_options(one)
+        self.assertEqual(status, 200, options)
+        status, _, body = self.phone("POST", "/m/api/unlock", {"assertion": a.get(options["publicKey"])},
+                                     cookie=two)
+        self.assertEqual(status, 401, ("A's challenge sent with B's session", body))
+        print("ok  unlock challenges are per session: two pending at once, each opens its own window; asking "
+              "again replaces only one's own; A's challenge never opens B's")
+
     def test_webauthn_missing_is_503_and_the_daemon_starts(self):
         text = (ROOT / "jarvis" / "v2" / "remote_auth.py").read_text(encoding="utf-8")
         self.assertNotRegex(text, r"(?m)^(import webauthn|from webauthn)", "imported only when used")

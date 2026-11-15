@@ -235,10 +235,23 @@ minus `DROPPED`, plus `title` and `project`.
        the rate before cancel, moves here.
      - **admission:** the op is recorded as `running`.
 
-     The lock order is always `Ops` then `Rate`.
+     The lock order is always `Ops` then `Rate`. **Since #374's fix round** (Sol's MED,
+     a barrier probe: End retired the session while a Cancel waited between its
+     signature check and admission, and the Cancel then ran and left an `Ops` record
+     for the ended session): admission runs **under the auth lock**, immediately after
+     a final check that the session is still live, its passkey unrevoked (401) and its
+     window still open (423), which never slides it. Every retirement holds the same
+     lock and cleans the session's `Ops` in it, so it lands wholly before admission
+     (401, nothing admitted) or wholly after (its cleanup takes the new record). The
+     lock order is auth → `Ops` → `Rate`; nothing holding `Ops` or `Rate` takes auth.
   5. The act-time checks (§5.4): 409. That includes today's approval, deferral and task
      lookups (`_request`, `_deferral`, `_task`), which today run before verification.
-  6. The mutation.
+  6. The mutation. `ticket.mutating()`, called immediately before it, checks once
+     more under the auth lock, without sliding, that the session is live and the window
+     open (Opus LOW-1 on #374: End, a revoke or Lock now landing during a slow act-time
+     check or a PR's fresh read). A refusal there is 401 or 423, passes through every
+     family's catch-all, and the op settles `refused` (a retired session's record is
+     already gone, and nothing makes it again).
 - **The 423 contract (Sol r2-2).** `remote_auth.Locked(AuthError)` has status 423, and
   `remote_auth.locked_reply()` is exactly `(423, {"error": "locked", "unlock": true}, [])`.
   - **Who catches it:** the local catches at `remote_answer.py:494`,
@@ -364,7 +377,9 @@ step 3 of §5.3; check 4 is step 4.
     refused (410) by the same snapshot's time check before pruning runs.
   - It also drops every record of a retired session (§5.8). That session's tokens can
     never verify again, because `sid` no longer exists.
-- **Op status (Sol r5-3).** `GET /m/api/ops/<n>` returns `{state, outcome, code}`.
+- **Op status (Sol r5-3).** `GET /m/api/ops/<n>` returns `{state, outcome, code, words}`.
+  `words` (added as built, #374) is `remote_auth.op_words(state, outcome, code)`: one of
+  the six fixed phrases listed under "What it shows" below, never model text.
   - **Lookup:** only by the **authenticated session's** digest plus `<n>`. Another session's
     nonce is `unknown`, exactly as a missing one is.
   - **Final re-check:** `session_live`, before the answer leaves. End or revoke during the
@@ -471,7 +486,9 @@ Every refusal and binding the `/options` routes made now runs in full at act tim
     tap names the thread, so an opaque thread-bound version is not added.
   - **Statuses:** as `working.done`. A malformed id, or a missing or malformed `seq`, is
     400. Stale, or not in the set, is 409 with the daemon's words. A linked rank 1–4 row
-    or a running turn is 409 with `why_not`.
+    or a running turn is 409 `{error, why_not}`: both the daemon's reason through the
+    phone's scrub (`why_not` added in #374's fix round, Sol LOW-2). A stale or out
+    refusal is `{error}` only.
   - **Response:** `{thread_id, done, token, undo_s}`.
 - **`POST /m/api/working/<id>/undo {token}`.** Session, window, and Done's token within
   10 s.
@@ -523,7 +540,8 @@ Every refusal and binding the `/options` routes made now runs in full at act tim
 
   A restart starts with empty unlock, challenge and `Ops` state and a new `OP_KEY`.
 - **Retiring a session** (every path above except Lock now) also removes that session's
-  `_unlock_gen` entry and its `Ops` records, in the same locked step that deletes its
+  `_unlock_gen` entry and its `Ops` records (admission holds the same lock: §5.3 step 4),
+  in the same locked step that deletes its
   challenges. Lock now keeps the session, so it bumps `_unlock_gen` instead.
 - **Revoke ordering (Sol r4).** `revoke` does three things in memory, under the lock,
   **before** `_save_passkeys`:
@@ -865,3 +883,39 @@ before the cap.
 - **PR code mapping is total.** Add `queued`, `head_moved`, `closed` and `not_mergeable`, and test every current pr_merge result. `not read again` → `unknown` takes precedence over `ok:false` → `failed`. `changed` is an exception path (pr_merge.py:723), not a normal return. Never reuse prRow.ts `resultOk`, which accepts `queued`.
 - **`Rate.take_if`'s capacity callback** inspects Ops under the already-held Ops lock and never re-acquires it.
 Every other revision-5 item is FIXED per Sol r6. The plan is ready to build with this addendum.
+
+## As built: WS-5c backend (#374), the builder's deviations
+
+Judged by Sol (cx374) and Opus; updated in #374's fix round.
+
+1. `Rate.take_if` samples `remote_write.clock()`, not the `Ops` snapshot. Both are
+   `time.monotonic` in production. Accepted.
+2. Every gated family spends a rate token; before, only `remote_write`'s routes did.
+   Accepted.
+3. The op token's full shape is checked at step 1, so a malformed token is 400 before
+   423. Accepted.
+4. A malformed task id on cancel is 400 (was 404). Accepted.
+5. **Marked `mutating` before a call that can still refuse, so a definite refusal inside
+   it reads back `uncertain`** (the safe direction: never a false "Done"). This covers
+   Fix (`pr_fix.start`) and cancel (`task_verb`), and also (Opus LOW-5, disclosed in the
+   fix round) Allow and Always (`_dispatch`, which can still refuse inside) and the
+   deferred Approve and retry (`quiet_defer.answer`, whose `APIError` is answered as its
+   own status while the op settles `uncertain`). Accepted.
+6. The act-time PR checks refuse before the fresh gh read. Accepted.
+7. ~~A Done refusal returns `{"error": why}` with no separate `why_not`.~~ Fixed in the
+   fix round: a linked rank 1–4 row or a running turn is 409 `{error, why_not}`
+   (`WorkingSet.done` names the reason; `remote_write.done` scrubs it).
+8. `review.subject`, `pr_merge.subject` and `remote_answer.defer_binding` are deleted.
+   Accepted.
+9. ~~Retiring a session cleans its `Ops` records in the same locked step as
+   `_end_unlock`; admission's pruning does not look up retired sessions.~~ Insufficient
+   under concurrency (Sol MED). Replaced in the fix round by admission under the auth
+   lock after a final session-and-window check, and `Op.mutating()`'s own final check
+   (§5.3 steps 4 and 6).
+10. cancel, Done and Undo call `owner_seen` (QH-3). Accepted.
+
+Also from the fix round: Approve selected has the catch-all every other family has (an
+exception is the 409 "may not have gone through", the op `uncertain` once `mutating`);
+the `Ops` and token-issue 429s carry `Retry-After: 60`; a Lock now after a retirement
+never makes the session's generation entry again; unlock challenges stay per session
+(tested with two sessions pending at once).

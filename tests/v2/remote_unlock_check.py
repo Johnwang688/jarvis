@@ -41,7 +41,13 @@ What it pins (§7, WS-5c):
     token), running records, states by failure point, the status route,
     the outcome words, the rate and duplicate order, and the composed
     status order;
-  - Done and Undo from the phone, bound to the URL thread and its `seq`.
+  - Done and Undo from the phone, bound to the URL thread and its `seq`;
+    Done's refusal for a linked row or a running turn carries `why_not`;
+  - #374's fix round: End, revoke or Lock now landing before admission,
+    during it, or between admission and the mutation refuses the op (401,
+    423) with nothing mutated and no op record kept for an ended session;
+    the final checks never slide; Lock now after a retirement makes no
+    generation; the op 429s carry `Retry-After`.
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/remote_unlock_check.py
 """
@@ -306,6 +312,19 @@ class Endings(Unlock):
         self.assertEqual(self.phone("POST", "/m/api/lock", {"x": 1}, cookie=self.cookie)[0], 400)
         self.assertEqual(self.phone("GET", "/m/api/lock", cookie=self.cookie)[0], 405)
         print("ok  Lock now: the window ends, the pending challenge goes (409), the generation is bumped")
+
+    def test_lock_after_a_retirement_makes_no_generation(self):
+        """Opus NIT on #374: a Lock now that lands after the session retired
+        (End in between) never makes its `_unlock_gen` entry again."""
+        self.secure_ok()
+        session, _credential = self.armed(self.cookie)
+        digest = session["token_sha256"]
+        self.assertEqual(self.hud("POST", f"/phone/sessions/{session['id']}/end")[0], 200)
+        self.assertNotIn(digest, self.auth._unlock_gen)
+        self.assertEqual(self.auth.lock(session), {"unlocked": False})
+        self.assertNotIn(digest, self.auth._unlock_gen, "[mutation: lock() bumps a retired session's generation]")
+        self.assertNotIn(digest, self.auth._unlocks)
+        print("ok  Lock now after a retirement: no generation entry is made again")
 
     def test_each_ending_on_the_existing_instance(self):
         self.secure_ok()
@@ -672,8 +691,9 @@ class OpTokens(Unlock):
             self.assertEqual(status, 200, (i, body))
             self.assertEqual(len(body["tokens"]), remote_auth.OP_TOKENS)
             self.assertEqual(body["ttl_s"], remote_auth.OP_TTL_S)
-        status, _, body = self.phone("GET", "/m/api/ops/tokens", cookie=self.cookie)
+        status, headers, body = self.phone("GET", "/m/api/ops/tokens", cookie=self.cookie)
         self.assertEqual((status, body), (429, {"error": remote_auth.OP_ISSUE_WORD}))
+        self.assertEqual(headers["Retry-After"], "60")
         self.mono.now = start + 61 * MIN
         request, _, _ = self.ask()
         self.assertEqual(self.allow(request)[:3:2], LOCKED, "issuing tokens never slid the window")
@@ -707,8 +727,9 @@ class OpTokens(Unlock):
         digest = self.digest()
         self.fill(digest, remote_auth.OPS_PER_SESSION)
         used = self.rate_used()
-        status, _, body = self.allow(request)
+        status, headers, body = self.allow(request)
         self.assertEqual((status, body), (429, {"error": remote_auth.OPS_FULL}))
+        self.assertEqual(headers["Retry-After"], "60", "as `_written`'s 429 [mutation: no Retry-After]")
         self.assertTrue(self.pending(request))
         self.assertEqual(self.auth.ops.count(digest), remote_auth.OPS_PER_SESSION, "nothing evicted or added")
         self.assertEqual({r["state"] for r in self.auth.ops._records.values()},
@@ -904,8 +925,9 @@ class OpTokens(Unlock):
         self.assertEqual(body.get("duplicate"), True, "rate exhausted plus a duplicate: 409 duplicate")
         self.assertEqual(self.rate_used(), remote_write.RATE, "no rate token spent")
         fresh = self.op()
-        status, _, body = self.allow(two, op=fresh)
+        status, headers, body = self.allow(two, op=fresh)
         self.assertEqual((status, body), (429, {"error": remote_auth.RATE_WORD}))
+        self.assertEqual(headers["Retry-After"], "60")
         self.assertNotIn((self.digest(), self.n_of(fresh)), self.auth.ops._records, "not admitted")
         self.assertTrue(self.pending(two))
         print("ok  order: rate exhausted plus a duplicate is 409 duplicate; plus a new token, 429 and not admitted")
@@ -938,6 +960,176 @@ class OpTokens(Unlock):
 
 
 # -- Done and Undo from the phone (§5.6) --------------------------------------------------------
+
+
+class Retirement(Unlock):
+    """Sol's MED and Opus LOW-1 on #374, with barriers: an ending (the desk's
+    End, a revoke, Lock now) that lands after `require_unlocked`, either
+    before admission or between admission and the mutation, refuses the op
+    before it mutates: 401 for an ending, 423 for Lock now. An ended session
+    keeps no op record; a locked one keeps its op, `refused`."""
+
+    def cancellable(self):
+        task = self.d.stores.tasks.create(self.project.id, "x")
+        self.d.stores.tasks.save(task)
+        return self.d.stores.tasks.transition(task.id, TaskState.CLARIFYING)
+
+    def ending(self, what):
+        """A fresh unlocked session: (its cookie, the ending as a call that
+        answers its status, the status a held request then gets)."""
+        if what == "revoke":
+            b = self.pair()
+            cookie = self.signed_in(b)
+            self.unlocked(cookie, b)
+            key = self.session_of(cookie)["passkey"]
+            return cookie, lambda: self.hud("POST", f"/phone/passkeys/{key}/revoke")[0], 401
+        cookie = self.other_session()
+        self.unlocked(cookie)
+        if what == "End":
+            sid = self.session_of(cookie)["id"]
+            return cookie, lambda: self.hud("POST", f"/phone/sessions/{sid}/end")[0], 401
+        return cookie, lambda: self.phone("POST", "/m/api/lock", {}, cookie=cookie)[0], 423
+
+    def holder(self, owner, name, key, *, after=False):
+        """`owner.name` patched so a call whose `key(*args)` is in the dict it
+        returns waits there for that entry's `go` (after the real call when
+        `after`), having set its `arrived`: `{key: (arrived, go)}`."""
+        held: dict = {}
+        real = getattr(owner, name)
+
+        def wrapper(*a, **k):
+            gate = held.get(key(*a, **k))
+            if gate is None:
+                return real(*a, **k)
+            out = real(*a, **k) if after else None
+            gate[0].set()
+            gate[1].wait(10)
+            return out if after else real(*a, **k)
+        guard = patch.object(owner, name, wrapper)
+        guard.start()
+        self.addCleanup(guard.stop)
+        return held
+
+    def background(self, fn):
+        out: list = []
+        thread = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+        thread.start()
+        return thread, out
+
+    def cancel_later(self, task, op, cookie):
+        return self.background(lambda: self.phone("POST", f"/m/api/tasks/{task.id}/cancel", {"op": op},
+                                                  cookie=cookie))
+
+    def test_an_ending_before_admission(self):
+        """Sol's barrier: held after the window and the signature, before
+        admission; the ending lands; released, the cancel is refused and
+        nothing is admitted."""
+        held = self.holder(self.auth, "verify_op", lambda session, op: op["n"], after=True)
+        for what in ("End", "revoke", "Lock now"):
+            with self.subTest(what=what):
+                cookie, end, want = self.ending(what)
+                digest = self.digest(cookie)
+                task = self.cancellable()
+                op = self.op(cookie)
+                arrived, go = held[self.n_of(op)] = (threading.Event(), threading.Event())
+                thread, out = self.cancel_later(task, op, cookie)
+                self.assertTrue(arrived.wait(5), "held past the window and the signature")
+                self.assertEqual(end(), 200)
+                go.set()
+                thread.join(10)
+                status, _, body = out[0]
+                self.assertEqual(status, want, body)
+                if want == 423:
+                    self.assertEqual(body, LOCKED[1])
+                self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CLARIFYING)
+                self.assertEqual(self.auth.ops.count(digest), 0,
+                                 "nothing admitted [mutation: no final check at admission]")
+                if want == 401:
+                    self.assertNotIn(digest, self.auth._unlock_gen)
+        self.assertEqual(self.runner.calls, [])
+        print("ok  End, revoke or Lock now before admission (barrier): 401, 401, 423; nothing cancelled, "
+              "nothing admitted")
+
+    def test_an_ending_waits_for_an_admission_under_way(self):
+        """Admission and its final check hold the auth lock, which every
+        retirement takes: End waits for an admission under way and then
+        retires the new record with the session."""
+        cookie, end, _want = self.ending("End")
+        digest = self.digest(cookie)
+        task = self.cancellable()
+        op = self.op(cookie)
+        admitting = self.holder(self.auth.ops, "admit", lambda session_digest, n, *a, **k: n)
+        arrived, go = admitting[self.n_of(op)] = (threading.Event(), threading.Event())
+        ended = threading.Event()
+        acting = self.holder(remote_write, "_task", lambda daemon, task_id: task_id)
+        acting[task.id] = (threading.Event(), ended)        # the act waits for the End
+        thread, out = self.cancel_later(task, op, cookie)
+        self.assertTrue(arrived.wait(5), "held inside admission")
+        ender, said = self.background(lambda: (end(), ended.set())[0])
+        ender.join(2.0)
+        self.assertTrue(ender.is_alive(), "End waits for the admission under way "
+                                          "[mutation: admission outside the auth lock]")
+        go.set()
+        ender.join(10)
+        thread.join(10)
+        self.assertEqual(said, [200])
+        status, _, body = out[0]
+        self.assertEqual((status, body), (401, {"error": "unauthorized"}))
+        self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CLARIFYING)
+        self.assertEqual(self.auth.ops.count(digest), 0, "the retirement took the new record")
+        self.assertEqual(self.runner.calls, [])
+        print("ok  End during an admission (barrier): it waits for the auth lock, then retires the record; "
+              "the cancel is 401")
+
+    def test_an_ending_between_admission_and_the_mutation(self):
+        """Opus LOW-1: held at the act-time lookup (after admission, before
+        `mutating()`); the ending lands; released, `mutating()`'s final check
+        refuses before the mutation."""
+        held = self.holder(remote_write, "_task", lambda daemon, task_id: task_id)
+        for what in ("End", "revoke", "Lock now"):
+            with self.subTest(what=what):
+                cookie, end, want = self.ending(what)
+                digest = self.digest(cookie)
+                task = self.cancellable()
+                op = self.op(cookie)
+                arrived, go = held[task.id] = (threading.Event(), threading.Event())
+                thread, out = self.cancel_later(task, op, cookie)
+                self.assertTrue(arrived.wait(5), "held after admission")
+                self.assertEqual(self.auth.ops.count(digest), 1, "admitted")
+                self.assertEqual(end(), 200)
+                go.set()
+                thread.join(10)
+                status, _, body = out[0]
+                self.assertEqual(status, want, (body, "[mutation: no final check in mutating()]"))
+                if want == 423:
+                    self.assertEqual(body, LOCKED[1])
+                self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CLARIFYING)
+                if want == 401:
+                    self.assertEqual(self.auth.ops.count(digest), 0, "retired; nothing settles it back")
+                else:
+                    # The session holds: its op stays recorded, refused (the
+                    # token is never released; a new tap retries).
+                    self.assertEqual(self.status_of(op, cookie)[2],
+                                     {"state": "refused", "outcome": None, "code": None, "words": "Not done"})
+        self.assertEqual(self.runner.calls, [])
+        print("ok  End, revoke or Lock now between admission and the mutation (barrier): 401, 401, 423; "
+              "nothing cancelled; an ended session keeps no record, a locked one keeps it refused")
+
+    def test_the_last_check_never_slides(self):
+        self.unlocked()
+        held = self.holder(remote_write, "_task", lambda daemon, task_id: task_id)
+        task = self.cancellable()
+        op = self.op()
+        arrived, go = held[task.id] = (threading.Event(), threading.Event())
+        thread, out = self.cancel_later(task, op, self.cookie)
+        self.assertTrue(arrived.wait(5))
+        self.mono.now += 59 * MIN
+        go.set()
+        thread.join(10)
+        self.assertEqual(out[0][0], 200, out[0])
+        self.assertEqual(self.runner.calls, [("cancel", task.id)])
+        self.assertEqual(self.unlock_s(), 60, "slid by require_unlocked only [mutation: the final check slides]")
+        print("ok  the final checks at admission and before the mutation never slide the window")
 
 
 class DoneUndo(Unlock):
@@ -1046,13 +1238,26 @@ class DoneUndo(Unlock):
         eventually(lambda: self.seq(self.one) == self.ws.entry(self.one.id)["seq"], what="the bump")
         status, _, body = self.done(self.one, self.seq(self.one))
         self.assertEqual(status, 409, body)
-        self.assertIn("waits on you", body["error"])
+        self.assertEqual(set(body), {"error", "why_not"}, "§5.6/§7: 409 with why_not")
+        self.assertIn("waits on you", body["why_not"])
+        self.assertEqual(body["error"], body["why_not"])
         self.assertTrue(self.inside(self.one))
         self.statuses[self.two.id] = "working"
         status, _, body = self.done(self.two, self.seq(self.two))
-        self.assertEqual((status, body), (409, {"error": "a turn is running in this chat"}))
+        self.assertEqual((status, body), (409, {"error": "a turn is running in this chat",
+                                                "why_not": "a turn is running in this chat"}))
         self.assertTrue(self.inside(self.two))
-        print("ok  Done: a linked rank 1-4 row or a running turn is 409 with why, and the thread stays in")
+        # The reason goes through the phone's scrub, as every phone string does.
+        with patch.object(self.ws, "why_not", lambda ids, rows=None: {t: "x " + rnc.TOKEN for t in ids}):
+            status, _, body = self.done(self.two, self.seq(self.two))
+        self.assertEqual(status, 409, body)
+        self.assertNotIn(rnc.TOKEN, json.dumps(body))
+        self.assertEqual(body["why_not"], remote_write._word("x " + rnc.TOKEN))
+        # A stale seq is not a why_not.
+        status, _, body = self.done(self.two, self.seq(self.two) + 1)
+        self.assertEqual((status, set(body)), (409, {"error"}))
+        print("ok  Done: a linked rank 1-4 row or a running turn is 409 {error, why_not} (scrubbed), and the "
+              "thread stays in; a stale seq is {error} only")
 
 
 # -- recording and the boundary ---------------------------------------------------------------

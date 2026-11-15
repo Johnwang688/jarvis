@@ -903,11 +903,17 @@ def phone_act(handler, daemon, session, path: str, body: dict):
 
 
 def _phone_catch(fn):
+    """`fn()`'s answer, a refusal as its status. An `AuthError`
+    (`Op.mutating`'s final check: 401, or `Locked`) passes through to
+    `phone_route`'s catch."""
     from .remote_answer import _word
+    from .remote_auth import AuthError
     try:
         return fn()
     except Refused as exc:
         return exc.status, {"error": _word(exc.word)}, []
+    except AuthError:
+        raise
     except Exception as exc:  # noqa: BLE001 — never a 500; it may have taken effect
         LOG.warning("PR actions: a phone action failed (%s)", type(exc).__name__)
         return 409, {"error": "it may not have gone through: check before trying again", "uncertain": True}, []

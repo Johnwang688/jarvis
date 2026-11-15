@@ -31,6 +31,9 @@ PM = "jarvis/v2/pr_merge.py"
 UNLOCK = "tests/v2/remote_unlock_check.py"
 ANSWER = "tests/v2/remote_answer_check.py"
 PRC = "tests/v2/pr_merge_check.py"
+AUTH = "tests/v2/remote_auth_check.py"
+REVIEW = "tests/v2/review_check.py"
+REV = "jarvis/v2/review.py"
 
 MUTANTS = [
     ("a read slides the window", API,
@@ -89,10 +92,12 @@ MUTANTS = [
     ("admission runs before require_unlocked", RA,
      "        self.require_unlocked(session)\n        self.verify_op(session, op)\n"
      '        digest = session["token_sha256"]\n'
-     '        reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n',
+     "        with self._lock:\n            self._still_unlocked(session)\n"
+     '            reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n',
      "        self.verify_op(session, op)\n"
      '        digest = session["token_sha256"]\n'
-     '        reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n'
+     "        with self._lock:\n"
+     '            reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n'
      "        self.require_unlocked(session)\n",
      ["OpTokens.test_the_composed_status_order"], UNLOCK),
     ("the token TTL check is dropped", RA,
@@ -164,6 +169,64 @@ MUTANTS = [
      '                return 401, {"error": "unauthorized"}, []\n'
      "            return 200, payload, []\n",
      ["Always.test_the_rule_read"], ANSWER),
+    # -- #374's fix round ------------------------------------------------------------------
+    ("admission's final session and window check is dropped (Sol MED)", RA,
+     "            self._still_unlocked(session)\n            reservation = self.ops.admit(",
+     "            reservation = self.ops.admit(",
+     ["Retirement.test_an_ending_before_admission"], UNLOCK),
+    ("admission runs outside the auth lock (Sol MED)", RA,
+     "        with self._lock:\n            self._still_unlocked(session)\n"
+     '            reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n',
+     "        self._still_unlocked(session)\n"
+     '        reservation = self.ops.admit(digest, op["n"], op["t"], op_digest(method, path, body), rate)\n',
+     ["Retirement.test_an_ending_waits_for_an_admission_under_way"], UNLOCK),
+    ("mutating() loses its final check (Opus LOW-1)", RA,
+     "            self._guard()           # 401 or `Locked`: the op stays `admitted`\n",
+     "",
+     ["Retirement.test_an_ending_between_admission_and_the_mutation"], UNLOCK),
+    ("mutating() loses its final check (PR family, Opus LOW-1)", RA,
+     "            self._guard()           # 401 or `Locked`: the op stays `admitted`\n",
+     "",
+     ["PhoneActs.test_an_ending_during_the_fresh_read"], PRC),
+    ("a gated catch-all swallows the final check (remote_write)", RW,
+     "        return exc.status, {\"error\": exc.word, **exc.extra}, []\n    except AuthError:\n        raise\n"
+     "    except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain\n",
+     "        return exc.status, {\"error\": exc.word, **exc.extra}, []\n"
+     "    except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain\n",
+     ["Retirement.test_an_ending_between_admission_and_the_mutation"], UNLOCK),
+    ("a gated catch-all swallows the final check (pr_merge)", PM,
+     "        return exc.status, {\"error\": _word(exc.word)}, []\n    except AuthError:\n        raise\n",
+     "        return exc.status, {\"error\": _word(exc.word)}, []\n",
+     ["PhoneActs.test_an_ending_during_the_fresh_read"], PRC),
+    ("the final check slides the window", RA,
+     '        if self._open_unlock(session["token_sha256"], passkey) is None:\n            raise Locked()\n',
+     '        held = self._open_unlock(session["token_sha256"], passkey)\n        if held is None:\n'
+     '            raise Locked()\n        held["until"] = self.mono() + UNLOCK_S\n',
+     ["Retirement.test_the_last_check_never_slides"], UNLOCK),
+    ("the unlock challenge cap counts across sessions (Sol LOW-3)", RA,
+     '                    if c["kind"] == "unlock" and c.get("session") == extra.get("session")]\n',
+     '                    if c["kind"] == "unlock"]\n',
+     ["StatusAndState.test_unlock_challenges_are_per_session"], AUTH),
+    ("Done's refusal loses why_not (Sol LOW-2)", RW,
+     '                    refused["why_not"] = _word(payload["why_not"])\n',
+     "                    pass\n",
+     ["DoneUndo.test_a_linked_row_or_a_running_turn_keeps_it_in"], UNLOCK),
+    ("Done's why_not skips the scrub (Sol LOW-2)", RW,
+     '                    refused["why_not"] = _word(payload["why_not"])\n',
+     '                    refused["why_not"] = payload["why_not"]\n',
+     ["DoneUndo.test_a_linked_row_or_a_running_turn_keeps_it_in"], UNLOCK),
+    ("Approve selected has no catch-all (Opus LOW-4)", REV,
+     "        return _catch(run)\n    return gated(handler, session, APPROVE, value, op, \"review\", act)\n",
+     "        return run()\n    return gated(handler, session, APPROVE, value, op, \"review\", act)\n",
+     ["Phone.test_an_exception_is_409_uncertain_never_500"], REVIEW),
+    ("lock() bumps a retired session's generation (Opus NIT)", RA,
+     "            if isinstance(digest, str) and digest in self._sessions:\n",
+     "            if isinstance(digest, str):\n",
+     ["Endings.test_lock_after_a_retirement_makes_no_generation"], UNLOCK),
+    ("an Ops 429 has no Retry-After (Opus NIT)", RA,
+     "                raise AuthError(429, OPS_FULL, headers=RETRY_AFTER)\n",
+     "                raise AuthError(429, OPS_FULL)\n",
+     ["OpTokens.test_capacity_refuses_and_changes_nothing"], UNLOCK),
 ]
 
 

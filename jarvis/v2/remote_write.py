@@ -244,7 +244,9 @@ class Rate:
         full), then `ok()` (the `Ops` capacity, called with the Ops lock
         already held: "full" when it refuses), and the write is recorded only
         when both pass ("go"). So a refusal spends no rate token. The lock
-        order is always Ops, then this."""
+        order is always `RemoteAuth`'s, then Ops, then this (admission runs
+        under the auth lock since #374's fix round); nothing here takes
+        either of the others."""
         with self._lock:
             for key in [k for k, q in self._seen.items() if not q or now - q[-1] >= RATE_S]:
                 del self._seen[key]
@@ -529,11 +531,16 @@ def verb(daemon, task_id: str, name: str, body) -> dict:
 
 def _catch(fn):
     """`fn()`'s answer, with a refusal answered as its status (the act-time
-    half of a gated action: nothing here raises past the op's settling)."""
+    half of a gated action: nothing here raises past the op's settling but
+    an `AuthError`, `Op.mutating`'s final check, 401 or `Locked`, which the
+    route answers)."""
+    from .remote_auth import AuthError
     try:
         return fn()
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
+    except AuthError:
+        raise
     except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain
         LOG.exception("phone: a write failed (%s)", type(exc).__name__)
         return 409, {"error": UNCERTAIN, "uncertain": True}, []
@@ -583,9 +590,10 @@ def done(handler, daemon, session, path: str, thread_id: str, body) -> tuple:
     """`POST working/<id>/done {seq, op}`: Done on the thread in the URL, as
     drawn (its own `seq`, captured at the tap). 400 for a malformed id or
     `seq`; then the window, the token, the thread still visible, and
-    `WorkingSet.done` (409 stale, out, a linked row or a running turn, with
-    the daemon's words). The answer is `{thread_id, done, token, undo_s}`
-    and nothing else of the entry."""
+    `WorkingSet.done` (409 stale or out, `{error}`; 409 for a linked rank
+    1-4 row or a running turn, `{error, why_not}`; in the daemon's words,
+    scrubbed). The answer is `{thread_id, done, token, undo_s}` and nothing
+    else of the entry."""
     from .remote_auth import gated, parse_op
     body = _fields(body, ("seq", "op"), ("seq", "op"))
     if not isinstance(thread_id, str) or not _ID.fullmatch(thread_id):
@@ -603,7 +611,13 @@ def done(handler, daemon, session, path: str, thread_id: str, body) -> tuple:
             status, payload = working.done(thread_id, seq)
             ticket.returned()
             if status != 200:
-                return status, {"error": _word(payload.get("error") if isinstance(payload, dict) else "")}, []
+                payload = payload if isinstance(payload, dict) else {}
+                refused = {"error": _word(payload.get("error") or "")}
+                if status == 409 and isinstance(payload.get("why_not"), str):
+                    # A linked rank 1-4 row or a running turn (§5.6): why,
+                    # scrubbed as every phone string is.
+                    refused["why_not"] = _word(payload["why_not"])
+                return status, refused, []
             ticket.result = "done"
             LOG.info("phone: Done from the phone on chat %s", thread_id)
             return 200, {"thread_id": thread_id, "done": True, "token": payload["token"],

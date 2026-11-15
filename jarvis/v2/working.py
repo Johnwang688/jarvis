@@ -837,7 +837,9 @@ class WorkingSet:
                     return 409, {"error": "this chat changed since the Inbox was drawn",
                                  "entry": self.entry(thread_id)}
                 if why is not None:
-                    return 409, {"error": why, "entry": _public(thread_id, entry)}
+                    # `why_not` names this refusal apart from a stale one (the
+                    # phone's Done answers it: WS-5c §5.6).
+                    return 409, {"error": why, "why_not": why, "entry": _public(thread_id, entry)}
                 if self._closed:
                     return 503, {"error": "Jarvis is stopping; nothing changed"}
                 before = dict(entry)

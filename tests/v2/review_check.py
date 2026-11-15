@@ -571,6 +571,31 @@ class Phone(ra.Phone):
         self.assertEqual(self.store.get(r3.req_id)["state"], "waiting")
         print("ok  the set the body names: one tag different is 409 changed; set A's token is reused on set B")
 
+    def test_an_exception_is_409_uncertain_never_500(self):
+        """Opus LOW-4 on #374: an exception inside Approve selected is the
+        409 "may not have gone through" every family answers, never a 500;
+        the op is `uncertain` once the grants began, `refused` before."""
+        from jarvis.v2 import remote_auth, remote_write
+        r1, r2 = self.defer("one"), self.defer("two")
+        out = self.review_report()
+        self.unlocked()
+        self.mono2.now += quiet_defer.PRESENT_S
+        cases = (("approve", "uncertain", "Unknown: check at the desk"),
+                 ("check_group", "refused", "Not done"))
+        for name, state, words in cases:
+            with self.subTest(failing=name):
+                op = self.op()
+                with patch.object(review, name, side_effect=RuntimeError("boom")):
+                    status, _, body = self.approve(picked(out, f"defer:{r1.req_id}"), op)
+                self.assertEqual((status, body), (409, {"error": remote_write.UNCERTAIN, "uncertain": True}),
+                                 "[mutation: no catch-all in _approve_phone]")
+                n = remote_auth.parse_op(op)["n"]
+                got = self.phone("GET", "/m/api/ops/" + n, cookie=self.cookie)[2]
+                self.assertEqual((got["state"], got["words"]), (state, words))
+        self.assertEqual({self.store.get(r.req_id)["state"] for r in (r1, r2)}, {"waiting"})
+        print("ok  Approve selected: an exception is 409 may-not-have-gone-through (uncertain after the grants "
+              "began, refused before), never a 500")
+
     def test_a_row_token_and_a_group_token_never_cross(self):
         r1, r2 = self.defer("only"), self.defer("other")
         out = self.review_report()

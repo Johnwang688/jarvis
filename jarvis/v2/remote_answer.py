@@ -389,11 +389,15 @@ def _dispatch(daemon, row_id: str, body: dict, *, owner_verified: bool) -> dict:
 
 def _catch(fn):
     """`fn()`'s answer, a refusal as its status: the act-time half of a
-    gated action (`remote_auth.gated`)."""
+    gated action (`remote_auth.gated`). An `AuthError` (`Op.mutating`'s
+    final check: 401, or `Locked`) passes through to the route's catch."""
+    from .remote_auth import AuthError
     try:
         return fn()
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
+    except AuthError:
+        raise
     except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
         from .remote_write import UNCERTAIN
         LOG.exception("phone: an answer failed (%s)", type(exc).__name__)
