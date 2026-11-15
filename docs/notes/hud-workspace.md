@@ -1913,7 +1913,10 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   (`owner-inbox-count`), amber while a rank 1–2 row waits, none while the
   inbox cannot be read (an older daemon's 404 is never shown as zero). A
   click is `showView("inbox")`: the pane already showing it, else the focused
-  pane, never a pane with an unsaved edit. It answers nothing.
+  pane, never a pane with an unsaved edit. It answers nothing. (Since WS-3 the row
+  folds the In progress list instead, and the page opens from the "Needs you" line
+  under it; the row opens the page itself only where there is no list to fold. See
+  "Needs you (WS-3)" below.)
 - **App badge.** After each read whose count changed, `lib/inbox` `setBadge`:
   `navigator.setAppBadge(count)`, `clearAppBadge()` at 0 (else
   `setAppBadge(0)`), feature-detected, every error swallowed. In a tab Chrome
@@ -2358,8 +2361,9 @@ The owner's answer O-4: the project where chat with no project lands is named
 ## The Inbox section (WS-2, 2026-11-14)
 
 Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` (D-5, D-6, D-9, D-10). Additive: today's
-Inbox page, its navigation, the aurora row's look, its count and its amber are unchanged
-(`waitingCount`/`anyPending` still come from `state/inbox.ts`, D-6).
+Inbox page, the aurora row's look, its count and its amber are unchanged (`waitingCount`/
+`anyPending` still come from `state/inbox.ts`, D-6). WS-3 (below) then made the row the list's
+header: its click folds the list, and the page opens from the "Needs you" line.
 
 - **Store.** `hud/src/state/working.ts` (`WorkingStore`), like `state/inbox.ts`: one `GET /working`
   in flight, an event heard during a read asks for exactly one more, read on `working_changed`
@@ -2418,3 +2422,11 @@ still hold except where this section replaces them.
 - **Tests.** `Sidebar.needsyou.test.ts`, `InboxView.threads.test.ts`, `lib/working.test.ts`; face
   checks `hud_v2_working_check.py` (sections `collapse`, `inbox`, `line`, `hint`, `page`) and
   `hud_v2_inbox_check.py` (`needsyou`). Screenshots: `JARVIS_WORKING_SHOTS=<dir>`.
+- **Review of PR #368 (fix round 1).** A hint's target waits for a read started for it before it is
+  judged absent (the working list can be newer than the cached rows), then clears; it never outlives its
+  navigation (an ordinary open clears it, the page going away clears it, 15 s expires it:
+  `state/inboxFocus.ts`). The header row is always the same element in `WorkingBlock`, so its focus
+  survives the first read; it folds only once a read has landed (`WorkingSnapshot.loaded`), and any
+  first-read error (not only 404/403) leaves it a page-opening button. An unread count shows
+  "Needs you · –", never a zero. The project chip yields to a hint first (`.whint ~ .wchip`). The
+  stray bits in the page screenshot were the binary click sparkle (`#sparkle-layer`, 500 ms), not WS-3.

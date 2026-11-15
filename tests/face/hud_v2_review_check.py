@@ -111,6 +111,14 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
                               ".map(b => b.dataset.testid).filter(t => t === 'owner-inbox' || t === 'owner-review')")  # WS-3: the In progress list sits between them
         check("the sidebar's Morning review row sits under the Inbox [mutation: no row]",
               order == ["owner-inbox", "owner-review"], str(order))
+        above = page.evaluate("""() => {
+          const r = document.querySelector('[data-testid="owner-review"]');
+          const p = document.querySelector('[data-testid="project-p1"]');
+          const h = [...document.querySelectorAll('#sidebar h2.bar')].find(e => /projects/i.test(e.textContent));
+          return !!(r && p && h && (r.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING)
+            && (r.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING));
+        }""")
+        check("and it stays above the projects and their header [mutation: the row moves below the project tree]", above)
         until(lambda: page.locator('[data-testid="owner-review-count"]').count() == 1, timeout=4)
         check("its count is the review's open items",
               page.locator('[data-testid="owner-review-count"]').inner_text().strip() == "4")

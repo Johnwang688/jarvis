@@ -50,7 +50,8 @@ HIGH). §10 says where each one landed.
   - anything whose thread is archived, deleted or out of the set.
 
   Nothing that waits on you gets lost. The full **Needs you** page (today's
-  Inbox page) stays one click away.
+  Inbox page) stays one click away from the unfolded list (its "Needs you" line;
+  the rainbow row folds the list, WS-3, §11).
 - **Unsorted.** The catch-all project where chats with no project land is
   renamed **Unsorted**, so "Inbox" means one thing.
 
