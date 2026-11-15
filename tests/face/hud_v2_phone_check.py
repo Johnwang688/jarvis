@@ -660,15 +660,16 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-3 Inbox: the rows render (approvals, the private card, the blocked task)",
           rows.count() >= 3 and page.locator('[data-testid="m-inbox-row"][data-kind="approval"]').count() == 2,
           text())
-    check("P-3 Inbox: origin, command and reason are text, never markup",
+    # PX-3b: the compact approval item has no command (it is on the card, hud_v2_phone_answer_check.py).
+    check("P-3 Inbox: origin is text, never markup; the compact approval carries no command (PX-3b)",
           HOSTILE in page.locator('[data-testid="m-origin"]').first.inner_text()
-          and HOSTILE in page.locator('[data-testid="m-command"]').first.inner_text() and clean())
+          and page.locator('[data-kind="approval"] [data-testid="m-command"]').count() == 0 and clean())
     check("P-3 Inbox: a private card shows its private projection only",
           page.locator('[data-testid="m-private"]').count() == 1 and "PRIVATE-NEVER" not in text())
     # P-4: an approval row opens its answering card (hud_v2_phone_answer_check.py);
     # nothing on the list itself allows, denies or always-allows.
-    check("P-4 Inbox: approvals offer 'Open the card to answer'",
-          page.locator('[data-testid="m-open-card"]', has_text="Open the card to answer").count() == 2)
+    check("P-4 Inbox: approvals offer one Review button (PX-3b)",
+          page.locator('[data-testid="m-item-review"]', has_text="Review").count() == 2)
     bad, fields = answer_controls()
     check("P-3 Inbox: no answer control on the list itself (no Allow, Deny, Always, no input)",
           not bad and fields == 0, f"{bad} {fields}")

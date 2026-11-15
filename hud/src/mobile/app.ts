@@ -128,7 +128,7 @@ const RETRY_MS = 4000;
 export const ASKING_FACE_ID = "Asking for Face ID…";
 export const SENDING = "Sending…";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
-const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-open-card"]);
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
@@ -1615,7 +1615,7 @@ export class PhoneApp {
     } else if (was && this.tab === "inbox") {
       // Answered: the line saying what happened ("Denied."); else (back, or gone) the row's own button.
       const flash = this.main.querySelector<HTMLElement>('[data-testid="m-flash"]');
-      const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-open-card"]');
+      const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-item-review"]');
       if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
       else row?.focus({ preventScroll: true });
     }

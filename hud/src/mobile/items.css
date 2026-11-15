@@ -21,3 +21,27 @@
 }
 /* "Write your own": today's box and Send, under the chips. */
 .m-write { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* PX-3b: compact items. The approval item shows a headline and its summary in at most two lines each, then one
+   Review button (right, 48 px+). The fold and Later controls are 48 px targets too. */
+.m-item-approval .m-clamp2,
+.m-item-approval .as-ai .as-text {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+.m-item-approval .m-item-detail { margin-top: 0.375rem; padding-top: 0.375rem; }
+.m-item-approval .as-line { font-size: 0.9375rem; overflow-wrap: anywhere; }
+.m-item .tap.m-review { display: block; margin-left: auto; min-width: 7rem; min-height: 3.25rem; margin-top: 0.5rem; }
+.m-item .tap.m-later {
+  display: block; margin-left: auto; margin-top: 0.5rem; min-height: 3rem; min-width: 6rem; color: var(--text-2);
+}
+.m-item-approval .tap.m-review + .tap.m-later { margin-top: 0.25rem; }
+.m-thread-items > .tap.m-fold { min-height: 3rem; align-self: stretch; color: var(--text-2); text-align: center; }
+.m-fold-rest { display: flex; flex-direction: column; gap: 0.5rem; }
+.m-fold-rest[hidden] { display: none; }
+/* A row put off for now: one line and Show. */
+.m-later-stub { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.m-later-stub .m-later-title {
+  flex: 1 1 auto; min-width: 0; font-size: 0.9375rem; font-weight: 500; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.m-later-stub .tap.m-unlater { flex: 0 0 auto; min-height: 3rem; min-width: 5rem; }

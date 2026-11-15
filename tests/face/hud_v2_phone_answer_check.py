@@ -252,7 +252,7 @@ def run(browser, check, until):
         page.locator('[data-testid="m-tab-inbox"]').click()
         row = page.locator(f'[data-testid="m-inbox-row"][data-id="appr:{request.req_id}"]')
         until(lambda: row.count() == 1, timeout=8)
-        row.locator('[data-testid="m-open-card"]').click()
+        row.locator('[data-testid="m-item-review"]').click()
         until(lambda: page.locator(card).count() == 1
               and page.locator(f"{card} .m-card-body").inner_text() not in ("", "Loading the card…"), timeout=8)
 

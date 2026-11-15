@@ -25,7 +25,8 @@ import { prRowOf, questionRow } from "../lib/prRow";
 import { LABEL_TEXT } from "../lib/working";
 import type { TaskView, WorkingItem } from "./model";
 import { bands, buildSlots, type Band, type Slot } from "./threads";
-import { el, empty, inboxRow, tap, type InboxAnswers } from "./views";
+import { el, empty, tap, type InboxAnswers } from "./views";
+import { buildItems, ItemsUi } from "./items";
 import { agoWords } from "./reltime";
 import "./threads.css";
 
@@ -94,7 +95,7 @@ function rowUi(row: InboxRow, a: InboxAnswers, now: number): string {
   return JSON.stringify(parts);
 }
 
-export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: number): string {
+export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: number, ui?: ItemsUi): string {
   const task = slot.task;
   return JSON.stringify([
     band, slot.key, slot.title, slot.entry,
@@ -103,6 +104,8 @@ export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: numb
     // Globals the rows draw from.
     !!a.pr, a.pr?.limited ?? false, !!a.withdraw, !!a.toggle,
     slot.rows.map((r) => [r, rowUi(r, a, now)]),
+    // PX-3b: the fold, Later and their revision.
+    ui ? ui.sig(slot) : "",
   ]);
 }
 
@@ -110,6 +113,8 @@ export function slotSignature(slot: Slot, band: Band, a: InboxAnswers, now: numb
 export class SlotCache {
   readonly map = new Map<string, { sig: string; node: HTMLElement }>();
   builds = 0;
+  /** PX-3b: this page's fold and Later state (memory only: a reload starts empty). */
+  readonly ui = new ItemsUi();
   prune(keep: ReadonlySet<string>): void {
     for (const key of [...this.map.keys()]) if (!keep.has(key)) this.map.delete(key);
   }
@@ -135,7 +140,7 @@ function threadMeta(slot: Slot, now: number): string {
   return ["Chat", age].filter(Boolean).join(" · ");
 }
 
-function buildCard(slot: Slot, band: Band, a: ListActions, now: number): HTMLElement {
+function buildCard(slot: Slot, band: Band, a: ListActions, now: number, ui: ItemsUi): HTMLElement {
   const card = testid(el("article", `m-thread m-thread-${band}`), "m-thread");
   card.dataset.key = slot.key;
   card.dataset.band = band;
@@ -153,18 +158,16 @@ function buildCard(slot: Slot, band: Band, a: ListActions, now: number): HTMLEle
     card.append(head);
   }
   if (slot.rows.length) {
-    const items = testid(el("div", "m-thread-items"), "m-thread-items");
-    for (const row of slot.rows) items.append(inboxRow(row, a.openRow, a.answers));
-    card.append(items);
+    card.append(buildItems(slot, a, ui));
   }
   return card;
 }
 
 function cardFor(slot: Slot, band: Band, a: ListActions, cache: SlotCache, now: number): HTMLElement {
-  const sig = slotSignature(slot, band, a.answers, now);
+  const sig = slotSignature(slot, band, a.answers, now, cache.ui);
   const hit = cache.map.get(slot.key);
   if (hit && hit.sig === sig) return hit.node;
-  const node = buildCard(slot, band, a, now);
+  const node = buildCard(slot, band, a, now, cache.ui);
   cache.builds += 1;
   cache.map.set(slot.key, { sig, node });
   return node;

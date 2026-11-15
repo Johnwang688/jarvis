@@ -226,6 +226,6 @@ describe("M7: control edges at 3:1", () => {
     for (const sel of [".tap.quiet", ".tap.m-btn", ".m-text", ".btn"]) expect(rule(sel)).toMatch(/border: 1px solid var\(--control-edge\)/);
     expect(rule(".tap.quiet.primary")).toMatch(/border-color: var\(--accent\); color: var\(--accent\)/);
     const view = inboxView(parseInbox([row({ id: "appr:r1", kind: "approval", rank: 1, detail: { tool: "Bash" } })])!, () => {}, answers());
-    expect(view.querySelector('[data-testid="m-open-card"]')!.className).toBe("tap quiet m-send primary");
+    expect(view.querySelector('[data-testid="m-item-review"]')!.className).toBe("tap quiet m-send primary");
   });
 });
