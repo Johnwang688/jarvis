@@ -1076,22 +1076,34 @@ class WorkingSet:
 
     # -- the read (D-5, D-6) -----------------------------------------------------------------
 
+    def entries(self) -> list[dict]:
+        """The visible in-set entries, unordered: membership and each
+        entry's `thread_id`, `project_id`, `since`, `last`, `seq` and
+        `status`, and nothing else (no `done_*`, no reason, no rows). It reads
+        no inbox row (WS-5a: the phone's read has none to attach), writes
+        nothing and changes no membership, token or `seq`. An entry whose
+        thread is archived, in an archived project, a task's or unreadable is
+        left out (D-7, D-8). `view()` builds on it. Called with no lock of
+        ours held."""
+        with self._lock:
+            snapshot = {tid: dict(e) for tid, e in self._threads.items() if e["done_at"] is None}
+        out = []
+        for thread_id, entry in snapshot.items():
+            thread = self._visible(thread_id)
+            if thread is None:
+                continue
+            out.append({"thread_id": thread_id, "project_id": thread.project_id,
+                        "since": entry["since"], "last": entry["last"], "seq": entry["seq"],
+                        "status": self._status(thread_id)})
+        return out
+
     def view(self) -> dict:
         """`GET /working`: each entry with the rows linked to it, every other
         row in `needs_you`, so every row of one `inbox.rows()` read appears
         exactly once; `count`/`pending` are today's badge rules."""
         from . import inbox as _inbox
         rows = _inbox.rows(self.daemon, marks="flag")
-        with self._lock:
-            snapshot = {tid: dict(e) for tid, e in self._threads.items() if e["done_at"] is None}
-        entries = {}
-        for thread_id, entry in snapshot.items():
-            thread = self._visible(thread_id)
-            if thread is None:
-                continue        # its rows go to needs_you (D-5, D-8)
-            entries[thread_id] = {"thread_id": thread_id, "project_id": thread.project_id,
-                                  "since": entry["since"], "last": entry["last"], "seq": entry["seq"],
-                                  "status": self._status(thread_id), "rows": [], "why_not": None}
+        entries = {e["thread_id"]: {**e, "rows": [], "why_not": None} for e in self.entries()}
         needs_you = []
         for row in rows:
             target = entries.get(row.get("thread_id")) if isinstance(row, dict) else None

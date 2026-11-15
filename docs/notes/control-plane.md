@@ -1582,6 +1582,50 @@ Tests: `tests/v2/remote_api_check.py`, `hud/src/mobile/app.test.ts`, the app
 half of `tests/face/hud_v2_phone_check.py` (`app_checks`: the built bundle
 through a real remote listener, signed in with the virtual authenticator).
 
+## The phone's In progress list: `GET /m/api/working` (WS-5a, 2026-11-15)
+
+The read half of WS-5 (plan `docs/plans/2026-11-15-ws5-phone-working-set-plan.md`,
+revision 2). The phone UI is WS-5b; the unlock window, Done and Undo are
+WS-5c. This package is a read and a stream kind, nothing more.
+
+- **The route.** `GET /m/api/working` goes through `api_route` and
+  `owner_status` like every `/m/api` read: exact Host (400), live session
+  (401, checked again before the answer leaves), GET only (405, and 403 first
+  without the phone's Origin), a query string is 400. 503 when the working
+  set is not running; 409 "the In progress list cannot be read now" when its
+  read fails (no detail). The API and HUD listeners answer it 404, and
+  `rules.remote_reading` already refuses an agent's curl/wget/urllib to it
+  (the `/m/api` prefix), with no rule change.
+- **The answer.** `{entries, more, total}`. Each entry is exactly
+  `WORKING_ENTRY_FIELDS` = `thread_id`, `project_id`, `project`, `title`,
+  `status`, `last`: the title as `remote_api.thread` scrubs it, the project
+  name through the same `_scrub`, `status` one of the five activity words
+  (anything else is `idle`), `last` an ISO time or `""`. No `seq` (WS-5c),
+  no inbox row (the phone joins its own `/m/api/inbox` rows by `thread_id`),
+  no `since`, `why_not`, `done_*`, reason, idle limit, path or session handle.
+  `DROPPED["working_entry"]` and `DROPPED["working"]` give the reason for
+  each field the desk's `GET /working` sends and this does not.
+- **Order, then cap.** The desk's order is applied first (label order
+  needs_input, failed, unread, working, idle; then newest `last`; a tie keeps
+  the daemon's descending thread id), and only then the first
+  `WORKING_ENTRIES` = 100 are sent. `total` and `more` come from the same
+  visible, valid collection, so an old Needs-you chat is never cut for newer
+  idle ones. There is no pagination: when `more` is true the rest is at the
+  desk.
+- **`WorkingSet.entries()`** is the membership read under it: the visible
+  in-set entries (`thread_id`, `project_id`, `since`, `last`, `seq`,
+  `status`), with no `inbox.rows()` read and no write. The desk's `view()` is
+  built on it and is unchanged: one `marks="flag"` read, rows attached once,
+  the same order, `why_not`, and the D-4 checks in Done and the sweep
+  (`tests/v2/working_check.py` pins its output against the pre-WS-5a code).
+- **The stream** sends `working_changed` as exactly
+  `{"kind":"working_changed","data":{}}`: ids and data are dropped even when
+  planted, and `_Hidden` has nothing to judge. Push still observes only
+  `inbox_changed`. (The 1 s debounce is the phone app's, WS-5b, P-4.)
+- Tests: `tests/v2/remote_api_check.py` (`Working`, and the stream case in
+  `Events`), `tests/v2/working_check.py` (`Entries`, and the flipped
+  stream-shape assertions).
+
 ## Answering from the phone (phone C4 / P-4, 2026-10-25)
 
 `jarvis/v2/remote_answer.py` and `jarvis/v2/remote_secure.py` (both

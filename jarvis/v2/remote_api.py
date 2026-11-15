@@ -12,6 +12,7 @@ a revoke during a slow read gets 401. Nothing here writes: answering,
 sending and task verbs are P-4 and P-5.
 
     GET /m/api/inbox                    `inbox.rows`
+    GET /m/api/working                  `WorkingSet.entries`, WS-5a (below)
     GET /m/api/projects                 `projects.project_view`, unarchived
     GET /m/api/threads?project=<id>     `Daemon.thread_json`, as `GET /threads`
     GET /m/api/threads/<id>/log?after=  `chat_reads.projected` over the log
@@ -47,6 +48,15 @@ PR #308). So the
 phone's card can withhold more than the desk's; answering (P-4) must show
 the full shared card before any button works.
 
+**The In progress list** (WS-5a, `GET /m/api/working`) is the desk's working
+set without its inbox rows: `{entries, more, total}`, each entry exactly
+`WORKING_ENTRY_FIELDS` (the title and project name through the same scrub as
+a thread title), ordered as the desk draws it (label, then newest) **before**
+the `WORKING_ENTRIES` cap, so an old Needs-you chat is never cut for newer
+idle ones. It never reads `inbox.rows()`; hints come from the phone's own
+`/m/api/inbox` rows. `DROPPED["working_entry"]` and `["working"]` say what
+the desk's read carries that this one does not.
+
 **The transcript is `chat_reads`' projection** (the design's §5 row): the
 owner's typed words, the assistant's replies, relays and system lines,
 scrubbed at the source; tool events and their output, thinking, gates and
@@ -70,7 +80,8 @@ credentials).
 **The event stream** (`GET /m/api/events`) is Server-Sent Events, as the
 HUD's `/events` is (the design's `/m/ws`; the HUD has no WebSocket stream to
 match, and under `/m/api` it inherits the 401 and the agent-path DENY). It
-carries three kinds and nothing else, each ids and a source kind only:
+carries four kinds and nothing else, each ids and a source kind only
+(`working_changed` not even that):
 
     inbox_changed   {"ids": [...], "reason": "<source kind>"}   as the HUD's
     thread_changed  {"thread_id", "project_id", "reason"}       a log grew,
@@ -79,6 +90,9 @@ carries three kinds and nothing else, each ids and a source kind only:
                                                                  title changed
     task_changed    {"task_id", "project_id", "reason"}         a task was
                                                                  made or moved
+    working_changed {}                                          the In progress
+                                                                 list may have
+                                                                 changed (WS-5a)
     resync          {}                                          events were
                                                                  dropped: read
                                                                  again
@@ -113,6 +127,7 @@ _EVENT_ID = re.compile(r"[A-Za-z0-9_:.\-]{1,200}")
 
 # -- caps (pinned by tests/v2/remote_api_check.py) ----------------------------------
 INBOX_ROWS = 200
+WORKING_ENTRIES = 100       # WS-5a: the In progress list, cut after the desk's order
 PROJECTS = 200
 THREADS = 300
 TASKS = 200
@@ -149,6 +164,14 @@ TASK_LIST_FIELDS = ("id", "project_id", "brief", "state", "created", "updated", 
 # absolute path into the task's worktree.
 STATUS_FIELDS = ("phase", "step", "steps", "started", "elapsed_s", "cost_usd", "tokens",
                  "last_tool", "open_question", "routing")
+
+# WS-5a: one entry of the In progress list (`GET /m/api/working`), these
+# fields and nothing else. `seq` (the version Done carries back) is WS-5c's,
+# and is not here until that package adds it to this tuple and its tests.
+WORKING_ENTRY_FIELDS = ("thread_id", "project_id", "project", "title", "status", "last")
+# The five activity words, in the desk's label order (`LABEL_ORDER` in
+# hud/src/lib/working.ts, D-9); any other `status` is sent as "idle".
+WORKING_LABELS = ("needs_input", "failed", "unread", "working", "idle")
 
 # An inbox row, every kind: these fields and nothing else (review of #308:
 # an allowlist, so a field `inbox.rows` gains later never reaches the phone
@@ -254,6 +277,18 @@ DROPPED = {
         "url": "the GitHub link is the desk's way out (PM-25); the phone answers from "
                "Jarvis's own facts, never GitHub",
     },
+    # WS-5a: what the desk's `GET /working` sends and the phone's read does not.
+    "working_entry": {
+        "since": "when the thread joined; the phone draws `last`",
+        "rows": "no inbox row data (P-2): the phone joins its own /m/api/inbox rows by thread_id",
+        "why_not": "Done's refusal reason; there is no Done on the phone in this read (WS-5c)",
+        "seq": "the version Done carries back; WS-5c adds it with its gate",
+    },
+    "working": {
+        "needs_you": "inbox rows with no entry; the phone has /m/api/inbox",
+        "count": "the badge stays `waitingCount` over /m/api/inbox",
+        "pending": "the badge stays `waitingCount` over /m/api/inbox",
+    },
     "approval_detail": {
         "code": "the 4-character code is an answer handle on another surface (Discord); "
                 "the phone answers nothing in P-3, and P-4 answers by row id",
@@ -273,7 +308,9 @@ THREAD_KINDS = frozenset({
     "thread_restored", "thread_deleted", "thread_closed",
 })
 TASK_KINDS = frozenset({"task_created", "task_status_changed", "task_updated", "task_question"})
-STREAM_KINDS = frozenset({"inbox_changed", "shutdown"}) | THREAD_KINDS | TASK_KINDS
+# WS-5a: `working_changed` (the In progress list's membership or a label may
+# have changed) is sent as a bare cue: no ids and no data, as on `/events`.
+STREAM_KINDS = frozenset({"inbox_changed", "working_changed", "shutdown"}) | THREAD_KINDS | TASK_KINDS
 
 
 class _Refused(Exception):
@@ -551,6 +588,55 @@ def inbox(daemon) -> dict:
     return {"rows": [inbox_row(r) for r in rows[:INBOX_ROWS]], "more": len(rows) > INBOX_ROWS}
 
 
+def _label(status) -> str:
+    return status if isinstance(status, str) and status in WORKING_LABELS else "idle"
+
+
+def working(daemon) -> dict:
+    """WS-5a, `GET /m/api/working`: the owner's In progress list, ordered as
+    the desk draws it (label, then newest `last`) and only then cut at
+    `WORKING_ENTRIES`, so an old Needs-you chat is never dropped for newer
+    idle ones. `WORKING_ENTRY_FIELDS` and nothing else; no inbox row (P-2),
+    no token, no path, no idle limit. A membership read: it never reads the
+    inbox and changes nothing."""
+    from .working import parse_time
+    found = getattr(daemon, "working", None)
+    if found is None:
+        raise _Refused(503, "the In progress list is not running")
+    try:
+        entries = [e for e in found.entries() if isinstance(e, dict)]
+    except Exception:  # noqa: BLE001 — as the desk's read: a refusal, not a 500
+        raise _Refused(409, "the In progress list cannot be read now") from None
+    entries = [e for e in entries if isinstance(e.get("thread_id"), str) and _ID.fullmatch(e["thread_id"])]
+    # The desk's own order: its read is newest first, the label order is a
+    # stable sort over it (hud/src/lib/working.ts `orderEntries`).
+    entries.sort(key=lambda e: (e.get("last") if isinstance(e.get("last"), str) else "", e["thread_id"]),
+                 reverse=True)
+
+    def stamp(e):
+        at = parse_time(e.get("last"))
+        return at.timestamp() if at is not None else 0.0
+
+    entries.sort(key=lambda e: (WORKING_LABELS.index(_label(e.get("status"))), -stamp(e)))
+    out = []
+    for e in entries[:WORKING_ENTRIES]:
+        record = _get(daemon.stores.threads, e["thread_id"])
+        if record is None:
+            continue
+        title = thread(daemon.thread_json(record)).get("title")
+        owner = _get(daemon.stores.projects, e.get("project_id"))
+        name = getattr(owner, "name", None)
+        at = parse_time(e.get("last"))
+        out.append({"thread_id": e["thread_id"],
+                    "project_id": e["project_id"] if isinstance(e.get("project_id"), str)
+                    and _ID.fullmatch(e["project_id"]) else None,
+                    "project": _scrub(name) if isinstance(name, str) else "",
+                    "title": title if isinstance(title, str) else "",
+                    "status": _label(e.get("status")),
+                    "last": e["last"] if at is not None else ""})
+    return {"entries": out, "more": len(entries) > WORKING_ENTRIES, "total": len(entries)}
+
+
 def project(view: dict) -> dict:
     return {k: view.get(k) for k in PROJECT_FIELDS}
 
@@ -753,6 +839,8 @@ def stream_record(record) -> dict | None:
         return {"kind": "inbox_changed",
                 "data": {"ids": [i for i in ids if isinstance(i, str) and _EVENT_ID.fullmatch(i)][:200],
                          "reason": reason if isinstance(reason, str) and _EVENT_ID.fullmatch(reason) else ""}}
+    if kind == "working_changed":
+        return {"kind": "working_changed", "data": {}}
     if kind in THREAD_KINDS:
         thread_id = ident(record.get("thread_id")) or ident(data.get("thread_id"))
         if thread_id is None:
@@ -916,6 +1004,8 @@ def _match(parts: list[str]):
     """(name, args) of a read route, or None."""
     if parts == ["inbox"]:
         return "inbox", ()
+    if parts == ["working"]:
+        return "working", ()
     if parts == ["projects"]:
         return "projects", ()
     if parts == ["threads"]:
@@ -956,6 +1046,8 @@ def route(handler, path: str, session: dict):
             return None
         if name == "inbox":
             payload = inbox(daemon)
+        elif name == "working":
+            payload = working(daemon)
         elif name == "projects":
             payload = projects(daemon)
         elif name == "threads":
