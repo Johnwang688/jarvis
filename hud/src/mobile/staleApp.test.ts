@@ -39,6 +39,65 @@ async function harness() {
 }
 
 describe("list freshness belongs to each read", () => {
+  const resources = ["inbox", "working", "tasks", "review", "log"] as const;
+  it.each(resources.flatMap(resource => [false, true].map(failedFirst => ({ resource, failedFirst }))))(
+    "retains $resource data and warns on a malformed 200 (failed first: $failedFirst)", async ({ resource, failedFirst }) => {
+      const h = await harness();
+      if (resource === "log") await h.app.openThread(T1);
+      const name = resource === "log" ? `threads/${T1}/log` : resource;
+      const path = `/m/api/${name}`;
+      const load = { inbox: () => h.app.loadInbox(), working: () => h.app.loadWorking(true),
+        tasks: () => h.app.loadTasks(), review: () => h.app.loadReview(), log: () => h.app.moreLog() }[resource];
+      const snapshot = () => ({ inbox: h.app.inbox, inboxMore: h.app.inboxMore,
+        entries: h.app.entries, cutoff: h.app.workingCut, tasks: h.app.tasks, tasksMore: h.app.tasksMore,
+        review: h.app.review, rows: h.app.thread?.rows, next: h.app.thread?.next });
+      const before = snapshot();
+      if (failedFirst) {
+        h.gets[path] = { ok: false, why: "error", status: 503, body: { error: "read unavailable" } };
+        await load();
+        expect(h.warning(name)).not.toBeNull();
+      }
+      // Neither a missing list nor a wrong-shaped list may erase retained rows or clear a warning.
+      for (const body of [{}, null, { rows: {}, entries: {}, tasks: {} }]) {
+        h.gets[path] = ok(body);
+        await load(); await h.app.loadMe(); await settle();
+        expect(h.warning(name)?.textContent).toContain("showing the last read");
+        expect(snapshot()).toEqual(before);
+      }
+      const empty = { inbox: { rows: [] }, working: { entries: [], total: 0 }, tasks: { tasks: [] },
+        review: { v: 1, overnight: [], before: [], open: 0 }, log: { rows: [], next: 1 } }[resource];
+      h.gets[path] = ok(empty);
+      await load(); await settle();
+      expect(h.warning(name)).toBeNull();
+    });
+
+  it("validates review reads from notifications before clearing their warning", async () => {
+    const h = await harness();
+    const previous = h.app.review;
+    h.gets["/m/api/review"] = ok({});
+    await h.app.openFromNotification(); await settle();
+    expect(h.app.review).toBe(previous);
+    expect(h.warning("review")).not.toBeNull();
+    h.gets["/m/api/review"] = ok({ v: 1, overnight: [], before: [], open: 0 });
+    await h.app.openFromNotification(); await settle();
+    expect(h.warning("review")).toBeNull();
+  });
+
+  it.each([ok({}), { ok: false, why: "error", status: 503, body: { error: "read unavailable" } } as Got])(
+    "a first invalid or refused log read has no successful last read (%j)", async got => {
+      const h = await harness();
+      const name = `threads/${T2}/log`, path = `/m/api/${name}`;
+      h.gets[path] = got;
+      await h.app.openThread(T2); await h.app.loadMe(); await settle();
+      expect(h.warning(name)?.textContent).toContain("not read yet");
+      h.gets[path] = ok({ rows: [], next: 0 });
+      await h.app.moreLog();
+      expect(h.warning(name)).toBeNull();
+      h.gets[path] = got;
+      await h.app.moreLog();
+      expect(h.warning(name)?.textContent).toContain("showing the last read");
+    });
+
   it.each(["inbox", "working", "tasks", "review"] as const)("keeps %s stale across healthy reads, redraws and 12 seconds, until its own success", async resource => {
     const h = await harness();
     const load = { inbox: () => h.app.loadInbox(), working: () => h.app.loadWorking(true),
