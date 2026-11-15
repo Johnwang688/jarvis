@@ -28,7 +28,7 @@
   color: var(--text-2);
 }
 .m-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.m-chip-count { flex: none; }
+.m-chip-count { flex: none; white-space: pre; }
 .m-threads[data-error="true"] > :not(.m-strip):not(.m-error) { opacity: 0.55; }
 .tap.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 /* Needs you is amber while a row is rank 1 or 2 (pending), the same rule as the badge. */
