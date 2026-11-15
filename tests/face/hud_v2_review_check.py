@@ -107,8 +107,8 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         _fresh(page, mock, until, SINGLE)
         row = page.locator('[data-testid="owner-review"]')
         until(lambda: row.count() == 1, timeout=4)
-        order = page.evaluate("() => [...document.querySelectorAll('#sidebar button.tree-row')].slice(0, 2)"
-                              ".map(b => b.dataset.testid)")
+        order = page.evaluate("() => [...document.querySelectorAll('#sidebar button.tree-row')]"
+                              ".map(b => b.dataset.testid).filter(t => t === 'owner-inbox' || t === 'owner-review')")  # WS-3: the In progress list sits between them
         check("the sidebar's Morning review row sits under the Inbox [mutation: no row]",
               order == ["owner-inbox", "owner-review"], str(order))
         until(lambda: page.locator('[data-testid="owner-review-count"]').count() == 1, timeout=4)
