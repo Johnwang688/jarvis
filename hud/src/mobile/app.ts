@@ -59,6 +59,7 @@
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
 import { lockIcon, unlockIcon } from "./icons";
+import { createProjectFolds } from "./folds";
 import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
@@ -70,7 +71,7 @@ import {
 } from "./model";
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
-import { answerKey } from "./threads";
+import { answerKey, waiting } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
@@ -186,6 +187,8 @@ export class PhoneApp {
   projects: Project[] | null = null;
   threads: ChatThread[] = [];
   expanded = new Set<string>();
+  readonly folds = createProjectFolds();
+  private unsubscribeFolds: () => void;
   thread: OpenThread | null = null;
   tasks: TaskView[] | null = null;
   /** PX-2: the read cut the tasks at its cap (`more`), and the inbox likewise. */
@@ -411,6 +414,13 @@ export class PhoneApp {
       unauthorized: () => void this.recheckSession(),
       online: () => this.online,
     });
+    this.unsubscribeFolds = this.folds.subscribe(() => {
+      if (this.stopped || this.tab !== "chats" || this.thread || this.sheet) return;
+      const focus = document.activeElement;
+      const headId = focus instanceof HTMLElement && focus.dataset.testid === "m-project-head" ? focus.id : null;
+      this.render();
+      if (headId) document.getElementById(headId)?.focus();
+    });
   }
 
   // -- life cycle ----------------------------------------------------------------
@@ -438,6 +448,7 @@ export class PhoneApp {
 
   stop(): void {
     this.stopped = true;
+    this.unsubscribeFolds();
     this.rowScroll.stop();
     this.clearFirstOpenTimer();
     if (this.recoverTimer !== null) this.clearTimer(this.recoverTimer);
@@ -2416,8 +2427,15 @@ export class PhoneApp {
             if (this.expanded.has(id)) this.expanded.delete(id); else this.expanded.add(id);
             this.render();
           },
+          fold: (id, folded) => this.folds.set(id, folded),
+        }, {
+          folds: this.folds,
+          needs: new Set([...(this.inbox ?? []).filter(waiting).flatMap((r) => r.thread_id ? [r.thread_id] : []),
+            ...(this.entries ?? []).filter((e) => e.status === "needs_input").map((e) => e.thread_id)]),
+          running: new Set((this.entries ?? []).filter((e) => e.status === "working").map((e) => e.thread_id)),
         });
-        view.prepend(tap("New chat", () => void this.openNewChat(), "quiet m-new", "m-new-chat-open"));
+        view.querySelector('[data-testid="m-chats-toolbar"]')?.append(
+          tap("+ New chat", () => void this.openNewChat(), "quiet primary m-new", "m-new-chat-open"));
       }
     } else if (this.sheet?.kind === "task") {
       view = taskSheetView(this.sheet, this.projects ?? [], this.online, {

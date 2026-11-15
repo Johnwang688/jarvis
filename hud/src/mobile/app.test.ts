@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -16,7 +17,9 @@ const HOSTILE = [
   '<svg onload="window.__pwned=3"></svg>',
 ];
 const H = HOSTILE.join(" ");
-const MARKUP = "img, script, b, svg, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+const MARKUP = "img, script, b, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 
 const ANSWER_WORDS = /\b(allow|deny|always|approve|answer it|send|withdraw|reply|resume|cancel|submit)\b/i;
 
@@ -38,6 +41,7 @@ const ROWS = parseInbox([
 
 function noMarkup(node: Element) {
   expect(node.querySelectorAll(MARKUP).length).toBe(0);
+  expect(injectedSvg(node)).toEqual([]);
   expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
 }
 

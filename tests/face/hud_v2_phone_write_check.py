@@ -234,8 +234,9 @@ def run(browser, check, until):
         # code-built control (the brand's orb, the lock pill's icon). Add a slot here with each new
         # icon. No SVG, of any class, may sit inside a region that shows server text.
         icon_slots = ('[data-testid="m-brand"] > .m-orb > svg, '
-                      '[data-testid="m-lock-pill"] > svg.m-icon:first-child')
-        server_text = (".plain-text, .chat-title, .group, .subtitle, .brief, .m-notice, .headline, .m-why, "
+                      '[data-testid="m-lock-pill"] > svg.m-icon:first-child, '
+                      '[data-testid="m-project-head"] > svg.m-icon:first-child')
+        server_text = (".plain-text, .chat-title, .m-project-name, .group, .subtitle, .brief, .m-notice, .headline, .m-why, "
                        ".reason, .pr-note, .pr-why, .pr-title, .pr-fixline, .m-error, .offline, .as-text, "
                        ".as-line, .m-review-text, .m-review-receipt, .card-line, .m-band-note, .m-deadline, "
                        ".option-text, .step-text, .step-body, .m-thread-title, .row-title, .msg-bubble, "
@@ -275,6 +276,9 @@ def run(browser, check, until):
         tid("m-tab-chats").click()
         until(lambda: page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').count() == 1, timeout=8)
         check("P-5 Chats: New chat is offered", tid("m-new-chat-open").count() == 1)
+        project_head = tid("m-project-head").first
+        check("RD-5 Chats: an idle project starts folded", project_head.get_attribute("aria-expanded") == "false")
+        project_head.click()
         page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').click()
         until(lambda: tid("m-compose-text").count() == 1, timeout=8)
         box = tid("m-compose-text")

@@ -1,12 +1,15 @@
 // The phone UI audit's fixes in the views (docs/plans/2026-10-24-phone-surface-design.md §10.12):
 // C1, the owner's rows can never be drawn by a reply; H1, H5, H6, M5 (H4, the interim PR row, is replaced by PM-F: pr.test.ts).
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { emptyLog, inboxView, logRow, NOT_TYPED_WORDS, OWNER_ROW_CLASSES, taskView, transcriptView, typedHere,
+import { chatsView, emptyLog, inboxView, logRow, NOT_TYPED_WORDS, OWNER_ROW_CLASSES, taskView, transcriptView, typedHere,
   type InboxAnswers } from "./views";
 import { type ChatThread, type LogRow, type TaskView } from "./model";
 import { parseInbox, type InboxRow } from "../lib/inbox";
+import { createProjectFolds } from "./folds";
+import { CODE_SVG } from "./icons";
+import { PhoneApp } from "./app";
 
 const CSS = readFileSync(join(__dirname, "mobile.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 /** One rule's body, by its exact selector. */
@@ -227,5 +230,151 @@ describe("M7: control edges at 3:1", () => {
     expect(rule(".tap.quiet.primary")).toMatch(/border-color: var\(--accent\); color: var\(--accent\)/);
     const view = inboxView(parseInbox([row({ id: "appr:r1", kind: "approval", rank: 1, detail: { tool: "Bash" } })])!, () => {}, answers());
     expect(view.querySelector('[data-testid="m-item-review"]')!.className).toBe("tap quiet m-send primary");
+  });
+});
+
+describe("RD-5 folding project groups", () => {
+  const projects = [
+    { id: "cccccccc", name: "Needs", inbox: false },
+    { id: "dddddddd", name: "Running", inbox: false },
+    { id: "eeeeeeee", name: "Idle", inbox: false },
+    { id: "ffffffff", name: "Empty", inbox: false },
+  ];
+  const chat = (id: string, project_id = "cccccccc", over: Partial<ChatThread> = {}): ChatThread =>
+    ({ ...CHAT, id, project_id, title: id, ...over });
+  const threads = [chat("a0000001"), chat("a0000002"), chat("b0000001", "dddddddd"),
+    chat("c0000001", "eeeeeeee"), chat("d0000001", "cccccccc", { task_id: "abcdabcd" })];
+  const state = { needs: new Set(["a0000001", "a0000002", "d0000001", "unknown"]),
+    running: new Set(["b0000001", "unknown"]) };
+  const head = (root: ParentNode, id = "cccccccc") =>
+    root.querySelector<HTMLButtonElement>(`[data-id="${id}"] [data-testid="m-project-head"]`)!;
+  const body = (root: ParentNode, id = "cccccccc") =>
+    root.querySelector<HTMLElement>(`[data-id="${id}"] [data-testid="m-project-body"]`)!;
+
+  afterEach(() => { document.body.replaceChildren(); localStorage.clear(); });
+
+  it("renders one group per project and counts chats rather than activity rows or tasks", () => {
+    const view = chatsView(projects, threads, new Set(), { open: vi.fn(), toggle: vi.fn() }, state);
+    expect(view.querySelectorAll('[data-testid="m-project"]')).toHaveLength(4);
+    expect(head(view).textContent).toBe("Needs2 need you2 chats");
+    expect(head(view, "dddddddd").textContent).toBe("Running1 running1 chat");
+    expect(head(view, "eeeeeeee").textContent).toBe("Idle1 chat");
+    expect(head(view, "ffffffff").textContent).toBe("Empty0 chats");
+    expect(body(view, "ffffffff").textContent).toBe("No chats.");
+    expect(view.querySelectorAll('[data-testid="m-chat"]')).toHaveLength(4);
+    expect(view.querySelector('[data-id="d0000001"]')).toBeNull();
+  });
+
+  it("defaults needs-you and running projects open, idle and empty projects closed", () => {
+    const view = chatsView(projects, threads, new Set(), { open: vi.fn(), toggle: vi.fn() }, state);
+    for (const [id, expanded] of [["cccccccc", true], ["dddddddd", true], ["eeeeeeee", false], ["ffffffff", false]] as const) {
+      expect(head(view, id).getAttribute("aria-expanded")).toBe(String(expanded));
+      expect(body(view, id).hidden).toBe(!expanded);
+      expect(head(view, id).getAttribute("aria-controls")).toBe(body(view, id).id);
+    }
+    const running = chatsView(projects, [chat("a0000001", "cccccccc", { running: true })], new Set(),
+      { open: vi.fn(), toggle: vi.fn() });
+    expect(head(running).getAttribute("aria-expanded")).toBe("true");
+    expect(head(running).textContent).toContain("1 running");
+  });
+
+  it("toggles via a native head button and remembers choices through data refresh and reload", () => {
+    let folds = createProjectFolds();
+    let data = threads;
+    const render = () => document.body.replaceChildren(chatsView(projects, data, new Set(), {
+      open: vi.fn(), toggle: vi.fn(), fold: (id, folded) => folds.set(id, folded),
+    }, { ...state, folds }));
+    const unsubscribe = folds.subscribe(render);
+    render();
+    expect(head(document).tagName).toBe("BUTTON");
+    expect(head(document).type).toBe("button");
+    head(document).click();
+    expect(head(document).getAttribute("aria-expanded")).toBe("false");
+    expect(body(document).hidden).toBe(true);
+    head(document, "eeeeeeee").click();
+    data = [...data, chat("c0000002", "eeeeeeee")];
+    render();
+    expect(head(document).getAttribute("aria-expanded")).toBe("false");
+    expect(body(document, "eeeeeeee").hidden).toBe(false);
+    unsubscribe();
+    folds = createProjectFolds();
+    render();
+    expect(head(document).getAttribute("aria-expanded")).toBe("false");
+    expect(body(document, "eeeeeeee").hidden).toBe(false);
+  });
+
+  it("keeps old active chats outside Show more and every chat reachable after unfolding", () => {
+    const data = Array.from({ length: 10 }, (_, i) => chat(`a000000${i}`, "cccccccc", {
+      updated: new Date(Date.UTC(2026, 10, 15, 10, i)).toISOString(), running: i === 0,
+    }));
+    const folds = createProjectFolds(null);
+    const expanded = new Set<string>();
+    const opened = vi.fn();
+    const render = () => document.body.replaceChildren(chatsView(projects, data, expanded, {
+      open: opened, fold: (id, folded) => folds.set(id, folded),
+      toggle: (id) => { if (expanded.has(id)) expanded.delete(id); else expanded.add(id); render(); },
+    }, { folds, needs: new Set(["a0000001"]), running: new Set(["a0000002"]) }));
+    const off = folds.subscribe(render);
+    render();
+    expect(document.querySelectorAll('[data-testid="m-chat"]')).toHaveLength(8);
+    expect(document.querySelector('[data-testid="m-more"]')!.textContent).toBe("Show 2 more");
+    document.querySelector<HTMLButtonElement>('[data-testid="m-more"]')!.click();
+    head(document).click();
+    expect(body(document).hidden).toBe(true);
+    head(document).click();
+    const rows = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="m-chat"]')];
+    expect(rows).toHaveLength(10);
+    expect(new Set(rows.map((r) => r.dataset.id)).size).toBe(10);
+    rows.forEach((r) => r.click());
+    expect(opened.mock.calls.map(([t]) => t.id).sort()).toEqual(data.map((t) => t.id).sort());
+    off();
+  });
+
+  it("renders hostile names as text and only code-built decorative chevrons as SVG", () => {
+    const hostile = H + '<svg class="m-icon" aria-hidden="true" onload="window.__pwned=3"></svg>';
+    const view = chatsView([{ ...projects[0], name: hostile }], [chat("a0000001", "cccccccc", { title: hostile })],
+      new Set(), { open: vi.fn(), toggle: vi.fn() });
+    expect(view.querySelector(".m-project-name")!.textContent).toBe(hostile);
+    expect(view.querySelector(".chat-title")!.textContent).toBe(hostile);
+    expect(view.querySelectorAll("img, script, [onerror], [onload]")).toHaveLength(0);
+    const svgs = [...view.querySelectorAll("svg")];
+    expect(svgs).toHaveLength(1);
+    expect(svgs.every((svg) => CODE_SVG.has(svg) && svg.getAttribute("aria-hidden") === "true")).toBe(true);
+  });
+
+  it("sets a rem target floor of at least 48px and hides collapsed bodies", () => {
+    expect(rule(".tap.m-project-head")).toContain("min-height: 3rem");
+    expect(rule(".m-project-body[hidden]")).toContain("display: none");
+  });
+
+  it("wires app inbox and working activity into counts, with fold focus kept across rerenders", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const app = new PhoneApp({ root, onSignedOut: vi.fn(), signOut: async () => {},
+      fetchJson: () => new Promise(() => {}), postJson: () => new Promise(() => {}),
+      openStream: () => ({ readyState: 0, onopen: null, onmessage: null, onerror: null, close: vi.fn() }) });
+    try {
+      app.start();
+      app.tab = "chats";
+      app.projects = projects;
+      app.threads = threads;
+      app.inbox = parseInbox([
+        { id: "q:1", kind: "question", rank: 2, thread_id: "a0000001", title: "Which?", detail: {} },
+        { id: "q:2", kind: "question", rank: 2, thread_id: "a0000001", title: "Also?", detail: {} },
+      ]);
+      app.entries = [{ thread_id: "b0000001", project_id: "dddddddd", project: "Running", title: "Work",
+        status: "working", last: "", seq: null }];
+      app.render();
+      expect(head(root).textContent).toContain("1 need you");
+      expect(head(root, "dddddddd").textContent).toContain("1 running");
+      head(root).focus();
+      head(root).click();
+      expect(document.activeElement).toBe(head(root));
+      expect(body(root).hidden).toBe(true);
+      app.entries = [];
+      app.render();
+      expect(body(root).hidden).toBe(true);
+      expect(body(root, "dddddddd").hidden).toBe(true);
+    } finally { app.stop(); }
   });
 });

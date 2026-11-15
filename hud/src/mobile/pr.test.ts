@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 // PM-F on the phone (mobile/views.ts `prBlock`, mobile/app.ts `prAct` and
 // `cancelFix`): the PR row's layout, the passkey per action with the head and
 // card as drawn, 409s, Q1's limited phone, Q3's hold, each fix state, squash
@@ -11,7 +12,9 @@ import { inboxView, type InboxAnswers } from "./views";
 import { parseInbox } from "../lib/inbox";
 import { FLAGGED, HOSTILE, REPO, cardOf, facts, fixRow, headOf, prRow, tqRow } from "../lib/prRow.fixtures";
 
-const MARKUP = "a, img, script, svg, iframe, [onerror], [onload]";
+const MARKUP = "a, img, script, iframe, [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 const CLEAN = HOSTILE.replace("‮", "");
 
 function answers(over: Partial<NonNullable<InboxAnswers["pr"]>> = {}, rows: unknown[] = []): InboxAnswers {
@@ -42,6 +45,7 @@ describe("PM-24 on the phone: the layout", () => {
     expect(r.querySelector(".row-title")!.compareDocumentPosition(r.querySelector('[data-testid="m-pr-acts"]')!)
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(r.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(r)).toEqual([]);
     expect(r.textContent).not.toContain(headOf(15));
     expect(r.textContent).not.toContain(cardOf(15));
     expect(r.textContent).not.toContain("github.com");
@@ -65,6 +69,7 @@ describe("PM-24 on the phone: the layout", () => {
     })]);
     const r = rowEl(view, 14);
     expect(r.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(r)).toEqual([]);
     expect(Array.from(r.querySelectorAll('[data-testid="m-pr-facts"] bdi')).map((b) => b.textContent))
       .toEqual(["GitGuardian", CLEAN + " [secret scanner]"]);
     expect(r.querySelectorAll('[data-testid="m-pr-scanner"]').length).toBe(1);
@@ -133,6 +138,7 @@ describe("Q1 and Q3 on the phone", () => {
     }
     expect(rowEl(view, 22).querySelector('[data-testid="m-pr-hold"]')!.textContent).toBe("On hold: waits on the robot " + CLEAN);
     expect(rowEl(view, 22).querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(rowEl(view, 22))).toEqual([]);
   });
 });
 
@@ -174,6 +180,7 @@ describe("the fix on the phone (PM-21 to PM-23)", () => {
       .map((c) => c.textContent).join(" ");
     expect(outside).not.toContain("evil");
     expect(r.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(r)).toEqual([]);
   });
 
   it("a fix waiting on an answer links to its question row when it is in the Inbox", () => {

@@ -651,7 +651,14 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
         return page.locator(selector).first.inner_text()
 
     def clean():
-        return (page.locator(f"{main} :is({MARKUP})").count() == 0
+        # RD-5's code-built chevron is allowed only in its own head slot; server text
+        # (including the project name beside it) still cannot contain any SVG.
+        other_markup = MARKUP.replace("svg, ", "")
+        return (page.locator(f"{main} :is({other_markup})").count() == 0
+                and page.locator(f"{main} svg").evaluate_all("""nodes => nodes.every(e =>
+                    e.matches('[data-testid="m-project-head"] > svg.m-icon:first-child')
+                    && e.getAttribute('aria-hidden') === 'true')""")
+                and page.locator(f"{main} :is(.m-project-name, .chat-title) :is({MARKUP})").count() == 0
                 and page.evaluate("window.__pwned === undefined"))
 
     def answer_controls():
@@ -719,6 +726,9 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     # -- Chats ---------------------------------------------------------------------------
     page.locator('[data-testid="m-tab-chats"]').click()
     until(lambda: page.locator('[data-testid="m-chat"]').count() >= 1, timeout=8)
+    check("RD-5 Chats: a project needing the owner starts open, with a 48px fold head",
+          page.locator('[data-testid="m-project-head"]').first.get_attribute("aria-expanded") == "true"
+          and page.locator('[data-testid="m-project-head"]').first.bounding_box()["height"] >= 48)
     check("P-3 Chats: the five most recent chats of the project, the rest behind Show more",
           page.locator('[data-testid="m-chat"]').count() == 5
           and page.locator('[data-testid="m-more"]').inner_text() == "Show 2 more")
