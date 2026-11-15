@@ -60,6 +60,7 @@ import {
 } from "./model";
 import { chatsView, el, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
+import { answerKey } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
@@ -918,7 +919,7 @@ export class PhoneApp {
   async sendAnswer(row: InboxRow, body: Record<string, unknown>, echo?: string): Promise<void> {
     if (this.answering.has(row.id)) return;
     // The row as it was answered: only that same row is removed on the 200 (a GET may have installed new contents under its id).
-    const answered = JSON.stringify(row);
+    const answered = answerKey(row);
     this.flash = "";
     this.answering.add(row.id);
     this.notes.delete(row.id);
@@ -935,7 +936,7 @@ export class PhoneApp {
       // D6: its row leaves at once (only this one); the re-read below restores it if the server still lists it.
       // A read that was in flight before this 200 is dropped by the afterWrite trigger, so it cannot bring the row back.
       const current = this.inbox?.find((r) => r.id === row.id);
-      if (this.inbox && current && JSON.stringify(current) === answered) {
+      if (this.inbox && current && answerKey(current) === answered) {
         this.inbox = this.inbox.filter((r) => r.id !== row.id);
         this.renderBadge();
       }

@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, WORKING_DEBOUNCE_MS, WORKING_RETRY_MS, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
+import type { InboxRow } from "../lib/inbox";
 import { mkRow } from "./threads.fixtures";
 
 class FakeStream implements StreamLike {
@@ -442,6 +443,39 @@ describe("D6: an answered row leaves at once", () => {
     expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
     expect(h.root.textContent).toContain("A NEWER question?");
     expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 1");
+  });
+
+  /** Answers a question while a GET replaces it under the same id with `fresh`; whether its row is gone after the 200. */
+  async function removedAfter(fresh: InboxRow): Promise<boolean> {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    let release!: (p: Posted) => void;
+    h.postReplies[path] = () => new Promise<Posted>((res) => { release = res; });
+    await started(h);
+    type(h);
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    h.answers["/m/api/inbox"] = ok({ rows: [fresh] });
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: [id], reason: "question" } });
+    await h.flush();
+    h.answers["/m/api/inbox"] = () => new Promise<Got>(() => {});
+    release({ status: 200, body: {} });
+    await h.settle();
+    return h.root.querySelectorAll('[data-testid="m-inbox-row"]').length === 0;
+  }
+
+  it("the same question refreshed with reordered detail keys is removed after the 200", async () => {
+    expect(await removedAfter(mkRow(id, 2, { thread_id: T1, detail: { options: [], text: "Which?" } }))).toBe(true);
+  });
+
+  it("the same question with a changed asked_at (or expiry) is removed after the 200", async () => {
+    expect(await removedAfter(mkRow(id, 2, { thread_id: T1, asked_at: "2026-11-15T11:11:11Z", expires_at: "2026-11-15T12:00:00Z",
+      detail: { text: "Which?", options: [], asked_at: "2026-11-15T11:11:11Z" } }))).toBe(true);
+  });
+
+  it("a changed question text, or changed options, keeps the row", async () => {
+    expect(await removedAfter(mkRow(id, 2, { thread_id: T1, detail: { text: "Which one now?", options: [] } }))).toBe(false);
+    expect(await removedAfter(mkRow(id, 2, { thread_id: T1, detail: { text: "Which?", options: ["a", "b"] } }))).toBe(false);
   });
 
   it("a failure keeps the row, with its error", async () => {

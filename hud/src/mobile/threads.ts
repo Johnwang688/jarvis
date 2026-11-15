@@ -136,3 +136,27 @@ export function bands(slots: readonly Slot[]): Bands {
   sort(out.info, (a, b) => lastOf(b) - lastOf(a));
   return out;
 }
+
+/** Keys that are metadata, not what is being answered: times, ages and the AI summary around a row. */
+const METADATA = /(^|_)(at|updated|created|expires|age)$|^(asked|expires|summary)/;
+
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v).sort()) if (!METADATA.test(k)) out[k] = canonical((v as Record<string, unknown>)[k]);
+    return out;
+  }
+  return v;
+}
+
+/**
+ * What an answer is an answer TO: the row's id, kind, rank and links, and its detail (the question text,
+ * the options, the request id ...) in sorted-key form, without times, ages or summaries. Two reads of the
+ * same question compare equal however the server ordered its keys or stamped it; a different question
+ * under the same id does not.
+ */
+export function answerKey(row: InboxRow): string {
+  return JSON.stringify(canonical({ id: row.id, kind: row.kind, rank: row.rank, thread_id: row.thread_id,
+    task_id: row.task_id, detail: row.detail }));
+}
