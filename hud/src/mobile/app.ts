@@ -59,7 +59,7 @@
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
 import { lockIcon, unlockIcon } from "./icons";
-import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
+import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
@@ -298,15 +298,20 @@ export class PhoneApp {
   private held: string | null = null;
 
   constructor(private readonly deps: AppDeps) {
+    // EVERY request this app makes goes through these two (and the push and clip wrappers below), so each
+    // outcome reaches the orb through `report`, the one path: no call site decides "offline" on its own.
+    const rawGet = deps.fetchJson ?? getJson;
+    const rawPost = deps.postJson ?? postJson;
     this.fetchJson = async (path) => {
-      const got = await (deps.fetchJson ?? getJson)(path);
-      if (!this.stopped && !got.ok) {
-        this.failStatus = got.status;
-        this.renderOrb();
-      }
+      const got = await rawGet(path);
+      this.report(reachOfGot(got), got.ok ? 200 : got.status);
       return got;
     };
-    this.postJson = deps.postJson ?? postJson;
+    this.postJson = async (path, value) => {
+      const posted = await rawPost(path, value);
+      this.reportWrite(posted);
+      return posted;
+    };
     this.getCredential = deps.getCredential ?? (async (publicKey) => {
       const credential = await navigator.credentials.get({ publicKey: prepareRequest(publicKey) });
       return credential ? credentialJSON(credential as PublicKeyCredential) : null;
@@ -329,7 +334,9 @@ export class PhoneApp {
       }),
       now: this.now, timer: this.unlockTimer,
       signedOut: () => this.signedOut(),
-      reached: (ok, status) => this.setOnline(ok, ok ? undefined : status),
+      // Every answer Unlock gets came through the reporting `postJson`/`fetchJson` above. What is left is
+      // the request that never answered within its bound: no response, so offline (amber).
+      reached: (ok, status) => { if (!ok && status === 0) this.report("offline", 0); },
       changed: () => this.renderPill(),
       // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
       reread: () => { if (!this.stopped) void this.probe(); },
@@ -374,13 +381,30 @@ export class PhoneApp {
       if (this.menuOpen && !(e.target instanceof Element && e.target.closest(".m-menu, .m-lock-pill"))) this.toggleMenu(null);
     });
     this.frame = frame;
-    this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
+    // The push routes and the clip upload report through the same path as every other request.
+    const rawPush = deps.pushSend ?? browserSend;
+    const pushSend: Send = async (method, path, body) => {
+      const sent = await rawPush(method, path, body);
+      this.reportWrite(sent);
+      return sent;
+    };
+    const rawTalk = deps.talkEnv ?? browserTalkEnv;
+    const talkEnv: TalkEnv = {
+      media: () => rawTalk.media(), context: () => rawTalk.context(), now: () => rawTalk.now(),
+      setTimer: (fn, ms) => rawTalk.setTimer(fn, ms), clearTimer: (handle) => rawTalk.clearTimer(handle),
+      upload: async (wav) => {
+        const uploaded = await rawTalk.upload(wav);
+        this.reportWrite(uploaded);
+        return uploaded;
+      },
+    };
+    this.notify = new Notifications(deps.pushEnv ?? browserEnv, pushSend,
       () => {
         if (this.menuOpen === "app" && !this.stopped) this.renderMenu();
         if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox();
       },
       () => { if (!this.stopped) void this.openFromNotification(); });
-    this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
+    this.talk = new Talk(talkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
       // No recording while this chat's send waits for its answer (its 202 would clear the box).
       busy: (threadId) => this.sending.has(threadId),
@@ -416,6 +440,8 @@ export class PhoneApp {
     this.stopped = true;
     this.rowScroll.stop();
     this.clearFirstOpenTimer();
+    if (this.recoverTimer !== null) this.clearTimer(this.recoverTimer);
+    this.recoverTimer = null;
     if (this.staleTimer) clearTimeout(this.staleTimer);
     this.staleTimer = null;
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
@@ -452,19 +478,51 @@ export class PhoneApp {
     this.deps.onSignedOut("Your session ended. Sign in again.");
   }
 
+  /**
+   * THE one path from a request's outcome to the orb (net.ts `Reach`). The reporting `fetchJson` and
+   * `postJson`, the push and clip wrappers, the stream's open and Unlock's unanswered request all end
+   * here; call sites only decide what their own view says. A refusal (any other 4xx, a 409, the daemon's
+   * own 503) changes nothing: Jarvis answered.
+   */
+  private report(reach: Reach, status: number): void {
+    if (this.stopped) return;
+    if (reach === "reached") this.setOnline(true);
+    else if (reach === "signed-out") this.signedOut();
+    else if (reach === "unreachable") this.setOnline(false, status);
+    else if (reach === "offline") this.setOnline(false, 0);
+  }
+
+  /** A write's outcome. Its 401 may be a refusal rather than the session ending, so `me` decides (WS-5c
+   * rule 9); the call site awaits the same check (`recheckSession` is shared) before saying anything. */
+  private reportWrite(posted: { status: number; body: unknown; offline?: boolean } | null): void {
+    const reach = reachOfPosted(posted);
+    if (reach === "signed-out") { if (!this.stopped) void this.recheckSession(); return; }
+    this.report(reach, posted?.status ?? 0);
+  }
+
+  private sessionCheck: Promise<void> | null = null;
+
+  /** A 401 from a write or the clip upload: is the session over? One `me` read, however many ask at once;
+   * its 401 signs out through `report`. */
+  private recheckSession(): Promise<void> {
+    if (!this.sessionCheck) {
+      this.sessionCheck = this.fetchJson("/m/api/me").then(() => undefined, () => undefined)
+        .finally(() => { this.sessionCheck = null; });
+    }
+    return this.sessionCheck;
+  }
+
   // -- reading ---------------------------------------------------------------------
 
-  /** One read: the body, or null after handling offline and signed out. */
+  /** One read: the body, or null when offline or signed out (`report` has already said which). */
   private async read(path: string): Promise<{ body: unknown } | { error: string; status: number } | null> {
     const got = await this.fetchJson(path);
     if (this.stopped) return null;
     if (got.ok) {
       this.lastRead = this.now();
-      this.setOnline(true);
       return { body: got.body };
     }
-    if (got.why === "signed-out") { this.signedOut(); return null; }
-    if (got.why === "offline") { this.setOnline(false); return null; }
+    if (got.why === "signed-out" || got.why === "offline") return null;
     return { error: errorWord(got.body) || `could not be read (${got.status})`, status: got.status };
   }
 
@@ -500,8 +558,10 @@ export class PhoneApp {
 
   /**
    * PX-2 (plan C §4.1): the In progress read. **Its failure is its own** (Sol, finding 3): it goes
-   * through `fetchJson`, never `read()`, so a 502/503/504 here never turns the app offline and never
-   * stamps "last read". A 401 still ends the session. One policy for every trigger (Sol, finding 5):
+   * through `fetchJson`, never `read()`, so the route's own refusal (the daemon's 503 "the In progress
+   * list is not running", with its words) never turns the app offline and never stamps "last read".
+   * Like every request it still reports through `report`: a 401 ends the session, and the proxy's
+   * 502/503/504 (no daemon words: Jarvis is down) is "Jarvis unreachable". One policy for every trigger (Sol, finding 5):
    * `force` (the list shown, the stream reopened, coming back online, a resync) reads now; the rest
    * (working_changed, an inbox change, a turn starting or ending) read after a one-second debounce
    * and, while a retry is waiting, leave the next read to its timer. A failed read arms ONE 30 s
@@ -516,7 +576,6 @@ export class PhoneApp {
 
   private applyWorking(got: Got): void {
     if (this.stopped) return;
-    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
     const parsed = got.ok ? parseWorkingList(got.body) : null;
     if (parsed) {
       this.entries = parsed.entries;
@@ -542,13 +601,9 @@ export class PhoneApp {
 
   /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
   async loadMe(): Promise<void> {
-    // Display only, but every session refusal must use the signed-out path.
+    // Display only. Its outcome (a 401, the proxy's 502/503/504, no answer) reached the orb in `fetchJson`.
     const got = await this.fetchJson("/m/api/me");
-    if (this.stopped) return;
-    if (!got.ok) {
-      if (got.why === "signed-out") this.signedOut();
-      return;
-    }
+    if (this.stopped || !got.ok) return;
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
     this.renderOrb();
     // WS-5c rule 2: the window's mirror follows `me.unlock_s` (display and path only).
@@ -759,13 +814,11 @@ export class PhoneApp {
     return `/m/api/inbox/${encodeURIComponent(rowId)}/${tail}`;
   }
 
-  /** A write's answer: null after handling offline and signed out. */
+  /** A write's answer: null when it met no Jarvis (`report` has already told the orb). */
   private async post(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
-    if ("offline" in got) { this.setOnline(false, got.status); return null; }
-    if (OFFLINE.has(got.status)) { this.setOnline(false, got.status); return null; }
-    this.setOnline(true);
+    if ("offline" in got || OFFLINE.has(got.status)) return null;
     this.slid(got.status);
     return got;
   }
@@ -780,9 +833,9 @@ export class PhoneApp {
   /** A refusal's words. A 401 is the session ending (the `me` probe signs out); never "locked" (WS-5c rule 9). */
   private async refusedWith(status: number, body: Record<string, unknown>): Promise<string> {
     if (status === 401) {
-      const me = await this.fetchJson("/m/api/me");
-      if (!me.ok && me.why === "signed-out") { this.signedOut(); return ""; }
-      return "Not accepted (401).";
+      // The write's report already asked `me`; this waits for that same read.
+      await this.recheckSession();
+      return this.stopped ? "" : "Not accepted (401).";
     }
     const word = typeof body.error === "string" ? body.error : "";
     return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
@@ -809,9 +862,8 @@ export class PhoneApp {
     if (!card) return;
     const got = await this.fetchJson(this.path(card.rowId, "detail"));
     if (this.stopped || this.card !== card) return;
-    if (!got.ok && got.why === "signed-out") return this.signedOut();
-    // H5: offline, the card says it was not read (setOnline leaves an open card alone).
-    if (!got.ok && got.why === "offline") { this.setOnline(false); this.render(); return; }
+    // H5: offline, the card says it was not read (setOnline, from `report`, leaves an open card alone).
+    if (!got.ok && got.why === "offline") { this.render(); return; }
     if (got.ok) {
       card.detail = parseDetail(got.body);
       card.refused = card.detail ? null : "This card could not be read.";
@@ -987,9 +1039,7 @@ export class PhoneApp {
     if (this.stopped || this.card !== card) return;
     card.busy = false;
     card.progress = "";
-    if (!got.ok && got.why === "signed-out") { this.signedOut(); return; }
     if (!got.ok && got.why === "offline") {
-      this.setOnline(false);
       card.rule = null;
       card.notice = "Offline: the rule could not be read.";
     } else if (!got.ok) {
@@ -1175,18 +1225,15 @@ export class PhoneApp {
   private async write(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown>; ambiguous?: boolean } | null> {
     const got = await this.postJson(path, value);
     if (this.stopped) return null;
-    if ("offline" in got || OFFLINE.has(got.status)) {
-      this.setOnline(false, got.status);
-      return { status: 0, body: {}, ambiguous: true };
-    }
-    this.setOnline(true);
+    if ("offline" in got || OFFLINE.has(got.status)) return { status: 0, body: {}, ambiguous: true };
     this.slid(got.status);
     const result = got;
     // The write took effect, or may have, but its answer failed (remote_write's UNCERTAIN).
     if (result.body.uncertain === true) return { status: result.status, body: result.body, ambiguous: true };
     if (result.status === 401) {
-      const me = await this.fetchJson("/m/api/me");
-      if (!me.ok && me.why === "signed-out") { this.signedOut(); return null; }
+      // The write's report already asked `me`; this waits for that same read.
+      await this.recheckSession();
+      if (this.stopped) return null;
     }
     return result;
   }
@@ -1272,12 +1319,6 @@ export class PhoneApp {
     // "May not have been sent" stays: it is about the words already in the box.
     if (this.composeNotes.get(threadId) !== MAYBE_SENT) this.composeNotes.delete(threadId);
     this.renderComposer(true);
-  }
-
-  /** A 401 from the clip upload: is the session over? */
-  private async recheckSession(): Promise<void> {
-    const me = await this.fetchJson("/m/api/me");
-    if (!me.ok && me.why === "signed-out") this.signedOut();
   }
 
   private firstProject(): string {
@@ -1741,9 +1782,13 @@ export class PhoneApp {
       this.streamOpen = true;
       this.everOpened = true;
       this.clearFirstOpenTimer();
+      // An open event stream is Jarvis's own 200: reached, through the one path.
+      const recoveries = this.recoveries;
+      this.report("reached", 200);
       this.renderOrb();
-      // Anything published while the stream was down is read now, and the window's mirror (WS-5c rule 2).
-      this.refreshVisible();
+      // Anything published while the stream was down is read now (unless coming back online just did),
+      // and the window's mirror (WS-5c rule 2).
+      if (this.recoveries === recoveries) this.refreshVisible();
       void this.loadMe();
     };
     stream.onmessage = (ev) => {
@@ -1761,15 +1806,14 @@ export class PhoneApp {
 
   /** The stream dropped: is it the network, the session, or a passing break? */
   async probe(stream: StreamLike | null = this.stream): Promise<void> {
+    // Its outcome reached the orb in `fetchJson` (a refusal leaves the orb on "Reconnecting…").
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped) return;
-    if (!got.ok && got.why === "signed-out") return this.signedOut();
     if (got.ok) {
       this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
       this.renderOrb();
       this.unlock.fromMe(got.body);
     }
-    this.setOnline(got.ok);
     if (stream && stream === this.stream && stream.readyState === CLOSED) {
       this.setTimer(() => { if (this.stream === stream) this.connect(); }, RETRY_MS);
     }
@@ -1825,7 +1869,30 @@ export class PhoneApp {
     this.renderBanner();
     // The write controls (P-5) say offline and turn off, or come back.
     if (!this.card) this.renderKeepingFocus();
-    if (online) this.refreshVisible();
+    if (online) this.recovered();
+  }
+
+  private recoverTimer: unknown = null;
+  private recoverOwed = false;
+  /** How many recovery refreshes ran (the stream's open reads only when coming back online did not). */
+  private recoveries = 0;
+
+  /**
+   * Back online: what is visible is read again, at most once per RETRY_MS. Every request reports through
+   * `report`, so one route the proxy keeps failing (a 504 on a slow route) beside routes that answer would
+   * otherwise flip offline and online forever, each flip re-reading everything: a request storm. A flip
+   * inside the window is owed and read once when it ends.
+   */
+  private recovered(): void {
+    if (this.recoverTimer !== null) { this.recoverOwed = true; return; }
+    this.recoveries += 1;
+    this.refreshVisible();
+    this.recoverTimer = this.setTimer(() => {
+      this.recoverTimer = null;
+      const owed = this.recoverOwed;
+      this.recoverOwed = false;
+      if (owed && this.online && !this.stopped) this.recovered();
+    }, RETRY_MS);
   }
 
   private renderBanner(): void {

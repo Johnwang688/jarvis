@@ -74,10 +74,26 @@ async function started(h: H) {
 const task = (id: string, state: string, over: Record<string, unknown> = {}) => ({ id, project_id: "99999999", brief: "Build it", state,
   updated: "2026-11-15T10:00:00Z", status: { step: 1, steps: 3 }, ...over });
 
+// The daemon's own refusal (remote_api.py: `_Refused(503, "the In progress list is not running")`), as
+// `getJson` classifies it: Jarvis answered with its words, so it is the route's failure, never offline.
+const WORKING_DOWN: Got = { ok: false, why: "error", status: 503, body: { error: "the In progress list is not running" } };
+
 describe("the working read's own state (Sol, finding 3)", () => {
+  it.each([502, 503, 504])("a proxy %s on the working read (no daemon words: Jarvis is down) is Jarvis unreachable", async (status) => {
+    const h = harness();
+    await started(h);
+    expect(h.q("m-conn")!.textContent).toBe("Live");
+    h.answers["/m/api/working"] = { ok: false, why: "offline", status };
+    await h.app.loadWorking(true);
+    await h.settle();
+    expect(h.app.failStatus).toBe(status);
+    expect({ word: h.q("m-conn")!.textContent, tone: h.q("m-conn")!.dataset.tone }).toEqual({ word: "Jarvis unreachable", tone: "err" });
+    expect(h.q("m-working-unavailable")!.textContent).toBe("In progress unavailable");
+  });
+
   it("a working 503 says In progress unavailable in the Running band and never turns the app offline", async () => {
     const h = harness();
-    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    h.answers["/m/api/working"] = WORKING_DOWN;
     h.answers["/m/api/inbox"] = ok({ rows: [mkRow("q:1", 3, { thread_id: T1, detail: { text: "Which?", options: [] } })] });
     const flips = vi.spyOn(h.app, "setOnline");
     await started(h);
@@ -93,7 +109,7 @@ describe("the working read's own state (Sol, finding 3)", () => {
 
   it("ten working 503s beside inbox 200s: never offline, one retry timer, bounded request counts", async () => {
     const h = harness();
-    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    h.answers["/m/api/working"] = WORKING_DOWN;
     const flips = vi.spyOn(h.app, "setOnline");
     await started(h);
     const working0 = h.count("/m/api/working");
@@ -148,7 +164,7 @@ describe("the working read's own state (Sol, finding 3)", () => {
 
   it("an inbox offline flip still decides offline, and coming back re-reads working at once, cancelling the timer", async () => {
     const h = harness();
-    h.answers["/m/api/working"] = { ok: false, why: "offline", status: 503 };
+    h.answers["/m/api/working"] = WORKING_DOWN;
     await started(h);
     const w = h.count("/m/api/working");
     expect(h.slow.size).toBe(1);

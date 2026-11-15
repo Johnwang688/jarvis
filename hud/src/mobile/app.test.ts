@@ -430,8 +430,9 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     h.answers["/m/api/me"] = h.ok({ signed_in: true, secure: { ok: false, label: "Unverified" } });
     await h.app.probe();
     expect(word()).toBe("Limited connection");
+    // Offline outranks Limited (spec §4): a limited phone in airplane mode is amber Offline.
     h.app.setOnline(false, 0);
-    expect(word()).toBe("Limited connection");
+    expect(word()).toMatch(/^Offline · read /);
     h.answers["/m/api/me"] = h.ok({ signed_in: true, secure: { ok: true } });
     await h.app.probe();
     expect(word()).toBe("Reconnecting…");

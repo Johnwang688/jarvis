@@ -11,6 +11,9 @@ const cases: [string, Partial<OrbSignals>, string, string, string][] = [
     [`proxy ${failStatus}`, { online: false, failStatus }, "error", "err", "Jarvis unreachable"]),
   ["limited", { secure: { ok: false } }, "error", "err", "Limited connection"],
   ["offline", { online: false, failStatus: 0 }, "offline", "wait", "Offline · read 3 min ago"],
+  ["a limited phone in airplane mode", { online: false, failStatus: 0, secure: { ok: false } }, "offline", "wait", "Offline · read 3 min ago"],
+  ["a limited phone whose Jarvis is down", { online: false, failStatus: 502, secure: { ok: false } }, "error", "err", "Jarvis unreachable"],
+  ["limited while reconnecting", { streamOpen: false, secure: { ok: false } }, "error", "err", "Limited connection"],
   ["offline before a read", { online: false, lastRead: null }, "offline", "wait", "Offline · not read yet"],
   ["reconnecting", { streamOpen: false }, "reconnecting", "wait", "Reconnecting…"],
   ["connecting", { streamOpen: false, everOpened: false }, "connecting", "ok", "Connecting…"],
@@ -46,10 +49,10 @@ describe("phone orb state table", () => {
     signals.signedOut = false;
     expect(orbState(signals).word).toBe("Jarvis unreachable");
     signals.failStatus = 0;
-    expect(orbState(signals).word).toBe("Limited connection");
-    signals.secure.ok = true;
     expect(orbState(signals).state).toBe("offline");
     signals.online = true;
+    expect(orbState(signals).word).toBe("Limited connection");
+    signals.secure.ok = true;
     expect(orbState(signals).state).toBe("reconnecting");
     signals.streamOpen = true;
     expect(orbState(signals).state).toBe("working");

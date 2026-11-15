@@ -21,14 +21,16 @@ export interface PhoneOrbState {
   word: string;
 }
 
-/** First match wins: signed out > unreachable > limited > offline > reconnecting > live. */
+/** First match wins (spec §4): signed out > unreachable > offline > limited > reconnecting > live.
+ * Offline outranks Limited: a limited phone in airplane mode shows amber Offline (the orb is about the
+ * connection); Limited's action restrictions still apply, since they follow `secure`, never the orb. */
 export function orbState(s: OrbSignals): PhoneOrbState {
   if (s.signedOut) return { state: "error", tone: "err", word: "Signed out" };
   if (!s.online && [502, 503, 504].includes(s.failStatus ?? 0))
     return { state: "error", tone: "err", word: "Jarvis unreachable" };
-  if (s.secure && !s.secure.ok) return { state: "error", tone: "err", word: "Limited connection" };
   if (!s.online) return { state: "offline", tone: "wait",
     word: s.lastRead === null ? "Offline · not read yet" : `Offline · read ${agoWords(s.lastRead, s.now)}` };
+  if (s.secure && !s.secure.ok) return { state: "error", tone: "err", word: "Limited connection" };
   if (!s.streamOpen && (s.everOpened || s.firstOpenTimedOut)) return { state: "reconnecting", tone: "wait", word: "Reconnecting…" };
   if (!s.streamOpen) return { state: "connecting", tone: "ok", word: "Connecting…" };
   if (s.working > 0) return { state: "working", tone: "ok", word: `Live · ${s.working} working` };
