@@ -153,18 +153,58 @@ describe("Settings > Inbox idle limit", () => {
     expect(input().value).toBe("8");
   });
 
-  it("a refresh that fails shows an error with Retry, not the old value, and keeps the draft for later", async () => {
+  it("a failed refresh keeps the editor mounted with the draft and focus, shows the error above it, and labels the old value", async () => {
     mocks.workingSettings.mockResolvedValue(served());
     await show();
     await type("12");
+    input().focus();
+    expect(document.activeElement).toBe(input());
+    const el = input();
     mocks.workingSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     await act(async () => { notify(); }); await flush();
     expect(q("inbox-settings-error")!.textContent).toContain("Failed to fetch");
-    expect(input()).toBeNull();
+    expect(input()).toBe(el);
+    expect(input().value).toBe("12");
+    expect(document.activeElement).toBe(input());
+    expect(host.textContent).toContain("last read");
     mocks.workingSettings.mockResolvedValue(served({ idle_days: 8 }));
     await act(async () => { q("inbox-settings-retry")!.click(); }); await flush();
     expect(input().value).toBe("12");
-    expect(host.textContent).toContain("1–30");
+    expect(q("inbox-settings-error")).toBeNull();
+    expect(host.textContent).not.toContain("last read");
+  });
+
+  it("Save after a failed read is the revalidation: a good answer makes it ready", async () => {
+    mocks.workingSettings.mockResolvedValue(served());
+    await show();
+    mocks.workingSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    await act(async () => { notify(); }); await flush();
+    mocks.setWorkingSettings.mockResolvedValue(served({ idle_days: 6 }));
+    mocks.workingSettings.mockResolvedValue(served({ idle_days: 6 }));
+    await type("6"); await save();
+    expect(q("inbox-settings-error")).toBeNull();
+    expect(input().value).toBe("6");
+    expect(q("inbox-idle-result")!.textContent).toBe("Saved: 5 days.".replace("5", "6"));
+  });
+
+  it("a read that fails during a save is not applied, and the saved value is shown as saved", async () => {
+    mocks.workingSettings.mockResolvedValue(served());
+    await show();
+    let finish!: (v: unknown) => void;
+    mocks.setWorkingSettings.mockReturnValue(new Promise((r) => { finish = r; }));
+    await type("5");
+    await act(async () => { q("inbox-idle-save")!.click(); });
+    mocks.workingSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    await act(async () => { notify(); }); await flush();
+    expect(q("inbox-settings-error")).toBeNull();
+    expect(input()).not.toBeNull();
+    // The follow-up read is held, as in the review's sequence.
+    mocks.workingSettings.mockReturnValue(new Promise(() => {}));
+    await act(async () => { finish(served({ idle_days: 5 })); });
+    await flush();
+    expect(q("inbox-settings-error")).toBeNull();
+    expect(input().value).toBe("5");
+    expect(q("inbox-idle-result")!.textContent).toBe("Saved: 5 days.");
   });
 
   it("a read that began before a save cannot land over it", async () => {

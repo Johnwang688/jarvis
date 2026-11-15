@@ -28,8 +28,12 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
   const draftNow = useRef("");
   draftNow.current = draft;
   const reading = useRef(0);
+  // A save in flight: reads wait for it (none is applied meanwhile), then one runs.
+  const saving = useRef(false);
+  const readWaits = useRef(false);
 
   const read = useCallback(async () => {
+    if (saving.current) { readWaits.current = true; return; }
     const mine = ++reading.current;
     try {
       const next = parseWorkingSettings(await api.workingSettings());
@@ -42,7 +46,8 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
     } catch (e) {
       if (!live.current || mine !== reading.current) return;
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) { setServer(null); setLoad("unavailable"); return; }
-      setServer(null); setLoad("error");
+      // The last good value stays (drawn as "last read"), so the owner's typing is not interrupted.
+      setLoad("error");
       setLoadError(e instanceof Error && e.message ? e.message : "The daemon could not be reached.");
     }
   }, []);
@@ -59,29 +64,34 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
     setTyped(true);
     if ("error" in checked) { setResult(null); return; }
     setBusy(true); setResult(null);
+    saving.current = true;
     reading.current += 1; // a read that began before this save must not land over it
     try {
       const next = parseWorkingSettings(await api.setWorkingSettings(checked.value));
       if (!live.current) return;
-      reading.current += 1; // and none that began during it either
       if (!next) {
         setResult({ kind: "failed", text: "The daemon's answer could not be read; the limit may not have been saved." });
-        void read();
+        readWaits.current = true;
         return;
       }
-      setServer(next); setDraft(String(next.idle_days)); synced.current = String(next.idle_days); setTyped(false);
+      // A good answer is the daemon's current word: ready, whatever the reads before it said.
+      setServer(next); setLoad("ready"); setLoadError(""); setDraft(String(next.idle_days)); synced.current = String(next.idle_days); setTyped(false);
       setResult({ kind: "saved", text: `Saved: ${next.idle_days} ${next.idle_days === 1 ? "day" : "days"}.` });
-      void read(); // the daemon's own answer, once the save is settled
+      readWaits.current = true; // the daemon's own answer, once the save is settled
     } catch (err) {
       if (!live.current) return;
       const text = err instanceof Error && err.message ? err.message : "The limit could not be saved.";
-      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) { reading.current += 1; setServer(null); setLoad("unavailable"); return; }
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) { setServer(null); setLoad("unavailable"); return; }
       setResult(err instanceof ApiError && err.status === 400
         ? { kind: "refused", text } : { kind: "failed", text: `Not saved: ${text}` });
-    } finally { if (live.current) setBusy(false); }
+    } finally {
+      saving.current = false;
+      if (live.current) { setBusy(false); if (readWaits.current) { readWaits.current = false; void read(); } }
+    }
   };
 
-  const off = blocked || busy || load !== "ready";
+  // After a failed read Save stays enabled: it is the revalidation (the daemon judges the value, and a good answer makes the state ready).
+  const off = blocked || busy;
   const dirty = server !== null && draft.trim() !== String(server.idle_days);
   return (
     <section className="inbox-settings" data-testid="inbox-settings" aria-label="In progress">
@@ -98,7 +108,7 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
           <button type="button" data-testid="inbox-settings-retry" onClick={() => { void read(); }}>Retry</button>
         </p>
       ) : null}
-      {server && load === "ready" ? (
+      {server && load !== "unavailable" ? (
         <form onSubmit={save} noValidate data-testid="inbox-settings-form">
           <div className="inbox-idle-row">
             <label htmlFor="inbox-idle-days">Leave In progress after</label>
@@ -106,7 +116,7 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
               value={draft} disabled={off} aria-invalid={invalid || result?.kind === "refused" ? true : undefined}
               aria-describedby={`inbox-idle-help${invalid || result ? " inbox-idle-result" : ""}`}
               onChange={(e) => { setDraft(e.target.value); setTyped(true); setResult(null); }} />
-            <span aria-hidden="true">idle days ({server.min}–{server.max}, default {server.default})</span>
+            <span aria-hidden="true">idle days ({server.min}–{server.max}, default {server.default}{load === "error" ? ", last read" : ""})</span>
             <button type="submit" data-testid="inbox-idle-save" disabled={off || !dirty}>{busy ? "Saving…" : "Save"}</button>
           </div>
           <p id="inbox-idle-result" role="status" aria-live="polite" data-testid="inbox-idle-result"
