@@ -144,6 +144,12 @@ SELF_PROTECTED = frozenset(
         # hides a live approval, question, proposal or blocked task. An
         # agent that could edit it could hide one.
         "jarvis/v2/inbox_marks.py",
+        # The owner's working set (WS-1, 2026-11-14): which chat threads are
+        # in the Inbox and when one may leave, by Done or the idle timer,
+        # under IN-8 (never while a rank 1 to 4 row waits on it). An agent
+        # that could edit it could take a thread that waits on the owner out
+        # of sight.
+        "jarvis/v2/working.py",
         # The phone's remote listener (phone design PH-1, P-1): its route
         # table, strict Host, Origin rule and headers decide what the
         # tailnet can reach on this machine. An agent that could edit it
@@ -362,8 +368,10 @@ def _protected_state_paths() -> set[Path]:
     # B4: what the owner snoozed or dismissed; a forged mark would hide a row).
     # `deferred.json` (QH): approvals deferred during quiet hours and the
     # owner's single-use grants; a forged grant would answer for the owner.
+    # `working.json` (WS-1): the owner's working set and its idle limit; a
+    # forged one could take a thread out of the Inbox or keep one in.
     paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks", inbox / "marks.json",
-              inbox / "deferred.json"}
+              inbox / "deferred.json", inbox / "working.json"}
     # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
     # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
     # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the

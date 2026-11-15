@@ -2372,3 +2372,79 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
   tap-time read lists fewer files than the row's did (tests for it saved, not merged). It
   refuses; it never lets a merge through. (b) The desk transcript still labels the deferral
   note "via the phone" (`chat_reads._PHONE_TYPED`).
+
+## The working set (WS-1, 2026-11-14)
+
+The daemon half of "the Inbox is your working set of threads" (plan
+`docs/plans/2026-11-14-inbox-working-set-plan.md`, revision 2). No HUD yet
+(WS-2); the phone and the morning review are unchanged, and so is what
+`inbox.rows()` returns (it gained only an optional `failures=` list).
+
+- **Store.** `jarvis/v2/working.py` (SELF_PROTECTED) keeps
+  `<data root>/inbox/working.json` (inside the protected inbox tree, and
+  named in `_protected_state_paths`): `{seeded_at, idle_days, threads:
+  {id: {since, last, seq, done_at, done_seq, done_token, reason}}}`. In
+  while `done_at` is null. Written by `stores._write_bytes` (a temp file and
+  `os.replace`, with no fsync: a crash can leave the file empty or missing,
+  which reads as an empty, unseeded set that is seeded again); a write over
+  the 4 MB read cap is refused and logged. A file that is a link, not
+  regular, too large or not JSON reads as empty. Agent writes are refused;
+  reads are as for every `<data>/inbox/` file (§9 Q7).
+- **Joining.** A bus observer reads the fixed producer table
+  (`ACTIVITY_KINDS`, plus `subagent` started/finished): each record bumps
+  `seq`/`last` on its `thread_id` and brings a thread back in. Compaction
+  records, task threads (D-7), archived threads and threads in archived
+  projects never count.
+- **IN-8: a visible chat thread with a linked rank 1 to 4 row is always
+  in.** Leaving needs eligibility: a fresh `inbox.rows()` read shows no rank
+  1 to 4 row with its `thread_id` (a quiet-hours deferral counts) and its
+  status is not working or needs_input. A failed read is not eligible:
+  `rows()` raised, or its `failures=` list (one per call, so overlapping
+  reads never mix) names a source that can hold such a row (approvals,
+  questions, deferrals, including a `deferred.json` that is not ours, or any
+  name other than tasks, missed, decisions, checks and pull requests). A
+  quiet-hours deferral arrives with no thread-scoped record (the broker
+  publishes only `inbox_changed`), so it can land while a Done or sweep is
+  deciding, or just after: every `inbox_changed` schedules a reconcile
+  0.25 s later, off the publish thread (and each sweep starts with one),
+  which brings back in any visible chat thread with a linked rank 1 to 4
+  row. One reconcile worker at a time; events while it runs make it run
+  once more. 0.25 s is only the scheduling delay: lock waits, the source
+  reads and a failed reconcile (retried on the next event or sweep) can
+  stretch the time to recovery, with no fixed bound. The row is drawn in
+  `needs_you` throughout. `stop()` closes the set: timers cancelled, a
+  running worker waited for (5 s each), and every section that changes
+  membership (activity, reconcile, the sweep's pruning and exits, seeding,
+  Done, Undo, and the archive, restore and delete handlers) checks the
+  closed flag first, so no membership change follows it.
+- **Leaving.** The hourly sweep (first run 5 minutes after start) takes out
+  threads idle past the limit (default 3 days, 1 to 30, `POST
+  /working/settings`). Done needs the `seq` the HUD drew (else 409 with the
+  current entry), then writes `done_at`, `done_seq` and a random
+  `done_token` in one step and marks read only the last turn it observed
+  (`Activity.seen_thread(only_turn=)`), so a reply that finished since stays
+  unread; Undo needs that token within 10 s of the daemon's monotonic clock.
+  A decision re-reads `seq` under the store lock after its eligibility read
+  and writes only if unchanged. A failed write rolls memory back (503).
+- **Lifecycle.** Archive (thread or project) takes a thread out; restore
+  does not rejoin; delete drops the entry; move and rename only redraw.
+  Archive, restore and delete bump a lifecycle generation (per thread, and
+  per project) and clear any `done_token`: activity, a reconcile or a seed
+  checked before the event is dropped, an Undo from before it is refused,
+  and another project's event drops nothing. A move bumps the thread's
+  generation too (not its `seq`).
+- **Seeding.** Once, at start. A seed whose inbox read failed, or that
+  could not read a thread, adds nothing and keeps no `seeded_at`; the next
+  sweep tries again. An empty seed with
+  no file writes nothing.
+- **Routes**, owner-only through `projects.owner_only` before anything
+  else: `GET /working`, `POST /working/<id>/done`, `POST
+  /working/<id>/undo`, `GET`/`POST /working/settings`. The phone's listener
+  serves none of them. **`working_changed`** on the bus is exactly `{"kind":
+  "working_changed"}`: no ids, no data, because `/events` is not
+  owner-checked. Its timing can still reveal membership to a local `/events`
+  reader (it follows a record on a member thread); accepted under plan §9
+  Q7, since membership is derivable from `/threads` and `/activity` anyway.
+- Tests: `tests/v2/working_check.py`; `tests/v2/archive_check.py` keeps
+  every tool, MCP entry, session tool, Discord and CLI module away from the
+  routes, the module and its file.

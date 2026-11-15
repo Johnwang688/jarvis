@@ -635,9 +635,13 @@ class DeferredStore:
 
     # -- reads -----------------------------------------------------------------------
 
-    def snapshot(self) -> tuple[list[dict], dict]:
+    def snapshot(self, failures: list | None = None) -> tuple[list[dict], dict]:
         """(records, more counters, the unwritten ones folded in), copied;
-        empty when the file is missing or not ours. Never raises."""
+        empty when the file is missing or not ours. Never raises.
+        `failures` (the working set's strict read, WS-1): when given, "deferred"
+        is appended when the file could not be read or is not ours, so a caller
+        that must fail closed can tell that empty from a missing file. The
+        return value is the same either way."""
         try:
             with self._lock:
                 fd = self._open(create=False)
@@ -654,6 +658,8 @@ class DeferredStore:
             LOG.warning("Cannot read the deferred approvals (%s)", type(exc).__name__)
             current, unwritten = None, {k: dict(v) for k, v in self._unwritten.items()}
         if current is None:
+            if failures is not None:
+                failures.append("deferred")
             current = ({}, {})
         records, more = current
         more = {k: dict(v) for k, v in more.items()}
@@ -1049,7 +1055,7 @@ def _who(thread_id, task_id) -> str:
     return f"task {task_id}" if task_id else f"chat {thread_id}" if thread_id else "a turn"
 
 
-def rows(daemon, row) -> list[dict]:
+def rows(daemon, row, failures: list | None = None) -> list[dict]:
     """The deferred rows: waiting ones at rank 4 for `WAITING_S`, then rank 8
     until `SHOWN_S`; one "and N more" row per thread past its cap. `row` is
     `inbox._row`. Titles and blocks are code's."""
@@ -1058,7 +1064,7 @@ def rows(daemon, row) -> list[dict]:
         return []
     out = []
     now = store.clock()
-    records, more = store.snapshot()
+    records, more = store.snapshot(failures) if failures is not None else store.snapshot()
     for rec in records:
         if rec["state"] != "waiting":
             continue

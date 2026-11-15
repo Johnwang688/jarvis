@@ -58,6 +58,7 @@ _TASK_KINDS = frozenset({"task_created", "task_status_changed"})
 _ACTIVE_TASK = frozenset({TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING,
                           TaskState.VERIFYING})
 _APPROVAL, _QUESTION = "approval", "question"
+_ANY = object()         # `seen_thread`'s default: whatever turn is last
 
 
 class Activity:
@@ -166,10 +167,23 @@ class Activity:
 
     # -- the owner reading --------------------------------------------------
 
-    def seen_thread(self, thread_id: str) -> str:
+    def last_turn(self, thread_id: str) -> str | None:
+        """The chat's last finished turn this tracker recorded, or None."""
+        with self._lock:
+            last = self._sidecar(self.stores.threads, thread_id).get("last")
+            return last.get("turn_id") if isinstance(last, dict) and last.get("turn_id") else None
+
+    def seen_thread(self, thread_id: str, *, only_turn=_ANY) -> str:
+        """Mark the chat read. `only_turn` (the working set's Done, WS-1): mark
+        it read only if its last finished turn is still that one (None: no
+        turn yet), so a reply that finished since is left unread."""
         with self._lock:
             side = self._sidecar(self.stores.threads, thread_id)
             last = side.get("last")
+            current = last.get("turn_id") if isinstance(last, dict) and last.get("turn_id") else None
+            if only_turn is not _ANY and current != only_turn:
+                self._changed_thread(thread_id)
+                return self.thread_status(thread_id)
             if isinstance(last, dict) and last.get("turn_id") and side.get("seen") != last["turn_id"]:
                 side["seen"] = last["turn_id"]
                 self._write(self.stores.threads, thread_id, side)
