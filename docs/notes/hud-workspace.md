@@ -2430,3 +2430,53 @@ still hold except where this section replaces them.
   first-read error (not only 404/403) leaves it a page-opening button. An unread count shows
   "Needs you · –", never a zero. The project chip yields to a hint first (`.whint ~ .wchip`). The
   stray bits in the page screenshot were the binary click sparkle (`#sparkle-layer`, 500 ms), not WS-3.
+
+## The In progress setting (WS-4, 2026-11-15)
+
+Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` (§5 WS-4, O-1, §9 Q1). The daemon's route is in
+`docs/notes/control-plane.md` ("The working set") and `docs/hud-api.md` (`/working/settings`); no backend change.
+
+- **Where.** Settings has an "Inbox" section (after Phone, before Archive), `components/InboxSettings.tsx`,
+  headed "In progress". One field, "Leave In progress after N idle days", with the daemon's bounds and default
+  beside it and a line of help: a thread also leaves when you press Done, and one waiting on you never leaves
+  on its own (D-3/D-4: a rank 1 to 4 row, a running turn or a pending answer holds it in).
+- **Source of truth.** `GET /working/settings` on opening: the value, `min` and `max` are the daemon's
+  (`lib/working.ts parseWorkingSettings`; an answer that is not a whole number inside its own bounds is an
+  error, never a shown value). The HUD hard-codes no bound. It validates a whole number inside them before
+  posting (`checkIdleDays`: 0, 31, 2.5, empty and text post nothing); `POST /working/settings {idle_days}`.
+- **States.** Saving disables the field and button ("Saving…"); a 200 shows "Saved: N days." and the daemon's
+  returned value; a 400 shows the daemon's own sentence inline and keeps what was typed; any other failure shows
+  "Not saved: …" (a 503 is "the setting could not be saved"). A 403 (not the owner's window) or 404 (an older
+  daemon) shows a quiet "Not available" with no field and no number; any other read failure shows the error
+  with Retry. Nothing is ever drawn as the setting that the daemon did not say.
+- **Refresh.** `WorkingStore.onRead` fires after every `GET /working` read (a `working_changed` or
+  `inbox_changed` event causes one), and the section reads its own setting again. A refresh updates the daemon's
+  value and bounds but never overwrites a draft that differs from the last daemon value; one that finds
+  nothing typed follows the daemon. A failed refresh keeps the editor mounted (focus and draft kept) with the error and Retry above it and the old bounds marked "last read"; Save stays enabled and is the revalidation (the daemon judges the value). A save answered 403/404 is "Not available" with no field. A save invalidates a read that began before it, no read is applied while it is pending (one runs after it settles), and a good answer makes the state ready itself; the daemon announces a saved limit as `working_changed`, so another window's open control follows.
+- **Accessibility.** A label tied to the input (`htmlFor`), the help and the result line referenced by
+  `aria-describedby`, the result in a polite live region, Enter saves, `aria-invalid` on a refused value. Aurora
+  glass tokens only (`.inbox-settings` in `theme.css`).
+- **Tests.** `components/InboxSettings.test.ts` (12), `lib/settings.test.ts` (the section list);
+  `tests/face/hud_v2_working_check.py` section `settings` with `/working/settings` in
+  `tests/face/hud_v2_mock_working.py`. Mutations that fail them: hard-coded bounds, a swallowed 400, a 404
+  shown as 3, a refresh that overwrites typing, a field left enabled while saving, a failed refresh that blanks
+  the value. Not run against a real daemon.
+
+## Working set: owner decisions (2026-11-14)
+
+The owner's answers to the plan, summarised here for the HUD area (the full text and the planner's defaults
+are in `docs/plans/2026-11-14-inbox-working-set-plan.md` §2, §9 and §11; `docs/notes/decisions.md` is a frozen
+snapshot and takes no new entries).
+
+- **O-1.** A thread leaves the sidebar Inbox when it has been idle for a while after its last turn, or when
+  the owner presses Done; not when its PR merges or its pane closes. **Q1:** the limit is 3 days, owner-settable
+  from 1 to 30 (Settings > Inbox). **Q2:** an unread or failed result does not hold a thread in past the limit.
+- **O-2.** Any activity, the owner's or an agent's, brings a thread in.
+- **O-3.** Today's item rows show on their thread; items with no thread sit in a "Needs you" group.
+- **O-4.** The catch-all project is "Unsorted" (WS-0). Threads stay reachable in their own project while they are
+  in the Inbox (the sidebar Inbox is the working set; the plan says it should feel like t3 code).
+- **Q7.** Agents may see which threads are in the Inbox (derivable from threads and activity); only changes
+  and the inbox rows stay owner-only. `working_changed` carries no ids or data.
+- **WS-3 (§11).** The rainbow Inbox row is the In progress list's header and folds it; a "Needs you" line with
+  its count (0 included) is always at the top of the unfolded list and opens the page; today's Inbox page is
+  renamed "Needs you" and lists every row (ranks 1 to 8), grouped under its thread with a link to open it.

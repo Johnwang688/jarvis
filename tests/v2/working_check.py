@@ -516,6 +516,15 @@ class Time(Base):
         self.assertEqual(working.WorkingSet(self.daemon).idle_days, 1)
         self.assertEqual(self.call("POST", "/working/settings", {"idle_days": 30})["idle_days"], 30)
 
+    def test_a_saved_idle_limit_is_announced_once_and_a_refused_one_not_at_all(self):
+        self.changes.clear()
+        for bad in (0, 31, 2.5, True):
+            self.call("POST", "/working/settings", {"idle_days": bad}, 400)
+        self.call("POST", "/working/settings", {"idle_days": 5, "extra": 1}, 400)
+        self.assertEqual(self.changes, [], "a refused save announces nothing")
+        self.call("POST", "/working/settings", {"idle_days": 5})
+        self.assertEqual(self.changes, [CHANGED], "one record, no ids and no data")
+
     def test_the_timer_runs_after_start_then_hourly(self):
         FakeTimer.made = []
         ws = working.WorkingSet(self.daemon, clock=self.clock, mono=self.clock.mono, timer_factory=FakeTimer)

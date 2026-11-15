@@ -285,6 +285,10 @@ export const api = {
   /** Done: `seq` is the entry's as drawn. 200 carries the `token` Undo takes; 409 is a list that moved on. */
   workingDone: (id: string, seq: number) => req<unknown>(`/working/${encodeURIComponent(id)}/done`, json({ seq })),
   workingUndo: (id: string, token: string) => req<unknown>(`/working/${encodeURIComponent(id)}/undo`, json({ token })),
+  /** The idle limit (WS-4): `{idle_days, min, max, default}`; `lib/working` `parseWorkingSettings`. */
+  workingSettings: () => req<unknown>("/working/settings"),
+  /** 200 carries the settings as saved; 400 is a value the daemon refuses, with its sentence. */
+  setWorkingSettings: (idle_days: number) => req<unknown>("/working/settings", json({ idle_days })),
   /** One answer, dispatched by the daemon to the item's own surface: `{text}`
    * for a question, `{withdraw: true}` for a proposal, `{action: "retry"|"leave"}`
    * for an approval deferred during quiet hours (QH). A 409 is "already

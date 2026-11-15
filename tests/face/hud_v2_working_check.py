@@ -55,6 +55,13 @@ What it pins, one section each (each names the mutation it is meant to catch):
             at 160%): at least one whole working row is visible, at least one
             tree row too, and Schedules is not under the orb [list shrinks to
             nothing; fixed tree minimum]
+  settings  (WS-4) Settings > Inbox shows the daemon's idle limit and bounds; a
+            client-side bad value (0, 31, 2.5) posts nothing; 3 -> 5 posts
+            exactly {idle_days: 5} and says saved; a server 400 shows its
+            sentence inline; Enter in the box saves; a 404 and a 403 show a
+            quiet "Not available" with no field; a working_changed read does not
+            overwrite a typed draft [hard-coded bounds; 400 swallowed; unavailable
+            shown as 3; refresh clobbers typing]
   menukeys  a read that disables the focused Done keeps focus inside the menu;
             ArrowDown and ArrowUp move between the enabled items and wrap
             [focus to body; no arrow keys]
@@ -78,6 +85,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.face import hud_v2_mock_inbox as mock_inbox  # noqa: E402
 from tests.face import hud_v2_mock_working as mock_working  # noqa: E402
+from tests.face.hud_v2_check import open_settings  # noqa: E402
 from tests.face.hud_v2_layout_check import _pane  # noqa: E402
 from tests.face.hud_v2_multichat_check import _chat, _fresh  # noqa: E402
 
@@ -836,6 +844,98 @@ def _short_checks(page, mock, check, until):
     _zfresh(page, mock, until, (1600, 900), 100)
 
 
+IDLE = '[data-testid="inbox-idle-days"]'
+RESULT = '[data-testid="inbox-idle-result"]'
+SAVE = '[data-testid="inbox-idle-save"]'
+
+
+def _settings_open(page, mock, until, zoom=100):
+    _reset(mock)
+    _zfresh(page, mock, until, (1600, 900), zoom)
+    open_settings(page, "Inbox")
+    until(lambda: page.locator('[data-testid="inbox-settings"]').count() == 1, timeout=4)
+
+
+def _settings_checks(page, mock, check, until):
+    print("\nSettings > Inbox: the idle limit (WS-4)")
+    s = _st(mock)
+    for zoom in (100, 160):
+        s.update({"settings": {"idle_days": 3, "min": 1, "max": 30, "default": 3}, "settings_fail": None,
+                  "settings_reply": None, "settings_posts": [], "settings_reads": 0})
+        _settings_open(page, mock, until, zoom)
+        until(lambda: page.locator(IDLE).count() == 1, timeout=4)
+        z = f" at {zoom}%"
+        box = page.locator('[data-testid="inbox-settings"]')
+        check(f"the box shows the daemon's 3 and its bounds{z} [hard-coded value]",
+              page.locator(IDLE).input_value() == "3" and "1–30, default 3" in box.inner_text())
+        help_text = page.locator('[data-testid="inbox-idle-help"]').inner_text()
+        check(f"the label is linked to the box and the help line says Done and waiting{z}",
+              page.get_by_label("Leave In progress after").count() == 1
+              and "Done" in help_text and "never leaves on its own" in help_text)
+        check(f"Save is disabled until the value changes{z}", page.locator(SAVE).is_disabled())
+        _shot_page(page, f"settings-normal-{zoom}")
+        for bad in ("0", "31", "2.5"):
+            page.locator(IDLE).fill(bad)
+            page.locator(SAVE).click()
+            check(f"{bad} is refused in the HUD, nothing posted{z} [no client check]",
+                  "whole number from 1 to 30" in page.locator(RESULT).inner_text() and not s["settings_posts"],
+                  page.locator(RESULT).inner_text())
+        page.locator(IDLE).fill("5")
+        page.locator(SAVE).click()
+        until(lambda: "Saved" in page.locator(RESULT).inner_text(), timeout=4)
+        check(f"3 -> 5 posts exactly {{idle_days: 5}}{z}", s["settings_posts"] == [{"idle_days": 5}], str(s["settings_posts"]))
+        check(f"the box shows 5 and says saved{z}", page.locator(IDLE).input_value() == "5"
+              and page.locator(RESULT).inner_text() == "Saved: 5 days.")
+        _shot_page(page, f"settings-saved-{zoom}")
+        # A server 400 shows its own sentence inline.
+        s["settings_reply"] = (400, "idle_days must be a whole number from 1 to 30 (server)")
+        page.locator(IDLE).fill("6")
+        page.locator(SAVE).click()
+        until(lambda: "(server)" in page.locator(RESULT).inner_text(), timeout=4)
+        check(f"a server 400 shows its sentence and keeps the typed 6{z} [400 swallowed]",
+              page.locator(RESULT).inner_text() == "idle_days must be a whole number from 1 to 30 (server)"
+              and page.locator(IDLE).input_value() == "6" and page.locator(IDLE).is_enabled()
+              and page.locator(IDLE).get_attribute("aria-invalid") == "true")
+        _shot_page(page, f"settings-400-{zoom}")
+        s["settings_reply"] = None
+        # A working_changed read does not clobber a typed draft.
+        s["settings"]["idle_days"] = 9
+        page.locator(IDLE).fill("12")
+        reads = s["settings_reads"]
+        mock_working.changed(mock)
+        check(f"the event made the HUD read the setting again{z}", bool(until(lambda: s["settings_reads"] > reads, timeout=4)))
+        time.sleep(0.3)
+        check(f"a working_changed read leaves the typed 12 alone{z} [refresh clobbers typing]",
+              page.locator(IDLE).input_value() == "12", page.locator(IDLE).input_value())
+        # Enter saves, from the keyboard alone.
+        page.locator(IDLE).fill("4")
+        page.locator(IDLE).press("Enter")
+        until(lambda: s["settings_posts"][-1:] == [{"idle_days": 4}], timeout=4)
+        check(f"Enter in the box saves{z}", s["settings_posts"][-1] == {"idle_days": 4})
+        # Server bounds, not constants: a daemon that says 2..9 refuses 10 here.
+        s["settings"] = {"idle_days": 3, "min": 2, "max": 9, "default": 3}
+        page.locator(IDLE).fill("")
+        mock_working.changed(mock)
+        check(f"the new bounds 2-9 arrive with the event{z}", bool(until(lambda: "2–9" in box.inner_text(), timeout=4)))
+        posts = len(s["settings_posts"])
+        page.locator(IDLE).fill("10")
+        page.locator(SAVE).click()
+        check(f"the daemon's bounds are the HUD's{z} [hard-coded max 30]",
+              "from 2 to 9" in page.locator(RESULT).inner_text() and len(s["settings_posts"]) == posts,
+              page.locator(RESULT).inner_text())
+    for status in (404, 403):
+        s["settings_fail"] = (status, "nope")
+        _settings_open(page, mock, until)
+        until(lambda: page.locator('[data-testid="inbox-settings-unavailable"]').count() == 1, timeout=4)
+        text = page.locator('[data-testid="inbox-settings"]').inner_text()
+        check(f"a {status} is a quiet Not available with no field and no value [shown as 3]",
+              page.locator(IDLE).count() == 0 and "Not available" in text and "3" not in text, text)
+        if status == 404:
+            _shot_page(page, "settings-unavailable-100")
+    s["settings_fail"] = None
+    _zfresh(page, mock, until, (1600, 900), 100)
+
+
 def _menukeys_checks(page, mock, check, until):
     _open(page, mock, until)
     until(lambda: len(_rows(page)) == 6, timeout=4)
@@ -884,7 +984,7 @@ def _menukeys_checks(page, mock, check, until):
 
 SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
             _live_checks, _empty_checks, _stale_checks, _inbox_checks, _line_checks, _event_checks, _keys_checks,
-            _hint_checks, _page_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)
+            _hint_checks, _page_checks, _settings_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)
 
 
 def working_checks(browser, mock, base, check, until, guard, init_script):

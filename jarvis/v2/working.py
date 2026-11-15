@@ -1071,6 +1071,7 @@ class WorkingSet:
             except Exception:
                 self._idle_days = before
                 raise
+        self._changed()     # no ids, no data: another window reads the limit again
         return self.settings()
 
     # -- the read (D-5, D-6) -----------------------------------------------------------------

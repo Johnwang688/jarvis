@@ -132,3 +132,25 @@ export function saveSectionOpen(open: boolean): void {
 
 /** How long the Undo toast stays (the daemon's own deadline is 10 s). */
 export const UNDO_TOAST_MS = 5_000;
+
+/** WS-4: the idle limit, as `GET /working/settings` answers it. The bounds are the daemon's. */
+export interface WorkingSettings { idle_days: number; min: number; max: number; default: number }
+
+const wholeIn = (v: unknown, lo: number, hi: number): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi;
+
+/** The daemon's answer, or null when it is not one: a made-up value is never shown as the setting. */
+export function parseWorkingSettings(raw: unknown): WorkingSettings | null {
+  if (!isObj(raw)) return null;
+  const { idle_days, min, max } = raw;
+  if (typeof min !== "number" || typeof max !== "number" || !Number.isInteger(min) || !Number.isInteger(max)
+    || min < 1 || max < min || !wholeIn(idle_days, min, max)) return null;
+  return { idle_days, min, max, default: wholeIn(raw.default, min, max) ? raw.default : idle_days };
+}
+
+/** A typed idle limit: the whole number, or the sentence that says what is wrong with it. */
+export function checkIdleDays(text: string, min: number, max: number): { value: number } | { error: string } {
+  const t = text.trim();
+  const n = /^\d{1,4}$/.test(t) ? Number(t) : NaN;
+  return Number.isInteger(n) && n >= min && n <= max ? { value: n } : { error: `Enter a whole number from ${min} to ${max}.` };
+}

@@ -68,6 +68,16 @@ export class WorkingStore {
 
   snapshot = (): WorkingSnapshot => this.snap;
 
+  private readListeners = new Set<() => void>();
+
+  /** Told after every read of `/working` finishes, even one that found the list as it was (which
+   * publishes nothing to `subscribe`): what a `working_changed` or `inbox_changed` event causes.
+   * Settings > Inbox uses it to read its own setting again (WS-4). */
+  onRead = (fn: () => void) => {
+    this.readListeners.add(fn);
+    return () => { this.readListeners.delete(fn); };
+  };
+
   /** Publish a change. A read that says what the last one said publishes nothing: no listener
    * (so no sidebar row) is redrawn for a refresh that found the list as it was. */
   private set(next: Partial<WorkingSnapshot>) {
@@ -88,6 +98,7 @@ export class WorkingStore {
         do {
           this.again = false;
           await this.readOnce();
+          for (const fn of Array.from(this.readListeners)) fn();
         } while (this.again);
       } finally {
         this.running = null;
