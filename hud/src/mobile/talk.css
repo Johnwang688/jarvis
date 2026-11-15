@@ -1,7 +1,7 @@
-/* P-7: push to talk in a chat's message box (talk.ts). Graphite tokens from
+/* P-7: push to talk in a chat's message box (talk.ts). Aurora-glass tokens from
    mobile.css; no image or font is loaded, and the mic is drawn with borders
    (no image, no svg). Since 2026-10-28 the button is a round mic icon beside
-   the message box: 44 px, the least tap target, held, not tapped; it cannot be
+   the message box: 48 px, the least tap target, held, not tapped; it cannot be
    selected or long-press-menued, and takes no scroll gesture while held. Its
    words stay its own text (visually hidden); the line above the bar says what
    is happening. Listening is glacier cyan, never the amber or red that mean
@@ -9,9 +9,9 @@
 .m-talk { display: contents; }
 .tap.m-mic {
   flex: none;
-  width: 44px;
-  height: 44px;
-  min-height: 44px;
+  width: 3rem;
+  height: 3rem;
+  min-height: 3rem;
   padding: 0;
   border: 1px solid var(--control-edge);
   border-radius: 50%;
@@ -24,11 +24,11 @@
   -webkit-touch-callout: none;
 }
 /* The mic: a capsule, its cradle and its stem. */
-.m-mic-icon { position: relative; width: 10px; height: 15px; margin-bottom: 5px; border: 2px solid currentColor;
-  border-radius: 5px; pointer-events: none; }
-.m-mic-icon::after { content: ""; position: absolute; left: -6px; top: 3px; width: 18px; height: 11px;
-  border: 2px solid currentColor; border-top: 0; border-radius: 0 0 9px 9px; }
-.m-mic-icon::before { content: ""; position: absolute; left: 2px; top: 14px; width: 2px; height: 4px;
+.m-mic-icon { position: relative; width: 0.625rem; height: 0.9375rem; margin-bottom: 0.3125rem; border: 2px solid currentColor;
+  border-radius: 0.3125rem; pointer-events: none; }
+.m-mic-icon::after { content: ""; position: absolute; left: -0.375rem; top: 0.1875rem; width: 1.125rem; height: 0.6875rem;
+  border: 2px solid currentColor; border-top: 0; border-radius: 0 0 0.5625rem 0.5625rem; }
+.m-mic-icon::before { content: ""; position: absolute; left: 2px; top: 0.875rem; width: 2px; height: 0.25rem;
   background: currentColor; }
 .tap.m-mic[data-phase="starting"],
 .tap.m-mic[data-phase="listening"] {
@@ -39,5 +39,5 @@
 .tap.m-mic[data-phase="transcribing"] { color: var(--text-muted); }
 .tap.m-mic:disabled { opacity: 0.5; }
 /* The line and Retry sit above the bar (they are the bar's own items: .m-talk has no box). */
-.m-talk-line { order: -2; flex-basis: 100%; margin: 0 4px; font-size: 13px; }
-.tap.m-mic-retry { order: -1; min-height: 44px; }
+.m-talk-line { order: -2; flex-basis: 100%; margin: 0 0.25rem; font-size: 0.875rem; }
+.tap.m-mic-retry { order: -1; min-height: 3rem; }

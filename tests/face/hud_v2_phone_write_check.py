@@ -14,7 +14,7 @@ authenticator stands in for the iPhone. Fake providers; a spy task runner.
   - New task: made in INTAKE and opened; Start asks first, then starts it;
   - Cancel on a running task: asked first, then the passkey, then cancelled;
   - a proposal withdrawn from its inbox row;
-  - every control at least 44 px tall; hostile text stays text; no page errors.
+  - every control at least 48 px tall; hostile text stays text; no page errors.
 
 Skipped when `hud/dist` has no phone shell (run `npm run build` in hud/).
 
@@ -226,7 +226,7 @@ def run(browser, check, until):
     def small_targets():
         return page.evaluate("""Array.from(document.querySelectorAll('.app button, .app select, .app textarea'))
             .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid || e.textContent,
-            e.getBoundingClientRect().height]).filter(([, h]) => h < 44)""")
+            e.getBoundingClientRect().height]).filter(([, h]) => h < 47.5)""")
 
     def users(thread_id):
         return [r["data"] for r in daemon.stores.threads.read_log(thread_id) if r.get("kind") == "user"]
@@ -281,7 +281,7 @@ def run(browser, check, until):
               users(chat.id)[1].get("queued") is True and brains[PN.CLAUDE].steered == []
               and "Queued: it runs after the current turn." == tid("m-compose-note").inner_text(),
               str(users(chat.id)))
-        check("P-5 app: every control is at least 44 px tall (the message box)", not small_targets(),
+        check("P-5 app: every control is at least 48 px tall (the message box)", not small_targets(),
               str(small_targets()))
         brains[PN.CLAUDE].release.set()
 
@@ -305,7 +305,7 @@ def run(browser, check, until):
         until(lambda: tid("m-new-provider").count() == 1, timeout=8)
         tid("m-new-provider").select_option("codex")
         tid("m-new-text").fill("hello codex")
-        check("P-5 New chat: every control is at least 44 px tall", not small_targets(), str(small_targets()))
+        check("P-5 New chat: every control is at least 48 px tall", not small_targets(), str(small_targets()))
         before = {t.id for t in daemon.stores.threads.list()}
         tid("m-new-start").click()
         pump(lambda: {t.id for t in daemon.stores.threads.list()} - before)
@@ -328,7 +328,7 @@ def run(browser, check, until):
               task.state == TaskState.INTAKE and runner.calls == [] and clean(), str(runner.calls))
         tid("m-task-start").click()
         check("P-5 Start: asks first", tid("m-task-ask").count() == 1 and runner.calls == [])
-        check("P-5 task controls: every control is at least 44 px tall", not small_targets(), str(small_targets()))
+        check("P-5 task controls: every control is at least 48 px tall", not small_targets(), str(small_targets()))
         tid("m-task-confirm").click()
         pump(lambda: runner.calls)
         until(lambda: tid("m-task-start").count() == 0, timeout=8)

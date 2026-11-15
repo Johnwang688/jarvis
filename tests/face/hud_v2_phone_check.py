@@ -652,7 +652,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     def small_targets():
         return page.evaluate("""Array.from(document.querySelectorAll('.app button, .app summary'))
             .filter(e => e.offsetParent !== null).map(e => [e.textContent, e.getBoundingClientRect().height])
-            .filter(([, h]) => h < 44)""")
+            .filter(([, h]) => h < 47.5)""")
 
     # -- Inbox ---------------------------------------------------------------------------
     until(lambda: page.locator('[data-testid="m-inbox-row"]').count() >= 3, timeout=8)
@@ -673,7 +673,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-3 Inbox: no answer control on the list itself (no Allow, Deny, Always, no input)",
           not bad and fields == 0, f"{bad} {fields}")
     check("P-3 Inbox: the tab counts what waits", "Inbox · " in page.locator('[data-testid="m-tab-inbox"]').inner_text())
-    check("P-3 app: every tap target is at least 44 px tall (Inbox)", not small_targets(), str(small_targets()))
+    check("P-3 app: every tap target is at least 48 px tall (Inbox)", not small_targets(), str(small_targets()))
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
     note = page.locator('[data-testid="m-notify"]')
@@ -719,7 +719,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-5 Chats: the transcript's only field is the message box, its only write Send",
           bad == ["Send"] and fields == 1 and page.locator('[data-testid="m-compose-text"]').count() == 1,
           f"{bad} {fields}")
-    check("P-3 app: every tap target is at least 44 px tall (Chats)", not small_targets(), str(small_targets()))
+    check("P-3 app: every tap target is at least 48 px tall (Chats)", not small_targets(), str(small_targets()))
     # The owner's chat layout (2026-10-28): the owner's words in a right-aligned
     # bubble, a reply as plain text with no box, and one slim bar pinned on the tab bar.
     layout = page.evaluate("""(() => {
@@ -833,7 +833,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     folded = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-diff-file]')).map(d => d.open)")
     check("P-3 Tasks: each file folds", folded.count(False) == 1, str(folded))
     check("P-3 Tasks: a patch's text is text", clean())
-    check("P-3 app: every tap target is at least 44 px tall (Tasks)", not small_targets(), str(small_targets()))
+    check("P-3 app: every tap target is at least 48 px tall (Tasks)", not small_targets(), str(small_targets()))
     bad, fields = answer_controls()
     # P-5: a running task offers Cancel only (asked first, then the passkey).
     check("P-5 Tasks: a running task offers Cancel only (no resume, start or answer control)",

@@ -49,8 +49,9 @@
 // draft and the box drawn again; Send is still the owner's tap. No inbox
 // row, card, question or decision has a mic.
 
-import { parseInbox, waitingCount, clockOf, type InboxRow } from "../lib/inbox";
+import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
+import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseSecure, type CardState, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import {
@@ -119,6 +120,8 @@ export const SENDING = "Sending…";
 const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-open-card"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
+/** UX-2: the relative-time labels' one coarse tick. */
+const TIME_TICK_MS = 60_000;
 
 /** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
 interface OpenThread {
@@ -268,6 +271,7 @@ export class PhoneApp {
     void this.loadMe();
     void this.notify.sync();
     this.connect();
+    this.tickTimes();
   }
 
   stop(): void {
@@ -276,6 +280,8 @@ export class PhoneApp {
     this.staleTimer = null;
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
     this.deadlineTimer = null;
+    if (this.timeTimer) clearTimeout(this.timeTimer);
+    this.timeTimer = null;
     this.talk.hidden();
     this.talk.dropRetry();
     this.stream?.close();
@@ -1372,10 +1378,12 @@ export class PhoneApp {
       this.conn.dataset.state = live ? "live" : "down";
       return;
     }
-    const at = this.lastRead !== null ? clockOf(this.lastRead) : "";
-    this.banner.textContent = at
-      ? `Offline. Nothing here is current: it was last read at ${at}.`
+    // UX-2: "last read 3 min ago" (the clock time is the banner's title); the minute tick redraws it.
+    const ago = this.lastRead !== null ? agoWords(this.lastRead, this.now()) : "";
+    this.banner.textContent = ago
+      ? `Offline. Nothing here is current: it was last read ${ago}.`
       : "Offline. Nothing here could be read yet.";
+    this.banner.title = this.lastRead !== null ? `Last read at ${absoluteWords(this.lastRead, this.now())}` : "";
     this.conn.textContent = "offline";
     this.conn.dataset.state = "offline";
   }
@@ -1434,6 +1442,20 @@ export class PhoneApp {
   /** After a cancelled passkey or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
   private focusNotice = false;
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private timeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** UX-2: once a minute, the text of every relative-time label (and the offline banner) is rewritten
+   * in place. Not a redraw: no list, card or focus is touched, and nothing runs per second. */
+  private tickTimes(): void {
+    if (this.timeTimer !== null || this.stopped) return;
+    this.timeTimer = setTimeout(() => {
+      this.timeTimer = null;
+      if (this.stopped) return;
+      refreshTimes(this.main, this.now());
+      if (!this.online) this.renderBanner();
+      this.tickTimes();
+    }, TIME_TICK_MS);
+  }
 
   /** After a draw: a card that just opened takes the focus on its heading; one that just closed
    * gives it to the line saying what happened, or back to its row's "Open the card to answer". */
@@ -1492,7 +1514,11 @@ export class PhoneApp {
       if (this.stopped || !this.card || this.tab !== "inbox") return;
       const line = this.main.querySelector('[data-testid="m-card-deadline"]');
       const card = this.card.detail?.card;
-      if (line && card) line.textContent = deadlineWords(deadlineAt(card), this.now());
+      if (line && card) {
+        const due = deadlineAt(card);
+        line.textContent = deadlineWords(due, this.now());
+        if (due !== null) (line as HTMLElement).title = `Denies automatically at ${absoluteWords(due, this.now())}`;
+      }
       this.tickDeadline();
     }, DEADLINE_TICK_MS);
   }

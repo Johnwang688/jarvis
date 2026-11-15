@@ -26,7 +26,8 @@
 import { headlineLine } from "../lib/approval";
 import { argText, browserBody, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
 import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/browserapproval";
-import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
+import { oneLine, type InboxRow } from "../lib/inbox";
+import { absoluteWords, denyWords } from "./reltime";
 import { relayedLine, relayedParts } from "../lib/relays";
 import {
   AI_LABEL, WHERE_LABEL, WHY_LABEL, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
@@ -305,12 +306,10 @@ export function deadlineAt(card: Json): number | null {
   return Number.isFinite(at) && Number.isFinite(t) ? at + t * 1000 : null;
 }
 
-/** L1 (phone audit): the deadline in the gap, code's words: "Denies automatically at 08:36 · 9 min left". */
+/** L1 (phone audit), UX-2: the deadline in the gap, code's words: "Denies automatically in 9 min"
+ * (the clock time is the line's title). */
 export function deadlineWords(at: number | null, now: number): string {
-  if (at === null) return "Denies automatically when it times out";
-  const left = Math.ceil((at - now) / 60_000);
-  const tail = left > 1 ? ` · ${left} min left` : left === 1 ? " · under a minute left" : "";
-  return `Denies automatically at ${clockOf(at).slice(0, 5)}${tail}`;
+  return denyWords(at, now);
 }
 
 /** M3 (phone audit): the limited state, said once, with what AUTHORIZE then means; when this card
@@ -384,7 +383,9 @@ export function cardView(state: CardState, actions: CardActions, now: number = D
   // L1: the safety gap holds the deadline (code's words, no button, no model text).
   const gap = () => {
     const g = el("div", "m-gap");
-    g.append(testid(el("p", "m-deadline", deadlineWords(at, now)), "m-card-deadline"));
+    const line = testid(el("p", "m-deadline", deadlineWords(at, now)), "m-card-deadline");
+    if (at !== null) line.title = `Denies automatically at ${absoluteWords(at, now)}`;
+    g.append(line);
     return g;
   };
   // Deny first, alone; AUTHORIZE and ALWAYS far below it; all of it above the card's body (AS-12).

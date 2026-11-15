@@ -62,6 +62,17 @@ window.__gets = [];
 """
 
 
+
+# Dynamic Type geometry (PR #372 review): the two actions of a pair keep at least 48 px between them
+# when text is enlarged and they wrap or stack. Separation = the larger of the horizontal and vertical gap.
+PAIR_JS = """(sel) => [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null).map(row => {
+    const groups = row.matches('.m-pr-acts') ? [...row.querySelectorAll(':scope > .m-pr-side')]
+        : [...row.querySelectorAll(':scope > button')];
+    if (groups.length < 2) return null;
+    const a = groups[0].getBoundingClientRect(), b = groups[1].getBoundingClientRect();
+    return Math.round(Math.max(b.left - a.right, a.left - b.right, b.top - a.bottom, a.top - b.bottom));
+}).filter(x => x !== null)"""
+
 def _iso(seconds=0.0):
     from datetime import datetime, timedelta, timezone
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
@@ -234,8 +245,8 @@ def run(browser, check, until):
         small = page.evaluate("""() => [...document.querySelectorAll(
             '[data-testid="m-review"] button, [data-testid="m-review"] .m-tick, [data-testid="m-review"] .m-choice')]
             .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid || e.className, e.getBoundingClientRect().height])
-            .filter(([, h]) => h < 44)""")
-        check("every tap target in the Review tab is at least 44 px tall", small == [], str(small[:5]))
+            .filter(([, h]) => h < 47.5)""")
+        check("every tap target in the Review tab is at least 48 px tall", small == [], str(small[:5]))
         # A withheld item ticked: Approve off, the footer names it.
         tap('[data-testid="m-review-tick"][data-id="defer:c"]')
         until(lambda: ticks()[2][1] is True, timeout=3)
@@ -255,6 +266,18 @@ def run(browser, check, until):
         approve_box = approve.bounding_box()
         gap = approve_box["x"] - (leave_box["x"] + leave_box["width"])
         check("Leave selected and Approve selected are far apart", gap >= 48, f"{gap:.0f}px")
+        for width in (375, 390):
+            for scale in (125, 150):
+                page.set_viewport_size({"width": width, "height": 844})
+                page.evaluate("s => document.documentElement.style.setProperty('font-size', s, 'important')", f"{scale}%")
+                page.wait_for_timeout(400)
+                seps = page.evaluate(PAIR_JS, "[data-testid=\"m-review\"] .m-review-rowacts, [data-testid=\"m-review\"] .m-review-actions")
+                over = page.evaluate("document.documentElement.scrollWidth > window.innerWidth")
+                check(f"Review rows and footer: the two actions stay at least 48 px apart at {width} px and {scale}% text, no sideways scroll",
+                      len(seps) >= 1 and all(s >= 48 for s in seps) and not over, f"{seps} over={over}")
+                page.evaluate("() => document.documentElement.style.removeProperty('font-size')")
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(300)
         tap('[data-testid="m-review-approve"]')
         until(lambda: page.locator('[data-testid="m-review-confirm"]').count() == 1, timeout=3)
         if shots:
