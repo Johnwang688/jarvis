@@ -229,7 +229,15 @@ def run(browser, check, until):
         return predicate()
 
     def clean():
-        return page.locator(f".app :is({MARKUP})").count() == 0 and page.evaluate("window.__pwned === undefined")
+        # Like CODE_SVG in vitest: only the app's decorative icon/orb roots are allowed.
+        # Server-text regions still forbid every SVG, including ones spoofing those classes.
+        other_markup = MARKUP.replace("svg, ", "")
+        server_text = ".plain-text, .chat-title, .group, .subtitle, .brief"
+        return (page.locator(f".app :is({other_markup})").count() == 0
+                and page.locator(".app svg").evaluate_all("""nodes => nodes.every(e =>
+                    e.matches('svg.m-icon, .m-orb > svg') && e.getAttribute('aria-hidden') === 'true')""")
+                and page.locator(f".app :is({server_text}) :is({MARKUP})").count() == 0
+                and page.evaluate("window.__pwned === undefined"))
 
     def small_targets():
         return page.evaluate("""Array.from(document.querySelectorAll('.app button, .app select, .app textarea'))

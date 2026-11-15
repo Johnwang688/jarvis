@@ -97,7 +97,7 @@ function signedOut(message = ""): void {
   screen("Jarvis", lines, [button("Sign in with passkey", () => void signIn())], message ? "warn" : "");
   const brand = brandButton();
   renderOrb(brand, orbState({ signedOut: true, online: true, failStatus: null, streamOpen: false,
-    everOpened: false, secure: null, working: 0, lastRead: null, now: Date.now() }));
+    everOpened: false, firstOpenTimedOut: false, secure: null, working: 0, lastRead: null, now: Date.now() }));
   root().querySelector("h1")?.replaceChildren(brand);
 }
 

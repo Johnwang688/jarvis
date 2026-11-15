@@ -358,7 +358,11 @@ function harness() {
       return answers[path] ?? answers[base] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } };
     },
     openStream: (url) => { const s = new FakeStream(url); streams.push(s); return s; },
-    setTimer: (fn) => { queueMicrotask(fn); return 0; },
+    setTimer: (fn, ms) => {
+      // The first-open deadline must elapse in time; only debounced reads run immediately.
+      if (ms === 10_000) return setTimeout(fn, ms);
+      queueMicrotask(fn); return 0;
+    },
     now: () => Date.parse("2026-10-25T10:11:12"),
   });
   const ok = (body: unknown): Got => ({ ok: true, body });

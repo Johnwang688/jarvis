@@ -119,6 +119,7 @@ export interface AppDeps {
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
   /** P-6's notifications: the browser's push and the push routes (fakes in the tests). */
   pushEnv?: PushEnv;
   pushSend?: Send;
@@ -177,6 +178,8 @@ export class PhoneApp {
   failStatus: number | null = null;
   everOpened = false;
   private streamOpen = false;
+  private firstOpenTimedOut = false;
+  private firstOpenTimer: unknown = null;
   private sessionEnded = false;
   lastRead: number | null = null;
   inbox: InboxRow[] | null = null;
@@ -252,6 +255,7 @@ export class PhoneApp {
   private readonly openStream: (url: string) => StreamLike;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
   private readonly timers = new Map<string, unknown>();
   private readonly frame: HTMLElement;
   private readonly banner: HTMLElement;
@@ -310,6 +314,7 @@ export class PhoneApp {
     this.openStream = deps.openStream ?? ((url) => new EventSource(url) as unknown as StreamLike);
     this.now = deps.now ?? Date.now;
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     this.setSlow = deps.setSlow ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearSlow = deps.clearSlow ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     try { this.recentAll = localStorage.getItem(RECENT_KEY) === "1"; } catch { /* no storage: it just does not last */ }
@@ -324,7 +329,7 @@ export class PhoneApp {
       }),
       now: this.now, timer: this.unlockTimer,
       signedOut: () => this.signedOut(),
-      reached: (ok) => this.setOnline(ok),
+      reached: (ok, status) => this.setOnline(ok, ok ? undefined : status),
       changed: () => this.renderPill(),
       // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
       reread: () => { if (!this.stopped) void this.probe(); },
@@ -410,6 +415,7 @@ export class PhoneApp {
   stop(): void {
     this.stopped = true;
     this.rowScroll.stop();
+    this.clearFirstOpenTimer();
     if (this.staleTimer) clearTimeout(this.staleTimer);
     this.staleTimer = null;
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
@@ -536,10 +542,13 @@ export class PhoneApp {
 
   /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
   async loadMe(): Promise<void> {
-    // Display only: a failure here changes nothing (the reads and the
-    // stream decide offline and signed out).
+    // Display only, but every session refusal must use the signed-out path.
     const got = await this.fetchJson("/m/api/me");
-    if (this.stopped || !got.ok) return;
+    if (this.stopped) return;
+    if (!got.ok) {
+      if (got.why === "signed-out") this.signedOut();
+      return;
+    }
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
     this.renderOrb();
     // WS-5c rule 2: the window's mirror follows `me.unlock_s` (display and path only).
@@ -1527,7 +1536,8 @@ export class PhoneApp {
       + (this.thread?.meta?.running ? 1 : 0);
     renderOrb(this.brand, orbState({ signedOut: this.sessionEnded, online: this.online,
       failStatus: this.failStatus, streamOpen: this.streamOpen && this.stream?.readyState === 1,
-      everOpened: this.everOpened, secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
+      everOpened: this.everOpened, firstOpenTimedOut: this.firstOpenTimedOut,
+      secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
   }
 
   /** The lock pill: the phone's copy of the window (display only). */
@@ -1704,17 +1714,33 @@ export class PhoneApp {
 
   // -- the stream ----------------------------------------------------------------------
 
+  private clearFirstOpenTimer(): void {
+    if (this.firstOpenTimer !== null) this.clearTimer(this.firstOpenTimer);
+    this.firstOpenTimer = null;
+  }
+
   connect(): void {
     if (this.stopped) return;
     this.stream?.close();
     const stream = this.openStream(STREAM_URL);
     this.stream = stream;
     this.streamOpen = stream.readyState === 1;
+    if (this.streamOpen) this.everOpened = true;
+    // One launch deadline: replacing a stream must not restart the ten-second wait.
+    if (!this.everOpened && !this.firstOpenTimedOut && this.firstOpenTimer === null) {
+      this.firstOpenTimer = this.setTimer(() => {
+        if (this.stopped || this.everOpened) return;
+        this.firstOpenTimer = null;
+        this.firstOpenTimedOut = true;
+        this.renderOrb();
+      }, 10_000);
+    }
     this.renderOrb();
     stream.onopen = () => {
       if (this.stream !== stream) return;
       this.streamOpen = true;
       this.everOpened = true;
+      this.clearFirstOpenTimer();
       this.renderOrb();
       // Anything published while the stream was down is read now, and the window's mirror (WS-5c rule 2).
       this.refreshVisible();

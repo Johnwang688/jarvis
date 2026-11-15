@@ -80,6 +80,11 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
       calls.push({ path, body: init && init.body ? JSON.parse(String(init.body)) : null });
       const a = answers[path] || { status: 404, body: {} };
+      // A successful sign-in changes subsequent session reads, as the real server does.
+      if (path === "/m/api/login/verify" && a.status === 200)
+        answers["/m/api/me"] = { status: 200, body: { signed_in: true } };
+      if (path === "/m/api/logout" && a.status === 200)
+        answers["/m/api/me"] = { status: 401, body: { error: "unauthorized" } };
       return new Response(JSON.stringify(a.body), { status: a.status });
     }));
     create = vi.fn(async () => fakeCredential("create"));

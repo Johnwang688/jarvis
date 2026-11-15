@@ -4,7 +4,7 @@ import * as icons from "./icons";
 import css from "./mobile.css?raw";
 
 const base: OrbSignals = { signedOut: false, online: true, failStatus: null, streamOpen: true,
-  everOpened: true, secure: { ok: true }, working: 0, lastRead: 0, now: 180_000 };
+  everOpened: true, firstOpenTimedOut: false, secure: { ok: true }, working: 0, lastRead: 0, now: 180_000 };
 const cases: [string, Partial<OrbSignals>, string, string, string][] = [
   ["signed out", { signedOut: true }, "error", "err", "Signed out"],
   ...[502, 503, 504].map((failStatus): [string, Partial<OrbSignals>, string, string, string] =>
@@ -14,6 +14,8 @@ const cases: [string, Partial<OrbSignals>, string, string, string][] = [
   ["offline before a read", { online: false, lastRead: null }, "offline", "wait", "Offline · not read yet"],
   ["reconnecting", { streamOpen: false }, "reconnecting", "wait", "Reconnecting…"],
   ["connecting", { streamOpen: false, everOpened: false }, "connecting", "ok", "Connecting…"],
+  ["first open timed out", { streamOpen: false, everOpened: false, firstOpenTimedOut: true }, "reconnecting", "wait", "Reconnecting…"],
+  ["offline after first-open timeout", { online: false, everOpened: false, firstOpenTimedOut: true }, "offline", "wait", "Offline · read 3 min ago"],
   ["working", { working: 2 }, "working", "ok", "Live · 2 working"],
   ["live", {}, "live", "ok", "Live"],
 ];

@@ -9,6 +9,7 @@ export interface OrbSignals {
   failStatus: number | null;
   streamOpen: boolean;
   everOpened: boolean;
+  firstOpenTimedOut: boolean;
   secure: { ok: boolean } | null;
   working: number;
   lastRead: number | null;
@@ -28,7 +29,7 @@ export function orbState(s: OrbSignals): PhoneOrbState {
   if (s.secure && !s.secure.ok) return { state: "error", tone: "err", word: "Limited connection" };
   if (!s.online) return { state: "offline", tone: "wait",
     word: s.lastRead === null ? "Offline · not read yet" : `Offline · read ${agoWords(s.lastRead, s.now)}` };
-  if (!s.streamOpen && s.everOpened) return { state: "reconnecting", tone: "wait", word: "Reconnecting…" };
+  if (!s.streamOpen && (s.everOpened || s.firstOpenTimedOut)) return { state: "reconnecting", tone: "wait", word: "Reconnecting…" };
   if (!s.streamOpen) return { state: "connecting", tone: "ok", word: "Connecting…" };
   if (s.working > 0) return { state: "working", tone: "ok", word: `Live · ${s.working} working` };
   return { state: "live", tone: "ok", word: "Live" };

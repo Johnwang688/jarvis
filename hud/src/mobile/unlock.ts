@@ -27,7 +27,7 @@
 //  8. **Always** freezes `{decision: "always", preview, op}` (app.ts and card.ts).
 //  9. **A 401 is signed out** (the `me` probe), never locked.
 
-import type { Got, Posted } from "./net";
+import { OFFLINE_STATUSES, type Got, type Posted } from "./net";
 
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
@@ -301,8 +301,8 @@ export interface UnlockDeps {
   now: () => number;
   timer?: Timer;
   signedOut: () => void;
-  /** A POST reached Jarvis (true) or did not (false): the app's online state. */
-  reached?: (ok: boolean) => void;
+  /** A POST reached Jarvis (true) or did not (false), with its HTTP status (0 if no response). */
+  reached?: (ok: boolean, status: number) => void;
   /** The mirror changed (the pill redraws). */
   changed?: () => void;
   /** Read `me` again (the app's probe): when local state cannot be trusted about the window (Opus L1).
@@ -379,7 +379,10 @@ export class Unlock {
     return held;
   }
 
-  private reached(ok: boolean): void { this.deps.reached?.(ok); }
+  private reached(result: Posted | typeof SLOW): void {
+    const status = result === SLOW ? 0 : result.status;
+    this.deps.reached?.(status !== 0 && !OFFLINE_STATUSES.has(status), status);
+  }
   private changed(): void { this.deps.changed?.(); }
 
   /** `me` decides the mirror (Opus L1): after a lost unlock, a lost action, or a 423 older than an unlock. */
@@ -410,12 +413,11 @@ export class Unlock {
     const unlocks = this.unlocks;
     const sentAt = this.deps.now();
     const got = await this.bounded(this.deps.postJson(op.url, op.body));
+    this.reached(got);
     if (got === SLOW || "offline" in got || PROXY_DOWN.has(got.status)) {
-      this.reached(false);
       this.reread();
       return this.recover(op, "lost");
     }
-    this.reached(true);
     const { status, body } = got;
     if (status >= 200 && status < 300) {
       // A Lock now (or a 423) since it was sent: this late answer does not slide the window back open.
@@ -476,8 +478,8 @@ export class Unlock {
   private async doUnlock(st: RunState, stage?: (s: Stage) => void): Promise<true | Outcome> {
     stage?.("unlocking");
     const opts = await this.bounded(this.deps.postJson(UNLOCK_OPTIONS_URL, {}));
-    if (opts === SLOW || "offline" in opts || PROXY_DOWN.has(opts.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
-    this.reached(true);
+    this.reached(opts);
+    if (opts === SLOW || "offline" in opts || PROXY_DOWN.has(opts.status)) { this.reread(); return { kind: "unlock-lost" }; }
     if (opts.status === 401) return this.unauthorized(401, opts.body, "unlock-refused");
     const publicKey = opts.body.publicKey;
     if (opts.status !== 200 || !isObj(publicKey)) return { kind: "unlock-refused", status: opts.status, body: opts.body };
@@ -496,9 +498,9 @@ export class Unlock {
     }
     st.unlockTried = true;
     const got = await this.bounded(this.deps.postJson(UNLOCK_URL, { assertion }));
+    this.reached(got);
     // The assertion may have verified and opened the window with only its answer lost: `me` decides the pill.
-    if (got === SLOW || "offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); this.reread(); return { kind: "unlock-lost" }; }
-    this.reached(true);
+    if (got === SLOW || "offline" in got || PROXY_DOWN.has(got.status)) { this.reread(); return { kind: "unlock-lost" }; }
     if (got.status === 200 && got.body.unlocked === true) {
       this.unlocks += 1;
       this.mirror.opened(got.body.unlock_s);
@@ -557,9 +559,9 @@ export class Unlock {
   async lockNow(): Promise<"locked" | "overtaken" | "unreached" | "refused" | "signed-out"> {
     const unlocks = this.unlocks;
     const got = await this.bounded(this.deps.postJson(LOCK_URL, {}));
+    this.reached(got);
     if (got === SLOW) { this.reread(); return "unreached"; }
-    if ("offline" in got || PROXY_DOWN.has(got.status)) { this.reached(false); return "unreached"; }
-    this.reached(true);
+    if ("offline" in got || PROXY_DOWN.has(got.status)) { return "unreached"; }
     if (got.status === 200) {
       // A delayed acknowledgement: an unlock completed after this was sent, so the server may be open again
       // (a 423, a fresh unlock, an action that slid it). Its 200 locks nothing here: `me` says what holds.
