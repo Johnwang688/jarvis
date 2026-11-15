@@ -1246,6 +1246,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   min-width: 190px; padding: 4px 0; box-shadow: var(--shadow-pop);
 }
+.threadmenu:focus { outline: none; }
 .threadmenu .mrow { padding: 5px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; border-radius: 0; }
 /* The row's own inline style clears its background, so hover has to insist. */
 .threadmenu .mrow:hover { background: var(--hover) !important; }
@@ -1256,6 +1257,76 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .threadmenu .mwhy { padding: 5px 12px; font-size: 11px; color: var(--text-muted); max-width: 230px; white-space: normal; }
 
 .movenote { padding: 4px 12px; }
+
+/* ---- the Inbox section under the owner Inbox row (WS-2) ----
+   The chat threads being worked on, a second view of threads that stay in their
+   projects. Rows are the tree's own (.tree-row, .act dots, .badge-like chips);
+   amber is only a pending row's kind word, red only the failed dot. */
+/* The section never takes the project tree's room: at most 40% of the sidebar (and 220px), its list
+   scrolling inside that; collapsed or empty it is its header line alone. Both lists keep one whole
+   row at least (28px), however short the window or high the zoom: the tree no longer holds a fixed
+   88px, which pushed Schedules under the orb in a short window. */
+.workingsec {
+  flex: 0 1 auto; min-height: 0; max-height: min(40%, 220px); display: flex; flex-direction: column;
+  margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.workingsec:has(> .wlist) { min-height: 56px; }   /* the header and one whole row, never less */
+.workingsec .workinghead { flex: 0 0 auto; }
+.workingsec .wlist { flex: 1 1 auto; min-height: 28px; overflow-y: auto; overflow-x: hidden; }
+#sidebar > .scroll { min-height: 28px; }
+/* A window so short that the chrome alone fills the sidebar above the orb (a 560px window at 160%: its content
+   box is under 200px): the sidebar measures itself (a size container), and there the PROJECTS header folds away and the section's
+   margins go, so one whole working row, one project row and Schedules still fit above the orb. */
+#sidebar { container: sbar / size; }
+@container sbar (max-height: 200px) {
+  #sidebar .barrow { display: none; }
+  #sidebar .sidebar-foot { padding: 0; }
+  .workingsec { margin-bottom: 0; padding-bottom: 0; }
+  .workingsec:has(> .wlist) { min-height: 46px; }
+  .workingsec .wlist { min-height: 26px; }
+  #sidebar > .scroll { min-height: 26px; }
+}
+.workinghead { display: flex; align-items: center; gap: 6px; padding: 1px 12px; color: var(--text-muted); }
+.workinghead .wtoggle {
+  flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); padding: 1px 4px;
+  border: none; background: none; border-radius: var(--radius-btn); word-spacing: normal; }
+.workinghead .wtoggle:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.workinghead .wtoggle:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.workinghead .wlabel { font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; word-spacing: normal; }
+.workinghead .wcount { font: 10px var(--mono); font-variant-numeric: tabular-nums; word-spacing: normal; }
+.workingsec .whead {
+  padding: 3px 12px 1px 26px; font: 600 9px var(--mono); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted); word-spacing: normal; }
+.workingsec .wrow { font-size: 12.5px; }
+.workingsec .wrow:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.workingsec .wkind {
+  flex: 0 0 auto; font: 9px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; color: var(--text-muted);
+  word-spacing: normal; }
+.workingsec .wneed.pending .wkind { color: var(--amber); border-color: var(--amber-line); }
+.workingsec .wneed .nm { flex: 1 1 auto; min-width: 0; }
+.workingsec .wchip {
+  flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong); border-radius: 3px;
+  padding: 0 4px; color: var(--text-muted); word-spacing: normal; }
+.workinghead .wnone { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; }
+.workinghead .wstale { color: var(--amber); font: 600 10px var(--mono); word-spacing: normal; margin-left: auto; cursor: help; }
+.workingsec button.wopen {
+  flex: 1 1 auto; min-width: 0; text-align: left; font: inherit; color: inherit; background: none; border: 0;
+  padding: 0; border-radius: var(--radius-btn); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workingsec button.wopen:hover:not(:disabled) { background: none; }
+.workingsec button.wopen:focus-visible, .workingsec button.whint:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+.workingsec button.whint {
+  flex: 0 0 auto; font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong);
+  border-radius: 3px; padding: 0 4px; background: none; color: var(--text-muted); word-spacing: normal; }
+.workingsec button.whint.pending { color: var(--amber); border-color: var(--amber-line); }
+.workingsec button.whint:hover:not(:disabled) { background: var(--bg-3); }
+.workingtoast {
+  display: flex; align-items: center; gap: 8px; margin: 2px 8px; padding: 4px 8px; flex: 0 0 auto;
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  font-size: 12px; color: var(--text); }
+.workingtoast .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workingtoast button { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; color: var(--accent-hi); }
+.threadmenu button.mrow:disabled { opacity: 0.45; cursor: default; }
 
 /* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
 /* The chip never clips: a capped width with overflow hidden used to cut off

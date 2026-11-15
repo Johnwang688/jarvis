@@ -3308,6 +3308,16 @@ def main():
             finally:
                 inbox_mock.stop()
 
+            # The Inbox section under the owner Inbox row (WS-2): a context and a
+            # mock of their own (it reloads, moves chats and scripts the working set).
+            from tests.face.hud_v2_working_check import working_checks
+            working_mock = MockDaemon(0).start()
+            try:
+                working_checks(browser, working_mock, f"http://127.0.0.1:{working_mock.port}", check, until,
+                               guard, FAKE_RECOGNIZER)
+            finally:
+                working_mock.stop()
+
             # The sidebar's five most recent chats per project (2026-10-15): a
             # context and a mock of their own — it opens threads and reloads.
             from tests.face.hud_v2_recent_chats_check import recent_chats_checks

@@ -279,6 +279,12 @@ export const api = {
   /** Inbox B4 (IN-7): `{snooze_until}`, `{dismiss: true}` or `{clear: true}` (Undo), for a row of
    * rank 5 to 8 only; the daemon judges the row's rank itself (409 otherwise). */
   markInbox: (id: string, body: MarkBody) => req<unknown>(markPath(id), json(body)),
+  // --- the owner's working set (WS-1's routes, owner-only) -------------------
+  /** The chat threads the owner is working on, and every other row that waits: `lib/working` `parseWorking`. */
+  getWorking: () => req<unknown>("/working"),
+  /** Done: `seq` is the entry's as drawn. 200 carries the `token` Undo takes; 409 is a list that moved on. */
+  workingDone: (id: string, seq: number) => req<unknown>(`/working/${encodeURIComponent(id)}/done`, json({ seq })),
+  workingUndo: (id: string, token: string) => req<unknown>(`/working/${encodeURIComponent(id)}/undo`, json({ token })),
   /** One answer, dispatched by the daemon to the item's own surface: `{text}`
    * for a question, `{withdraw: true}` for a proposal, `{action: "retry"|"leave"}`
    * for an approval deferred during quiet hours (QH). A 409 is "already

@@ -69,6 +69,10 @@ try:  # the owner inbox (inbox A1's owner routes, A2's view)
     from tests.face import hud_v2_mock_inbox as mock_inbox
 except ImportError:
     import hud_v2_mock_inbox as mock_inbox  # type: ignore[no-redef]
+try:  # the owner's working set (WS-1's owner routes, WS-2's Inbox section)
+    from tests.face import hud_v2_mock_working as mock_working
+except ImportError:
+    import hud_v2_mock_working as mock_working  # type: ignore[no-redef]
 
 
 # -- chat-to-chat (C5): relay records exactly as C3's daemon writes them ------------------
@@ -853,6 +857,8 @@ class MockDaemon:
                     return
                 if mock_inbox.handle(self, mock, "GET", path):
                     return
+                if mock_working.handle(self, mock, "GET", path):
+                    return
                 if mock_vex.handle(self, mock, "GET", path, {}):
                     return
                 if mock_projects.handle(self, mock, "GET", path, {}):
@@ -1097,6 +1103,8 @@ class MockDaemon:
                 if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
                     return
                 if mock_inbox.handle(self, mock, "POST", path):       # owner, then the answer
+                    return
+                if mock_working.handle(self, mock, "POST", path):     # owner, then Done and Undo
                     return
                 parts = [p for p in path.split("/") if p]
                 if (len(parts) == 5 and parts[0] == "threads" and parts[2] == "relays"

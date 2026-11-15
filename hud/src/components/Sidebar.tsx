@@ -63,7 +63,11 @@ import { InlineRename } from "./InlineRename";
 import { HoverTitle } from "./HoverTitle";
 import { CollapseButton } from "./Layout";
 import { toCss } from "../lib/layout";
-import { ACTIVITY_LABEL, NO_ACTIVITY, projectActivity, type ActivityStatus, type ActivityView } from "../lib/activity";
+import { NO_ACTIVITY, projectActivity, type ActivityView } from "../lib/activity";
+import { Dot } from "./ActivityDot";
+import { WorkingBlock, WorkingDoneItem } from "./WorkingSection";
+import { working } from "../state/working";
+import { UNDO_TOAST_MS, loadSectionOpen, saveSectionOpen } from "../lib/working";
 
 interface ProjectMenuAt {
   projectId: string;
@@ -78,6 +82,8 @@ interface MenuAt {
   threadId: string;
   /** Set when the row was a *task's* thread, which `/threads` does not list. */
   taskId: string | null;
+  /** Opened from a row of the Inbox section, whose menu also offers Done. */
+  working?: boolean;
   x: number;
   y: number;
 }
@@ -154,6 +160,16 @@ export const Sidebar = memo(function Sidebar(props: {
   const [pmenu, setPmenu] = useState<ProjectMenuAt | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "project" | "thread"; id: string } | null>(null);
   const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  // The Inbox section under the owner Inbox row (WS-2). The store is read by
+  // `WorkingBlock`, not here: a refresh redraws that block only.
+  const [workOpen, setWorkOpen] = useState<boolean>(() => loadSectionOpen());
+  const toggleWork = () =>
+    setWorkOpen((o) => {
+      saveSectionOpen(!o);
+      return !o;
+    });
+  // Done's Undo toast: the entry's title and the daemon's token, for UNDO_TOAST_MS.
+  const [undo, setUndo] = useState<{ id: string; token: string; title: string } | null>(null);
   // Projects whose full chat list the owner asked for (remembered, not stored on the server).
   const [showAll, setShowAll] = useState<Record<string, boolean>>(() => loadShowMore());
   const toggleShowAll = (id: string) =>
@@ -225,11 +241,43 @@ export const Sidebar = memo(function Sidebar(props: {
     menu?.taskId ? ({ id: menu.threadId, task_id: menu.taskId } as Thread) : menuThread,
   );
 
-  const openMenu = (e: React.MouseEvent, id: string, taskId: string | null = null) => {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuOpener = useRef<HTMLElement | null>(null);
+  // Keyboard: focus goes to the menu's first enabled item as it opens and back to the
+  // button that opened it when it closes (unless the owner has put it somewhere else).
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button.mrow:not(:disabled)")?.focus();
+    const opener = menuOpener.current;
+    return () => {
+      const a = document.activeElement;
+      if (opener && opener.isConnected && (!a || a === document.body)) opener.focus();
+    };
+  }, [menu]);
+
+  /** Arrow keys for a `role="menu"` (both menus): Up and Down move between the enabled items and
+   * wrap, Home and End go to the ends. Other keys are left alone (Tab, Escape, Enter keep working). */
+  const menuKeys = (e: React.KeyboardEvent<HTMLElement>) => {
+    const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button.mrow:not(:disabled)"));
+    if (!items.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const to = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+      : e.key === "ArrowDown" ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1);
+    items[to].focus();
+  };
+
+  const openMenu = (e: React.MouseEvent, id: string, taskId: string | null = null, inWorking = false) => {
     e.preventDefault();
     e.stopPropagation();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setMenu({ threadId: id, taskId, x: Math.round(toCss(r.left, z)), y: Math.round(toCss(r.bottom, z)) });
+    menuOpener.current = e.currentTarget as HTMLElement;
+    // The reason Done is greyed out is as of the last read: read again as the menu opens.
+    if (inWorking) void working.refresh();
+    setMenu({ threadId: id, taskId, working: inWorking, x: Math.round(toCss(r.left, z)), y: Math.round(toCss(r.bottom, z)) });
   };
 
   // The project menu: same closing rules as the thread menu, plus focus goes
@@ -272,6 +320,30 @@ export const Sidebar = memo(function Sidebar(props: {
     const t = setTimeout(() => setNote(null), 6000);
     return () => clearTimeout(t);
   }, [note]);
+
+  // The toast goes by itself; Undo before then posts the daemon's token.
+  useEffect(() => {
+    if (!undo) return;
+    const t = setTimeout(() => setUndo(null), UNDO_TOAST_MS);
+    return () => clearTimeout(t);
+  }, [undo]);
+
+  const markDone = (id: string) => {
+    setMenu(null);
+    const thread = props.threads.find((t) => t.id === id);
+    const title = thread ? threadLabel(thread).text : "Thread";
+    void working.done(id).then((r) => {
+      // A 409 is the list having moved on: it is read again and redrawn, with no message.
+      if (r.kind === "done") setUndo({ id, token: r.token, title });
+      else if (r.kind === "error") setNote({ text: `Could not mark it done: ${r.message}`, error: true });
+    });
+  };
+  const undoDone = (u: { id: string; token: string }) => {
+    setUndo(null);
+    void working.undo(u.id, u.token).then((r) => {
+      if (r.kind === "error") setNote({ text: `Could not undo: ${r.message}`, error: true });
+    });
+  };
 
   const saveRename = (kind: "project" | "thread", id: string, name: string) => {
     const go = kind === "project" ? props.onRenameProject?.(id, name) : props.onRenameThread?.(id, name);
@@ -329,6 +401,30 @@ export const Sidebar = memo(function Sidebar(props: {
           ) : null}
         </button>
       ) : null}
+      {props.inbox && props.onOpenInbox ? (
+        <WorkingBlock
+          open={workOpen}
+          onToggle={toggleWork}
+          threads={props.threads}
+          projects={props.projects}
+          activity={activity}
+          selClass={selClass}
+          paneOf={(id) => openIn(id)?.pane}
+          dragging={dragging}
+          onPick={props.onPickThread}
+          onOpenInbox={props.onOpenInbox}
+          onMenu={(e, id) => openMenu(e, id, null, true)}
+          onDragStart={(e, id) => {
+            e.dataTransfer.setData("text/plain", id);
+            e.dataTransfer.effectAllowed = "move";
+            setDragging(id);
+          }}
+          onDragEnd={() => {
+            setDragging(null);
+            setOver(null);
+          }}
+        />
+      ) : null}
       {props.review && props.onOpenReview ? (
         // The morning review (MR-10): what waited overnight, in one report. It
         // only opens the view; it answers nothing.
@@ -366,6 +462,12 @@ export const Sidebar = memo(function Sidebar(props: {
       {note ? (
         <div className={(note.error ? "err " : "muted small ") + "movenote"} data-testid="rename-note">
           {note.text}
+        </div>
+      ) : null}
+      {undo ? (
+        <div className="workingtoast" data-testid="working-toast" role="status">
+          <span className="nm">Done: {undo.title}</span>
+          <button type="button" data-testid="working-undo" onClick={() => undoDone(undo)}>Undo</button>
         </div>
       ) : null}
       <div className="scroll" data-testid="sidebar">
@@ -678,6 +780,8 @@ export const Sidebar = memo(function Sidebar(props: {
           className="threadmenu"
           data-testid="project-menu"
           role="menu"
+          tabIndex={-1}
+          onKeyDown={menuKeys}
           style={{ left: pmenu.x, top: pmenu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
@@ -739,12 +843,18 @@ export const Sidebar = memo(function Sidebar(props: {
         <div
           className="threadmenu"
           data-testid="thread-menu"
+          ref={menuRef}
+          role="menu"
+          tabIndex={-1}
+          onKeyDown={menuKeys}
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          {menu.working ? <WorkingDoneItem threadId={menu.threadId} onDone={markDone} /> : null}
           <button
             type="button"
             className="mrow"
+            role="menuitem"
             style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                      background: "none", textTransform: "none", letterSpacing: 0 }}
             data-testid="tmenu-beside"
@@ -760,6 +870,7 @@ export const Sidebar = memo(function Sidebar(props: {
           <button
             type="button"
             className="mrow"
+            role="menuitem"
             style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                      background: "none", textTransform: "none", letterSpacing: 0 }}
             data-testid="tmenu-copyid"
@@ -782,6 +893,7 @@ export const Sidebar = memo(function Sidebar(props: {
               <button
                 type="button"
                 className="mrow"
+                role="menuitem"
                 style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                          background: "none", textTransform: "none", letterSpacing: 0 }}
                 data-testid="tmenu-rename"
@@ -796,6 +908,7 @@ export const Sidebar = memo(function Sidebar(props: {
               <button
                 type="button"
                 className="mrow danger"
+                role="menuitem"
                 style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                          background: "none", textTransform: "none", letterSpacing: 0 }}
                 data-testid="tmenu-archive"
@@ -814,6 +927,7 @@ export const Sidebar = memo(function Sidebar(props: {
                 <button
                   type="button"
                   className="mrow"
+                  role="menuitem"
                   key={p.id}
                   style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                            background: "none", textTransform: "none", letterSpacing: 0 }}
@@ -837,30 +951,3 @@ export const Sidebar = memo(function Sidebar(props: {
     </div>
   );
 });
-
-/** One row's status. Idle is the plain `·` it always was; the rest carry a
- * label for the tooltip and for a screen reader. */
-function Dot({ status, testid }: { status: ActivityStatus; testid: string }) {
-  if (status === "idle") {
-    return <span className="act idle" data-testid={testid} data-status="idle">·</span>;
-  }
-  const label = ACTIVITY_LABEL[status];
-  return (
-    <span
-      className={`act ${status}`}
-      data-testid={testid}
-      data-status={status}
-      title={label}
-      role="img"
-      aria-label={label}
-    >
-      {status === "failed" ? (
-        <svg viewBox="0 0 12 12" aria-hidden="true">
-          <path d="M6 0.8 L11.6 11 H0.4 Z" />
-          <rect x="5.25" y="4" width="1.5" height="3.8" rx="0.5" />
-          <rect x="5.25" y="8.6" width="1.5" height="1.5" rx="0.6" />
-        </svg>
-      ) : null}
-    </span>
-  );
-}
