@@ -142,7 +142,8 @@ export const Sidebar = memo(function Sidebar(props: {
    * shows the inbox. Absent: no row (older callers and tests).
    */
   inbox?: { count: number | null; pending: boolean; shown: boolean };
-  onOpenInbox?: () => void;
+  /** Opens the Needs you page; given a thread id, at that thread's group (WS-3). */
+  onOpenInbox?: (threadId?: string) => void;
   /** The morning review's row, under the Inbox's (MR-10): `count` is what is open in
    * it (null while unread); absent or null when the daemon has no review. */
   review?: { count: number | null; shown: boolean } | null;
@@ -376,35 +377,15 @@ export const Sidebar = memo(function Sidebar(props: {
         ) : null}
       </div>
       {props.inbox && props.onOpenInbox ? (
-        // Not the "Unsorted" project below (where unplaced chat lands): the owner
-        // inbox, everything waiting on the owner. A real button, so Enter and
-        // Space open it; it only opens the view, it answers nothing.
-        <button
-          type="button"
-          // The aurora (owner, 2026-10-25; theme.css): this row only, never
-          // the "Unsorted" project. Calm with nothing waiting, dimmed and
-          // spark-free while something pending keeps the count amber.
-          className={"tree-row ownerinbox aurora" + (props.inbox.shown ? " sel" : "")}
-          data-aurora={props.inbox.pending ? "pending" : props.inbox.count ? "live" : "calm"}
-          data-testid="owner-inbox"
-          aria-label={props.inbox.count ? `Inbox, ${props.inbox.count} waiting on you` : "Inbox"}
-          title="Everything waiting on you, most urgent first"
-          onClick={props.onOpenInbox}
-        >
-          <span className="tw">✉</span>
-          <span className="nm">Inbox</span>
-          {props.inbox.count ? (
-            <span className={"badge inboxcount" + (props.inbox.pending ? " pending" : "")}
-                  data-testid="owner-inbox-count" data-pending={props.inbox.pending ? "true" : "false"}>
-              {props.inbox.count}
-            </span>
-          ) : null}
-        </button>
-      ) : null}
-      {props.inbox && props.onOpenInbox ? (
+        // The owner Inbox row is the header of the In progress list (WS-3): `WorkingBlock` draws it
+        // and the list under it, and a click folds the list (it opens the Needs you page only where
+        // the daemon has no list to fold).
         <WorkingBlock
           open={workOpen}
           onToggle={toggleWork}
+          inboxCount={props.inbox.count}
+          pending={props.inbox.pending}
+          shown={props.inbox.shown}
           threads={props.threads}
           projects={props.projects}
           activity={activity}

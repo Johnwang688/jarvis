@@ -223,7 +223,8 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         s["review"] = report()
         mock_inbox.changed(mock, ["defer:b"], "test")
         # #329 MED 2: the desk view mounts with nothing ticked.
-        page.locator('[data-testid="owner-inbox"]').click()
+        until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+        page.locator('[data-testid="working-needs-line"]').click()      # WS-3: the row folds; this line opens the page
         until(lambda: _view(page).count() == 0, timeout=4)
         page.locator('[data-testid="owner-review"]').click()
         until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)

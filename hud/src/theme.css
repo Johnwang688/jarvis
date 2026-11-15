@@ -1269,8 +1269,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .workingsec {
   flex: 0 1 auto; min-height: 0; max-height: min(40%, 220px); display: flex; flex-direction: column;
   margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
-.workingsec:has(> .wlist) { min-height: 56px; }   /* the header and one whole row, never less */
-.workingsec .workinghead { flex: 0 0 auto; }
+.workingsec:has(> .wlist) { min-height: 56px; }   /* the Needs you line and one whole row, never less */
 .workingsec .wlist { flex: 1 1 auto; min-height: 28px; overflow-y: auto; overflow-x: hidden; }
 #sidebar > .scroll { min-height: 28px; }
 /* A window so short that the chrome alone fills the sidebar above the orb (a 560px window at 160%: its content
@@ -1285,14 +1284,22 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   .workingsec .wlist { min-height: 26px; }
   #sidebar > .scroll { min-height: 26px; }
 }
-.workinghead { display: flex; align-items: center; gap: 6px; padding: 1px 12px; color: var(--text-muted); }
-.workinghead .wtoggle {
-  flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); padding: 1px 4px;
-  border: none; background: none; border-radius: var(--radius-btn); word-spacing: normal; }
-.workinghead .wtoggle:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
-.workinghead .wtoggle:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
-.workinghead .wlabel { font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; word-spacing: normal; }
-.workinghead .wcount { font: 10px var(--mono); font-variant-numeric: tabular-nums; word-spacing: normal; }
+/* WS-3: the owner Inbox row is the list's header (it folds the list), so it carries the chevron and the
+   stale mark the old "In progress" header line did; the section's own first line is "Needs you". */
+button.tree-row.ownerinbox .wchev { flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); width: 10px; text-align: center; word-spacing: normal; }
+button.tree-row.ownerinbox .wstale { color: var(--amber); font: 600 10px var(--mono); word-spacing: normal; margin-left: auto; cursor: help; }
+button.tree-row.ownerinbox .wstale + .badge.inboxcount { margin-left: 6px; }
+.workingsec[hidden] { display: none; }
+.workingsec button.wneedsline {
+  flex: 0 0 auto; width: 100%; box-sizing: border-box; border: 0; border-radius: 0; background: none;
+  text-align: left; font-size: 12.5px; color: var(--text); }
+.workingsec button.wneedsline:hover:not(:disabled) { background: var(--hover); }
+.workingsec button.wneedsline.sel { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
+.workingsec button.wneedsline:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.workingsec button.wneedsline .wcount { font: 11px var(--mono); font-variant-numeric: tabular-nums; word-spacing: normal; color: var(--text-muted); }
+.workingsec button.wneedsline.pending .wcount { color: var(--amber); }
+.workingsec button.wneedsline.quiet0 { color: var(--text-muted); }
+.workingsec .wnone { padding: 2px 12px 2px 26px; font-size: 11px; color: var(--text-muted); }
 .workingsec .whead {
   padding: 3px 12px 1px 26px; font: 600 9px var(--mono); letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--text-muted); word-spacing: normal; }
@@ -1308,8 +1315,6 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong); border-radius: 3px;
   padding: 0 4px; color: var(--text-muted); word-spacing: normal; }
-.workinghead .wnone { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; }
-.workinghead .wstale { color: var(--amber); font: 600 10px var(--mono); word-spacing: normal; margin-left: auto; cursor: help; }
 .workingsec button.wopen {
   flex: 1 1 auto; min-width: 0; text-align: left; font: inherit; color: inherit; background: none; border: 0;
   padding: 0; border-radius: var(--radius-btn); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2358,6 +2363,13 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 .inbox-gh {
   font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted);
   padding: 8px 12px 4px; word-spacing: normal; }
+/* WS-3: a chat's rows on the Needs you page, gathered under its name (a link opens the chat). */
+.inbox-thread { margin: 6px 0; padding: 0; outline: none; }
+.inbox-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); border-radius: var(--radius); }
+.inbox-thread .it-head { display: flex; align-items: baseline; gap: 8px; padding: 2px 12px; min-width: 0; }
+.inbox-thread .it-name { flex: 1 1 auto; min-width: 0; font: 600 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; word-spacing: normal; }
+.inbox-thread .it-open { flex: 0 0 auto; }
+.inbox-thread .inbox-row { margin-left: 20px; }
 .inbox-row {
   margin: 4px 12px; padding: 8px 10px; min-width: 0;
   background: var(--bg-2); border: 1px solid var(--border); border-left: 2px solid var(--border-strong);

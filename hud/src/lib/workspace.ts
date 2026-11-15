@@ -84,7 +84,7 @@ export const PANE_VIEWS: readonly View[] =
  */
 export const VIEW_LABEL: Readonly<Record<View, string>> = {
   chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
-  subagent: "sub-agent", inbox: "inbox", review: "morning review",
+  subagent: "sub-agent", inbox: "needs you", review: "morning review",
 };
 
 export type Preset =

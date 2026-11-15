@@ -161,6 +161,7 @@ import { thinkingClock } from "./components/MiniOrb";
 import { InboxView } from "./components/InboxView";
 import { ReviewView } from "./components/ReviewView";
 import { inbox, useInbox } from "./state/inbox";
+import { inboxFocus } from "./state/inboxFocus";
 import { working } from "./state/working";
 import { review, useReview } from "./state/review";
 import { anyPending, waitingCount } from "./lib/inbox";
@@ -4396,6 +4397,7 @@ export default function App() {
             snapshot={inboxSnap}
             approvals={state.approvals}
             blocked={blocked}
+            threads={state.threads}
             onOpenThread={(id) => { if (!blockedNow.current) pickThread(id); }}
             onOpenTask={(id) => {
               if (blockedNow.current) return;
@@ -4767,7 +4769,7 @@ export default function App() {
       case "browser":
         return spec.browserUrl || "";
       case "inbox":
-        return "Inbox";
+        return "Needs you";
       case "review":
         return "Morning review";
       default:
@@ -4824,8 +4826,10 @@ export default function App() {
     },
     // The owner inbox's row (inbox A2): the pane already showing the inbox,
     // else the focused pane (lib/workspace `show`), never a pane with an unsaved edit.
-    onOpenInbox: () => {
+    // A thread id (WS-3: a hint on a thread row) also asks the page to scroll to that thread's group.
+    onOpenInbox: (thread?: string) => {
       if (blockedNow.current) return;
+      if (typeof thread === "string") inboxFocus.request(thread);
       showView("inbox");
     },
     // The morning review's row (MR-10), under the Inbox's.

@@ -4,19 +4,22 @@
 // `WorkingBlock`, the one place that subscribes to the working-set store: the
 // Sidebar does not, so a refresh redraws this block and never the whole tree.
 //
-// What it draws, top to bottom (D-5, D-9, D-10):
-//   - a header with the fold chevron (the choice lasts, lib/working); with
-//     nothing in the set the header itself says so and nothing else is drawn;
-//   - a list with a height of its own (it scrolls, and never takes the project
-//     tree's room):
-//     - the "Needs you" group: every row that has no thread entry to sit on, as
-//       a kind word and a title (text, never HTML); a click opens today's
-//       Inbox page, where answering happens;
+// What it draws, top to bottom (D-5, D-9, D-10, and WS-3):
+//   - the owner Inbox row, the list's header (`InboxHeadRow`): the rainbow row keeps its look and its
+//     count; a click folds and unfolds the list below it (the choice lasts, lib/working), and carries
+//     `aria-expanded`/`aria-controls`. Where the daemon has no list (an older one, or before the first
+//     read) it is a plain button that opens the Needs you page, as before;
+//   - a "Needs you" line, always, whenever the list is unfolded, even at 0: it carries the waiting
+//     count (the row's own) and opens the Needs you page;
+//   - a list with a height of its own (it scrolls, and never takes the project tree's room):
+//     - the Needs-you rows that have no thread entry to sit on, as a kind word and a title (text, never
+//       HTML); a click opens the Needs you page, where answering happens;
 //     - one row per thread, ordered by label then newest first: the same dot
 //       as its row in the project tree (the Sidebar's activity store), its
-//       title, a hint for inbox rows attached to it, and a chip with its
-//       project's name. Its title is a real button (Tab, Enter, Space); a click
+//       title, a hint naming what waits on it (a click opens the page at that thread), and a chip
+//       with its project's name. Its title is a real button (Tab, Enter, Space); a click
 //       anywhere on the row opens it like a tree row.
+// A row that waits on a thread is drawn on that thread only, never also in the Needs-you rows.
 
 import { memo, useEffect, useRef } from "react";
 import type { Project, Thread } from "../types";
@@ -33,6 +36,10 @@ import { HoverTitle } from "./HoverTitle";
 export interface WorkingSectionProps {
   open: boolean;
   onToggle: () => void;
+  /** The owner Inbox row's count (`waitingCount`; null when there is none to read) and amber/selected state. */
+  inboxCount: number | null;
+  pending: boolean;
+  shown: boolean;
   entries: WorkingEntry[];
   needsYou: InboxRow[];
   /** Whether the last read failed (the last list is kept and drawn). */
@@ -44,10 +51,52 @@ export interface WorkingSectionProps {
   paneOf: (threadId: string) => PaneNo | undefined;
   dragging: string | null;
   onPick: (id: string, beside: boolean) => void;
-  onOpenInbox: () => void;
+  /** Opens the Needs you page; with a thread id, at that thread's group. */
+  onOpenInbox: (threadId?: string) => void;
   onMenu: (e: React.MouseEvent, id: string) => void;
   onDragStart: (e: React.DragEvent, id: string) => void;
   onDragEnd: () => void;
+}
+
+export const SECTION_ID = "working-section-body";
+
+/** The owner Inbox row (the rainbow one) as the list's header. */
+export function InboxHeadRow(p: {
+  count: number | null; pending: boolean; shown: boolean; stale: boolean;
+  /** Whether there is a list to fold; when not, a click opens the Needs you page. */
+  foldable: boolean; open: boolean; onToggle: () => void; onOpen: () => void;
+}) {
+  const label = p.count ? `Inbox, ${p.count} waiting on you` : "Inbox";
+  return (
+    <button
+      type="button"
+      // The RGB wave (theme.css) is this row only; it is calm with nothing waiting, dimmed while
+      // something pending keeps the count amber.
+      className={"tree-row ownerinbox aurora" + (p.shown ? " sel" : "")}
+      data-aurora={p.pending ? "pending" : p.count ? "live" : "calm"}
+      data-testid="owner-inbox"
+      aria-label={label}
+      aria-expanded={p.foldable ? p.open : undefined}
+      aria-controls={p.foldable ? SECTION_ID : undefined}
+      title={p.foldable ? (p.open ? "Fold the In progress list" : "Unfold the In progress list") : "Everything waiting on you, most urgent first"}
+      onClick={p.foldable ? p.onToggle : p.onOpen}
+    >
+      {p.foldable ? (
+        <span className="wchev" data-testid="working-chevron" aria-hidden="true">{p.open ? "▾" : "▸"}</span>
+      ) : null}
+      <span className="tw">✉</span>
+      <span className="nm">Inbox</span>
+      {p.stale ? (
+        <span className="wstale" data-testid="working-stale" title="Could not refresh this list">!</span>
+      ) : null}
+      {p.count ? (
+        <span className={"badge inboxcount" + (p.pending ? " pending" : "")}
+              data-testid="owner-inbox-count" data-pending={p.pending ? "true" : "false"}>
+          {p.count}
+        </span>
+      ) : null}
+    </button>
+  );
 }
 
 export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProps) {
@@ -57,131 +106,139 @@ export const WorkingSection = memo(function WorkingSection(p: WorkingSectionProp
   const rows = orderEntries(p.entries, p.activity)
     .map((e) => ({ e, t: byId.get(e.thread_id) }))
     .filter((x): x is { e: WorkingEntry; t: Thread } => !!x.t);
-  const empty = !rows.length && !p.needsYou.length;
+  // A row that waits on a thread drawn here is that thread's hint, never also a line in this group.
+  const drawn = new Set(rows.map((x) => x.t.id));
+  const needs = p.needsYou.filter((r) => !(r.thread_id && drawn.has(r.thread_id)));
+  const waiting = p.inboxCount ?? 0;
+  const hasList = !!rows.length || !!needs.length;
   return (
-    <div className="workingsec" data-testid="working-section" data-open={p.open ? "true" : "false"}>
-      <div className="workinghead">
-        <button
-          type="button"
-          className="wtoggle"
-          data-testid="working-toggle"
-          aria-expanded={p.open}
-          aria-label={p.open ? "Collapse the Inbox list" : "Expand the Inbox list"}
-          title={p.open ? "Collapse" : "Expand"}
-          onClick={p.onToggle}
-        >
-          {p.open ? "▾" : "▸"}
-        </button>
-        {empty ? (
-          <span className="wlabel wnone" data-testid="working-empty">Nothing in progress</span>
-        ) : (
-          <>
-            <span className="wlabel">In progress</span>
-            <span className="wcount" data-testid="working-count">{rows.length}</span>
-          </>
-        )}
-        {p.stale ? (
-          <span className="wstale" data-testid="working-stale" title="Could not refresh this list">!</span>
+    <>
+      <InboxHeadRow count={p.inboxCount} pending={p.pending} shown={p.shown} stale={p.stale}
+                    foldable open={p.open} onToggle={p.onToggle} onOpen={() => p.onOpenInbox()} />
+      <div className="workingsec" id={SECTION_ID} data-testid="working-section" data-open={p.open ? "true" : "false"}
+           hidden={!p.open}>
+        {p.open ? (
+          <button
+            type="button"
+            className={"tree-row indent-1 wneedsline" + (p.pending ? " pending" : "") + (waiting ? "" : " quiet0")
+              + (p.shown ? " sel" : "")}
+            data-testid="working-needs-line"
+            data-count={waiting}
+            aria-label={waiting ? `Needs you, ${waiting} waiting` : "Needs you, nothing waiting"}
+            title="Open the Needs you page"
+            onClick={() => p.onOpenInbox()}
+          >
+            <span className="nm">Needs you<span className="wcount" data-testid="working-needs-count">{` · ${waiting}`}</span></span>
+          </button>
         ) : null}
-      </div>
-      {p.open && !empty ? (
-        <div className="wlist" data-testid="working-list">
-          {p.needsYou.length ? (
-            <div className="wneeds" data-testid="working-needs">
-              <div className="whead">Needs you</div>
-              {p.needsYou.map((r) => (
+        {p.open && !hasList ? (
+          <div className="wnone" data-testid="working-empty">Nothing in progress</div>
+        ) : null}
+        {p.open && hasList ? (
+          <div className="wlist" data-testid="working-list">
+            {needs.length ? (
+              <div className="wneeds" data-testid="working-needs">
+                {needs.map((r) => (
+                  <div
+                    key={r.id}
+                    className={"tree-row indent-1 wrow wneed" + (rowPending(r) ? " pending" : "")}
+                    data-testid="working-need"
+                    data-id={r.id}
+                    title={r.title}
+                    onClick={() => p.onOpenInbox()}
+                  >
+                    <span className="wkind">{kindLabel(r)}</span>
+                    <button type="button" className="wopen nm" onClick={(e) => { e.stopPropagation(); p.onOpenInbox(); }}>
+                      {r.title}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {rows.map(({ e, t }) => {
+              const status = p.activity.threads[t.id] || "idle";
+              const pid = t.project_id || e.project_id || "";
+              const chip = projectName.get(pid) || "";
+              const label = threadLabel(t);
+              const hint = attachedHint(e.attached);
+              return (
                 <div
-                  key={r.id}
-                  className={"tree-row indent-1 wrow wneed" + (rowPending(r) ? " pending" : "")}
-                  data-testid="working-need"
-                  data-id={r.id}
-                  title={r.title}
-                  onClick={p.onOpenInbox}
+                  key={t.id}
+                  className={
+                    "tree-row indent-1 titled wrow" + p.selClass(t.id) + (p.dragging === t.id ? " dragging" : "")
+                    + (status === "working" ? " act-working" : "")
+                  }
+                  data-testid="working-row"
+                  data-id={t.id}
+                  data-label={status}
+                  data-pane={p.paneOf(t.id)}
+                  draggable
+                  onDragStart={(ev) => p.onDragStart(ev, t.id)}
+                  onDragEnd={p.onDragEnd}
+                  onContextMenu={(ev) => p.onMenu(ev, t.id)}
+                  onClick={(ev) => p.onPick(t.id, ev.altKey)}
+                  title={threadTooltip(t, t.cwd) + (status === "idle" ? "" : ` · ${LABEL_TEXT[status]}`)}
                 >
-                  <span className="wkind">{kindLabel(r)}</span>
-                  <button type="button" className="wopen nm" onClick={(e) => { e.stopPropagation(); p.onOpenInbox(); }}>
-                    {r.title}
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {rows.map(({ e, t }) => {
-            const status = p.activity.threads[t.id] || "idle";
-            const pid = t.project_id || e.project_id || "";
-            const chip = projectName.get(pid) || "";
-            const label = threadLabel(t);
-            const hint = attachedHint(e.attached);
-            return (
-              <div
-                key={t.id}
-                className={
-                  "tree-row indent-1 titled wrow" + p.selClass(t.id) + (p.dragging === t.id ? " dragging" : "")
-                  + (status === "working" ? " act-working" : "")
-                }
-                data-testid="working-row"
-                data-id={t.id}
-                data-label={status}
-                data-pane={p.paneOf(t.id)}
-                draggable
-                onDragStart={(ev) => p.onDragStart(ev, t.id)}
-                onDragEnd={p.onDragEnd}
-                onContextMenu={(ev) => p.onMenu(ev, t.id)}
-                onClick={(ev) => p.onPick(t.id, ev.altKey)}
-                title={threadTooltip(t, t.cwd) + (status === "idle" ? "" : ` · ${LABEL_TEXT[status]}`)}
-              >
-                <span className="tw">
-                  <Dot status={status} testid={`working-activity-${t.id}`} />
-                </span>
-                {/* The row's tab stop: Enter and Space click it, and the click opens the thread. */}
-                <button
-                  type="button"
-                  className="wopen nm ttl-btn"
-                  data-testid={`working-open-${t.id}`}
-                  aria-label={`${label.text}${status === "idle" ? "" : `, ${LABEL_TEXT[status]}`}${chip ? `, ${chip}` : ""}`}
-                >
-                  <HoverTitle text={label.text} untitled={label.untitled} testid={`working-name-${t.id}`}
-                    onDoubleClick={() => {}} />
-                </button>
-                {hint ? (
+                  <span className="tw">
+                    <Dot status={status} testid={`working-activity-${t.id}`} />
+                  </span>
+                  {/* The row's tab stop: Enter and Space click it, and the click opens the thread. */}
                   <button
                     type="button"
-                    className={"whint" + (e.attached.some(rowPending) ? " pending" : "")}
-                    data-testid={`working-hint-${t.id}`}
-                    title="Open the Inbox page"
-                    onClick={(ev) => { ev.stopPropagation(); p.onOpenInbox(); }}
+                    className="wopen nm ttl-btn"
+                    data-testid={`working-open-${t.id}`}
+                    aria-label={`${label.text}${status === "idle" ? "" : `, ${LABEL_TEXT[status]}`}${chip ? `, ${chip}` : ""}`}
                   >
-                    {hint}
+                    <HoverTitle text={label.text} untitled={label.untitled} testid={`working-name-${t.id}`}
+                      onDoubleClick={() => {}} />
                   </button>
-                ) : null}
-                {chip ? (
-                  <span className="wchip" data-testid={`working-chip-${t.id}`} title={`Project: ${chip}`}>{chip}</span>
-                ) : null}
-                <button
-                  type="button"
-                  className="menu"
-                  data-testid={`working-menu-${t.id}`}
-                  title="Done, move to…"
-                  aria-label={`${label.text}: menu`}
-                  aria-haspopup="menu"
-                  onClick={(ev) => p.onMenu(ev, t.id)}
-                >
-                  ⋯
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
+                  {hint ? (
+                    <button
+                      type="button"
+                      className={"whint" + (e.attached.some(rowPending) ? " pending" : "")}
+                      data-testid={`working-hint-${t.id}`}
+                      title="Open the Needs you page at this chat"
+                      aria-label={`${hint} waiting on ${label.text}: open the Needs you page at this chat`}
+                      onClick={(ev) => { ev.stopPropagation(); p.onOpenInbox(t.id); }}
+                    >
+                      {hint}
+                    </button>
+                  ) : null}
+                  {chip ? (
+                    <span className="wchip" data-testid={`working-chip-${t.id}`} title={`Project: ${chip}`}>{chip}</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="menu"
+                    data-testid={`working-menu-${t.id}`}
+                    title="Done, move to…"
+                    aria-label={`${label.text}: menu`}
+                    aria-haspopup="menu"
+                    onClick={(ev) => p.onMenu(ev, t.id)}
+                  >
+                    ⋯
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </>
   );
 });
 
-/** The store's one subscriber: the section, and nothing else, redraws on a refresh. Nothing is
- * drawn for an older daemon, or until the first read has landed. */
+/** The store's one subscriber: this block (the rainbow row and the list), and nothing else, redraws on a
+ * refresh. Until the first read lands, and for an older daemon, only the row is drawn, a plain button
+ * that opens the Needs you page. */
 export const WorkingBlock = memo(function WorkingBlock(p: Omit<WorkingSectionProps, "entries" | "needsYou" | "stale">) {
   const work = useWorking();
-  if (work.status === "unavailable" || work.status === "loading") return null;
+  if (work.status === "unavailable" || work.status === "loading") {
+    return (
+      <InboxHeadRow count={p.inboxCount} pending={p.pending} shown={p.shown} stale={false}
+                    foldable={false} open={false} onToggle={p.onToggle} onOpen={() => p.onOpenInbox()} />
+    );
+  }
   return <WorkingSection {...p} entries={work.entries} needsYou={work.needsYou} stale={work.status === "error"} />;
 });
 

@@ -352,3 +352,9 @@ Independent review: Codex gpt-6.1-sol, 2026-11-14, on revision 1.
 | 11 MED | rename coverage and collisions | D-12 |
 | 12 MED | PR dependencies | §5: projection and guards in WS-1, WS-2 additive, WS-3 presentation |
 | facts | "exactly one", "five newest", D-8 sub-agents, "unknown after restart" | corrected in §1, D-2, D-11 |
+
+## 11. WS-3 owner decisions (2026-11-14)
+
+- The rainbow Inbox row becomes the In progress list's header: clicking it folds/unfolds the list (WS-2's separate "IN PROGRESS" header goes); its count badge and amber are unchanged.
+- A "Needs you" line is always shown at the top of the unfolded list, with its count (0 included), and opens the full page.
+- Today's Inbox page is renamed "Needs you" and still lists every row (ranks 1–8), with a thread's rows grouped under that thread and a link to open it.

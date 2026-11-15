@@ -159,6 +159,36 @@ export function groupRows(rows: readonly InboxRow[]): { group: InboxGroup; rows:
   return out;
 }
 
+/** One slot of a group on the Needs you page: a row that belongs to no thread, or a thread with its rows. */
+export type ThreadSlot =
+  | { kind: "row"; row: InboxRow }
+  | { kind: "thread"; threadId: string; rows: InboxRow[] };
+
+/**
+ * WS-3: inside one group, the rows that sit on a chat are gathered under it (at the place of the thread's
+ * first row, each keeping its rank order); rows with no chat stay where they were. Uses `linkOf`, so a row
+ * "belongs to a thread" by the same rule as its "Open its chat" link. Every row appears exactly once.
+ */
+export function groupByThread(rows: readonly InboxRow[]): ThreadSlot[] {
+  const out: ThreadSlot[] = [];
+  const at = new Map<string, Extract<ThreadSlot, { kind: "thread" }>>();
+  for (const row of rows) {
+    const link = linkOf(row);
+    if (!link || link.kind !== "thread") {
+      out.push({ kind: "row", row });
+      continue;
+    }
+    const slot = at.get(link.id);
+    if (slot) slot.rows.push(row);
+    else {
+      const made: Extract<ThreadSlot, { kind: "thread" }> = { kind: "thread", threadId: link.id, rows: [row] };
+      at.set(link.id, made);
+      out.push(made);
+    }
+  }
+  return out;
+}
+
 /** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5), never a hidden row. */
 export function waitingCount(rows: readonly InboxRow[]): number {
   return rows.filter((r) => !isHidden(r) && r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;

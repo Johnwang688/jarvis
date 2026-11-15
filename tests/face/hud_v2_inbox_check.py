@@ -245,11 +245,17 @@ def _count(page):
     return loc.inner_text().strip() if loc.count() else None
 
 
+def _go_page(page, until):
+    """WS-3: the rainbow row folds the list now; the page opens from the Needs you line under it."""
+    until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-needs-line"]').click()
+
+
 def _open(page, mock, until, rows=None, ws=SINGLE):
     _reset(mock, rows)
     _fresh(page, mock, until, ws)
     if ws == SINGLE:
-        page.locator('[data-testid="owner-inbox"]').click()
+        _go_page(page, until)
     until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)
 
 
@@ -292,8 +298,13 @@ def _sidebar_checks(page, mock, check, until):
     check("the title is J.A.R.V.I.S. with the inbox counted", page.title() == TITLE, page.title())
     posts = len(_answers(mock))
     row.click()
+    time.sleep(0.3)
+    check("WS-3: a click on the rainbow row folds the list and opens no view [mutation: the row opens the page]",
+          row.get_attribute("aria-expanded") == "false" and _view(page).count() == 0)
+    row.click()
+    _go_page(page, until)
     until(lambda: _view(page).count() == 1, timeout=3)
-    check("a click on it opens the Inbox view in the focused pane, and answers nothing",
+    check("the Needs you line opens the Needs you view in the focused pane, and answers nothing",
           page.locator(_pane(1)).get_attribute("data-view") == "inbox" and len(_answers(mock)) == posts)
     check("the row is marked while a pane shows the inbox", "sel" in (row.get_attribute("class") or ""))
     check("the pane's strip offers the inbox only while it shows it",
@@ -328,6 +339,31 @@ def _groups_checks(page, mock, check, until):
     check("a blocked or failed task offers nothing to press but its link",
           _row(page, "task:k1").locator("button").count() == 1
           and _row(page, "task:k1").locator('[data-testid="inbox-link"]').count() == 1)
+
+
+def _needsyou_checks(page, mock, check, until):
+    """WS-3: today's Inbox page is "Needs you", still lists every row, and gathers a chat's rows under it."""
+    rows = basic_rows() + [dec_row("d0123456789ab", "t1")]
+    _open(page, mock, until, rows)
+    check("the page is titled Needs you (the rainbow row, the strip and the pane keep their own names) "
+          "[mutation: still titled Inbox]",
+          page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you"
+          and "needs you" in (page.locator(_pane(1)).get_attribute("aria-label") or "").lower(),
+          page.locator('[data-testid="inbox-page-title"]').text_content())
+    ids = _row_ids(page)
+    check("it still lists every row, ranks 1 to 8, in the same order [mutation: drop thread-less rows]",
+          sorted(ids) == sorted(r["id"] for r in rows), str(ids))
+    group = page.locator('[data-testid="inbox-thread"][data-thread-id="t1"]')
+    check("a chat's rows sit under its group, with its name, in each rank group [mutation: no grouping by thread]",
+          group.count() >= 1 and group.first.locator('[data-testid="inbox-thread-name"]').count() == 1
+          and group.first.locator('[data-testid="inbox-row"]').count() >= 1
+          and page.locator('[data-testid="inbox-row"][data-id="prop:k9"]').evaluate(
+              "e => !e.closest('[data-testid=\"inbox-thread\"]')"), str(group.count()))
+    posts = len(_answers(mock))
+    group.first.locator('[data-testid="inbox-thread-open"]').click()
+    until(lambda: page.locator(_pane(1)).get_attribute("data-view") == "chat", timeout=3)
+    check("its link opens the chat and answers nothing",
+          page.locator(_pane(1)).get_attribute("data-view") == "chat" and len(_answers(mock)) == posts)
 
 
 def _live_checks(page, mock, check, until):
@@ -505,7 +541,7 @@ def _clicks_checks(page, mock, check, until):
     until(lambda: page.evaluate("window.__hud.state().taskId") == "k1", timeout=3)
     check("a task row's link opens its task", page.evaluate("window.__hud.state().taskId") == "k1"
           and page.locator(_pane(1)).get_attribute("data-view") == "task")
-    page.locator('[data-testid="owner-inbox"]').click()
+    _go_page(page, until)
     until(lambda: _view(page).count() == 1, timeout=3)
     _row(page, "q:t1:r9").locator('[data-testid="inbox-link"]').click()
     until(lambda: page.locator(_pane(1)).get_attribute("data-view") == "chat", timeout=3)
@@ -1137,7 +1173,7 @@ def _aurora_body(page, mock, check, until, inbox_id):
 
     # Selected (a pane shows the inbox): the 2px accent bar is left clear of
     # the layers the isolated row paints over its own inset shadow.
-    row.click()
+    _go_page(page, until)
     until(lambda: "sel" in (row.get_attribute("class") or ""), timeout=3)
     check("selected, a stationary 2px accent strip sits above the moving band (computed style)",
           _pseudo(page, OWNER_ROW, "::after", "backgroundColor") == "rgb(111, 195, 223)"
@@ -1214,7 +1250,7 @@ def _older_checks(page, mock, check, until):
     _reset(mock)
     _st(mock)["fail"] = (404, "route not found")
     _fresh(page, mock, until, SINGLE)
-    page.locator('[data-testid="owner-inbox"]').click()
+    _go_page(page, until)
     until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "unavailable", timeout=4)
     check("an older daemon (404): the sidebar shows no count, never a zero", _count(page) is None)
     check("and the view says the inbox is not available, never 'nothing waiting' [mutation: 404 read as empty]",
@@ -1710,7 +1746,7 @@ def _check_checks(page, mock, check, until):
 
 # ---------------------------------------------------------------------------
 
-SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
+SECTIONS = (_sidebar_checks, _groups_checks, _needsyou_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
             _marks_checks, _deferred_checks, _summary_checks, _card_checks,
             _older_checks, _aurora_checks, _pr_checks, _pr_action_checks)
