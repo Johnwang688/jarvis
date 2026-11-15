@@ -54,8 +54,10 @@ export function reachOf(status: number, body?: unknown): Reach {
 export function reachOfGot(got: Got): Reach {
   if (got.ok) return "reached";
   if (got.why === "signed-out") return "signed-out";
-  if (got.why === "offline") return OFFLINE_STATUSES.has(got.status) ? "unreachable" : "offline";
-  return reachOf(got.status, got.body) === "unreachable" ? "unreachable" : "refused";
+  // `getJson` read no daemon words into an "offline": the table decides what its status means.
+  if (got.why === "offline") return reachOf(got.status || 0) === "unreachable" ? "unreachable" : "offline";
+  const reach = reachOf(got.status, got.body);
+  return reach === "reached" ? "refused" : reach; // a 2xx whose body would not parse
 }
 
 /** A write's outcome (`postJson`, an unlock step, Lock now, a push route, the clip upload). */
