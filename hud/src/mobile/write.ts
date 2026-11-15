@@ -19,6 +19,7 @@
 import "./write.css";
 import { oneLine } from "../lib/inbox";
 import type { Project, TaskView } from "./model";
+import { menuView } from "./nav";
 
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
@@ -369,6 +370,8 @@ export interface TaskControls {
   ask: (verb: Verb) => void;
   confirm: (verb: Verb) => void;
   back: () => void;
+  /** PX-4: the page's ⋯ menu, which holds Cancel. Absent (a plain test's controls): Cancel stays a button. */
+  menu?: { open: boolean; toggle: (open: boolean) => void };
 }
 
 export function taskControlsView(task: TaskView, c: TaskControls, allowed: readonly Verb[] = verbsFor(task.state)): HTMLElement {
@@ -382,9 +385,19 @@ export function taskControlsView(task: TaskView, c: TaskControls, allowed: reado
         c.busy || !c.online));
     box.append(row);
   } else {
+    // PX-4: Cancel is in the page's ⋯ menu, never beside Start and Resume. Its confirmation and its
+    // passkey (the branch above) are unchanged: choosing it asks, and only the passkey cancels.
     for (const verb of allowed) {
+      if (verb === "cancel" && c.menu) continue;
       box.append(button(LABEL[verb], () => c.ask(verb), `quiet m-btn ${verb}`, "m-task-" + verb, c.busy || !c.online));
     }
+  }
+  if (c.menu && allowed.includes("cancel")) {
+    box.prepend(menuView({
+      id: "m-task-more", label: "Task actions", open: c.menu.open, toggle: c.menu.toggle,
+      items: [{ id: "cancel", testid: "m-task-cancel", label: LABEL.cancel, disabled: c.busy || !c.online,
+        onSelect: () => c.ask("cancel") }],
+    }));
   }
   if (c.note) box.append(note(c.note, "m-task-note"));
   if (!c.online && allowed.length) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-task-offline", "m-notice m-off"));

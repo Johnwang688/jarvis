@@ -295,6 +295,7 @@ export function reviewView(state: ReviewState, a: ReviewActions, limited: string
     live.append(el("h2", "group", "Live now"));
     for (const row of report.live) {
       const card = testid(el("article", "row rank-1"), "m-review-live-row");
+      card.dataset.id = row.id;
       card.append(el("h3", "row-title", row.title || row.id));
       card.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-review-open-card"));
       live.append(card);
@@ -367,4 +368,33 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
 /** Whether the Review tab shows (MR-12): the review has open items and the next night has not begun. */
 export function reviewTabShown(report: ReviewReport | null): boolean {
   return !!report && report.open > 0 && !report.quiet.now;
+}
+
+/**
+ * PX-4 (plan C D2): whether the review holds a deferred approval. The Review tab shows only then
+ * (the group Approve is for deferred approvals); every other review is reached by its line.
+ */
+export function deferralsOpen(report: ReviewReport | null): boolean {
+  // The report's own counts too: a capped report (`more`) can omit the deferral from what it lists, and
+  // `summary.approvals` still counts it.
+  return !!report && (report.summary.approvals > 0 || allItems(report).some((item) => item.row.kind === "deferred"));
+}
+
+/**
+ * An enabled way into the review: while the review has open items and the night has not begun, or while any
+ * deferred approval waits (a quiet-hours review with a deferral is still reachable; it was not, with the tab
+ * visible and disabled).
+ */
+export function reviewReachable(report: ReviewReport | null): boolean {
+  return reviewTabShown(report) || (!!report && report.open > 0 && deferralsOpen(report));
+}
+
+/** PX-4: "Morning review · 5 left overnight", a line in the Inbox that opens today's review. Code's words. */
+export function reviewLine(report: ReviewReport | null, open: () => void): HTMLElement | null {
+  if (!reviewReachable(report)) return null;
+  const n = report!.open;
+  const line = tap("", open, "m-review-line", "m-review-open");
+  line.append(el("span", "m-review-text", `Morning review · ${n} left overnight`), el("span", "m-review-more", "Open"));
+  line.setAttribute("aria-label", `Morning review, ${n} left overnight. Open`);
+  return line;
 }

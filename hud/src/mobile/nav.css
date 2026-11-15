@@ -1,0 +1,140 @@
+/* PX-4: the approval sheet, the ⋯ menus, the Needs-you tray and the review line (nav.ts).
+   The skin's --m-* tokens only, sized in rem, no url(), no inline style. The sheet is the ONE
+   rule in the phone that may use backdrop-filter (skin.test.ts allows it for `.m-sheet` alone).
+   Every tap target is at least 3rem (48 px). */
+
+/* -- the approval sheet (§3.3): a bottom sheet over the list, which keeps its scroll -- */
+.m-sheet-dim {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: rgba(3, 8, 12, 0.62);
+}
+.m-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  max-height: 92dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  padding: 0 var(--m-gutter) max(1rem, env(safe-area-inset-bottom));
+  border: 1px solid var(--m-rim);
+  border-bottom: 0;
+  border-radius: 1.5rem 1.5rem 0 0;
+  box-shadow: var(--m-rim-shadow);
+  background: var(--m-sheen), var(--m-glass-bar);
+  -webkit-backdrop-filter: blur(1.5rem) saturate(1.4);
+  backdrop-filter: blur(1.5rem) saturate(1.4);
+}
+/* The card keeps its content and its order; inside the sheet its own bar sticks to the sheet's top. */
+.m-sheet .view { gap: 0.5rem; }
+.m-sheet .subbar { top: 0; margin: 0 calc(-1 * var(--m-gutter)) 0.5rem; padding-top: 0.5rem;
+  border-radius: 1.5rem 1.5rem 0 0; border-bottom: 0; }
+/* While the sheet is open nothing behind it scrolls, takes a tap or takes the keyboard (app.ts sets inert). */
+.app[data-sheet="open"] .main { overflow: hidden; }
+
+/* -- the header's ⋯ and the menus -- */
+.top { position: relative; z-index: 4; }
+.m-menu { position: relative; flex: none; }
+.tap.m-more {
+  width: var(--m-tap);
+  height: var(--m-tap);
+  padding: 0;
+  text-align: center;
+  font-size: 1.5rem;
+  line-height: 1;
+  border-radius: var(--m-r-pill);
+  color: var(--text-2);
+}
+.tap.m-more[aria-expanded="true"] { background: var(--bg-3); color: var(--accent); }
+.m-menu-panel {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 5;
+  width: min(20rem, calc(100vw - 2 * var(--m-gutter)));
+  box-sizing: border-box;
+  padding: 0.25rem;
+  border: 1px solid var(--m-rim);
+  border-radius: var(--m-r-card);
+  box-shadow: var(--m-rim-shadow), 0 0.5rem 1.5rem rgba(0, 0, 0, 0.45);
+  background: var(--m-sheen), var(--m-glass-sticky);
+}
+.tap.m-menu-row, .m-menu-row {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--m-tap);
+  padding: 0 0.75rem;
+  border-radius: var(--m-r-field);
+  text-align: left;
+}
+.tap.m-menu-row:disabled { opacity: 0.5; }
+.m-menu-row[data-tone="danger"] { color: var(--red); }
+.m-menu-info { margin: 0; padding: 0 0.75rem; min-height: var(--m-tap); display: flex; align-items: center;
+  font-size: 0.9375rem; color: var(--text-muted); }
+/* Notifications keeps its own row (notify.view()); inside the menu it is not a card of its own. */
+.m-menu-panel .notify { margin: 0; }
+
+/* -- the review line (§3.5): a line in the Inbox, not a tab -- */
+.tap.m-review-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: var(--m-tap);
+  padding: 0 1rem;
+  border: 1px solid var(--m-rim);
+  border-radius: var(--m-r-card);
+  box-shadow: var(--m-rim-shadow);
+  background: var(--m-sheen), var(--m-glass);
+  color: var(--text);
+}
+.m-review-line .m-review-more { color: var(--accent); flex: none; }
+
+/* -- the Needs-you tray (§3.4): under the open chat's header, up to 45dvh, never drops a row -- */
+.tap.tab[hidden] { display: none; }
+.m-tray {
+  position: sticky;
+  top: calc(3.5rem + 1px - 0.75rem);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  max-height: 45dvh;
+  margin-top: 0.5rem;
+  border: 1px solid var(--amber-line);
+  border-radius: var(--m-r-card);
+  box-shadow: var(--m-rim-shadow);
+  background: var(--m-sheen), var(--m-glass-sticky);
+  overflow: hidden;
+}
+.tap.m-tray-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--m-tap);
+  padding: 0 1rem;
+  color: var(--text-2);
+  white-space: pre;
+  overflow: hidden;
+}
+.tap.m-tray-bar[data-tone="pending"] { color: var(--amber); }
+.m-tray-label { font-weight: 600; flex: none; }
+.m-tray-count { flex: none; }
+.m-tray-peek { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); }
+.m-tray-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0 0.5rem 0.5rem;
+  overflow-y: auto;
+  max-height: calc(45dvh - 3rem);
+}
+.m-tray-body[hidden] { display: none; }

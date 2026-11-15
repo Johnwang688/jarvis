@@ -148,6 +148,9 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     expect(document.querySelector("button")!.textContent).toBe("Sign in with passkey");
     await tap();
     expect(screen()).toBe("app");
+    // PX-4: Sign out is behind the header's ⋯, last.
+    expect(document.querySelector('[data-testid="m-signout"]')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-testid="m-menu"]')!.click();
     const out = document.querySelector<HTMLButtonElement>('[data-testid="m-signout"]')!;
     expect(out.textContent).toBe("Sign out");
     out.click();

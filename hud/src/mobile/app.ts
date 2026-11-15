@@ -58,7 +58,7 @@ import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
 } from "./model";
-import { chatsView, el, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
 import { answerKey } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
@@ -72,7 +72,8 @@ import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
-import { reviewTabShown, reviewView, type ReviewActions } from "./review";
+import { deferralsOpen, reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
+import { ScrollMemory, byAttr, menuView, sheetView, trayView, type MenuItem } from "./nav";
 import { staleAt } from "../lib/approvalSummary";
 import { ACTION_PROGRESS, actionBody, prRowOf, resultWords, type PrAction } from "../lib/prRow";
 
@@ -128,7 +129,7 @@ const RETRY_MS = 4000;
 export const ASKING_FACE_ID = "Asking for Face ID…";
 export const SENDING = "Sending…";
 /** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
-const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold"]);
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-item-review", "m-item-later", "m-item-unlater", "m-item-fold", "m-thread-open"]);
 /** L1: how often the card's "N min left" is redrawn. */
 const DEADLINE_TICK_MS = 15_000;
 /** UX-2: the relative-time labels' one coarse tick. */
@@ -168,6 +169,8 @@ export class PhoneApp {
   recentAll = false;
   listError: string | null = null;
   readonly slots = new SlotCache();
+  /** PX-4: where "back" from an open chat goes: the view it was opened from (the Inbox, the review or the Chats list). */
+  private threadBack: "inbox" | "review" | "chats" = "chats";
   /** Where "back" from a task goes: the list filter it was opened from. */
   private taskBack: Filter = "tasks";
   task: OpenTask | null = null;
@@ -214,7 +217,6 @@ export class PhoneApp {
   reviewConfirmLines: ConfirmLine[] = [];
   reviewFlash = "";
   private reviewFirst = true;
-  private rendered: Tab | null = null;
 
   private readonly fetchJson: (path: string) => Promise<Got>;
   private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
@@ -238,6 +240,19 @@ export class PhoneApp {
   /** An open transcript drawn again: where its scroll was ("end": at the newest message). */
   private keepScroll: "end" | number | null = null;
   private logAgain = false;
+  /** PX-4: the scroll each view had, and what is open besides the list. There is no browser-history integration. */
+  private readonly mem = new ScrollMemory();
+  /** Which ⋯ menu is open: the header's, or an open task page's. */
+  menuOpen: "app" | "task" | null = null;
+  /** The open chat's Needs-you tray folded to its bar by the owner. */
+  trayFolded = false;
+  private menuWrap: HTMLElement;
+  private readonly topBar: HTMLElement;
+  private readonly tabBar: HTMLElement;
+  private readonly sheetHost: HTMLElement;
+  /** The view the main area last drew, and (while the approval sheet is open) the one it keeps under the sheet. */
+  private drawnKey: string | null = null;
+  private held: string | null = null;
 
   constructor(private readonly deps: AppDeps) {
     this.fetchJson = deps.fetchJson ?? getJson;
@@ -263,7 +278,9 @@ export class PhoneApp {
     this.conn = el("span", "conn", "connecting");
     this.conn.dataset.testid = "m-conn";
     top.append(this.conn);
-    top.append(tap("Sign out", () => void this.signOut(), "quiet", "m-signout"));
+    // PX-4: Sign out and Notifications are behind the ⋯ (renderMenu); the lock pill is PX-5's.
+    this.menuWrap = menuView({ id: "m-menu", label: "Menu", items: [], open: false, toggle: () => {} });
+    top.append(this.menuWrap);
     this.banner = el("div", "offline");
     this.banner.dataset.testid = "m-offline";
     this.banner.setAttribute("role", "status");
@@ -279,10 +296,20 @@ export class PhoneApp {
     };
     this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats") };
     this.tabs.review.disabled = true;
-    frame.append(top, this.banner, this.main, nav);
+    this.sheetHost = el("div", "m-sheet-host");
+    frame.append(top, this.banner, this.main, nav, this.sheetHost);
+    this.topBar = top;
+    this.tabBar = nav;
+    // A tap outside an open ⋯ menu closes it.
+    frame.addEventListener("click", (e) => {
+      if (this.menuOpen && !(e.target instanceof Element && e.target.closest(".m-menu"))) this.toggleMenu(null);
+    });
     this.frame = frame;
     this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
-      () => { if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox(); },
+      () => {
+        if (this.menuOpen === "app" && !this.stopped) this.renderMenu();
+        if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox();
+      },
       () => { if (!this.stopped) void this.openFromNotification(); });
     this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
@@ -298,6 +325,7 @@ export class PhoneApp {
   start(): void {
     this.deps.root.className = "app-root";
     this.deps.root.replaceChildren(this.frame);
+    this.renderMenu();
     // A notification's tap opens /m/#inbox: the Inbox is the first tab anyway.
     if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
@@ -458,6 +486,8 @@ export class PhoneApp {
       return;
     }
     if (this.tab === "review") this.renderKeepingFocus();
+    // PX-4: the Inbox's review line follows the review as it is read.
+    else if (this.tab === "inbox" && !this.card) this.renderInbox();
   }
 
   /** A notification's tap on an open app (sw.ts posts "open-inbox"): the review when the
@@ -501,8 +531,11 @@ export class PhoneApp {
   private renderTabs(): void {
     // M9a (phone audit): the Review tab keeps its slot, off while there is no review, so the
     // tabs never move under the thumb (Inbox, Review, Chats: Tasks is a filter of the Inbox).
-    const shown = this.tab === "review" || reviewTabShown(this.review);
+    const shown = this.tab === "review" || reviewReachable(this.review);
     this.tabs.review.disabled = !shown;
+    // PX-4: the Review tab shows only while a deferred approval waits (or the review is open); the Inbox's
+    // review line reaches every other review.
+    this.tabs.review.hidden = !(this.tab === "review" || deferralsOpen(this.review));
     const n = shown ? this.review?.open ?? 0 : 0;
     this.tabs.review.textContent = n ? `Review · ${n}` : "Review";
     this.tabs.review.setAttribute("aria-label", shown ? (n ? `Review, ${n} waiting` : "Review") : "Review, nothing to review");
@@ -661,7 +694,9 @@ export class PhoneApp {
   openCard(row: InboxRow): void {
     this.flash = "";
     this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
-    this.tab = "inbox";
+    this.invoker = this.tab === "review" ? "m-review-open-card" : "m-item-review";
+    // PX-4: the sheet opens over whatever the owner is looking at (the list, a chat, the review), its scroll kept.
+    if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     this.render();
     void this.loadCard();
   }
@@ -1278,6 +1313,10 @@ export class PhoneApp {
   }
 
   async openThread(id: string, meta: ChatThread | null = null): Promise<void> {
+    if (this.thread?.id !== id || this.tab !== "chats") { this.leftFrom("thread", id); this.trayFolded = false; }
+    // Every new opening sets where back goes: from the Inbox or the review, or from the Chats list.
+    if (this.tab !== "chats") this.threadBack = this.tab === "review" ? "review" : "inbox";
+    else if (!this.thread) this.threadBack = "chats";
     this.tab = "chats";
     this.sheet = null;
     this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null,
@@ -1355,6 +1394,7 @@ export class PhoneApp {
 
   /** Open a task, or read the open one again (its diff too, once shown; its folds kept). */
   async openTask(id: string): Promise<void> {
+    if (this.task?.id !== id || this.tab !== "tasks") this.leftFrom("task", id);
     if (this.tab !== "tasks") this.taskBack = this.tab === "inbox" ? this.filter : "tasks";
     this.tab = "tasks";
     if (this.sheet?.kind === "task") this.sheet = null;
@@ -1489,7 +1529,7 @@ export class PhoneApp {
     this.frame.dataset.stale = online ? "false" : "true";
     this.renderBanner();
     // The write controls (P-5) say offline and turn off, or come back.
-    if (this.tab !== "inbox" || !this.card) this.renderKeepingFocus();
+    if (!this.card) this.renderKeepingFocus();
     if (online) this.refreshVisible();
   }
 
@@ -1511,9 +1551,103 @@ export class PhoneApp {
     this.conn.dataset.state = "offline";
   }
 
+  // -- navigation (PX-4) -----------------------------------------------------------------------
+
+  /** How many levels are open above the list: the approval sheet, a New chat or New task form, an open chat or task. */
+  depth(): number {
+    return (this.card ? 1 : 0) + (this.sheet ? 1 : 0) + (this.tab === "chats" && this.thread ? 1 : 0)
+      + (this.tab === "tasks" && this.task ? 1 : 0);
+  }
+
+  /**
+   * Back (the in-app button, the dim area, the sheet's back): the topmost level closes, now and in place, one
+   * level per tap. The browser's own Back and swipe are not involved: no history entry is ever made.
+   */
+  goBack(): void {
+    if (this.card) { this.closeCard(); return; }
+    if (this.sheet) {
+      if (this.sheet.kind === "chat") { this.sheet = null; this.render(); void this.loadChats(); } else this.show("tasks");
+      return;
+    }
+    if (this.tab === "chats" && this.thread) this.closeThread();
+    else if (this.tab === "tasks" && this.task) this.show("tasks");
+  }
+
+  /** An open chat's back: to the view it was opened from, and that view as the owner left it. */
+  private closeThread(): void {
+    const to = this.threadBack;
+    this.threadBack = "chats";
+    this.thread = null;
+    this.show(to);
+  }
+
+  /** Open or close a ⋯ menu (`null` closes whichever is open). The focus follows: into its panel, back to its button. */
+  toggleMenu(which: "app" | "task" | null): void {
+    const was = this.menuOpen;
+    if (which === was) return;
+    const inside = typeof document !== "undefined" && !!(document.activeElement as HTMLElement | null)?.closest?.(".m-menu");
+    this.menuOpen = which;
+    if (was === "app" || which === "app") this.renderMenu();
+    if (was === "task" || which === "task") this.render();
+    if (typeof document === "undefined") return;
+    const id = (which ?? was) === "task" ? "m-task-more" : "m-menu";
+    if (which !== null) {
+      this.frame.querySelector<HTMLElement>(`[data-testid="${id}-panel"] button`)?.focus();
+    } else if (inside) {
+      this.frame.querySelector<HTMLElement>(`[data-testid="${id}"]`)?.focus();
+    }
+  }
+
+  /** The header's ⋯: Notifications, when Jarvis last answered, and Sign out (last). */
+  private renderMenu(): void {
+    const open = this.menuOpen === "app";
+    const items: MenuItem[] = [];
+    if (open) {
+      items.push({ id: "notifications", node: this.notify.view() });
+      items.push({ id: "lastread", info: true,
+        label: this.lastRead === null ? "Not read yet" : `Last read ${agoWords(this.lastRead, this.now())}` });
+      items.push({ id: "signout", testid: "m-signout", label: "Sign out", onSelect: () => void this.signOut() });
+    }
+    const next = menuView({ id: "m-menu", label: "Menu", items, open, toggle: (o) => this.toggleMenu(o ? "app" : null) });
+    this.menuWrap.replaceWith(next);
+    this.menuWrap = next;
+  }
+
+  /** The view the main area shows now, as a key: scroll is remembered per key (§3.1, D4). */
+  private surfaceKey(): string {
+    if (this.tab === "review") return "review";
+    if (this.tab === "inbox") return "inbox:" + (this.filter ?? "");
+    if (this.tab === "chats") return this.sheet?.kind === "chat" ? "chat-sheet" : this.thread ? "thread:" + this.thread.id : "chats";
+    return this.sheet?.kind === "task" ? "task-sheet" : this.task ? "task:" + this.task.id : "tasks";
+  }
+
+  /** Remember the row a list view is left from, to come back to it (the list's own attribute names it). */
+  private leftFrom(kind: "thread" | "task", id: string): void {
+    const key = this.drawnKey;
+    if (!key) return;
+    if (key === "chats" || key === "inbox:tasks") this.mem.leftFrom(key, "data-id", id);
+    else if (key.startsWith("inbox:")) this.mem.leftFrom(key, kind === "thread" ? "data-thread" : "data-task", id);
+  }
+
+  /** Back on a list: the row opened from it visible and focused (its scroll is restored by `render`). */
+  private returnToRow(key: string): void {
+    const from = this.mem.row(key);
+    if (!from) return;
+    this.mem.clearRow(key);
+    const card = byAttr(this.main, from.attr, from.value);
+    const target = card?.querySelector<HTMLElement>("button") ?? card;
+    if (!card || !target) return;
+    const area = this.main.getBoundingClientRect();
+    const at = card.getBoundingClientRect();
+    if (at.bottom > area.bottom || at.top < area.top) card.scrollIntoView({ block: "nearest" });
+    target.focus({ preventScroll: true });
+  }
+
   // -- drawing ---------------------------------------------------------------------------
 
   show(tab: Tab): void {
+    this.card = null;
+    if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     // PX-2: Tasks is a filter of the list, not a tab. Asking for it (a task's back, a closed sheet) shows that list.
     if (tab === "tasks") {
       this.task = null;
@@ -1529,7 +1663,6 @@ export class PhoneApp {
     }
     if (tab === "inbox" && this.tab === "tasks") { this.task = null; this.sheet = null; this.filter = null; this.taskBack = "tasks"; }
     else if (tab === "inbox" && this.tab === "inbox" && !this.card) this.filter = null;
-    if (tab === "inbox" && this.tab === "inbox" && this.card) this.card = null;
     if (tab === this.tab) {
       // A second tap on the open tab goes back to its list.
       if (tab === "chats") this.thread = null;
@@ -1577,6 +1710,8 @@ export class PhoneApp {
   private cardNotice: HTMLElement | null = null;
   /** After a cancelled passkey or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
   private focusNotice = false;
+  /** The control that opened the sheet (its test id), so closing returns to it wherever it lives (the list, the review). */
+  private invoker = "m-item-review";
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private timeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1593,16 +1728,16 @@ export class PhoneApp {
     }, TIME_TICK_MS);
   }
 
-  /** After a draw: a card that just opened takes the focus on its heading; one that just closed
-   * gives it to the line saying what happened, or back to its row's "Open the card to answer". */
+  /** After a draw: a card that just opened takes the focus on its heading (in the sheet); one that just closed
+   * gives it to the line saying what happened, or back to its row's button. */
   private moveFocus(kept: string | null): void {
-    const now = this.tab === "inbox" && this.card ? this.card.rowId : null;
+    const now = this.card ? this.card.rowId : null;
     const was = this.drawnCard;
     this.drawnCard = now;
     if (now === was) {
       if (now && this.focusNotice) {
         this.focusNotice = false;
-        const notice = this.main.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
+        const notice = this.sheetHost.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
         if (notice) { notice.tabIndex = -1; notice.focus({ preventScroll: true }); return; }
       }
       if (kept) this.restoreFocus(kept);
@@ -1610,12 +1745,14 @@ export class PhoneApp {
     }
     this.focusNotice = false;
     if (now) {
-      this.main.querySelector<HTMLElement>('[data-testid="m-card-heading"]')?.focus();
+      this.sheetHost.querySelector<HTMLElement>('[data-testid="m-card-heading"]')?.focus();
       this.tickDeadline();
-    } else if (was && this.tab === "inbox") {
+    } else if (was) {
       // Answered: the line saying what happened ("Denied."); else (back, or gone) the row's own button.
       const flash = this.main.querySelector<HTMLElement>('[data-testid="m-flash"]');
-      const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-item-review"]');
+      const holder = Array.from(this.main.querySelectorAll<HTMLElement>("[data-id]")).find((n) => n.dataset.id === was
+        && n.querySelector(`[data-testid="${this.invoker}"]`));
+      const row = holder?.querySelector<HTMLElement>(`[data-testid="${this.invoker}"]`);
       if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
       else row?.focus({ preventScroll: true });
     }
@@ -1624,17 +1761,20 @@ export class PhoneApp {
   /** What had the focus before a redraw, when it is one of the few things focus is kept on. */
   private focusedKey(): string | null {
     const active = typeof document !== "undefined" ? document.activeElement : null;
-    if (!(active instanceof HTMLElement) || !this.main.contains(active)) return null;
+    if (!(active instanceof HTMLElement) || !(this.main.contains(active) || this.sheetHost.contains(active))) return null;
     const id = active.dataset.testid ?? "";
     if (!KEEP_FOCUS.has(id)) return null;
-    return id + "\n" + (active.closest<HTMLElement>("[data-id]")?.dataset.id ?? "");
+    return id + "\n" + (active.closest<HTMLElement>("[data-id]")?.dataset.id ?? "") + "\n"
+      + (active.closest<HTMLElement>("[data-key]")?.dataset.key ?? "");
   }
 
   /** The same element in the redrawn view takes the focus back (a redraw builds new nodes). */
   private restoreFocus(key: string): void {
-    const [id, rowId] = key.split("\n");
-    const same = Array.from(this.main.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`))
-      .find((n) => (n.closest<HTMLElement>("[data-id]")?.dataset.id ?? "") === rowId);
+    const [id, rowId, cardKey] = key.split("\n");
+    const same = [...Array.from(this.sheetHost.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)),
+      ...Array.from(this.main.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`))]
+      .find((n) => (n.closest<HTMLElement>("[data-id]")?.dataset.id ?? "") === rowId
+        && (n.closest<HTMLElement>("[data-key]")?.dataset.key ?? "") === cardKey);
     if (same && document.activeElement !== same) {
       if (id === "m-flash") same.tabIndex = -1;
       same.focus({ preventScroll: true });
@@ -1647,8 +1787,8 @@ export class PhoneApp {
     // A real timer, as wakeForStale's: the injected one runs at once in the tests.
     this.deadlineTimer = setTimeout(() => {
       this.deadlineTimer = null;
-      if (this.stopped || !this.card || this.tab !== "inbox") return;
-      const line = this.main.querySelector('[data-testid="m-card-deadline"]');
+      if (this.stopped || !this.card) return;
+      const line = this.sheetHost.querySelector('[data-testid="m-card-deadline"]');
       const card = this.card.detail?.card;
       if (line && card) {
         const due = deadlineAt(card);
@@ -1691,6 +1831,85 @@ export class PhoneApp {
     }
     this.renderBadge();
     this.renderTabs();
+    // A task page's ⋯ is open only while that page is.
+    if (this.menuOpen === "task" && !(this.tab === "tasks" && this.task)) this.menuOpen = null;
+    const key = this.surfaceKey();
+    // PX-4: while the approval sheet is open, the view under it stays as it was drawn: its scroll, rows and
+    // order are exactly what the owner left, and closing the sheet draws it again in place.
+    if (!(this.card && this.held === key && this.drawnKey === key)) this.drawSurface(key);
+    this.held = this.card ? key : null;
+    this.drawSheet();
+    this.moveFocus(kept);
+  }
+
+  /** The approval sheet over the view (§3.3): `cardView`, unchanged, in a bottom sheet; nothing behind it takes a tap or Tab. */
+  private drawSheet(): void {
+    const open = !!this.card;
+    for (const node of [this.topBar, this.banner, this.main, this.tabBar]) {
+      if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+    }
+    if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
+    if (!this.card) { this.sheetHost.replaceChildren(); return; }
+    const view = cardView(this.card, {
+      back: () => this.goBack(),
+      deny: () => void this.denyCard(),
+      allow: () => void this.allowCard(),
+      always: () => void this.alwaysCard(),
+      confirmAlways: () => void this.confirmAlways(),
+      cancelAlways: () => this.cancelAlways(),
+      // AS: the owner's own open or close of the command, kept across a re-read of the card.
+      toggleCommand: (o) => { if (this.card) { this.card.expanded = o; this.render(); } },
+    }, this.now(), this.online);
+    // The same status node across redraws of this card: only its words and tone change.
+    const fresh = view.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
+    const old = this.cardNotice;
+    const same = this.drawnCard === this.card.rowId;
+    if (fresh && old && same) {
+      if (old.textContent !== fresh.textContent) old.textContent = fresh.textContent;
+      old.dataset.tone = fresh.dataset.tone ?? "";
+      fresh.replaceWith(old);
+    } else {
+      this.cardNotice = fresh;
+    }
+    const top = same ? this.sheetHost.querySelector<HTMLElement>(".m-sheet")?.scrollTop ?? 0 : 0;
+    this.sheetHost.replaceChildren(...sheetView(view, () => { if (this.card && !this.card.busy) this.goBack(); }));
+    const sheet = this.sheetHost.querySelector<HTMLElement>(".m-sheet");
+    if (sheet && top) sheet.scrollTop = top;
+  }
+
+  /** What the inbox rows draw with, for the list and for an open chat's tray. */
+  private inboxAnswers(): InboxAnswers {
+    return {
+      openCard: (row) => this.openCard(row),
+      send: (row, body, echo) => void this.sendAnswer(row, body, echo),
+      retry: (row) => void this.retryDeferred(row),
+      busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
+      expanded: this.opened,
+      toggle: (row, open) => { this.opened.set(row.id, open); this.render(); },
+      withdraw: {
+        confirming: this.withdrawing,
+        ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
+        back: (row) => { this.withdrawing.delete(row.id); this.render(); },
+      },
+      pr: {
+        act: (row, action) => void this.prAct(row, action),
+        cancelFix: (row) => void this.cancelFix(row),
+        question: (rowId, taskId) => {
+          if (rowId) this.revealRow(rowId);
+          else if (taskId) void this.openTask(taskId);
+        },
+        limited: !!this.secure && !this.secure.ok,
+        progress: this.prProgress,
+        rows: this.inbox ?? [],
+      },
+    };
+  }
+
+  /** The main area: the list, the review, a chat, a task. The scroll each view had is remembered (D4). */
+  private drawSurface(key: string): void {
+    const redraw = this.drawnKey === key;
+    if (this.drawnKey && !redraw) this.mem.save(this.drawnKey, this.main.scrollTop);
+    const top = this.main.scrollTop;
     let view: HTMLElement;
     if (this.tab === "review") {
       view = reviewView({
@@ -1700,60 +1919,8 @@ export class PhoneApp {
         opened: this.opened, confirmLines: this.reviewConfirmed ? this.reviewConfirmLines : null,
       }, { ...this.reviewActions(), expand: (row, open) => { this.opened.set(row.id, open); this.render(); } }, this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
         : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
-      // The scroll holds where it was: a row answered in place folds where it stood.
-      const top = this.rendered === "review" ? this.main.scrollTop : 0;
-      this.main.replaceChildren(view);
-      this.main.scrollTop = top;
-      this.rendered = "review";
-      this.drawnCard = null;
-      return;
-    }
-    if (this.tab === "inbox" && this.card) {
-      view = cardView(this.card, {
-        back: () => this.closeCard(),
-        deny: () => void this.denyCard(),
-        allow: () => void this.allowCard(),
-        always: () => void this.alwaysCard(),
-        confirmAlways: () => void this.confirmAlways(),
-        cancelAlways: () => this.cancelAlways(),
-        // AS: the owner's own open or close of the command, kept across a re-read of the card.
-        toggleCommand: (open) => { if (this.card) { this.card.expanded = open; this.render(); } },
-      }, this.now(), this.online);
-      // The same status node across redraws of this card: only its words and tone change.
-      const fresh = view.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
-      const old = this.cardNotice;
-      if (fresh && old && this.drawnCard === this.card.rowId) {
-        if (old.textContent !== fresh.textContent) old.textContent = fresh.textContent;
-        old.dataset.tone = fresh.dataset.tone ?? "";
-        fresh.replaceWith(old);
-      } else {
-        this.cardNotice = fresh;
-      }
     } else if (this.tab === "inbox") {
-      const answers: InboxAnswers = {
-        openCard: (row) => this.openCard(row),
-        send: (row, body, echo) => void this.sendAnswer(row, body, echo),
-        retry: (row) => void this.retryDeferred(row),
-        busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
-        expanded: this.opened,
-        toggle: (row, open) => { this.opened.set(row.id, open); this.render(); },
-        withdraw: {
-          confirming: this.withdrawing,
-          ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
-          back: (row) => { this.withdrawing.delete(row.id); this.render(); },
-        },
-        pr: {
-          act: (row, action) => void this.prAct(row, action),
-          cancelFix: (row) => void this.cancelFix(row),
-          question: (rowId, taskId) => {
-            if (rowId) this.revealRow(rowId);
-            else if (taskId) void this.openTask(taskId);
-          },
-          limited: !!this.secure && !this.secure.ok,
-          progress: this.prProgress,
-          rows: this.inbox ?? [],
-        },
-      };
+      const answers = this.inboxAnswers();
       const open = (row: InboxRow) => {
         if (row.thread_id) void this.openThread(row.thread_id);
         else if (row.task_id) void this.openTask(row.task_id);
@@ -1775,7 +1942,12 @@ export class PhoneApp {
         },
         retry: () => { void this.loadInbox(); },
       }, this.slots, this.now(), tasksPanel, this.secure);
-      view.append(this.notify.view());
+      // PX-4 (D2): the morning review is a line at the head of the list's body; Notifications moved behind the ⋯.
+      const line = this.filter === null ? reviewLine(this.review, () => this.show("review")) : null;
+      if (line) {
+        const first = view.querySelector(".m-band");
+        if (first) first.before(line); else view.append(line);
+      }
       if (this.flash) {
         const line = el("p", "m-notice", this.flash);
         line.dataset.testid = "m-flash";
@@ -1785,7 +1957,7 @@ export class PhoneApp {
     } else if (this.tab === "chats") {
       if (this.sheet?.kind === "chat") {
         view = chatSheetView(this.sheet, this.projects ?? [], this.models, this.online, {
-          close: () => { this.sheet = null; this.render(); void this.loadChats(); },
+          close: () => this.goBack(),
           submit: () => void this.createChat(),
           change: () => this.render(),
           openChat: (id) => void this.openThread(id),
@@ -1793,10 +1965,22 @@ export class PhoneApp {
       } else if (this.thread) {
         // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
         if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
-        const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"),
-          this.composer(this.thread.id), { loaded: this.thread.loaded, online: this.online });
-        this.thread.list = built.list;
+        const thread = this.thread;
+        const built = transcriptView(thread.meta, thread.rows, thread.older, () => this.goBack(),
+          this.composer(thread.id), { loaded: thread.loaded, online: this.online });
+        const back = built.view.querySelector('[data-testid="m-back"]');
+        if (back) back.textContent = this.threadBack === "inbox" ? "‹ Inbox" : this.threadBack === "review" ? "‹ Review" : "‹ Chats";
+        thread.list = built.list;
         view = built.view;
+        // PX-4 (§3.4): this chat's rank 1 to 5 rows, in a tray under the header.
+        const answers = this.inboxAnswers();
+        const tray = trayView({
+          rows: (this.inbox ?? []).filter((r) => r.thread_id === thread.id),
+          draw: (row) => inboxRow(row, () => this.scrollToEnd(), answers),
+          folded: this.trayFolded,
+          fold: (f) => { this.trayFolded = f; this.render(); },
+        });
+        if (tray) view.querySelector(".subbar")?.after(tray);
       } else {
         view = chatsView(this.projects, this.threads, this.expanded, {
           open: (t) => void this.openThread(t.id, t),
@@ -1809,7 +1993,7 @@ export class PhoneApp {
       }
     } else if (this.sheet?.kind === "task") {
       view = taskSheetView(this.sheet, this.projects ?? [], this.online, {
-        close: () => { this.show("tasks"); },
+        close: () => this.goBack(),
         submit: () => void this.createTask(),
         change: () => this.render(),
       });
@@ -1825,6 +2009,8 @@ export class PhoneApp {
           confirming: w.confirming, busy: w.busy, note: w.note, online: this.online,
           ask: (verb) => this.askVerb(open.id, verb), back: () => this.backVerb(open.id),
           confirm: (verb) => void this.confirmVerb(open.id, verb),
+          // PX-4: Cancel is in this page's ⋯ menu.
+          menu: { open: this.menuOpen === "task", toggle: (o) => this.toggleMenu(o ? "task" : null) },
         }, allowed);
         if (proposed) {
           box.prepend(el("p", "m-notice", "Proposed: it starts on its own when its grace window ends. Withdraw it from the inbox."));
@@ -1833,21 +2019,26 @@ export class PhoneApp {
       })() : (this.taskWrite?.id === open.id && this.taskWrite.note
         ? el("p", "m-notice", this.taskWrite.note) : null);
       view = open.view
-        ? taskView(open.view, open.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
+        ? taskView(open.view, open.diff, { back: () => this.goBack(), showDiff: () => void this.loadDiff(),
           folds: open.folds, controls, answerInInbox: (index) => this.showInboxRow(`tq:${open.id}:${index}`),
           inInbox: (index) => !!this.inbox?.some((row) => row.id === `tq:${open.id}:${index}`) })
         : el("p", "empty", this.online ? "Loading…" : "Not read yet: you're offline.");
+      // The ⋯ sits in the page's header, at the right of its title.
+      const menu = controls?.querySelector<HTMLElement>(".m-menu");
+      if (menu) view.querySelector(".subbar")?.append(menu);
     } else {
       view = this.tasksPanel();
     }
     this.main.replaceChildren(view);
-    this.rendered = this.tab;
     const keep = this.keepScroll;
     this.keepScroll = null;
     if (keep === "end") this.scrollToEnd();
     else if (keep !== null) this.main.scrollTop = keep;
-    this.moveFocus(kept);
+    else this.main.scrollTop = redraw ? top : this.mem.top(key);
+    this.drawnKey = key;
+    if (!redraw) this.returnToRow(key);
   }
+
 
   /** The Tasks filter's body: today's task list, headed by "New task", and the cap's notice. */
   private tasksPanel(): HTMLElement {

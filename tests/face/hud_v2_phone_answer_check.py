@@ -286,6 +286,24 @@ def run(browser, check, until):
         check("P-4 card: the whole command, the origin and the reason are text, never markup",
               HOSTILE in page.locator(f'{card} [data-testid="approval-command"]').inner_text()
               and HOSTILE in page.locator(f'{card} [data-testid="approval-origin"]').inner_text() and clean())
+        # PX-4: the card is a bottom sheet over the list; the heading takes the focus (never DENY), and only the
+        # sheet blurs what is behind it.
+        sheet = page.locator('[data-testid="m-sheet"]')
+        vp = page.viewport_size
+        sb = sheet.bounding_box()
+        check("PX-4 sheet: the card is in a bottom sheet over the list, which stays in the page and takes no tap",
+              sheet.locator(card).count() == 1 and page.locator('[data-testid="m-inbox"]').count() == 1
+              and page.evaluate("document.querySelector('.main').inert === true "
+                                "&& document.querySelector('.tabs').inert === true"), str(sb))
+        check("PX-4 sheet: at the bottom edge, inside the screen, at most 92% high",
+              sb is not None and abs(sb["y"] + sb["height"] - vp["height"]) < 1.5 and sb["x"] >= 0
+              and sb["width"] <= vp["width"] + 0.5 and sb["height"] <= vp["height"] * 0.92 + 1, f"{sb} {vp}")
+        check("PX-4 sheet: the heading has the focus on open, not DENY",
+              page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-card-heading",
+              page.evaluate("document.activeElement?.dataset?.testid || ''"))
+        blurs = page.evaluate("""[...document.querySelectorAll('.app *')].filter(e => {
+            const v = getComputedStyle(e).backdropFilter; return v && v !== 'none'; }).map(e => e.className)""")
+        check("PX-4 sheet: the sheet is the one element that blurs what is behind it", blurs == ["m-sheet"], str(blurs))
         page.locator(card).focus()
         for key in ("Enter", " "):
             page.keyboard.press(key)
@@ -305,6 +323,11 @@ def run(browser, check, until):
         pump(lambda: "decision" in h_out)
         check("P-4 Deny: one tap answers it, no passkey", h_out.get("decision") == Decision.DENY, str(h_out))
         until(lambda: page.locator(card).count() == 0, timeout=8)
+        check("PX-4 sheet: answered, it closes, the list is live again and the line saying so has the focus",
+              page.locator('[data-testid="m-sheet"]').count() == 0
+              and page.evaluate("document.querySelector('.main').inert === false")
+              and page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-flash",
+              page.evaluate("document.activeElement?.dataset?.testid || ''"))
 
         # -- AS: the summary, a fake model, the card's new order -----------------------------
         from types import SimpleNamespace

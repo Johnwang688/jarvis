@@ -397,6 +397,9 @@ describe("task verbs (P-5)", () => {
       project_id: null, thread_id: null, task_id: TASK, asked_at: null, expires_at: null, origin: "", detail: {} }] });
     await openTask(h, "intake");
     expect(h.q("m-task-start")).toBeNull();
+    // PX-4: Cancel is behind the page's ⋯.
+    expect(h.q("m-task-cancel")).toBeNull();
+    await h.click("m-task-more");
     expect(h.q("m-task-cancel")).not.toBeNull();
     expect(h.q("m-task-controls")!.textContent).toMatch(/starts on its own/);
   });
@@ -424,6 +427,7 @@ describe("task verbs (P-5)", () => {
     const h = harness();
     await openTask(h, "running");
     h.replies[`/m/api/tasks/${TASK}/cancel/options`] = { status: 0, body: {}, offline: true };
+    await h.click("m-task-more");
     await h.click("m-task-cancel");
     await h.click("m-task-confirm");
     expect(h.posts.map((p) => p.path)).toEqual([`/m/api/tasks/${TASK}/cancel/options`]);
@@ -464,7 +468,14 @@ describe("task verbs (P-5)", () => {
     expect(h.q("m-task-start")).toBeNull();
     expect(h.q("m-task-resume")).toBeNull();
     h.replies[`/m/api/tasks/${TASK}/cancel/options`] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
+    // PX-4: Cancel is not a button on the page; it is a row of the page's ⋯ menu (48 px, nothing else in it).
+    expect(h.q("m-task-cancel")).toBeNull();
+    await h.click("m-task-more");
+    expect(Array.from(h.root.querySelectorAll('[data-testid="m-task-more-panel"] button')).map((b) => b.getAttribute("data-testid")))
+      .toEqual(["m-task-cancel"]);
     await h.click("m-task-cancel");
+    // Choosing it closes the menu and asks; nothing is sent until the passkey.
+    expect(h.q("m-task-more-panel")).toBeNull();
     expect(h.posts).toEqual([]);
     expect(h.q("m-task-ask")!.textContent).toMatch(/cannot be resumed/);
     // The passkey refused (Face ID cancelled): nothing is cancelled.
@@ -472,6 +483,7 @@ describe("task verbs (P-5)", () => {
     await h.click("m-task-confirm");
     expect(h.posts.map((p) => p.path)).toEqual([`/m/api/tasks/${TASK}/cancel/options`]);
     expect(h.q("m-task-note")!.textContent).toMatch(/The task goes on/);
+    await h.click("m-task-more");
     await h.click("m-task-cancel");
     h.gets[`/m/api/tasks/${TASK}`] = h.ok({ task: task("cancelled") });
     await h.click("m-task-confirm");
@@ -484,7 +496,7 @@ describe("task verbs (P-5)", () => {
 
   it("nothing for a task that has ended; offline, every verb is off", async () => {
     const view = taskControlsView({ state: "running" } as TaskView, { confirming: null, busy: false, note: "", online: false,
-      ask: () => {}, confirm: () => {}, back: () => {} });
+      ask: () => {}, confirm: () => {}, back: () => {}, menu: { open: true, toggle: () => {} } });
     expect((view.querySelector('[data-testid="m-task-cancel"]') as HTMLButtonElement).disabled).toBe(true);
     expect(view.querySelector('[data-testid="m-task-offline"]')).not.toBeNull();
     const h = harness();

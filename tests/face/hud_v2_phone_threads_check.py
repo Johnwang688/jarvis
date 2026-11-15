@@ -47,6 +47,14 @@ HOSTILE = '<img src=x onerror="window.__pwned=7"><b>bold</b>'
 T_NEEDS, T_WORK, T_IDLE, T_FAILED, T_ARCHIVED = "a0000001", "a0000002", "a0000003", "a0000004", "a0000009"
 K_RUN, K_BLOCKED = "b0000001", "b0000002"
 PROJECT = "c0000001"
+CMD = "npm test"
+DETAIL = {
+    "card": {"req_id": "r1", "tool": "Bash", "args": {"command": CMD}, "command": CMD, "reason": "runs the tests", "layer": "reviewer",
+             "origin": "chat x", "headline": "Run the test suite", "asked_at": ago(3) if False else "2026-11-15T10:00:00+00:00",
+             "timeout_s": 600, "allowlistable": True, "summary": "Runs the project's tests.", "summary_state": "ready"},
+    "private": False, "withheld": False, "secure": {"ok": True, "failed": None, "label": "", "reason": ""},
+    "can": {"deny": True, "allow": True, "always": True}, "why": "",
+}
 
 
 def ago(minutes: int) -> str:
@@ -101,11 +109,13 @@ def run(browser, check, until, shots=None):
     from jarvis.v2.remote_listener import SECURITY_HEADERS
     state = world()
     seen: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def api(route):
         request = route.request
         path = request.url.split(HOST, 1)[1].split("?", 1)[0]
         seen.append(path)
+        calls.append((request.method, path))
         if request.method == "POST":
             state["answers"].append((path, request.post_data))
             return route.fulfill(status=200, json={"note": "Sent."})
@@ -119,6 +129,21 @@ def run(browser, check, until, shots=None):
             return route.fulfill(json=state["working"])
         if path == "/m/api/tasks":
             return route.fulfill(json={"tasks": state["tasks"], "more": state.get("tasks_more", False)})
+        if path == "/m/api/review":
+            return route.fulfill(json=state.get("review", {"open": 0}))
+        if path == "/m/api/projects":
+            return route.fulfill(json={"projects": [{"id": PROJECT, "name": "Calc"}]})
+        if path == "/m/api/threads":
+            return route.fulfill(json={"threads": [{"id": T_IDLE, "project_id": PROJECT, "title": "Notes", "provider": "claude",
+                                                    "updated": ago(90), "running": False, "turns": 2}]})
+        if path == "/m/api/inbox/appr%3Ar1/detail":
+            return route.fulfill(json=DETAIL)
+        if (m := re.fullmatch(r"/m/api/threads/([a-z0-9]+)/log", path)):
+            return route.fulfill(json={"rows": [{"seq": 1, "role": "Claude", "text": "Hello from the log", "at": None, "marks": []}],
+                                       "next": 2, "older": False, "thread": {"id": m.group(1), "title": "A chat", "project_id": PROJECT}})
+        if (m := re.fullmatch(r"/m/api/tasks/([a-z0-9]+)", path)):
+            found = [t for t in state["tasks"] if t["id"] == m.group(1)]
+            return route.fulfill(json={"task": found[0]}) if found else route.fulfill(status=404, json={"error": "not found"})
         if path == "/m/api/events":
             return route.fulfill(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-store"},
                                  body="retry: 600000\n: hello\n\n")
@@ -370,11 +395,143 @@ def run(browser, check, until, shots=None):
             check(f"PX-3b no CSP violation or script error {tag}", not problems, str(problems))
         finally:
             ctx.close()
+
+    # -- PX-4: scroll memory, back, the sheet (no browser-history entries), the sheet and the ⋯ menus, at 375 and 390 -------------------
+    shots4 = os.environ.get("JARVIS_PX4_SHOTS")
+
+    def shot4(page, name):
+        if shots4:
+            page.screenshot(path=str(Path(shots4) / f"{name}.png"))
+
+    review = {"v": 1, "quiet": {"enabled": True, "now": False, "start": None, "end": None},
+              "summary": {"approvals": 0, "questions": 1, "decisions": 0, "blocked": 0, "proposals": 0, "live": 0}, "live": [],
+              "overnight": [{"row": row("q:" + T_NEEDS + ":9", "question", 2, "Which branch?", {"text": "Which branch?", "options": []},
+                                        thread_id=T_NEEDS),
+                             "section": "overnight", "place": "chat:" + T_NEEDS, "approve": False, "leave": False, "why": "", "tag": None}],
+              "before": [], "fyi": {"count": 0}, "more": 0, "open": 5, "limits": {"approve": 10, "leave": 25},
+              "projects": [{"id": PROJECT, "name": "Calc"}],
+              "places": [{"key": "chat:" + T_NEEDS, "kind": "chat", "id": T_NEEDS, "project_id": PROJECT, "title": "Fix the build"}],
+              "group": {"ok": True, "why": ""}, "opens_here": False}
+    for width in (375, 390):
+        state.update(world())
+        state["rows"] = state["rows"] + [row(f"q:f{i:02d}", "question", 4, f"Filler question {i}", {"text": "Which?", "options": []},
+                                              thread_id=f"e{i:07x}") for i in range(14)]
+        state["review"] = review
+        ctx, page, problems = open_page(width, 844)
+        tid = lambda i: page.locator(f'[data-testid="{i}"]')  # noqa: E731
+        tag = f"@{width}"
+        scroll = lambda: page.evaluate("document.querySelector('[data-testid=m-main]').scrollTop")  # noqa: E731
+        try:
+            until(lambda: tid("m-review-open").count() == 1 and tid("m-inbox-row").count() >= 3, timeout=10)
+            line = tid("m-review-open")
+            check(f"PX-4 the morning review is a line: 'Morning review · 5 left overnight', 48 px, no Review tab {tag}",
+                  line.inner_text().replace("\n", "") == "Morning review · 5 left overnightOpen"
+                  and line.bounding_box()["height"] >= 47.5 and not tid("m-tab-review").is_visible(), line.inner_text())
+            shot4(page, f"review-line-{width}")
+            tid("m-menu").click()
+            until(lambda: tid("m-menu-panel").count() == 1)
+            box = tid("m-menu-panel").bounding_box()
+            rows = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-menu-panel] > *')).map(e => [e.getBoundingClientRect().height, e.dataset.testid || e.dataset.menuItem])")
+            check(f"PX-4 the ⋯ menu is inside the screen, with 48 px rows, Sign out last {tag}",
+                  box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5 and all(h >= 47.5 for h, _ in rows) and rows[-1][1] == "m-signout", f"{box} {rows}")
+            shot4(page, f"menu-{width}")
+            page.keyboard.press("Escape")
+            until(lambda: tid("m-menu-panel").count() == 0)
+
+            # Scroll the list, open a chat from a card low in it: no id in the address, no history entry.
+            target = '[data-key="orphan:e0000009"] [data-testid="m-thread-open"]'
+            page.evaluate("document.querySelector('[data-key=\"orphan:e0000009\"]').scrollIntoView({block: 'center'})")
+            before = scroll()
+            hist0 = page.evaluate("history.length")
+            check(f"PX-4 the list is long enough to scroll {tag}", before > 100, str(before))
+            page.locator(target).click()
+            until(lambda: tid("m-transcript").count() == 1)
+            check(f"PX-4 opening a chat makes no history entry and no id reaches the address {tag}",
+                  page.url == f"https://{HOST}/m/" and page.evaluate("history.length") == hist0 and "e0000009" not in page.url,
+                  f"{page.url} {page.evaluate('history.length')} vs {hist0}")
+            check(f"PX-4 the back button says where it goes {tag}", tid("m-back").inner_text() == "‹ Inbox")
+            # The in-app back works with no swipe: the list as it was, the row focused.
+            tid("m-back").click()
+            until(lambda: tid("m-inbox").count() == 1)
+            check(f"PX-4 back: the Inbox is as it was left, scroll kept {tag}", abs(scroll() - before) <= 1, f"{before} -> {scroll()}")
+            check(f"PX-4 back: the row it was opened from has the focus {tag}",
+                  page.evaluate("document.activeElement.closest('[data-key]')?.dataset.key") == "orphan:e0000009")
+            check(f"PX-4 the in-app back left the history and the address alone {tag}",
+                  page.evaluate("history.length") == hist0 and page.url == f"https://{HOST}/m/")
+            # Again, to the same row: the scroll and the row are remembered every time.
+            page.locator(target).click()
+            until(lambda: tid("m-transcript").count() == 1)
+            tid("m-back").click()
+            until(lambda: tid("m-inbox").count() == 1)
+            check(f"PX-4 back again: the Inbox, scroll kept, the address unchanged {tag}",
+                  abs(scroll() - before) <= 1 and page.url == f"https://{HOST}/m/", f"{before} -> {scroll()} {page.url}")
+
+            # Inbox -> chat -> tap Chats -> open a chat from that list: back goes to the Chats list, not the Inbox.
+            page.locator(target).click()
+            until(lambda: tid("m-transcript").count() == 1)
+            tid("m-tab-chats").click()
+            until(lambda: tid("m-chat").count() == 1)
+            tid("m-chat").click()
+            until(lambda: tid("m-transcript").count() == 1)
+            check(f"PX-4 a chat opened from the Chats list says and goes back to Chats, not to the earlier Inbox origin {tag}",
+                  tid("m-back").inner_text() == "‹ Chats")
+            tid("m-back").click()
+            until(lambda: tid("m-chat").count() == 1 and tid("m-transcript").count() == 0)
+            check(f"PX-4 back landed on the Chats list {tag}", tid("m-inbox").count() == 0 and tid("m-chat").count() == 1)
+            tid("m-tab-inbox").click()
+            until(lambda: tid("m-inbox").count() == 1)
+
+            # The approval sheet over the list: the list keeps its scroll; the safety gap holds on the sheet.
+            page.evaluate("document.querySelector('[data-testid=m-main]').scrollTop = 0")
+            page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
+            until(lambda: tid("m-sheet").count() == 1 and tid("approval-allow").count() == 1)
+            # Read once the card has its body (the sheet grows from the bottom edge as it loads), both boxes in one read.
+            until(lambda: page.locator(".m-card-body").inner_text() not in ("", "Loading the card…"), timeout=8)
+            gap = lambda: page.evaluate("""() => { const d = document.querySelector('[data-testid=approval-deny]'),
+                a = document.querySelector('[data-testid=approval-allow]');
+                return d && a ? a.getBoundingClientRect().top - d.getBoundingClientRect().bottom : null; }""")  # noqa: E731
+            until(lambda: (gap() or 0) > 0, timeout=4)
+            check(f"PX-4 sheet over the list: AUTHORIZE is more than 100 px below DENY {tag}", (gap() or 0) > 100, str(gap()))
+            check(f"PX-4 sheet over the list: no history entry, the list still in the page {tag}",
+                  page.evaluate("history.length") == hist0 and tid("m-inbox").count() == 1)
+            shot4(page, f"sheet-{width}")
+            page.mouse.click(width / 2, 30)
+            until(lambda: tid("m-sheet").count() == 0)
+            check(f"PX-4 a tap on the dim area closes the sheet; the focus is back on the row's button {tag}",
+                  page.evaluate("document.activeElement?.dataset?.testid") == "m-item-review")
+            page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
+            until(lambda: tid("m-sheet").count() == 1)
+            tid("m-back").click()
+            until(lambda: tid("m-sheet").count() == 0)
+            check(f"PX-4 the sheet's back closes it at once, the list kept {tag}",
+                  tid("m-inbox").count() == 1 and page.evaluate("history.length") == hist0)
+
+            # A task page, its ⋯ open: Cancel is the only row.
+            tid("m-chip-tasks").click()
+            until(lambda: tid("m-task").count() == 2)
+            page.locator(f'[data-testid="m-task"][data-id="{K_RUN}"]').click()
+            until(lambda: tid("m-task-view").count() == 1 and tid("m-task-more").count() == 1)
+            tid("m-task-more").click()
+            until(lambda: tid("m-task-cancel").count() == 1)
+            box = tid("m-task-more-panel").bounding_box()
+            check(f"PX-4 the task page's ⋯ opens inside the screen over its header, Cancel the only row {tag}",
+                  box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5 and page.locator('[data-testid="m-task-more-panel"] button').count() == 1,
+                  str(box))
+            shot4(page, f"task-menu-{width}")
+            check(f"PX-4 no CSP violation, no page error {tag}", not problems, str(problems))
+        finally:
+            ctx.close()
     seen_paths = sorted(set(seen))
-    allowed = {"/m/api/me", "/m/api/inbox", "/m/api/working", "/m/api/tasks", "/m/api/events", "/m/api/review"}
-    stray = [p for p in seen_paths if p.startswith("/m/api/") and p not in allowed and "/answer" not in p and "/detail" not in p]
-    check("PX-2 the app reads only today's routes plus WS-5a's /m/api/working", not stray,
+    # Exact routes, with their methods: reads are GETs of these patterns, and the only POST is an answer.
+    get_ok = [r"/m/api/(me|inbox|working|tasks|review|events|projects|threads)", r"/m/api/threads/[a-z0-9]+/log",
+              r"/m/api/tasks/[a-z0-9]+", r"/m/api/inbox/[^/]+/detail"]
+    post_ok = [r"/m/api/inbox/[^/]+/answer"]
+    stray = [(m, p) for m, p in sorted(set(calls)) if p.startswith("/m/api/") and not (
+        (m == "GET" and any(re.fullmatch(g, p) for g in get_ok)) or (m == "POST" and any(re.fullmatch(g, p) for g in post_ok)))]
+    check("PX-2 the app calls only today's routes, by method (GET reads; a POST only to an answer)", not stray,
           str(stray) + " " + json.dumps(seen_paths))
+    check("PX-4 no request went to any thread or task action route (only GET log and GET task)",
+          not [c for c in calls if re.search(r"/m/api/(threads|tasks)/[^/]+/", c[1]) and not (c[0] == "GET" and c[1].endswith("/log"))])
 
 
 def main():
