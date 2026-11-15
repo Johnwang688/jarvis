@@ -163,9 +163,9 @@ const TIME_TICK_MS = 60_000;
 /** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
 interface ThreadDone { id: string; busy: boolean; note: string; token: string | null; until: number }
 
-/** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
+/** `loaded`: the initial read finished (including a refusal); `hasRead`: a valid log was applied. */
 interface OpenThread {
-  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean;
+  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean; hasRead: boolean;
 }
 interface OpenTask {
   id: string;
@@ -313,8 +313,8 @@ export class PhoneApp {
       const got = await rawGet(path);
       const resource = path.split("?")[0];
       if (!this.stopped && /^\/m\/api\/(inbox|working|tasks|review|threads\/[^/]+\/log)$/.test(resource)) {
-        if (got.ok) this.failedReads.delete(resource);
-        else this.failedReads.add(resource);
+        // HTTP success proves reachability only. The loader clears freshness after applying valid data.
+        if (!got.ok) this.failedReads.add(resource);
       }
       this.report(reachOfGot(got), got.ok ? 200 : got.status);
       if (!this.stopped) this.renderReadWarnings();
@@ -535,6 +535,15 @@ export class PhoneApp {
 
   // -- reading ---------------------------------------------------------------------
 
+  /** A resource is fresh only once its response parsed and was applied, including empty lists/pages. */
+  private readApplied(resource: string, applied: boolean): void {
+    if (this.stopped) return;
+    const path = `/m/api/${resource}`;
+    if (applied) this.failedReads.delete(path);
+    else this.failedReads.add(path);
+    this.renderReadWarnings();
+  }
+
   /** One read: the body, or null when offline or signed out (`report` has already said which). */
   private async read(path: string): Promise<{ body: unknown } | { error: string; status: number } | null> {
     const got = await this.fetchJson(path);
@@ -560,10 +569,13 @@ export class PhoneApp {
       if (this.tab === "inbox") this.renderInbox();
       return;
     }
-    this.listError = null;
     const body = r.body as { rows?: unknown; more?: unknown };
-    this.inbox = parseInbox(body?.rows) ?? [];
+    const rows = parseInbox(body?.rows);
+    if (!rows) { this.readApplied("inbox", false); return; }
+    this.listError = null;
+    this.inbox = rows;
     this.inboxMore = body?.more === true;
+    this.readApplied("inbox", true);
     this.renderBadge();
     const card = this.card;
     if (card && !card.busy && !this.inbox.some((row) => row.id === card.rowId)) {
@@ -611,6 +623,7 @@ export class PhoneApp {
         this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
       }
     }
+    this.readApplied("working", parsed !== null);
     this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
     else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
@@ -638,7 +651,7 @@ export class PhoneApp {
     const r = await this.read("/m/api/review");
     if (!r || !("body" in r)) return;
     const report = parseReview(r.body);
-    if (!report) return;
+    if (!report) { this.readApplied("review", false); return; }
     this.review = report;
     // Under an open confirmation, a re-read that drops or changes any
     // confirmed item closes it: nothing is approved but the set the owner
@@ -646,6 +659,7 @@ export class PhoneApp {
     this.checkConfirmed(report);
     // A re-read unticks whatever left the review.
     this.reviewSel = keptSelection(report, this.reviewSel);
+    this.readApplied("review", true);
     const first = this.reviewFirst;
     this.reviewFirst = false;
     this.renderTabs();
@@ -666,6 +680,7 @@ export class PhoneApp {
     const report = r && "body" in r ? parseReview(r.body) : null;
     if (this.stopped) return;
     if (report) this.review = report;
+    if (r && "body" in r) this.readApplied("review", report !== null);
     // Opened from a notification: nothing is ticked (review of #329, MED 2).
     this.resetReviewSelection();
     this.renderTabs();
@@ -1651,15 +1666,16 @@ export class PhoneApp {
     this.tab = "chats";
     this.sheet = null;
     this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null,
-      loaded: false };
+      loaded: false, hasRead: false };
     this.render();
     const r = await this.read(`/m/api/threads/${id}/log`);
     if (!r || this.thread?.id !== id) return;
     if (!("body" in r)) { this.threadGone(r.error); return; }
     const page = parseLog(r.body);
-    if (!page) return;
+    if (!page) { this.readApplied(`threads/${id}/log`, false); return; }
     this.thread = { id, meta: page.thread ?? this.thread.meta, rows: page.rows, next: page.next, older: page.older, list: null,
-      loaded: true };
+      loaded: true, hasRead: true };
+    this.readApplied(`threads/${id}/log`, true);
     this.render();
     this.scrollToEnd();
   }
@@ -1687,14 +1703,16 @@ export class PhoneApp {
           const r = await this.read(`/m/api/threads/${open.id}/log?after=${open.next}`);
           if (!r || !("body" in r) || this.thread !== open) return;
           const page = parseLog(r.body);
-          if (!page) return;
+          if (!page) { this.readApplied(`threads/${open.id}/log`, false); return; }
           open.loaded = true;
+          open.hasRead = true;
           const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
           const fresh = page.rows.filter((row) => row.seq > last);
           open.next = Math.max(open.next, page.next);
           if (page.thread) { open.meta = page.thread; this.renderOrb(); }
           more = page.more;
           if (fresh.length) this.appendRows(open, fresh);
+          this.readApplied(`threads/${open.id}/log`, true);
         }
       } while (this.logAgain);
     } finally {
@@ -1717,9 +1735,15 @@ export class PhoneApp {
 
   private applyTasks(r: { body: unknown } | { error: string; status: number } | null): void {
     if (this.stopped || !r || !("body" in r)) return;
+    // parseTasks tolerates absent lists for other callers; a refresh must carry an actual list.
+    if (!Array.isArray((r.body as { tasks?: unknown } | null)?.tasks)) {
+      this.readApplied("tasks", false);
+      return;
+    }
     this.tasks = parseTasks(r.body);
-    this.renderOrb();
     this.tasksMore = (r.body as { more?: unknown } | null)?.more === true;
+    this.readApplied("tasks", true);
+    this.renderOrb();
     if (this.tab === "inbox" && !this.card) this.renderInbox();
     else if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
   }
@@ -1939,7 +1963,7 @@ export class PhoneApp {
     if (this.tab === "review") resources.push(["review", "Morning review", this.review !== null]);
     if (this.tab === "tasks" && !this.task && !this.sheet) resources.push(["tasks", "Tasks", this.tasks !== null]);
     if (this.tab === "chats" && this.thread) resources.push(
-      [`threads/${this.thread.id}/log`, "Chat log", this.thread.loaded], ["inbox", "Inbox", this.inbox !== null]);
+      [`threads/${this.thread.id}/log`, "Chat log", this.thread.hasRead], ["inbox", "Inbox", this.inbox !== null]);
     const warnings = resources.filter(([resource]) => this.failedReads.has(`/m/api/${resource}`))
       .map(([resource, label, loaded]) => {
         const note = el("p", "m-error m-resource-warning",
