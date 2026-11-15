@@ -53,7 +53,7 @@ function actions(over: Partial<ReviewActions> = {}): ReviewActions {
     jump: none, ...over };
 }
 
-describe("the phone's Review tab (mobile/review.ts)", () => {
+describe("the phone's Morning review (mobile/review.ts)", () => {
   it("names each checkbox by its item for VoiceOver, not only Select (M13 of the phone audit)", () => {
     const view = reviewView(state(), actions(), null);
     const boxes = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]'));
@@ -157,31 +157,33 @@ function harness(review: Record<string, unknown>) {
 }
 
 describe("the phone app's review (MR-11, MR-12)", () => {
-  it("opens on the Review tab when the morning push was the last one, else on the Inbox", async () => {
+  it("opens Morning review when the morning push was the last one, else on the Inbox", async () => {
     const opens = harness(report({ opens_here: true }));
     opens.app.start();
     await opens.settle();
     expect(opens.app.tab).toBe("review");
-    const tab = (h: { root: HTMLElement }) => h.root.querySelector<HTMLButtonElement>('[data-testid="m-tab-review"]')!;
-    expect([tab(opens).hidden, tab(opens).disabled]).toEqual([false, false]);
+    const tab = (h: { root: HTMLElement }) => h.root.querySelector<HTMLButtonElement>('[data-testid="m-tab-review"]');
+    expect(tab(opens)).toBeNull();
+    expect(opens.root.querySelector('[data-testid="m-review"]')).not.toBeNull();
     const not = harness(report({ opens_here: false }));
     not.app.start();
     await not.settle();
     expect(not.app.tab).toBe("inbox");
-    expect([tab(not).hidden, tab(not).disabled]).toEqual([false, false]);
+    expect(tab(not)).toBeNull();
+    expect(not.root.querySelector('[data-testid="m-review-open"]')).not.toBeNull();
     const night = harness(report({ quiet: { enabled: true, now: true, start: null, end: null } }));
     night.app.start();
     await night.settle();
     // PX-4: a deferred approval still waits (the report has them), so the review stays reachable through the
-    // tab and the Inbox's line even in the quiet hours; it was visible and disabled, a dead end.
-    expect([tab(night).hidden, tab(night).disabled]).toEqual([false, false]);
+    // Inbox line even in the quiet hours; it was visible and disabled, a dead end.
+    expect(tab(night)).toBeNull();
     expect(night.root.querySelector('[data-testid="m-review-open"]')).not.toBeNull();
     night.root.querySelector<HTMLButtonElement>('[data-testid="m-review-open"]')!.click();
     await night.settle();
     expect(night.app.tab).toBe("review");
     expect(night.root.querySelector('[data-testid="m-review"]')).not.toBeNull();
     expect(Array.from(night.root.querySelectorAll("nav.tabs button")).map((b) => b.getAttribute("data-testid")))
-      .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats"]);
+      .toEqual(["m-tab-inbox", "m-tab-chats", "m-tab-settings"]);
   });
 
   it("tick 2 of 3, confirm: Face ID once (locked), then exactly those ids and tags with one op token", async () => {
@@ -309,14 +311,14 @@ describe("the review of #329's fixes, on the phone", () => {
     expect(h.posts).toEqual([]);
   });
 
-  it("MED 2: entering the Review tab, or a notification's tap, starts with nothing ticked", async () => {
+  it("MED 2: entering Morning review, or a notification's tap, starts with nothing ticked", async () => {
     const h = harness(report({ opens_here: true }));
     h.app.start();
     await h.settle();
     await h.click('[data-testid="m-review-tick"][data-id="defer:a"]');
     expect(h.app.reviewSel.size).toBe(1);
     await h.click('[data-testid="m-tab-inbox"]');
-    await h.click('[data-testid="m-tab-review"]');
+    await h.click('[data-testid="m-review-open"]');
     expect(h.app.reviewSel.size).toBe(0);
     expect(Array.from(h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]')).some((b) => b.checked)).toBe(false);
     await h.click('[data-testid="m-review-tick"][data-id="defer:b"]');

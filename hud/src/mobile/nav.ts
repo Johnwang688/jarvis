@@ -13,6 +13,73 @@ import { el } from "./views";
 import { oneLine } from "../lib/inbox";
 import "./nav.css";
 
+/** A destructive confirmation. Focus starts on the dialog, never on its destructive choice. */
+export function signOutSheet(host: HTMLElement, confirm: () => void, closed: () => void,
+  opener: HTMLElement | null): { close: () => void } {
+  const background = [...host.children].filter((n): n is HTMLElement => n instanceof HTMLElement);
+  const inert = background.map((node) => node.hasAttribute("inert"));
+  background.forEach((node) => node.setAttribute("inert", ""));
+  const overlay = el("div", "m-actsheet-host");
+  const dim = el("div", "m-sheet-dim");
+  dim.dataset.testid = "m-signout-dim";
+  const sheet = el("div", "m-actsheet");
+  sheet.dataset.testid = "m-signout-sheet";
+  sheet.setAttribute("role", "alertdialog");
+  sheet.setAttribute("aria-modal", "true");
+  sheet.setAttribute("aria-labelledby", "m-signout-title");
+  sheet.setAttribute("aria-describedby", "m-signout-description");
+  sheet.tabIndex = -1;
+  const group = el("div", "m-actsheet-group");
+  const message = el("div", "m-actsheet-message");
+  const title = el("h2", "", "Sign out of Jarvis on this phone?");
+  title.id = "m-signout-title";
+  const description = el("p", "", "Notifications stop and gated actions need a new sign-in with the passkey.");
+  description.id = "m-signout-description";
+  message.append(title, description);
+  const accept = el("button", "tap m-actsheet-button m-danger", "Sign out");
+  accept.type = "button";
+  accept.dataset.testid = "m-signout-confirm";
+  const cancelGroup = el("div", "m-actsheet-group");
+  const cancel = el("button", "tap m-actsheet-button m-actsheet-cancel", "Cancel");
+  cancel.type = "button";
+  cancel.dataset.testid = "m-signout-cancel";
+  let open = true;
+  const close = () => {
+    if (!open) return;
+    open = false;
+    document.removeEventListener("keydown", keys, true);
+    document.removeEventListener("focusin", focus, true);
+    overlay.remove();
+    background.forEach((node, i) => { if (!inert[i]) node.removeAttribute("inert"); });
+    closed();
+    const target = opener?.isConnected ? opener : host.querySelector<HTMLElement>('[data-testid="m-signout"]');
+    target?.focus({ preventScroll: true });
+  };
+  const keys = (event: KeyboardEvent) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); close(); }
+    if (event.key === "Tab") {
+      if (event.shiftKey && (document.activeElement === accept || document.activeElement === sheet)) {
+        event.preventDefault(); cancel.focus();
+      } else if (!event.shiftKey && (document.activeElement === cancel || document.activeElement === sheet)) {
+        event.preventDefault(); accept.focus();
+      }
+    }
+  };
+  const focus = (event: FocusEvent) => { if (!sheet.contains(event.target as Node)) sheet.focus(); };
+  dim.addEventListener("click", close);
+  cancel.addEventListener("click", close);
+  accept.addEventListener("click", () => { close(); confirm(); });
+  group.append(message, accept);
+  cancelGroup.append(cancel);
+  sheet.append(group, cancelGroup);
+  overlay.append(dim, sheet);
+  host.append(overlay);
+  document.addEventListener("keydown", keys, true);
+  document.addEventListener("focusin", focus, true);
+  sheet.focus();
+  return { close };
+}
+
 // -- scroll memory ---------------------------------------------------------------------
 
 /** Where a view's scroll stood, and the row the owner left it from, per view. */

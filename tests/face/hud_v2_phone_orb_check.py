@@ -111,9 +111,9 @@ def run(browser, check):
                 check(f"RD-1 no header more button at {width}", page.locator(".top .m-more").count() == 0)
                 pill.click()
                 panel = page.get_by_test_id("m-menu-panel")
-                check(f"RD-1 all four former menu rows in one tap at {width}",
+                check(f"RD-1 two pill rows in one tap at {width}",
                       all(panel.get_by_test_id(testid).is_visible() for testid in
-                          ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]))
+                          ["m-lock-now", "m-menu-settings"]))
                 check(f"RD-1 background inert behind popover at {width}",
                       page.get_by_test_id("m-main").get_attribute("inert") is not None
                       and brand.get_attribute("inert") is not None)

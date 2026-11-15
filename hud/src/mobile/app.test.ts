@@ -439,7 +439,7 @@ describe("RD-5 project refreshes", () => {
 });
 
 describe("the phone app: live, offline and signed out (P-3)", () => {
-  it("keeps Notifications, Last read, Sign out and Lock now within two taps of the header pill", async () => {
+  it("reaches Lock now and Settings from the header pill, with the remaining rows in Settings", async () => {
     const h = harness();
     h.app.start();
     await h.settle();
@@ -449,7 +449,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(top.querySelectorAll("button")).toHaveLength(2); // brand and pill
     pill.click(); // tap one; every action/info row is now reachable
     const panel = top.querySelector('[data-testid="m-menu-panel"]')!;
-    for (const id of ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]) {
+    for (const id of ["m-lock-now", "m-menu-settings"]) {
       expect(panel.querySelector(`[data-testid="${id}"]`), id).not.toBeNull();
     }
     expect(pill.getAttribute("aria-expanded")).toBe("true");
@@ -458,6 +458,10 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(top.querySelector('[data-testid="m-menu-panel"]')).toBeNull();
     expect(document.activeElement).toBe(pill);
     expect(h.root.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+    h.app.show("settings");
+    for (const id of ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]) {
+      expect(h.root.querySelector(`[data-testid="${id}"]`), id).not.toBeNull();
+    }
     h.app.stop();
   });
 
@@ -532,7 +536,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     h.streams[0].send({ kind: "inbox_changed", data: { ids: ["appr:r9"], reason: "approval_requested" } });
     await h.settle();
     expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
-    expect(h.root.querySelector('[data-testid="m-tab-inbox"]')!.textContent).toBe("Inbox · 1");
+    expect(h.root.querySelector('[data-testid="m-tab-inbox"]')!.getAttribute("aria-label")).toBe("Inbox, 1 need you");
     // P-4: an approval row opens its answering card; nothing answers from the row.
     expect(h.root.querySelector('[data-testid="m-item-review"]')!.textContent).toBe("Review");
     expect(h.root.querySelector('[data-testid="m-desk-only"]')).toBeNull();

@@ -1,4 +1,4 @@
-"""The phone's Review tab (MR-2 to MR-5, MR-11, MR-12; docs/plans/2026-10-28-
+"""The phone's Morning review (MR-2 to MR-5, MR-11, MR-12; docs/plans/2026-10-28-
 morning-review.md), in a real headless Chromium at an iPhone viewport.
 
 A mock mobile server: the built `mobile.html` and its assets from `hud/dist`,
@@ -10,7 +10,7 @@ ID.
 
 What it pins:
   - a launch (a notification's tap opens `/m/#inbox`) with `opens_here`
-    opens the Review tab; without it, the Inbox;
+    opens the Morning review; without it, the Inbox;
   - no box is ticked at first; there is no select-all;
   - tick 2 of 3: the confirmation lists exactly those 2; with the phone
     believing itself unlocked while Jarvis is locked (WS-5c, a stale client),
@@ -195,7 +195,7 @@ class Mock:
 
 
 def run(browser, check, until):
-    print("\nThe phone's Review tab (MR): opening, ticks, one passkey for a set, 409, in place, chips")
+    print("\nThe phone's Morning review (MR): opening, ticks, one passkey for a set, 409, in place, chips")
     dist = REPO / "hud" / "dist"
     if not (dist / "mobile.html").is_file():
         print("  skip  hud/dist has no phone shell (run npm run build in hud/)")
@@ -226,7 +226,7 @@ def run(browser, check, until):
         page.wait_for_timeout(int(seconds * 1000))
 
     def selected_tab():
-        return page.evaluate("() => { const t = document.querySelector('[role=tab][aria-selected=true]');"
+        return page.evaluate("() => { const t = document.querySelector('nav.tabs [aria-current=page]');"
                              " return t && t.dataset.testid; }")
 
     def ticks():
@@ -248,17 +248,17 @@ def run(browser, check, until):
         check("PX-4: the review is a line in the Inbox, with its count, a 48 px target",
               line.is_visible() and "Morning review" in line.inner_text() and "left overnight" in line.inner_text()
               and line.bounding_box()["height"] >= 47.5, line.inner_text())
-        check("PX-4: the Review tab shows beside the Inbox while a deferred approval waits",
-              page.locator('[data-testid="m-tab-review"]').is_visible())
+        check("PX-4: Morning review stays reachable from the Inbox line while a deferred approval waits",
+              page.locator('[data-testid="m-tab-review"]').count() == 0 and page.locator('[data-testid="m-review-open"]').is_visible())
         tap('[data-testid="m-review-open"]')
         until(lambda: page.locator('[data-testid="m-review"]').count() == 1, timeout=6)
-        check("PX-4: the line opens the review", selected_tab() == "m-tab-review", str(selected_tab()))
-        # The notification's tap with opens_here: the Review tab.
+        check("PX-4: the line opens the review", selected_tab() == "m-tab-inbox" and page.locator('[data-testid="m-review"]').count() == 1, str(selected_tab()))
+        # The notification's tap with opens_here: the Morning review.
         mock.review = report(True)
         page.goto("about:blank")
         page.goto(ORIGIN + "/m/#inbox")
         until(lambda: page.locator('[data-testid="m-review"]').count() == 1, timeout=6)
-        check("a tap with opens_here opens the Review tab", selected_tab() == "m-tab-review", str(selected_tab()))
+        check("a tap with opens_here opens the Morning review", selected_tab() == "m-tab-inbox" and page.locator('[data-testid="m-review"]').count() == 1, str(selected_tab()))
         until(lambda: len(ticks()) == 4, timeout=4)
         check("no box is ticked at first", ticks() == [["defer:a", False], ["defer:b", False], ["defer:c", False],
                                                        ["defer:d", False]],
@@ -276,7 +276,7 @@ def run(browser, check, until):
             '[data-testid="m-review"] button, [data-testid="m-review"] .m-tick, [data-testid="m-review"] .m-choice')]
             .filter(e => e.offsetParent !== null).map(e => [e.dataset.testid || e.className, e.getBoundingClientRect().height])
             .filter(([, h]) => h < 47.5)""")
-        check("every tap target in the Review tab is at least 48 px tall", small == [], str(small[:5]))
+        check("every tap target in the Morning review is at least 48 px tall", small == [], str(small[:5]))
         # A withheld item ticked: Approve off, the footer names it.
         tap('[data-testid="m-review-tick"][data-id="defer:c"]')
         until(lambda: ticks()[2][1] is True, timeout=3)

@@ -5,8 +5,8 @@
 //           shown in full and say "Answer at the desk" (answering is P-4).
 //   Chats   projects, then each project's five most recent chats (the
 //           desktop sidebar's rule, lib/recentChats.ts), then a transcript.
-//   Tasks   running first, then blocked, then the rest; a task's state,
-//           plan, last report and diff, folded file by file.
+//   Settings   connection, unlock window, notifications and session.
+//   Tasks stays a filter in the Inbox, with its detail pages above it.
 //
 // **Live, and never stale while it says it is current.** The stream
 // (`/m/api/events`) carries ids only; each event makes the app read the
@@ -38,17 +38,17 @@
 // A proposal in the inbox takes Withdraw. Nothing is shown as sent before
 // its 2xx; offline, nothing is sent (no write queue).
 //
-// MR, the morning review (jarvis/v2/review.py, ./review.ts): a Review tab
-// beside the Inbox while the review has open items and the next night has
-// not begun. A launch or a notification's tap opens it when the last push
-// was the morning one (`opens_here`), else the Inbox. Questions and
+// MR, the morning review (jarvis/v2/review.py, ./review.ts): reached from
+// the Inbox line, including quiet hours while deferred approvals wait. A
+// launch or notification tap opens it when the last push was the morning one
+// (`opens_here`), else the Inbox. Questions and
 // decisions are answered in place; deferred approvals are ticked one by one
 // (never all at once) and approved as a set, ONE gated action naming exactly
 // that set, all or nothing; a limited phone (§4.1) gets the per-row Approve
 // and retry only.
 //
 // WS-5c, the unlock window (./unlock.ts): a lock pill in the header (it opens
-// its interim popover, whose first row is Lock now); Done and Undo in an open chat's ⋯
+// its two-row popover, Lock now and Settings); Done and Undo in an open chat's ⋯
 // menu. The pill is the phone's copy of the window: it never authorizes.
 //
 // P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
@@ -58,7 +58,7 @@
 
 import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
-import { lockIcon, unlockIcon } from "./icons";
+import { inboxIcon, chatsIcon, settingsIcon, lockIcon, unlockIcon } from "./icons";
 import { createProjectFolds } from "./folds";
 import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
@@ -83,13 +83,15 @@ import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
-import { deferralsOpen, reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
-import { ScrollMemory, byAttr, menuView, sheetView, trayView, type MenuItem } from "./nav";
+import { reviewLine, reviewView, type ReviewActions } from "./review";
+import { ScrollMemory, byAttr, menuView, sheetView, signOutSheet, trayView, type MenuItem } from "./nav";
 import { RowScroll } from "./rowScroll";
 import { staleAt } from "../lib/approvalSummary";
 import { ACTION_PROGRESS, actionBody, prRowOf, resultWords, type PrAction } from "../lib/prRow";
 
-export type Tab = "inbox" | "review" | "chats" | "tasks";
+import { settingsView, updateSettings, type SettingsState } from "./settings";
+
+export type Tab = "inbox" | "review" | "chats" | "tasks" | "settings";
 
 /** What the app needs of `EventSource` (a fake in the tests). */
 export interface StreamLike {
@@ -265,7 +267,7 @@ export class PhoneApp {
   private readonly brand: HTMLButtonElement;
   private readonly main: HTMLElement;
   private readonly rowScroll: RowScroll;
-  private readonly tabs: Record<"inbox" | "review" | "chats", HTMLButtonElement>;
+  private readonly tabs: Record<"inbox" | "chats" | "settings", HTMLButtonElement>;
   private inboxReader!: SerialReader;
   private workingReader!: SerialReader;
   private tasksReader!: SerialReader;
@@ -293,6 +295,8 @@ export class PhoneApp {
   /** The open chat's Needs-you tray folded to its bar by the owner. */
   trayFolded = false;
   private menuWrap: HTMLElement;
+  private signOutOverlay: { close: () => void } | null = null;
+  private lockNote = "";
   private readonly topBar: HTMLElement;
   private readonly tabBar: HTMLElement;
   private readonly sheetHost: HTMLElement;
@@ -340,7 +344,7 @@ export class PhoneApp {
       // Every answer Unlock gets came through the reporting `postJson`/`fetchJson` above. What is left is
       // the request that never answered within its bound: no response, so offline (amber).
       reached: (ok, status) => { if (!ok && status === 0) this.report("offline", 0); },
-      changed: () => this.renderPill(),
+      changed: () => { this.lockNote = ""; this.renderPill(); },
       // Opus L1: when local state cannot be trusted about the window, `me` decides the pill.
       reread: () => { if (!this.stopped) void this.probe(); },
     });
@@ -351,7 +355,7 @@ export class PhoneApp {
     const top = el("header", "top");
     this.brand = brandButton(() => this.deps.onBrand?.());
     top.append(this.brand);
-    // Interim until RD-2 Settings: all four header rows live in the pill's popover.
+    // The pill opens Lock now and Settings.
     // The pill remains the phone's copy of the unlock window, never authorization.
     this.pill = tap("Locked", () => this.toggleMenu(this.menuOpen === "app" ? null : "app"), "m-lock-pill", "m-lock-pill");
     this.pill.dataset.state = "locked";
@@ -367,14 +371,17 @@ export class PhoneApp {
     this.rowScroll = new RowScroll(this.main);
     this.main.dataset.testid = "m-main";
     const nav = el("nav", "tabs");
-    const make = (tab: "inbox" | "review" | "chats", label: string) => {
+    nav.setAttribute("aria-label", "Sections");
+    const make = (tab: "inbox" | "chats" | "settings", label: string, icon: () => SVGSVGElement) => {
       const b = tap(label, () => this.show(tab), "tab", "m-tab-" + tab);
-      b.setAttribute("role", "tab");
+      const glyph = el("span", "m-tab-icon");
+      glyph.append(icon());
+      b.replaceChildren(glyph, el("span", "m-tab-label", label));
       nav.append(b);
       return b;
     };
-    this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats") };
-    this.tabs.review.disabled = true;
+    this.tabs = { inbox: make("inbox", "Inbox", inboxIcon), chats: make("chats", "Chats", chatsIcon),
+      settings: make("settings", "Settings", settingsIcon) };
     this.sheetHost = el("div", "m-sheet-host");
     frame.append(top, this.banner, this.main, nav, this.sheetHost);
     this.topBar = top;
@@ -403,7 +410,7 @@ export class PhoneApp {
     };
     this.notify = new Notifications(deps.pushEnv ?? browserEnv, pushSend,
       () => {
-        if (this.menuOpen === "app" && !this.stopped) this.renderMenu();
+        if (this.tab === "settings" && !this.stopped) this.refreshNotifications();
         if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox();
       },
       () => { if (!this.stopped) void this.openFromNotification(); });
@@ -447,6 +454,7 @@ export class PhoneApp {
   }
 
   stop(): void {
+    this.signOutOverlay?.close();
     this.stopped = true;
     this.unsubscribeFolds();
     this.rowScroll.stop();
@@ -631,6 +639,7 @@ export class PhoneApp {
     const report = parseReview(r.body);
     if (!report) return;
     this.review = report;
+    this.refreshSettings();
     // Under an open confirmation, a re-read that drops or changes any
     // confirmed item closes it: nothing is approved but the set the owner
     // confirmed (review of #329, MED 1).
@@ -639,7 +648,6 @@ export class PhoneApp {
     this.reviewSel = keptSelection(report, this.reviewSel);
     const first = this.reviewFirst;
     this.reviewFirst = false;
-    this.renderTabs();
     if (first && report.opensHere && this.tab === "inbox" && !this.card) {
       this.show("review");
       return;
@@ -659,7 +667,6 @@ export class PhoneApp {
     if (report) this.review = report;
     // Opened from a notification: nothing is ticked (review of #329, MED 2).
     this.resetReviewSelection();
-    this.renderTabs();
     this.show(report?.opensHere ? "review" : "inbox");
   }
 
@@ -687,18 +694,6 @@ export class PhoneApp {
     this.reviewFlash = "Something you selected changed: nothing was approved. Look again, then confirm again.";
   }
 
-  private renderTabs(): void {
-    // M9a (phone audit): the Review tab keeps its slot, off while there is no review, so the
-    // tabs never move under the thumb (Inbox, Review, Chats: Tasks is a filter of the Inbox).
-    const shown = this.tab === "review" || reviewReachable(this.review);
-    this.tabs.review.disabled = !shown;
-    // PX-4: the Review tab shows only while a deferred approval waits (or the review is open); the Inbox's
-    // review line reaches every other review.
-    this.tabs.review.hidden = !(this.tab === "review" || deferralsOpen(this.review));
-    const n = shown ? this.review?.open ?? 0 : 0;
-    this.tabs.review.textContent = n ? `Review · ${n}` : "Review";
-    this.tabs.review.setAttribute("aria-label", shown ? (n ? `Review, ${n} waiting` : "Review") : "Review, nothing to review");
-  }
 
   /** One question, decision or proposal, answered in place; once sent it folds to a receipt where it stood. */
   async answerInReview(item: ReviewItem, body: Record<string, unknown>): Promise<void> {
@@ -1579,6 +1574,7 @@ export class PhoneApp {
       : r === "overtaken" ? "Lock now reached Jarvis, but this phone unlocked again since: the pill shows what Jarvis says now."
       : r === "unreached" ? "Lock now did not reach Jarvis: this phone may still be unlocked."
       : "Lock now was refused: this phone may still be unlocked.";
+    this.lockNote = this.flash;
     this.renderPill();
     if (this.tab === "inbox" && !this.card) this.render();
   }
@@ -1592,6 +1588,7 @@ export class PhoneApp {
       failStatus: this.failStatus, streamOpen: this.streamOpen && this.stream?.readyState === 1,
       everOpened: this.everOpened, firstOpenTimedOut: this.firstOpenTimedOut,
       secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
+    this.refreshSettings();
   }
 
   /** The lock pill: the phone's copy of the window (display only). */
@@ -1613,6 +1610,7 @@ export class PhoneApp {
     pill.setAttribute("aria-haspopup", "true");
     pill.setAttribute("aria-controls", "m-menu-panel");
     pill.setAttribute("aria-expanded", String(this.menuOpen === "app"));
+    this.refreshSettings();
   }
 
   async loadChats(): Promise<void> {
@@ -1933,6 +1931,9 @@ export class PhoneApp {
    * level per tap. The browser's own Back and swipe are not involved: no history entry is ever made.
    */
   goBack(): void {
+    if (this.signOutOverlay) { this.signOutOverlay.close(); return; }
+    if (this.menuOpen) { this.toggleMenu(null); return; }
+    if (this.tab === "review" && !this.card) { this.show("inbox"); return; }
     if (this.card) { this.closeCard(); return; }
     if (this.sheet) {
       if (this.sheet.kind === "chat") { this.sheet = null; this.render(); void this.loadChats(); } else this.show("tasks");
@@ -1967,17 +1968,18 @@ export class PhoneApp {
     }
   }
 
-  /** The pill's interim popover: Lock now (first, PX-5), Notifications, when Jarvis last answered, and Sign out (last). */
+  /** The pill's two-row popover: Lock now and Settings (§3.1). */
   private renderMenu(): void {
     const open = this.menuOpen === "app";
     const items: MenuItem[] = [];
     if (open) {
       // Always offered: the pill is only the phone's copy, so Lock now never waits on it.
       items.push({ id: "lock", testid: "m-lock-now", label: "Lock now", onSelect: () => void this.lockNow() });
-      items.push({ id: "notifications", node: this.notify.view() });
-      items.push({ id: "lastread", info: true,
-        label: this.lastRead === null ? "Not read yet" : `Last read ${agoWords(this.lastRead, this.now())}` });
-      items.push({ id: "signout", testid: "m-signout", label: "Sign out", onSelect: () => void this.signOut() });
+      items.push({ id: "settings", testid: "m-menu-settings", label: "Settings", onSelect: () => {
+        this.show("settings");
+        this.main.querySelector<HTMLElement>('[data-testid="m-settings-unlock"]')?.closest<HTMLElement>("section")?.scrollIntoView?.({ block: "nearest" });
+        this.main.querySelector<HTMLElement>('[data-testid="m-lock-now"]')?.focus();
+      } });
     }
     const next = menuView({ id: "m-menu", label: "Menu", items, open, toggle: (o) => this.toggleMenu(o ? "app" : null) });
     // Reuse the existing rows but discard the old ⋯ opener. The stable pill is the sole opener.
@@ -2005,7 +2007,8 @@ export class PhoneApp {
   }
 
   private menuInert(): void {
-    const open = this.menuOpen === "app";
+    const open = this.menuOpen === "app" || !!this.signOutOverlay;
+    if (this.signOutOverlay) this.topBar.setAttribute("inert", "");
     for (const node of [this.brand, this.main, this.tabBar, this.banner]) {
       if (open || this.card) node.setAttribute("inert", ""); else node.removeAttribute("inert");
     }
@@ -2013,6 +2016,7 @@ export class PhoneApp {
 
   /** The view the main area shows now, as a key: scroll is remembered per key (§3.1, D4). */
   private surfaceKey(): string {
+    if (this.tab === "settings") return "settings";
     if (this.tab === "review") return "review";
     if (this.tab === "inbox") return "inbox:" + (this.filter ?? "");
     if (this.tab === "chats") return this.sheet?.kind === "chat" ? "chat-sheet" : this.thread ? "thread:" + this.thread.id : "chats";
@@ -2042,6 +2046,7 @@ export class PhoneApp {
   // -- drawing ---------------------------------------------------------------------------
 
   show(tab: Tab): void {
+    this.signOutOverlay?.close();
     this.card = null;
     if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     // PX-2: Tasks is a filter of the list, not a tab. Asking for it (a task's back, a closed sheet) shows that list.
@@ -2066,7 +2071,7 @@ export class PhoneApp {
     } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : "")) {
       this.sheet = null;
     }
-    // Entering the Review tab: nothing ticked, nothing confirmed (review of #329, MED 2).
+    // Entering Morning review: nothing ticked, nothing confirmed (review of #329, MED 2).
     if (tab === "review" && this.tab !== "review") this.resetReviewSelection();
     this.tab = tab;
     this.render();
@@ -2075,9 +2080,57 @@ export class PhoneApp {
     if (tab === "chats" && !this.thread) void this.loadChats();
   }
 
+  private confirmSignOut(): void {
+    if (this.signOutOverlay) return;
+    this.signOutOverlay = signOutSheet(this.frame, () => void this.signOut(), () => {
+      this.signOutOverlay = null;
+      this.menuInert();
+    }, this.main.querySelector<HTMLElement>('[data-testid="m-signout"]'));
+  }
+
+  private settingsState(): SettingsState {
+    const word = this.brand.querySelector<HTMLElement>('[data-testid="m-conn"]');
+    const quiet = this.review?.quiet;
+    return {
+      connection: word?.textContent ?? "Connecting…", tone: word?.dataset.tone ?? "ok",
+      connectionState: word?.dataset.state ?? "connecting",
+      lastRead: this.lastRead === null ? "Not read yet" : absoluteWords(this.lastRead, this.now()),
+      security: this.secure ? this.secure.ok ? "Secure: full answers allowed" : `Limited: ${this.secure.label || "a check failed"}` : "Checking…",
+      limited: !!this.secure && !this.secure.ok,
+      unlock: pillLabel(this.unlock.mirror, this.now()), unlocked: this.unlock.mirror.open(), lockNote: this.lockNote,
+      quiet: quiet?.enabled === false ? "Quiet hours are off."
+        : `No pushes ${quiet?.start ?? "23:00"} to ${quiet?.end ?? "07:00"}. What waits is in the morning review.`,
+    };
+  }
+
+  private refreshSettings(): void {
+    if (this.tab !== "settings" || !this.main || !this.unlock) return;
+    const view = this.main.querySelector<HTMLElement>('[data-testid="m-settings"]');
+    if (view) updateSettings(view, this.settingsState());
+  }
+
+  private refreshNotifications(): void {
+    const old = this.main.querySelector<HTMLElement>('[data-testid="m-notify"]');
+    if (!old) return;
+    const focused = old.contains(document.activeElement);
+    const next = this.notify.view();
+    old.replaceWith(next);
+    if (focused) {
+      next.tabIndex = -1;
+      (next.querySelector<HTMLElement>("button") ?? next).focus();
+    }
+  }
+
   private renderBadge(): void {
+    this.refreshSettings();
     const n = this.inbox ? waitingCount(this.inbox) : 0;
-    this.tabs.inbox.textContent = n ? `Inbox · ${n}` : "Inbox";
+    const icon = this.tabs.inbox.querySelector(".m-tab-icon")!;
+    let badge = icon.querySelector<HTMLElement>(".m-tab-badge");
+    if (n) {
+      if (!badge) { badge = el("span", "m-tab-badge"); badge.setAttribute("aria-hidden", "true"); icon.append(badge); }
+      badge.textContent = String(n);
+    } else badge?.remove();
+    this.tabs.inbox.setAttribute("aria-label", n ? `Inbox, ${n} need you` : "Inbox");
   }
 
   /**
@@ -2248,10 +2301,10 @@ export class PhoneApp {
     const kept = this.focusedKey();
     for (const [tab, b] of Object.entries(this.tabs) as [Tab, HTMLButtonElement][]) {
       // A task's own pages belong to the Inbox (Tasks is a filter of it, not a tab).
-      b.setAttribute("aria-selected", String(tab === this.tab || (tab === "inbox" && this.tab === "tasks")));
+      const active = tab === this.tab || (tab === "inbox" && (this.tab === "tasks" || this.tab === "review"));
+      if (active) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     }
     this.renderBadge();
-    this.renderTabs();
     // A task page's ⋯ is open only while that page is; an open chat's likewise.
     if (this.menuOpen === "task" && !(this.tab === "tasks" && this.task)) this.menuOpen = null;
     if (this.menuOpen === "thread" && !(this.tab === "chats" && this.thread && !this.sheet)) this.menuOpen = null;
@@ -2347,7 +2400,15 @@ export class PhoneApp {
     if (this.drawnKey && !redraw) this.mem.save(this.drawnKey, this.main.scrollTop);
     const top = this.main.scrollTop;
     let view: HTMLElement;
-    if (this.tab === "review") {
+    if (this.tab === "settings") {
+      if (redraw && this.main.querySelector('[data-testid="m-settings"]')) {
+        this.refreshSettings();
+        return;
+      }
+      view = settingsView(this.settingsState(), this.notify.view(), {
+        lock: () => void this.lockNow(), signOut: () => this.confirmSignOut(),
+      });
+    } else if (this.tab === "review") {
       view = reviewView({
         report: this.review, selection: this.reviewSel, notes: this.notes, receipts: this.reviewReceipts,
         busy: this.answering, groupBusy: this.reviewBusy, confirming: this.reviewConfirming, flash: this.reviewFlash,
@@ -2356,6 +2417,7 @@ export class PhoneApp {
         unlocked: this.unlock.mirror.open(), tapAgain: this.tapAgain,
       }, { ...this.reviewActions(), expand: (row, open) => { this.opened.set(row.id, open); this.render(); } }, this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
         : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
+      view.prepend(tap("‹ Inbox", () => this.show("inbox"), "quiet", "m-review-back"));
     } else if (this.tab === "inbox") {
       const answers = this.inboxAnswers();
       const open = (row: InboxRow) => {
@@ -2379,8 +2441,8 @@ export class PhoneApp {
         },
         retry: () => { void this.loadInbox(); },
       }, this.slots, this.now(), tasksPanel, this.secure);
-      // PX-4 (D2): the morning review is a line at the head of the list's body; Notifications moved behind the ⋯.
-      const line = this.filter === null ? reviewLine(this.review, () => this.show("review")) : null;
+      // RD-2: Morning review stays reachable under every Inbox filter; Notifications lives in Settings.
+      const line = reviewLine(this.review, () => this.show("review"));
       if (line) {
         const first = view.querySelector(".m-band");
         if (first) first.before(line); else view.append(line);

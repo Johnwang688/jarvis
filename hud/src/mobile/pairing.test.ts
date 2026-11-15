@@ -155,12 +155,14 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     expect(document.querySelector("button.btn")!.textContent).toBe("Sign in with passkey");
     await tap();
     expect(screen()).toBe("app");
-    // RD-1: Sign out is behind the lock pill, last.
+    // RD-2: Sign out is last in Settings and takes a second confirming tap.
     expect(document.querySelector('[data-testid="m-signout"]')).toBeNull();
-    document.querySelector<HTMLButtonElement>('[data-testid="m-lock-pill"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-testid="m-tab-settings"]')!.click();
     const out = document.querySelector<HTMLButtonElement>('[data-testid="m-signout"]')!;
     expect(out.textContent).toBe("Sign out");
     out.click();
+    expect(document.querySelector('[data-testid="m-signout-sheet"]')).not.toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-testid="m-signout-confirm"]')!.click();
     await settle();
     expect(calls.map((c) => c.path).slice(-1)).toEqual(["/m/api/logout"]);
     expect(screen()).toBe("Jarvis");

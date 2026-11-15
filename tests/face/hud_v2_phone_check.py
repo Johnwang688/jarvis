@@ -603,12 +603,14 @@ def shell_checks(browser, check, until):
         print(f"  note  {len(violations)} CSP refusal(s) in the app: {sorted(set(violations))[:3]}")
         check("P-3 app: nothing the app draws needs more than C1's policy (inline styles, if any, are refused "
               "and dropped)", all(v.startswith("style-src") for v in violations), str(violations[:5]))
-        # PX-4: Sign out is behind the header's ⋯, last.
-        check("PX-4: Sign out is not on the page until the lock pill is opened",
+        # RD-2: Sign out is last in Settings and asks for confirmation.
+        check("PX-4: Sign out is not on the page until Settings is opened",
               page.locator('[data-testid="m-signout"]').count() == 0)
-        page.locator('[data-testid="m-lock-pill"]').click()
+        page.locator('[data-testid="m-tab-settings"]').click()
         until(lambda: page.locator('[data-testid="m-signout"]').count() == 1, timeout=4)
         page.locator('[data-testid="m-signout"]').click()
+        check("RD-2 Sign out row does not end the session", screen() == "app")
+        page.locator('[data-testid="m-signout-confirm"]').click()
         until(lambda: screen() == "Jarvis", timeout=8)
         check("P-2 shell: Sign out ends the session",
               page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401)
@@ -690,19 +692,23 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     bad, fields = answer_controls()
     check("P-3 Inbox: no answer control on the list itself (no Allow, Deny, Always, no input)",
           not bad and fields == 0, f"{bad} {fields}")
-    check("P-3 Inbox: the tab counts what waits", "Inbox · " in page.locator('[data-testid="m-tab-inbox"]').inner_text())
+    check("P-3 Inbox: the tab counts what waits", "need you" in page.locator('[data-testid="m-tab-inbox"]').get_attribute("aria-label") and page.locator(".m-tab-badge").count() == 1)
     check("P-3 app: every tap target is at least 48 px tall (Inbox)", not small_targets(), str(small_targets()))
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
-    check("PX-4 Inbox: Notifications is not on the list: it is behind the header's ⋯",
+    check("PX-4 Inbox: Notifications is not on the list: it is in Settings",
           page.locator('[data-testid="m-notify"]').count() == 0 and page.locator('[data-testid="m-lock-pill"]').is_visible()
           and 47.5 <= page.locator('[data-testid="m-lock-pill"]').bounding_box()["height"])
     page.locator('[data-testid="m-lock-pill"]').click()
-    until(lambda: page.locator('[data-testid="m-notify"]').count() == 1, timeout=4)
+    until(lambda: page.locator('[data-testid="m-menu-panel"]').count() == 1, timeout=4)
     items = page.evaluate("""Array.from(document.querySelectorAll('[data-testid="m-menu-panel"] > *'))
         .map(e => e.dataset.testid || e.dataset.menuItem)""")
-    check("PX-4/PX-5 menu: Lock now first, Notifications, when Jarvis last answered, then Sign out last",
-          items == ["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"], str(items))
+    check("PX-4/PX-5 menu: Lock now first, Settings last",
+          items == ["m-lock-now", "m-menu-settings"], str(items))
+    page.keyboard.press("Escape")
+    check("RD-2 pill Escape restores focus", page.evaluate("document.activeElement?.dataset?.testid") == "m-lock-pill")
+    page.locator('[data-testid="m-tab-settings"]').click()
+    until(lambda: page.locator('[data-testid="m-notify"]').count() == 1, timeout=4)
     note = page.locator('[data-testid="m-notify"]')
     # One compact row (2026-10-28); "count only, never what" is the "on" state's hint (notify.test.ts).
     check("P-6 Inbox: the notifications row offers them, off",
@@ -712,10 +718,7 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           page.locator('[data-testid="m-notify-button"]').inner_text() == "Turn on"
           and page.locator('[data-testid="m-notify-button"]').get_attribute("aria-label") == "Turn on notifications"
           and 44 <= note.bounding_box()["height"] <= 60, str(note.bounding_box()))
-    page.keyboard.press("Escape")
-    until(lambda: page.locator('[data-testid="m-menu-panel"]').count() == 0, timeout=4)
-    check("PX-4 menu: Escape closes it and the focus is back on the ⋯",
-          page.evaluate("document.activeElement?.dataset?.testid || ''") == "m-lock-pill")
+
     sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
         r.headers.get('content-type'), await r.text()])""")
     check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
