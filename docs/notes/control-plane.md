@@ -2376,9 +2376,13 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
 ## The working set (WS-1, 2026-11-14)
 
 The daemon half of "the Inbox is your working set of threads" (plan
-`docs/plans/2026-11-14-inbox-working-set-plan.md`, revision 2). No HUD yet
-(WS-2); the phone and the morning review are unchanged, and so is what
-`inbox.rows()` returns (it gained only an optional `failures=` list).
+`docs/plans/2026-11-14-inbox-working-set-plan.md`, revision 2). The HUD
+halves are in `docs/notes/hud-workspace.md` (WS-2, WS-3, WS-4); the phone
+and the morning review are unchanged, and so is what `inbox.rows()` returns
+(it gained only an optional `failures=` list). The owner's answers behind it
+(O-1 to O-4, the 3-day limit, unread and failed rows not holding a thread in,
+agents seeing membership) are summarised in hud-workspace.md, "Working set:
+owner decisions".
 
 - **Store.** `jarvis/v2/working.py` (SELF_PROTECTED) keeps
   `<data root>/inbox/working.json` (inside the protected inbox tree, and
@@ -2419,7 +2423,13 @@ The daemon half of "the Inbox is your working set of threads" (plan
   closed flag first, so no membership change follows it.
 - **Leaving.** The hourly sweep (first run 5 minutes after start) takes out
   threads idle past the limit (default 3 days, 1 to 30, `POST
-  /working/settings`). Done needs the `seq` the HUD drew (else 409 with the
+  /working/settings`; the limit is the one `idle_days` in `working.json`,
+  read at each sweep, saved before it takes effect, and a refused save
+  changes nothing; the daemon owns the bounds, so the HUD reads `min`/`max`
+  from `GET /working/settings` and treats a 400 as the daemon's sentence to
+  show). Unread and failed results do not hold a thread in past the limit
+  (owner, §9 Q2); only an IN-8 rank 1 to 4 row, a running turn or a pending
+  answer does. Done needs the `seq` the HUD drew (else 409 with the
   current entry), then writes `done_at`, `done_seq` and a random
   `done_token` in one step and marks read only the last turn it observed
   (`Activity.seen_thread(only_turn=)`), so a reply that finished since stays

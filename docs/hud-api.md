@@ -3833,7 +3833,9 @@ The rules are in `docs/notes/control-plane.md`, "The owner inbox routes"; the de
 
 The rules are in `docs/notes/control-plane.md`, "The working set (WS-1)"; the plan is
 `docs/plans/2026-11-14-inbox-working-set-plan.md`. Every route is owner-only (`403` otherwise),
-never on the phone's listener. No HUD view uses them yet (WS-2).
+never on the phone's listener. The HUD's sidebar section (WS-2, WS-3) uses `GET /working`, Done and
+Undo; Settings > Inbox (WS-4) uses `/working/settings`. Anything else on `/working` is `404` (a wrong
+method on a known path is `405`), and `503` when the daemon's working set is not running.
 
 - **`GET /working`** → `{entries, needs_you, count, pending}`.
   - `entries`: the chat threads in the working set, newest `last` first, each `{thread_id,
@@ -3856,9 +3858,14 @@ never on the phone's listener. No HUD view uses them yet (WS-2).
 - **`POST /working/{id}/undo`** `{token}`: the `token` Done returned, within `undo_s` seconds
   (the HUD's toast shows 5). `200 {thread_id, done: false, entry}`; `409 {error, entry}` for any
   other token, after the deadline, after the chat or its project was archived, restored or deleted, or
-  after a daemon restart.
-- **`GET /working/settings`** → `{idle_days, min: 1, max: 30, default: 3}`; **`POST
-  /working/settings`** `{idle_days}` (a whole number from 1 to 30, else `400`).
+  after a daemon restart. `400` for a bad id or token; `503` when the change could not be saved.
+- **`GET /working/settings`** → `{idle_days, min: 1, max: 30, default: 3}`: the idle limit in days
+  before a thread leaves on its own, with the bounds the daemon enforces (clients read `min`/`max`,
+  they do not hard-code them). **`POST /working/settings`** `{idle_days}`: only that key, a whole
+  number from `min` to `max`; `200` returns the settings as saved, `400 {error}` for any other value
+  or body (`idle_days must be a whole number from 1 to 30`, a boolean or `2.5` included), `503` when
+  it could not be saved (nothing changes). The limit is read each sweep, so it applies to every
+  thread from the next hourly sweep on. Settings > Inbox (WS-4) is the HUD's control.
 - An `entry` in a response is `{thread_id, in, since, last, seq, done_at, done_seq, reason}`
   (`reason`: `done`, `idle` or `archived` once out); never the token.
 - **`working_changed`** on `/events`: exactly `{"kind": "working_changed"}`, no ids or data. Read

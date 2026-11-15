@@ -67,6 +67,7 @@ import type { DevAttempt, PendingDev } from "./state/devservers";
 import { DevServerPrompts, type DevTarget } from "./components/DevServerPrompt";
 import { BrowserSettings } from "./components/BrowserSettings";
 import { PhoneSettings } from "./components/PhoneSettings";
+import { InboxSettings } from "./components/InboxSettings";
 import { cleanTitle } from "./lib/remote";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
@@ -5124,6 +5125,7 @@ export default function App() {
               <DecisionsLog route={state.route} /></> : null}
             {settingsSection === "Browser" ? <BrowserSettings blocked={blocked} /> : null}
             {settingsSection === "Phone" ? <PhoneSettings blocked={blocked} /> : null}
+            {settingsSection === "Inbox" ? <InboxSettings blocked={blocked} /> : null}
             {settingsSection === "Archive" ? (
               <ArchiveView embedded blocked={blocked}
                 version={lifecycle}

@@ -14,7 +14,11 @@ The world's `working` section (`state(mock)`):
   - `done_posts` / `undo_posts`: every Done and Undo that got through the
     owner test, as (thread id, body);
   - `done_reply`: thread id -> (status, body) to answer that Done with instead;
-  - `refused`: every request the owner test refused.
+  - `refused`: every request the owner test refused;
+  - `settings` (WS-4): what `GET /working/settings` serves (`idle_days, min, max,
+    default`); `settings_fail` / `settings_reply`: (status, sentence) to answer the
+    GET / the POST with instead; `settings_posts`: every POST body; a POST with a
+    value outside min..max (or not a whole number) is the daemon's 400.
 
 A Done with the entry's current `seq`, and no `why_not`, takes the entry out
 and publishes the daemon's `working_changed` (no ids, no data); its token is
@@ -34,7 +38,9 @@ except ImportError:  # run from tests/face
 def state(mock) -> dict:
     return mock.world.setdefault("working", {
         "entries": [], "needs_you": [], "count": 0, "pending": False, "fail": None, "reads": 0,
-        "done_posts": [], "undo_posts": [], "done_reply": {}, "undone": {}, "refused": 0})
+        "done_posts": [], "undo_posts": [], "done_reply": {}, "undone": {}, "refused": 0,
+        "settings": {"idle_days": 3, "min": 1, "max": 30, "default": 3}, "settings_fail": None,
+        "settings_reply": None, "settings_posts": [], "settings_reads": 0})
 
 
 def entry(thread_id: str, *, project_id: str = "p1", seq: int = 1, last: str = "2026-11-14T10:00:00+00:00",
@@ -65,6 +71,28 @@ def handle(h, mock, method: str, path: str) -> bool:
             return True
         h._json({"entries": s["entries"], "needs_you": s["needs_you"], "count": s["count"],
                  "pending": s["pending"]})
+        return True
+    if parts == ["working", "settings"] and method in ("GET", "POST"):
+        if method == "GET":
+            s["settings_reads"] += 1
+            if s["settings_fail"]:
+                h._err(*s["settings_fail"])
+            else:
+                h._json(s["settings"])
+            return True
+        body = h._body()
+        s["settings_posts"].append(body)
+        mock.calls.append(("POST", "/working/settings", body if isinstance(body, dict) else {}))
+        if s["settings_reply"]:
+            h._err(*s["settings_reply"])
+            return True
+        days = (body or {}).get("idle_days") if isinstance(body, dict) else None
+        lo, hi = s["settings"]["min"], s["settings"]["max"]
+        if isinstance(days, bool) or not isinstance(days, int) or not lo <= days <= hi:
+            h._err(400, f"idle_days must be a whole number from {lo} to {hi}")
+        else:
+            s["settings"] = {**s["settings"], "idle_days": days}
+            h._json(s["settings"])
         return True
     if len(parts) == 3 and parts[2] in ("done", "undo") and method == "POST":
         body = h._body()

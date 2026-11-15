@@ -2163,6 +2163,13 @@ button.vextab > .vexhelpnum { top: -12px; bottom: auto; left: 2px; }
 .stt-backends input[type="radio"] { width: auto; padding: 0; margin: 0 4px 0 0; accent-color: var(--accent); vertical-align: middle; }
 .stt-fallback { display: block; margin-top: 8px; }
 
+/* Settings > Inbox (WS-4): the idle limit. Existing tokens only. */
+.inbox-settings p { font-size: 12px; margin: 6px 0; }
+.inbox-settings .inbox-idle-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.inbox-settings input[type="text"] { width: 5em; flex: 0 0 auto; }
+.inbox-settings .inbox-help { color: var(--text-muted); font-size: 11px; max-width: 60ch; }
+.inbox-settings .inbox-saved { color: var(--green); }
+
 /* V2: a clip that could not be transcribed, kept for Retry. */
 .stt-retry-row { display: flex; flex-direction: column; gap: 6px; }
 .stt-retry-row + .stt-retry-row { margin-top: 8px; }
