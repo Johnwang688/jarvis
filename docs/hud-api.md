@@ -3864,7 +3864,7 @@ method on a known path is `405`), and `503` when the daemon's working set is not
   they do not hard-code them). **`POST /working/settings`** `{idle_days}`: only that key, a whole
   number from `min` to `max`; `200` returns the settings as saved, `400 {error}` for any other value
   or body (`idle_days must be a whole number from 1 to 30`, a boolean or `2.5` included), `503` when
-  it could not be saved (nothing changes). The limit is read each sweep, so it applies to every
+  it could not be saved (nothing changes). A saved limit publishes `working_changed` (once; a refused one publishes nothing). The limit is read each sweep, so it applies to every
   thread from the next hourly sweep on. Settings > Inbox (WS-4) is the HUD's control.
 - An `entry` in a response is `{thread_id, in, since, last, seq, done_at, done_seq, reason}`
   (`reason`: `done`, `idle` or `archived` once out); never the token.

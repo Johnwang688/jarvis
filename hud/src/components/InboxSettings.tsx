@@ -42,7 +42,7 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
     } catch (e) {
       if (!live.current || mine !== reading.current) return;
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) { setServer(null); setLoad("unavailable"); return; }
-      setLoad((was) => (was === "ready" ? was : "error"));
+      setServer(null); setLoad("error");
       setLoadError(e instanceof Error && e.message ? e.message : "The daemon could not be reached.");
     }
   }, []);
@@ -59,9 +59,11 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
     setTyped(true);
     if ("error" in checked) { setResult(null); return; }
     setBusy(true); setResult(null);
+    reading.current += 1; // a read that began before this save must not land over it
     try {
       const next = parseWorkingSettings(await api.setWorkingSettings(checked.value));
       if (!live.current) return;
+      reading.current += 1; // and none that began during it either
       if (!next) {
         setResult({ kind: "failed", text: "The daemon's answer could not be read; the limit may not have been saved." });
         void read();
@@ -69,9 +71,11 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
       }
       setServer(next); setDraft(String(next.idle_days)); synced.current = String(next.idle_days); setTyped(false);
       setResult({ kind: "saved", text: `Saved: ${next.idle_days} ${next.idle_days === 1 ? "day" : "days"}.` });
+      void read(); // the daemon's own answer, once the save is settled
     } catch (err) {
       if (!live.current) return;
       const text = err instanceof Error && err.message ? err.message : "The limit could not be saved.";
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) { reading.current += 1; setServer(null); setLoad("unavailable"); return; }
       setResult(err instanceof ApiError && err.status === 400
         ? { kind: "refused", text } : { kind: "failed", text: `Not saved: ${text}` });
     } finally { if (live.current) setBusy(false); }
@@ -99,7 +103,7 @@ export function InboxSettings({ blocked = false, changes = working.onRead }: {
           <div className="inbox-idle-row">
             <label htmlFor="inbox-idle-days">Leave In progress after</label>
             <input id="inbox-idle-days" data-testid="inbox-idle-days" type="text" inputMode="numeric" autoComplete="off"
-              value={draft} disabled={off} aria-invalid={invalid ? true : undefined}
+              value={draft} disabled={off} aria-invalid={invalid || result?.kind === "refused" ? true : undefined}
               aria-describedby={`inbox-idle-help${invalid || result ? " inbox-idle-result" : ""}`}
               onChange={(e) => { setDraft(e.target.value); setTyped(true); setResult(null); }} />
             <span aria-hidden="true">idle days ({server.min}–{server.max}, default {server.default})</span>

@@ -2452,7 +2452,7 @@ Plan: `docs/plans/2026-11-14-inbox-working-set-plan.md` (§5 WS-4, O-1, §9 Q1).
 - **Refresh.** `WorkingStore.onRead` fires after every `GET /working` read (a `working_changed` or
   `inbox_changed` event causes one), and the section reads its own setting again. A refresh updates the daemon's
   value and bounds but never overwrites a draft that differs from the last daemon value; one that finds
-  nothing typed follows the daemon. A failed refresh keeps what is drawn.
+  nothing typed follows the daemon. A failed refresh (or a save answered 403/404) hides the field behind the error or "Not available"; the draft is kept for when a read succeeds. A save invalidates reads that began before or during it and then reads again; the daemon announces a saved limit as `working_changed`, so another window's open control follows.
 - **Accessibility.** A label tied to the input (`htmlFor`), the help and the result line referenced by
   `aria-describedby`, the result in a polite live region, Enter saves, `aria-invalid` on a refused value. Aurora
   glass tokens only (`.inbox-settings` in `theme.css`).

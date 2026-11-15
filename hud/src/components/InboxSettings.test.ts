@@ -153,13 +153,63 @@ describe("Settings > Inbox idle limit", () => {
     expect(input().value).toBe("8");
   });
 
-  it("a refresh that fails keeps the value on screen", async () => {
+  it("a refresh that fails shows an error with Retry, not the old value, and keeps the draft for later", async () => {
     mocks.workingSettings.mockResolvedValue(served());
     await show();
+    await type("12");
     mocks.workingSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     await act(async () => { notify(); }); await flush();
-    expect(input().value).toBe("3");
-    expect(q("inbox-settings-error")).toBeNull();
+    expect(q("inbox-settings-error")!.textContent).toContain("Failed to fetch");
+    expect(input()).toBeNull();
+    mocks.workingSettings.mockResolvedValue(served({ idle_days: 8 }));
+    await act(async () => { q("inbox-settings-retry")!.click(); }); await flush();
+    expect(input().value).toBe("12");
+    expect(host.textContent).toContain("1–30");
+  });
+
+  it("a read that began before a save cannot land over it", async () => {
+    mocks.workingSettings.mockResolvedValue(served());
+    await show();
+    let late!: (v: unknown) => void;
+    mocks.workingSettings.mockReturnValueOnce(new Promise((r) => { late = r; }));
+    await act(async () => { notify(); });
+    mocks.setWorkingSettings.mockResolvedValue(served({ idle_days: 5 }));
+    mocks.workingSettings.mockResolvedValue(served({ idle_days: 5 }));
+    await type("5"); await save();
+    await act(async () => { late(served({ idle_days: 3 })); }); await flush();
+    expect(input().value).toBe("5");
+    expect(q("inbox-idle-result")!.textContent).toBe("Saved: 5 days.");
+  });
+
+  it("reads the setting again after a save", async () => {
+    mocks.workingSettings.mockResolvedValue(served());
+    await show();
+    const before = mocks.workingSettings.mock.calls.length;
+    mocks.setWorkingSettings.mockResolvedValue(served({ idle_days: 5 }));
+    await type("5"); await save();
+    expect(mocks.workingSettings.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("a save answered 403 or 404 is unavailable: no field, no value", async () => {
+    for (const status of [403, 404]) {
+      mocks.workingSettings.mockResolvedValue(served());
+      mocks.setWorkingSettings.mockRejectedValue(new mocks.ApiError(status, "no"));
+      await show();
+      await type("7"); await save();
+      expect(q("inbox-settings-unavailable")).not.toBeNull();
+      expect(input()).toBeNull();
+      await act(async () => root.render(createElement("div")));
+    }
+  });
+
+  it("a server 400 marks the field invalid, and typing clears it", async () => {
+    mocks.workingSettings.mockResolvedValue(served());
+    mocks.setWorkingSettings.mockRejectedValue(new mocks.ApiError(400, "refused"));
+    await show();
+    await type("7"); await save();
+    expect(input().getAttribute("aria-invalid")).toBe("true");
+    await type("8");
+    expect(input().getAttribute("aria-invalid")).toBeNull();
   });
 
   it("is inert while blocked", async () => {

@@ -894,7 +894,8 @@ def _settings_checks(page, mock, check, until):
         until(lambda: "(server)" in page.locator(RESULT).inner_text(), timeout=4)
         check(f"a server 400 shows its sentence and keeps the typed 6{z} [400 swallowed]",
               page.locator(RESULT).inner_text() == "idle_days must be a whole number from 1 to 30 (server)"
-              and page.locator(IDLE).input_value() == "6" and page.locator(IDLE).is_enabled())
+              and page.locator(IDLE).input_value() == "6" and page.locator(IDLE).is_enabled()
+              and page.locator(IDLE).get_attribute("aria-invalid") == "true")
         _shot_page(page, f"settings-400-{zoom}")
         s["settings_reply"] = None
         # A working_changed read does not clobber a typed draft.

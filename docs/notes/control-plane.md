@@ -2424,7 +2424,7 @@ owner decisions".
 - **Leaving.** The hourly sweep (first run 5 minutes after start) takes out
   threads idle past the limit (default 3 days, 1 to 30, `POST
   /working/settings`; the limit is the one `idle_days` in `working.json`,
-  read at each sweep, saved before it takes effect, and a refused save
+  read at each sweep, saved before it takes effect and then announced as `working_changed` (no ids), and a refused save
   changes nothing; the daemon owns the bounds, so the HUD reads `min`/`max`
   from `GET /working/settings` and treats a 400 as the daemon's sentence to
   show). Unread and failed results do not hold a thread in past the limit
