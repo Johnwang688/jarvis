@@ -13,8 +13,10 @@
 // route it names again. When a read cannot reach Jarvis, or the stream
 // drops and a check finds no way through, the app turns offline: a banner
 // says so and when the shown data was last read, and the view is marked
-// stale (dimmed, `data-stale`). Coming back reads everything shown again
-// before the banner goes. A 401 anywhere means the session ended (logout,
+// stale (dimmed, `data-stale`). Coming back reads everything shown again.
+// Each list also keeps its own failed-refresh warning until its read succeeds,
+// even when other routes recover and the connection orb says Live.
+// A 401 anywhere means the session ended (logout,
 // a revoke at the desk, expiry): the app stops and asks for a sign-in.
 // There is no offline queue.
 //
@@ -299,6 +301,8 @@ export class PhoneApp {
   /** The view the main area last drew, and (while the approval sheet is open) the one it keeps under the sheet. */
   private drawnKey: string | null = null;
   private held: string | null = null;
+  /** Connection health and list freshness are independent: only this route's success clears it. */
+  private readonly failedReads = new Set<string>();
 
   constructor(private readonly deps: AppDeps) {
     // EVERY request this app makes goes through these two (and the push and clip wrappers below), so each
@@ -307,7 +311,13 @@ export class PhoneApp {
     const rawPost = deps.postJson ?? postJson;
     this.fetchJson = async (path) => {
       const got = await rawGet(path);
+      const resource = path.split("?")[0];
+      if (!this.stopped && /^\/m\/api\/(inbox|working|tasks|review|threads\/[^/]+\/log)$/.test(resource)) {
+        if (got.ok) this.failedReads.delete(resource);
+        else this.failedReads.add(resource);
+      }
       this.report(reachOfGot(got), got.ok ? 200 : got.status);
+      if (!this.stopped) this.renderReadWarnings();
       return got;
     };
     this.postJson = async (path, value) => {
@@ -595,9 +605,8 @@ export class PhoneApp {
       this.workingCut = { more: parsed.more, total: parsed.total };
       if (this.workingRetry !== null) { this.clearSlow(this.workingRetry); this.workingRetry = null; }
     } else {
-      this.entries = null;
+      // A failed refresh keeps the last entries (and their cutoff) visible, with its own warning.
       this.workingState = "unavailable";
-      this.workingCut = { more: false, total: 0 };
       if (this.workingRetry === null) {
         this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
       }
@@ -1920,6 +1929,36 @@ export class PhoneApp {
     this.banner.title = this.lastRead !== null ? `Last read at ${absoluteWords(this.lastRead, this.now())}` : "";
   }
 
+  /** List-header warnings survive unrelated successes, reconnects and every surface redraw. */
+  private renderReadWarnings(): void {
+    this.main.querySelectorAll(".m-resource-warning").forEach((node) => node.remove());
+    const resources: [string, string, boolean][] = [];
+    if (this.tab === "inbox") resources.push(
+      ["inbox", "Inbox", this.inbox !== null], ["working", "Running", this.entries !== null],
+      ["tasks", "Tasks", this.tasks !== null], ["review", "Morning review", this.review !== null]);
+    if (this.tab === "review") resources.push(["review", "Morning review", this.review !== null]);
+    if (this.tab === "tasks" && !this.task && !this.sheet) resources.push(["tasks", "Tasks", this.tasks !== null]);
+    if (this.tab === "chats" && this.thread) resources.push(
+      [`threads/${this.thread.id}/log`, "Chat log", this.thread.loaded], ["inbox", "Inbox", this.inbox !== null]);
+    const warnings = resources.filter(([resource]) => this.failedReads.has(`/m/api/${resource}`))
+      .map(([resource, label, loaded]) => {
+        const note = el("p", "m-error m-resource-warning",
+          `${label} couldn't refresh: ${loaded ? "showing the last read" : "not read yet"}.`);
+        note.dataset.resource = resource;
+        note.dataset.stale = "true";
+        note.dataset.testid = resource === "inbox" && !this.main.querySelector('[data-testid="m-list-error"]')
+          ? "m-list-error" : "m-resource-stale";
+        note.setAttribute("role", "status");
+        return note;
+      });
+    // Under the filter strip, at the list header; transcript updates keep the same log and scroll.
+    const surface = this.main.firstElementChild;
+    if (surface?.classList.contains("view")) {
+      const strip = surface.querySelector(":scope > .m-strip");
+      if (strip) strip.after(...warnings); else surface.prepend(...warnings);
+    } else this.main.prepend(...warnings);
+  }
+
   // -- navigation (PX-4) -----------------------------------------------------------------------
 
   /** How many levels are open above the list: the approval sheet, a New chat or New task form, an open chat or task. */
@@ -2479,6 +2518,7 @@ export class PhoneApp {
       view = this.tasksPanel();
     }
     this.main.replaceChildren(view);
+    this.renderReadWarnings();
     this.rowScroll.sync();
     const keep = this.keepScroll;
     this.keepScroll = null;
