@@ -196,6 +196,8 @@ describe("M13: focus follows the card", () => {
     expect(h.q("m-card-heading")!.closest(".m-sheet")).not.toBeNull();
     expect(document.activeElement).not.toBe(h.q("approval-deny"));
     await h.click("m-back");
+    // The back goes through the browser's history: the sheet closes when its popstate lands.
+    await new Promise((r) => setTimeout(r, 40));
     await h.settle();
     expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-item-review"]'));
   });

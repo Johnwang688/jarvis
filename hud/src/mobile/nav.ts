@@ -48,38 +48,40 @@ export function depthOf(state: unknown): number {
   return typeof v === "number" && Number.isInteger(v) && v > 0 && v < 100 ? v : 0;
 }
 
-/** A `go` this class asked for. It is remembered until its popstate arrives (or `KEEP_MS`), so a late one is never mistaken for the owner's back. */
-interface Request { target: number; at: number; expired: boolean }
-/** After this long an unanswered traversal no longer holds the history (the watchdog): it may be pushed past, never walked back over. */
-const LIVE_MS = 1500;
-const KEEP_MS = 15_000;
+/** How long a traversal we asked for may stay unanswered before the queued opens are let through. */
+const PENDING_MS = 4000;
 
 /**
- * The history, reconciled against what the app shows. **The browser's own state is the truth**
- * (`history.state`, read at the moment it matters), never a count kept here.
+ * The history, with ONE path and no attribution.
  *
- * - A popstate that answers one of our own `go` calls (matched by the depth it was asked to reach, or,
- *   failing that, the oldest request still live) closes NOTHING: the levels the app shows now are
- *   reconciled to the real depth by pushing what is missing. So a sheet closed and reopened before the
- *   traversal lands keeps its level, and no depth is pushed twice.
- * - A popstate that answers no request is the owner's back: the app closes the levels deeper than it.
- * - While a request is live nothing is pushed or walked back (the position is unknown). The watchdog
- *   only marks the request expired: from then on a push is allowed (state read as it is) and a new `go`
- *   still waits, but the watchdog itself never pushes and never closes.
+ * - **Only a popstate closes a level.** The handler reads the depth the browser landed on (`state.jv`, else 0)
+ *   and closes every level deeper than it. Every popstate gets this, ours or the owner's, so a real Back is
+ *   never swallowed.
+ * - **Closing goes through the browser.** `back()` (the in-app back, the dim area) asks `history.go(-1)` and
+ *   closes nothing itself. (When the browser has no entry of ours to leave, `back()` closes the level at once.)
+ * - **Opening while a traversal we asked for is on its way is queued** (`open`) and run, with its push, right
+ *   after the next popstate lands, so a late popstate can never close a level opened after the request: the
+ *   level does not exist yet when it lands. If none arrives within `PENDING_MS` the queue is let through; the
+ *   timeout never pushes by itself and never closes anything, and what is missing is pushed from the state
+ *   `history.state` shows then.
+ * - `sync` pushes the entries the app's levels are missing and walks back over entries whose levels the app
+ *   closed on its own (a tab switch, an answered card).
  */
 export class Nav {
   private off: (() => void) | null = null;
   /** The app is closing levels for a pop: `sync` waits, so it never pushes a forward entry mid-way. */
   private closing = false;
-  private reqs: Request[] = [];
-  private watchdog: ReturnType<typeof setTimeout> | null = null;
+  /** A `go` of ours has not been answered yet. */
+  private pending = false;
+  private queue: (() => void)[] = [];
+  private timer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * `depth`: how many levels the app shows now. `close`: close levels until the app shows at
-   * most this many (the app's own back, run for a pop).
+   * most this many (run only for a popstate).
    */
   constructor(private readonly env: HistoryEnv, private readonly depth: () => number,
-              private readonly close: (depth: number) => void, private readonly now: () => number = Date.now) {}
+              private readonly close: (depth: number) => void) {}
 
   /** How many of our entries sit above the base entry in the real history, as the browser says. */
   get hist(): number {
@@ -95,55 +97,70 @@ export class Nav {
   stop(): void {
     this.off?.();
     this.off = null;
-    this.clearWatchdog();
-    this.reqs = [];
+    this.settle();
+    this.queue = [];
   }
 
-  private clearWatchdog(): void {
-    if (this.watchdog !== null) clearTimeout(this.watchdog);
-    this.watchdog = null;
+  private settle(): void {
+    this.pending = false;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
   }
 
-  private purge(): void {
-    const t = this.now();
-    this.reqs = this.reqs.filter((r) => t - r.at < KEEP_MS);
+  private request(delta: number): void {
+    this.pending = true;
+    this.env.go(delta);
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.pending = false;
+      this.flush();
+      this.sync();
+    }, PENDING_MS);
+  }
+
+  private flush(): void {
+    const run = this.queue.splice(0);
+    for (const fn of run) fn();
   }
 
   private popped(landed: number): void {
-    this.purge();
-    let i = this.reqs.findIndex((r) => r.target === landed);
-    if (i < 0) i = this.reqs.findIndex((r) => !r.expired);
-    if (i >= 0) {
-      // Ours (possibly late): it closes nothing; the app's levels are reconciled to the real depth.
-      this.reqs.splice(0, i + 1);
-      if (!this.reqs.some((r) => !r.expired)) this.clearWatchdog();
-      this.sync();
-      return;
-    }
+    this.settle();
     this.closing = true;
     try { this.close(landed); } finally { this.closing = false; }
+    this.flush();
     this.sync();
   }
 
-  /** Make the real history match the levels the app shows: push for each new one, go back for each closed one. */
+  /** Run an action that opens a level: now, or right after the pending traversal lands. */
+  open(fn: () => void): void {
+    if (this.pending) { this.queue.push(fn); return; }
+    fn();
+    this.sync();
+  }
+
+  /** The top level goes back through the browser; with no entry of ours to leave it is closed at once. */
+  back(): void {
+    const want = this.depth();
+    if (want <= 0 || this.pending || this.closing) return;
+    if (this.hist <= 0) {
+      this.closing = true;
+      try { this.close(want - 1); } finally { this.closing = false; }
+      this.sync();
+      return;
+    }
+    this.request(-1);
+  }
+
+  /** Make the real history match the levels the app shows: push for each new one, go back over each closed one. */
   sync(): void {
-    if (this.closing) return;
-    this.purge();
-    if (this.reqs.some((r) => !r.expired)) return;
+    if (this.closing || this.pending) return;
     const want = this.depth();
     const actual = this.hist;
     if (want > actual) {
       for (let i = actual + 1; i <= want; i++) this.env.push({ jv: i });
     } else if (want < actual) {
-      // A stale traversal is still on its way: it settles the position when it lands.
-      if (this.reqs.length) return;
-      this.reqs.push({ target: want, at: this.now(), expired: false });
-      this.env.go(want - actual);
-      this.clearWatchdog();
-      this.watchdog = setTimeout(() => {
-        this.watchdog = null;
-        for (const r of this.reqs) r.expired = true;
-      }, LIVE_MS);
+      this.request(want - actual);
     }
   }
 }

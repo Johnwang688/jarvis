@@ -699,7 +699,12 @@ export class PhoneApp {
     return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
   }
 
+  /** Opening a level goes through the history (nav.open): queued while a traversal of ours is on its way. */
   openCard(row: InboxRow): void {
+    this.nav.open(() => this.openCardNow(row));
+  }
+
+  private openCardNow(row: InboxRow): void {
     this.flash = "";
     this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
     this.invoker = this.tab === "review" ? "m-review-open-card" : "m-item-review";
@@ -1126,7 +1131,11 @@ export class PhoneApp {
     return (open && list.some((p) => p.id === open) ? open : list[0]?.id) ?? "";
   }
 
-  async openNewChat(): Promise<void> {
+  openNewChat(): Promise<void> {
+    return new Promise((done) => this.nav.open(() => { void this.openNewChatNow().then(done); }));
+  }
+
+  private async openNewChatNow(): Promise<void> {
     this.tab = "chats";
     this.thread = null;
     this.sheet = { kind: "chat", projectId: this.firstProject(), provider: "fast", model: "", text: "", busy: false,
@@ -1182,6 +1191,10 @@ export class PhoneApp {
   }
 
   openNewTask(): void {
+    this.nav.open(() => this.openNewTaskNow());
+  }
+
+  private openNewTaskNow(): void {
     if (this.tab !== "tasks") this.taskBack = this.tab === "inbox" ? this.filter : "tasks";
     this.tab = "tasks";
     this.task = null;
@@ -1320,7 +1333,11 @@ export class PhoneApp {
     if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
-  async openThread(id: string, meta: ChatThread | null = null): Promise<void> {
+  openThread(id: string, meta: ChatThread | null = null): Promise<void> {
+    return new Promise((done) => this.nav.open(() => { void this.openThreadNow(id, meta).then(done); }));
+  }
+
+  private async openThreadNow(id: string, meta: ChatThread | null): Promise<void> {
     if (this.thread?.id !== id || this.tab !== "chats") { this.leftFrom("thread", id); this.trayFolded = false; }
     // Every new opening sets where back goes: from the Inbox or the review, or from the Chats list.
     if (this.tab !== "chats") this.threadBack = this.tab === "review" ? "review" : "inbox";
@@ -1401,7 +1418,11 @@ export class PhoneApp {
   }
 
   /** Open a task, or read the open one again (its diff too, once shown; its folds kept). */
-  async openTask(id: string): Promise<void> {
+  openTask(id: string): Promise<void> {
+    return new Promise((done) => this.nav.open(() => { void this.openTaskNow(id).then(done); }));
+  }
+
+  private async openTaskNow(id: string): Promise<void> {
     if (this.task?.id !== id || this.tab !== "tasks") this.leftFrom("task", id);
     if (this.tab !== "tasks") this.taskBack = this.tab === "inbox" ? this.filter : "tasks";
     this.tab = "tasks";
@@ -1862,7 +1883,7 @@ export class PhoneApp {
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;
     if (!this.card) { this.sheetHost.replaceChildren(); return; }
     const view = cardView(this.card, {
-      back: () => this.closeCard(),
+      back: () => this.nav.back(),
       deny: () => void this.denyCard(),
       allow: () => void this.allowCard(),
       always: () => void this.alwaysCard(),
@@ -1883,7 +1904,7 @@ export class PhoneApp {
       this.cardNotice = fresh;
     }
     const top = same ? this.sheetHost.querySelector<HTMLElement>(".m-sheet")?.scrollTop ?? 0 : 0;
-    this.sheetHost.replaceChildren(...sheetView(view, () => { if (this.card && !this.card.busy) this.closeCard(); }));
+    this.sheetHost.replaceChildren(...sheetView(view, () => { if (this.card && !this.card.busy) this.nav.back(); }));
     const sheet = this.sheetHost.querySelector<HTMLElement>(".m-sheet");
     if (sheet && top) sheet.scrollTop = top;
   }
@@ -1968,7 +1989,7 @@ export class PhoneApp {
     } else if (this.tab === "chats") {
       if (this.sheet?.kind === "chat") {
         view = chatSheetView(this.sheet, this.projects ?? [], this.models, this.online, {
-          close: () => { this.sheet = null; this.render(); void this.loadChats(); },
+          close: () => this.nav.back(),
           submit: () => void this.createChat(),
           change: () => this.render(),
           openChat: (id) => void this.openThread(id),
@@ -1977,7 +1998,7 @@ export class PhoneApp {
         // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
         if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const thread = this.thread;
-        const built = transcriptView(thread.meta, thread.rows, thread.older, () => this.closeThread(),
+        const built = transcriptView(thread.meta, thread.rows, thread.older, () => this.nav.back(),
           this.composer(thread.id), { loaded: thread.loaded, online: this.online });
         const back = built.view.querySelector('[data-testid="m-back"]');
         if (back) back.textContent = this.threadBack === "inbox" ? "‹ Inbox" : this.threadBack === "review" ? "‹ Review" : "‹ Chats";
@@ -2004,7 +2025,7 @@ export class PhoneApp {
       }
     } else if (this.sheet?.kind === "task") {
       view = taskSheetView(this.sheet, this.projects ?? [], this.online, {
-        close: () => { this.show("tasks"); },
+        close: () => this.nav.back(),
         submit: () => void this.createTask(),
         change: () => this.render(),
       });
@@ -2030,7 +2051,7 @@ export class PhoneApp {
       })() : (this.taskWrite?.id === open.id && this.taskWrite.note
         ? el("p", "m-notice", this.taskWrite.note) : null);
       view = open.view
-        ? taskView(open.view, open.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
+        ? taskView(open.view, open.diff, { back: () => this.nav.back(), showDiff: () => void this.loadDiff(),
           folds: open.folds, controls, answerInInbox: (index) => this.showInboxRow(`tq:${open.id}:${index}`),
           inInbox: (index) => !!this.inbox?.some((row) => row.id === `tq:${open.id}:${index}`) })
         : el("p", "empty", this.online ? "Loading…" : "Not read yet: you're offline.");

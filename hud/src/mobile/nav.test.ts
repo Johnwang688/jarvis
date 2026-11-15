@@ -246,9 +246,9 @@ describe("history is state only: no id ever reaches the address", () => {
     await h.settle();
     expect(history.state).toEqual({ jv: 1 });
     await h.click("m-back");
-    // The level closed at once, whatever the browser does about its history.
-    expect(h.app.thread).toBeNull();
+    // The in-app back goes through the browser (history.back): the level closes when the popstate lands.
     await h.traversed();
+    expect(h.app.thread).toBeNull();
     expect(history.state).toEqual({ jv: 0 });
     h.app.stop();
   });
@@ -323,7 +323,7 @@ describe("the approval sheet", () => {
     expect(h.q("m-card-heading")!.tabIndex).toBe(-1);
     expect(document.activeElement).not.toBe(h.q("approval-deny"));
     await h.click("m-back");
-    await h.settle();
+    await h.traversed();
     expect(h.q("m-sheet")).toBeNull();
     expect(main.hasAttribute("inert")).toBe(false);
     expect(main.scrollTop).toBe(250);
@@ -342,6 +342,7 @@ describe("the approval sheet", () => {
     expect(h.app.card).not.toBeNull();
     h.app.card!.busy = false;
     await h.click("m-sheet-dim");
+    await h.traversed();
     expect(h.app.card).toBeNull();
     expect(h.q("m-sheet")).toBeNull();
     h.app.stop();
@@ -528,31 +529,6 @@ describe("PX-3b state across the sheet and back-navigation", () => {
 });
 
 describe("PX-4 fix round", () => {
-  it("history: a sheet closed and reopened before the traversal lands is not dismissed by it", async () => {
-    const h = fakeHistory();
-    let depth = 0;
-    const closed: number[] = [];
-    const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
-    nav.start();
-    depth = 1;
-    nav.sync();
-    expect(h.log.at(-1)).toBe('push {"jv":1}');
-    depth = 0;
-    nav.sync();
-    expect(h.log.at(-1)).toBe("go -1");
-    // Reopened at once: nothing is pushed on a position that is not known yet.
-    depth = 1;
-    nav.sync();
-    expect(h.log.filter((l) => l.startsWith("push"))).toEqual(['push {"jv":1}']);
-    await Promise.resolve();
-    await Promise.resolve();
-    // The old traversal landed: it closed nothing, and the new level now has its own entry.
-    expect(closed).toEqual([]);
-    expect(depth).toBe(1);
-    expect(h.log.filter((l) => l.startsWith("push"))).toEqual(['push {"jv":1}', 'push {"jv":1}']);
-    expect(nav.hist).toBe(1);
-  });
-
   it("app: close the sheet and reopen it at once; the late history traversal leaves it open", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness({ rows: [approval()] });
@@ -637,91 +613,125 @@ describe("PX-4 fix round", () => {
   });
 });
 
-// A history whose traversals are released by hand: `deferGo` holds the whole traversal (state and event),
-// `deferPop` runs it at once but holds its popstate (the state is already the new one).
+// A history whose traversals are released by hand. "go" holds the whole traversal (state and event); "pop"
+// runs it at once but holds its popstate (the state is already the new one). `userBack` is the owner's own Back.
 function slowHistory(mode: "go" | "pop") {
   const entries: unknown[] = [null];
   let at = 0;
   const pops: ((s: unknown) => void)[] = [];
   const held: (() => void)[] = [];
   const pushes: unknown[] = [];
+  const traverse = (d: number, fire: boolean) => {
+    if (at + d < 0 || at + d >= entries.length) return;
+    at += d;
+    const s = entries[at];
+    if (fire) pops.forEach((f) => f(s));
+    return () => pops.forEach((f) => f(s));
+  };
   const env: HistoryEnv = {
     state: () => entries[at],
     push: (s) => { entries.splice(at + 1); entries.push(s); at += 1; pushes.push(s); },
     replace: (s) => { entries[at] = s; },
     go: (d) => {
-      const run = () => { at += d; const s = entries[at]; if (mode === "go") pops.forEach((f) => f(s)); else held.push(() => pops.forEach((f) => f(s))); };
-      if (mode === "go") held.push(run); else run();
+      if (mode === "go") held.push(() => { traverse(d, true); });
+      else { const fire = traverse(d, false); if (fire) held.push(fire); }
     },
     onPop: (f) => { pops.push(f); return () => { pops.splice(pops.indexOf(f), 1); }; },
   };
-  return { env, entries, pushes, release: () => { while (held.length) held.shift()!(); } };
+  return { env, entries, pushes, release: () => { while (held.length) held.shift()!(); },
+    userBack: () => { traverse(-1, true); }, get at() { return at; }, get heldCount() { return held.length; } };
 }
 
-describe("PX-4 fix round 2: late traversals", () => {
+/** The app's side: one level, opened and closed the way app.ts does it (only a popstate closes it). */
+function level(h: ReturnType<typeof slowHistory>) {
+  let depth = 0;
+  const closed: number[] = [];
+  const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
+  nav.start();
+  return { nav, closed, get depth() { return depth; }, open: () => nav.open(() => { depth = 1; nav.sync(); }),
+    back: () => nav.back() };
+}
+
+describe("Nav: one path, no attribution", () => {
   const depthOnes = (h: { entries: unknown[] }) => h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length;
 
+  it("the owner's Back during a delayed app traversal closes on the FIRST press", () => {
+    const h = slowHistory("go");
+    const l = level(h);
+    l.open();
+    l.back();                 // ours: go(-1), held
+    expect(l.depth).toBe(1);  // nothing closes until the browser says so
+    h.userBack();             // the owner's own Back lands first
+    expect(l.closed).toEqual([0]);
+    expect(l.depth).toBe(0);
+  });
+
   for (const mode of ["pop", "go"] as const) {
-    it(`${mode === "pop" ? "a popstate" : "a go()"} delayed beyond the watchdog leaves the reopened level open, with no duplicate entry`, () => {
+    it(`close then immediate reopen, ${mode === "pop" ? "popstate" : "go()"} delayed 2 s: the level ends open, with exactly one entry`, () => {
       vi.useFakeTimers();
       try {
         const h = slowHistory(mode);
-        let depth = 0;
-        const closed: number[] = [];
-        const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
-        nav.start();
-        depth = 1;
-        nav.sync();
-        depth = 0;
-        nav.sync();
-        depth = 1;
-        nav.sync();
-        // Nothing is pushed while the traversal is live.
+        const l = level(h);
+        l.open();
+        l.back();
+        l.open();                       // queued: the old traversal is still on its way
         expect(h.pushes.length).toBe(1);
         vi.advanceTimersByTime(2000);
-        // The watchdog itself pushed nothing and closed nothing.
-        expect(h.pushes.length).toBe(1);
-        expect(closed).toEqual([]);
-        nav.sync();
-        h.release();
-        expect(closed).toEqual([]);
-        expect(depth).toBe(1);
+        expect(h.pushes.length).toBe(1); // nothing pushed meanwhile
+        expect(l.closed).toEqual([]);
+        h.release();                    // the late traversal lands: it closes, THEN the queued open runs
+        expect(l.closed).toEqual([0]);
+        expect(l.depth).toBe(1);
         expect(depthOnes(h)).toBe(1);
-        expect(nav.hist).toBe(1);
+        expect(l.nav.hist).toBe(1);
       } finally { vi.useRealTimers(); }
     });
   }
 
-  it("rapid close and reopen, three times, ends with one entry and the level open", async () => {
-    const h = fakeHistory();
-    let depth = 0;
-    const closed: number[] = [];
-    const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
-    nav.start();
-    for (let i = 0; i < 3; i++) {
-      depth = 1; nav.sync();
-      depth = 0; nav.sync();
-    }
-    depth = 1;
-    nav.sync();
-    for (let i = 0; i < 6; i++) await Promise.resolve();
-    expect(closed).toEqual([]);
-    expect(depth).toBe(1);
-    expect(h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length).toBe(1);
-    expect(nav.hist).toBe(1);
-  });
-
-  it("an owner's back after the dust settles still closes the level", async () => {
+  it("160 rapid close/reopen cycles keep the history bounded and the level open", async () => {
     const h = fakeHistory();
     let depth = 0;
     const nav = new Nav(h.env, () => depth, (d) => { depth = Math.min(depth, d); });
     nav.start();
-    depth = 1; nav.sync();
-    depth = 0; nav.sync();
-    depth = 1; nav.sync();
-    for (let i = 0; i < 6; i++) await Promise.resolve();
-    h.pop(-1);
-    expect(depth).toBe(0);
+    for (let i = 0; i < 160; i++) {
+      nav.open(() => { depth = 1; nav.sync(); });
+      nav.back();
+      nav.open(() => { depth = 1; nav.sync(); });
+      if (i % 7 === 0) for (let k = 0; k < 4; k++) await Promise.resolve();
+    }
+    for (let k = 0; k < 10; k++) await Promise.resolve();
+    expect(depth).toBe(1);
+    expect(h.entries.length).toBeLessThanOrEqual(3);
+    expect(h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length).toBe(1);
+  });
+
+  it("a traversal that never answers is let go after the timeout: queued opens run, and the next Back is one press", () => {
+    vi.useFakeTimers();
+    try {
+      const h = slowHistory("go");
+      const l = level(h);
+      l.open();
+      l.back();                 // go(-1) held for ever: no popstate
+      l.open();                 // queued
+      vi.advanceTimersByTime(5000);
+      expect(l.depth).toBe(1);  // the queue ran (the level was never closed)
+      expect(h.pushes.length).toBe(1);
+      // Recovered: the next Back is requested at once (not blocked until some render repairs it).
+      const before = h.heldCount;
+      l.back();
+      expect(h.heldCount).toBe(before + 1);
+      h.release();
+      expect(l.depth).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a popstate is never ignored: every landing closes the levels deeper than it", () => {
+    const h = slowHistory("pop");
+    const l = level(h);
+    l.open();
+    l.back();                   // ours, event held
+    h.release();
+    expect(l.closed).toEqual([0]);
   });
 });
 
