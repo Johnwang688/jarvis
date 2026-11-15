@@ -192,7 +192,7 @@ function strip(model: ListModel, a: ListActions, running: number): HTMLElement {
     if (tone) b.dataset.tone = tone;
     bar.append(b);
   };
-  chip("needs", `Needs you · ${waitingN}`, pending ? "pending" : "");
+  chip("needs", model.rows === null && model.error !== null ? "Needs you · ?" : `Needs you · ${waitingN}`, pending ? "pending" : "");
   chip("running", `Running · ${running}`);
   chip("tasks", "Tasks");
   return bar;
@@ -204,7 +204,10 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   const loading = model.rows === null && model.error === null;
   if (loading) view.setAttribute("aria-busy", "true");
   const rows = model.rows ?? [];
-  const slots = model.rows === null ? [] : buildSlots(model.entries, rows, model.tasks);
+  // A first inbox read that failed (rows null, error set) still shows what the other reads brought: the
+  // running threads and tasks. It never says Nothing needs you, and never All clear.
+  const unread = model.rows === null && model.error !== null;
+  const slots = loading ? [] : buildSlots(model.entries, rows, model.tasks);
   const grouped = bands(slots);
   view.append(strip(model, a, grouped.running.length));
   if (secure && !secure.ok) {
@@ -242,7 +245,8 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   if (showNeeds) {
     const sec = testid(el("section", "m-band"), "m-band-needs");
     sec.dataset.band = "needs";
-    sec.append(heading(grouped.needs.length ? "Needs you" : "Nothing needs you", "m-band-needs-head"));
+    sec.append(heading(grouped.needs.length || unread ? "Needs you" : "Nothing needs you", "m-band-needs-head"));
+    if (unread) sec.append(note("The Inbox could not be read", "m-inbox-unreadable"));
     draw(grouped.needs, "needs", sec);
     view.append(sec);
   }
@@ -283,7 +287,7 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
     }
     view.append(sec);
   }
-  if (all && !slots.length) view.append(empty("All clear"));
+  if (all && !slots.length && !unread) view.append(empty("All clear"));
   // What the phone does not show.
   if (all || model.filter === "needs") {
     if (model.workingCut.more && model.working === "ok") {

@@ -19,7 +19,7 @@
 //
 // Nothing here builds HTML. Every string is untrusted text and stays so.
 
-import { oneLine, type InboxRow } from "../lib/inbox";
+import { isHidden, oneLine, type InboxRow } from "../lib/inbox";
 import { LABEL_ORDER } from "../lib/working";
 import { RUNNING_STATES, type TaskView, type WorkingItem } from "./model";
 
@@ -45,8 +45,9 @@ export interface Slot {
 /** The lowest rank that is not "Needs you" (ranks 1 to 5 are: lib/inbox `COUNTED_MAX_RANK`). */
 export const NEEDS_MAX_RANK = 5;
 
-/** A row that waits on the owner. A rank that is not a number counts as waiting: never lose a row to a typo. */
-export const waiting = (row: Pick<InboxRow, "rank">): boolean => !(row.rank > NEEDS_MAX_RANK);
+/** A row that waits on the owner. A rank that is not a number counts as waiting: never lose a row to a typo.
+ * A row the owner marked (hidden, rank 5 and up: `isHidden` never hides ranks 1 to 4) is Recent, as the chip and badge count it. */
+export const waiting = (row: InboxRow): boolean => !isHidden(row) && !(row.rank > NEEDS_MAX_RANK);
 
 export function buildSlots(entries: readonly WorkingItem[] | null, rows: readonly InboxRow[],
                            tasks: readonly TaskView[] | null): Slot[] {

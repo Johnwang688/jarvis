@@ -22,7 +22,7 @@ const ok = (body: unknown): Got => ({ ok: true, body });
 const T1 = "aaaaaaaa", K1 = "11111111";
 
 function harness() {
-  const answers: Record<string, Got | (() => Got)> = {};
+  const answers: Record<string, Got | (() => Got | Promise<Got>)> = {};
   const asked: string[] = [];
   const streams: FakeStream[] = [];
   const timers: { fn: () => void; ms: number }[] = [];
@@ -313,6 +313,56 @@ describe("the keyed list under a pending send and a refusal", () => {
     h.streams[0].send({ kind: "inbox_changed", data: { ids: ["q:" + T1 + ":1"], reason: "question" } });
     await h.flush();
     expect(h.q("m-answer-note")!.textContent).toContain("Already answered");
+  });
+});
+
+describe("launch and task navigation", () => {
+  it("the first paint needs one round trip: the first inbox answer is applied though the stream's reopen already owes a re-read", async () => {
+    const h = harness();
+    let release!: (g: Got) => void;
+    let calls = 0;
+    h.answers["/m/api/inbox"] = () => {
+      calls += 1;
+      return calls === 1 ? new Promise<Got>((res) => { release = res; }) : new Promise<Got>(() => {});   // later reads never answer
+    };
+    h.app.start();
+    await h.settle();
+    h.streams[0].open();
+    await h.settle();
+    release(ok({ rows: [mkRow("q:1", 3, { detail: { text: "Which?", options: [] } })] }));
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
+  });
+
+  it("a task_changed for the task you left (via Chats) does not pull you back onto it", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: false });
+    h.answers[`/m/api/tasks/${K1}`] = ok({ task: task(K1, "running") });
+    await started(h);
+    await h.app.openTask(K1);
+    h.q("m-tab-chats")!.click();
+    await h.settle();
+    h.streams[0].send({ kind: "task_changed", data: { task_id: K1, project_id: null, reason: "task_status_changed" } });
+    await h.flush();
+    expect(h.app.tab).toBe("chats");
+  });
+
+  it("closing New task, opened from the Tasks filter, lands on the Tasks filter; the Inbox tab resets the way back", async () => {
+    const h = harness();
+    await started(h);
+    h.q("m-chip-tasks")!.click();
+    await h.settle();
+    h.q("m-new-task-open")!.click();
+    await h.settle();
+    h.app.show("tasks");
+    await h.settle();
+    expect(h.app.filter).toBe("tasks");
+    // From the plain list, New task is not reachable (it lives under the filter); the filter is where it closes.
+    h.q("m-new-task-open")!.click();
+    await h.settle();
+    h.q("m-tab-inbox")!.click();
+    await h.settle();
+    expect(h.app.filter).toBe(null);
   });
 });
 

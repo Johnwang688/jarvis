@@ -165,6 +165,28 @@ describe("what the phone does not show, and the working route's own state", () =
   });
 });
 
+describe("a first inbox read that failed", () => {
+  it("shows the running thread and task that loaded, a neutral line, and never Nothing needs you or All clear", () => {
+    const v = draw(model({ rows: null, error: "The Inbox could not be read: boom", entries: [mkEntry("aaaaaaaa", "working")],
+      tasks: [mkTask("11111111", "running")] }));
+    expect(v.querySelector('[data-testid="m-list-error"]')).not.toBeNull();
+    expect(v.querySelector('[data-testid="m-inbox-unreadable"]')!.textContent).toBe("The Inbox could not be read");
+    expect(v.textContent).not.toContain("Nothing needs you");
+    expect(v.querySelector('[data-testid="m-empty"]')).toBeNull();
+    expect(v.querySelector('[data-testid="m-chip-needs"]')!.textContent).toBe("Needs you · ?");
+    expect(v.querySelector('[data-testid="m-chip-running"]')!.textContent).toBe("Running · 2");
+    expect(card(v, "thread:aaaaaaaa").dataset.band).toBe("running");
+    expect(card(v, "task:11111111").dataset.band).toBe("running");
+  });
+
+  it("a hidden rank 5 row sits in Recent while the chip counts 0", () => {
+    const rows = [mkRow("q:5", 5, { hidden: { snoozedUntil: "2099-01-01T00:00:00Z", dismissedAt: null } })];
+    const v = draw(model({ rows }));
+    expect(v.querySelector('[data-testid="m-chip-needs"]')!.textContent).toBe("Needs you · 0");
+    expect(card(v, "row:q:5").dataset.band).toBe("recent");
+  });
+});
+
 describe("IN-8 through rendering: each received row is drawn once; ranks 1 to 4 are never folded", () => {
   it("holds for generated cases with overlapping thread and task ids, in every working state", () => {
     for (let seed = 1; seed <= 150; seed++) {
@@ -184,6 +206,29 @@ describe("IN-8 through rendering: each received row is drawn once; ranks 1 to 4 
           if (rank <= 5) expect(el.closest("[data-band]")!.getAttribute("data-band"), `seed ${seed}`).toBe("needs");
         }
       }
+    }
+  });
+
+  it("holds under every filter, a reused cache, and a failed first read: what is drawn is exactly its bands' rows", () => {
+    const cache = new SlotCache();
+    for (let seed = 1; seed <= 150; seed++) {
+      const c = randomCase(seed);
+      const split = bands(buildSlots(c.entries, c.rows, c.tasks));
+      const ids = (list: { rows: { id: string }[] }[]) => list.flatMap((s) => s.rows.map((r) => r.id)).sort();
+      const want = { needs: ids(split.needs), running: ids(split.running) };
+      for (const filter of [null, "needs", "running"] as const) {
+        const v = draw(model({ rows: c.rows, entries: c.entries, tasks: c.tasks, filter }), actions(), cache);
+        const drawn = rowEls(v).map((r) => r.dataset.id!).sort();
+        const expected = filter === "needs" ? want.needs : filter === "running" ? want.running : c.rows.map((r) => r.id).sort();
+        expect(drawn, `seed ${seed} filter ${filter}`).toEqual(expected);
+        for (const el of rowEls(v)) {
+          if (c.rows.find((r) => r.id === el.dataset.id)!.rank <= 4) expect(folded(el), `seed ${seed}`).toBe(false);
+        }
+      }
+      // A failed first read: no inbox row is drawn (none was received), the entries and tasks still are.
+      const failed = draw(model({ rows: null, error: "boom", entries: c.entries, tasks: c.tasks }), actions(), cache);
+      expect(rowEls(failed).length, `seed ${seed}`).toBe(0);
+      expect(failed.textContent, `seed ${seed}`).not.toContain("All clear");
     }
   });
 

@@ -356,8 +356,8 @@ export class PhoneApp {
   }
 
   /** One inbox read at a time, plus one owed (reader.ts). It decides online and offline, as before. */
-  loadInbox(): Promise<void> {
-    return this.inboxReader.trigger();
+  loadInbox(afterWrite = false): Promise<void> {
+    return this.inboxReader.trigger({ afterWrite });
   }
 
   private applyInbox(r: { body: unknown } | { error: string; status: number } | null): void {
@@ -499,7 +499,7 @@ export class PhoneApp {
 
   private renderTabs(): void {
     // M9a (phone audit): the Review tab keeps its slot, off while there is no review, so the
-    // tabs never move under the thumb (Chats is always third, Tasks fourth).
+    // tabs never move under the thumb (Inbox, Review, Chats: Tasks is a filter of the Inbox).
     const shown = this.tab === "review" || reviewTabShown(this.review);
     this.tabs.review.disabled = !shown;
     const n = shown ? this.review?.open ?? 0 : 0;
@@ -531,7 +531,7 @@ export class PhoneApp {
     }
     this.renderKeepingFocus();
     void this.loadReview();
-    void this.loadInbox();
+    void this.loadInbox(true);
   }
 
   /** Leave it on one deferred row (the session only). */
@@ -571,7 +571,7 @@ export class PhoneApp {
       }
       this.render();
       void this.loadReview();
-      void this.loadInbox();
+      void this.loadInbox(true);
     };
     const options = await this.post("/m/api/review/approve/options", body);
     if (!options || options.status !== 200) return done(options);
@@ -607,7 +607,7 @@ export class PhoneApp {
     }
     this.render();
     void this.loadReview();
-    void this.loadInbox();
+    void this.loadInbox(true);
   }
 
   /** The inbox, drawn again, unless an answer is being typed (it waits for the box to lose focus). */
@@ -815,7 +815,7 @@ export class PhoneApp {
         this.flash = typeof result.body.note === "string" ? result.body.note : "Approved once.";
       } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
       this.render();
-      void this.loadInbox();
+      void this.loadInbox(true);
     };
     const options = await this.post(this.path(row.id, "answer/options"), { decision: "allow" });
     if (!options || options.status !== 200) return done(options);
@@ -858,7 +858,7 @@ export class PhoneApp {
       } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
       else if (sent) this.notes.set(row.id, "No answer came back: it may have been done. Look again in a moment.");
       this.render();
-      void this.loadInbox();
+      void this.loadInbox(true);
     };
     let sent = false;
     const options = await this.post("/m/api/inbox/pr/options", bound);
@@ -895,7 +895,7 @@ export class PhoneApp {
       else if (result && result.status === 401) this.notes.set(row.id, "Not accepted: the passkey was not verified for this cancel.");
       else if (result) this.notes.set(row.id, refusal(result.status, result.body, "Not cancelled"));
       this.render();
-      void this.loadInbox();
+      void this.loadInbox(true);
     };
     const path = `/m/api/tasks/${encodeURIComponent(id)}/cancel`;
     const options = await this.post(path + "/options", {});
@@ -938,7 +938,7 @@ export class PhoneApp {
       this.notes.set(row.id, await this.refusedWith(result.status, result.body));
     }
     this.render();
-    void this.loadInbox();
+    void this.loadInbox(true);
   }
 
   // -- writing (P-5) -------------------------------------------------------------------
@@ -1129,6 +1129,7 @@ export class PhoneApp {
   }
 
   openNewTask(): void {
+    if (this.tab !== "tasks") this.taskBack = this.tab === "inbox" ? this.filter : "tasks";
     this.tab = "tasks";
     this.task = null;
     this.sheet = { kind: "task", projectId: this.firstProject(), brief: "", busy: false, note: "" };
@@ -1452,7 +1453,7 @@ export class PhoneApp {
       }
     } else if (event.kind === "task_changed") {
       this.later("tasks", () => void this.loadTasks());
-      if (this.task?.id === event.taskId) this.later("task", () => void this.openTask(event.taskId));
+      if (this.tab === "tasks" && this.task?.id === event.taskId) this.later("task", () => void this.openTask(event.taskId));
     } else {
       this.refreshVisible();
     }
@@ -1512,7 +1513,7 @@ export class PhoneApp {
       void this.loadTasks();
       return;
     }
-    if (tab === "inbox" && this.tab === "tasks") { this.task = null; this.sheet = null; this.filter = null; }
+    if (tab === "inbox" && this.tab === "tasks") { this.task = null; this.sheet = null; this.filter = null; this.taskBack = "tasks"; }
     else if (tab === "inbox" && this.tab === "inbox" && !this.card) this.filter = null;
     if (tab === "inbox" && this.tab === "inbox" && this.card) this.card = null;
     if (tab === this.tab) {

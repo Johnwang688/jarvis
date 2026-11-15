@@ -89,6 +89,17 @@ describe("bandOf is total, with an explicit Recent fallback", () => {
   });
 });
 
+describe("a row the owner marked", () => {
+  const hidden = { snoozedUntil: "2099-01-01T00:00:00Z", dismissedAt: null };
+
+  it("a hidden rank 5 row is Recent, as the chip and badge count it; ranks 1 to 4 are never hidden", () => {
+    expect(bandOf(buildSlots(null, [mkRow("q:5", 5, { hidden })], null)[0])).toBe("recent");
+    // A rank 4 row carrying a `hidden` is still Needs you (the HUD's own rule: lib/inbox isHidden).
+    expect(bandOf(buildSlots(null, [mkRow("q:4", 4, { hidden })], null)[0])).toBe("needs");
+    expect(bandOf(buildSlots(null, [mkRow("q:5", 5)], null)[0])).toBe("needs");
+  });
+});
+
 describe("order", () => {
   it("Needs you: lowest rank, then soonest expiry, then label, then newest", () => {
     const slots = buildSlots([mkEntry(T1, "needs_input", { last: "2026-11-15T09:00:00Z" })], [
