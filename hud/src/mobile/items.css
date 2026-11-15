@@ -1,7 +1,7 @@
 /* PX-3a: one-tap answer chips (items.ts will own this file from PX-3b). Existing tokens only, so
    the phone skin restyles them; no external references; every control at least 48 px tall. */
 .m-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.tap.m-chip {
+.m-chips > .tap.m-chip {
   flex: 1 1 100%;
   min-height: 48px;
   padding: 8px 14px;
@@ -13,9 +13,9 @@
   border: 1px solid var(--accent);
   border-radius: var(--radius-btn);
 }
-.tap.m-chip:disabled { opacity: 0.5; color: var(--text-muted); border-color: var(--control-edge); background: none; }
-.tap.m-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.m-chip .suggested {
+.m-chips > .tap.m-chip:disabled { opacity: 0.5; color: var(--text-muted); border-color: var(--control-edge); background: none; }
+.m-chips > .tap.m-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.m-chips > .m-chip .suggested {
   font: 11px var(--mono); text-transform: uppercase; color: var(--text-2);
   border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0 4px;
 }

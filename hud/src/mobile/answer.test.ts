@@ -483,7 +483,7 @@ describe("one-tap answer chips (PX-3a)", () => {
     expect(h.root.querySelector('[data-kind="question"] [data-testid="m-answer-write"] [data-testid="m-answer-text"]')).not.toBeNull();
     noMarkup(h.root);
     const css = readFileSync(join(__dirname, "items.css"), "utf8");
-    expect(css).toMatch(/\.tap\.m-chip\s*\{[^}]*min-height:\s*48px/);
+    expect(css).toMatch(/\.m-chips > \.tap\.m-chip\s*\{[^}]*min-height:\s*48px/);
     expect(css).toMatch(/\.m-chips\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(css).not.toMatch(/url\s*\(/);
   });
@@ -501,6 +501,36 @@ describe("one-tap answer chips (PX-3a)", () => {
     await h.settle();
     expect(h.posts).toEqual([{ path: "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer", value: { text: "Only user-visible" } }]);
     expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: Only user-visible");
+  });
+
+  it("a long option is sent whole, never cut at the display's 200 characters, and the receipt says it whole", async () => {
+    const LONGOPT = "Rewrite the history of the repo and " + "x".repeat(190) + " but NEVER delete originals";
+    expect(Array.from(LONGOPT).length).toBeGreaterThan(240);
+    const h = await start([row({ id: "q:aaaaaaaa:q-9", kind: "question", rank: 2, thread_id: "aaaaaaaa",
+      detail: { text: "How?", options: [LONGOPT, "no"] } })]);
+    const chips = chipsOf(h, "question");
+    expect(chips[0].querySelector(".option-text")!.textContent).toBe(LONGOPT);
+    chips[0].click();
+    await h.settle();
+    expect(h.posts[0].value).toEqual({ text: LONGOPT });
+    expect(h.posts[0].value.text).not.toContain("…");
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: " + LONGOPT);
+  });
+
+  it("an option too long to have whole gets no chip: it is shown, and the others keep theirs", async () => {
+    const HUGE = "y".repeat(2500);
+    const h = await start([row({ id: "q:aaaaaaaa:q-8", kind: "question", rank: 2, thread_id: "aaaaaaaa",
+      detail: { text: "How?", options: [HUGE, "ok"] } })]);
+    expect(chipsOf(h, "question").map((c) => c.querySelector(".option-text")!.textContent)).toEqual(["ok"]);
+    expect(h.root.querySelector('[data-testid="m-option-long"]')!.textContent).toContain("write it below");
+    expect(h.root.querySelector('[data-testid="m-answer-text"]')).not.toBeNull();
+  });
+
+  it("the chip rules are scoped to the answer chips, not Review's chat-jump buttons", () => {
+    const css = readFileSync(join(__dirname, "items.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const selectors = css.match(/[^{}]+(?=\{)/g)!.map((x) => x.trim());
+    for (const sel of selectors) if (sel.includes("m-chip") && !sel.includes("m-chips")) throw new Error(sel);
+    expect(selectors.filter((x) => x.includes("m-chip")).every((x) => x.startsWith(".m-chips"))).toBe(true);
   });
 
   it("a task question's chip sends its option text", async () => {

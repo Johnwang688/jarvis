@@ -321,14 +321,27 @@ function sendButton(label: string, id: string, onClick: () => void): HTMLButtonE
   return b;
 }
 
-/** PX-3a: an option is a button, and one tap sends that exact option. Every chip in the item is off while
- * its answer is on its way, so a double tap sends once; the app's own guard is the second lock. */
-function optionChips(row: InboxRow, options: readonly string[], a: InboxAnswers, busy: boolean,
-                     suggested: number | null, body: (i: number, option: string) => Record<string, unknown>): HTMLElement {
+/** The most an option may be for one tap to send it whole (characters, after format controls are stripped). */
+const CHIP_MAX = 2000;
+
+/** An option's complete words: null when it is empty or longer than CHIP_MAX, which is never sent cut. */
+function fullOption(raw: unknown): string | null {
+  const text = oneLine(raw, CHIP_MAX * 5);
+  return text && Array.from(text).length <= CHIP_MAX ? text : null;
+}
+
+/** PX-3a: an option is a button, and one tap sends that exact, complete option (never the display's 200-character
+ * cut). An option that cannot be had whole has no chip: its words are shown, to be written. Every chip in the item
+ * is off while its answer is on its way, so a double tap sends once; the app's own guard is the second lock. */
+function optionChips(row: InboxRow, shown: readonly string[], whole: readonly (string | null)[], a: InboxAnswers,
+                     busy: boolean, suggested: number | null,
+                     body: (i: number, option: string) => Record<string, unknown>): HTMLElement {
   const group = testid(el("div", "m-chips"), "m-chips");
   group.setAttribute("role", "group");
   group.setAttribute("aria-label", "Answer options");
-  options.forEach((option, i) => {
+  const long: string[] = [];
+  whole.forEach((option, i) => {
+    if (option === null) { long.push(shown[i] ?? ""); return; }
     const chip = tap("", () => { if (!chip.disabled) a.send(row, body(i, option), option); }, "m-chip", "m-option");
     chip.disabled = busy;
     if (i === suggested) chip.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
@@ -336,6 +349,12 @@ function optionChips(row: InboxRow, options: readonly string[], a: InboxAnswers,
     chip.setAttribute("aria-label", (i === suggested ? "suggested: " : "") + option);
     group.append(chip);
   });
+  if (long.length) {
+    const note = testid(el("p", "m-ask", "Too long for one tap, so write it below: " + long.join(" | ")), "m-option-long");
+    const wrap = el("div", "m-chips-wrap");
+    wrap.append(group, note);
+    return wrap;
+  }
   return group;
 }
 
@@ -391,7 +410,8 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     sync();
     const write = testid(el("div", "m-write"), "m-answer-write");
     write.append(text, send);
-    if (options.length) box.append(optionChips(row, options, a, busy, null, (_i, option) => ({ text: option })));
+    const raw = Array.isArray(row.detail.options) ? row.detail.options.filter((o) => typeof o === "string" && oneLine(o)) : [];
+    if (options.length) box.append(optionChips(row, options, raw.map(fullOption), a, busy, null, (_i, option) => ({ text: option })));
     box.append(write);
   } else {
     const d = decisionOf(row)!;
@@ -412,7 +432,8 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     sync();
     const write = testid(el("div", "m-write"), "m-answer-write");
     write.append(text, send);
-    box.append(optionChips(row, d.options, a, busy, d.suggested, (i) => ({ choice: i })), write);
+    const raw = Array.isArray(row.detail.options) ? row.detail.options : [];
+    box.append(optionChips(row, d.options, raw.map(fullOption), a, busy, d.suggested, (i) => ({ choice: i })), write);
   }
   const note = a.notes.get(row.id);
   if (note) {
