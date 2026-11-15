@@ -28,6 +28,7 @@ import {
 } from "../lib/prRow";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
+import "./items.css";
 import {
   ASSISTANT_ROLES, deskNote, lineKind, orderTasks,
   type ChatThread, type DiffView, type LogRow, type Project, type TaskView,
@@ -273,7 +274,8 @@ function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
 /** What the inbox may answer (P-4), and the app's state for it. */
 export interface InboxAnswers {
   openCard: (row: InboxRow) => void;
-  send: (row: InboxRow, body: Record<string, unknown>) => void;
+  /** `echo` is the words the phone itself sent (a chip's option); the receipt says them, never the server's. */
+  send: (row: InboxRow, body: Record<string, unknown>, echo?: string) => void;
   /** QH: Approve and retry on a deferred row; the app asks for the passkey first. */
   retry: (row: InboxRow) => void;
   /** Rows whose answer is on its way. */
@@ -282,6 +284,7 @@ export interface InboxAnswers {
   notes: ReadonlyMap<string, string>;
   /** Typed answers and picked options, kept across a read again. */
   drafts: Map<string, string>;
+  /** PX-3a: unused by the rows now (an option is one tap, nothing is picked first); kept for callers. */
   picks: Map<string, number>;
   /** AS: rows whose command the owner opened (true) or closed (false), and the toggle. */
   expanded?: ReadonlyMap<string, boolean>;
@@ -316,6 +319,24 @@ export function answersHere(row: InboxRow, a?: InboxAnswers): boolean {
 function sendButton(label: string, id: string, onClick: () => void): HTMLButtonElement {
   const b = tap(label, onClick, "quiet m-send", id);
   return b;
+}
+
+/** PX-3a: an option is a button, and one tap sends that exact option. Every chip in the item is off while
+ * its answer is on its way, so a double tap sends once; the app's own guard is the second lock. */
+function optionChips(row: InboxRow, options: readonly string[], a: InboxAnswers, busy: boolean,
+                     suggested: number | null, body: (i: number, option: string) => Record<string, unknown>): HTMLElement {
+  const group = testid(el("div", "m-chips"), "m-chips");
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Answer options");
+  options.forEach((option, i) => {
+    const chip = tap("", () => { if (!chip.disabled) a.send(row, body(i, option), option); }, "m-chip", "m-option");
+    chip.disabled = busy;
+    if (i === suggested) chip.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
+    chip.append(el("span", "option-text", option));
+    chip.setAttribute("aria-label", (i === suggested ? "suggested: " : "") + option);
+    group.append(chip);
+  });
+  return group;
 }
 
 function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
@@ -354,9 +375,10 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
       box.append(ask);
     }
   } else if (row.kind === "question" || row.kind === "task_question") {
+    const options = questionOf(row).options;
     const text = testid(el("textarea", "m-text"), "m-answer-text");
-    text.setAttribute("aria-label", "Your answer");
-    text.placeholder = "Your answer";
+    text.setAttribute("aria-label", options.length ? "Write your own answer" : "Your answer");
+    text.placeholder = options.length ? "Write your own" : "Your answer";
     text.rows = 2;
     text.value = a.drafts.get(row.id) ?? "";
     text.readOnly = busy;
@@ -367,47 +389,30 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     const sync = () => { a.drafts.set(row.id, text.value); send.disabled = busy || !text.value.trim(); };
     text.addEventListener("input", sync);
     sync();
-    box.append(text, send);
+    const write = testid(el("div", "m-write"), "m-answer-write");
+    write.append(text, send);
+    if (options.length) box.append(optionChips(row, options, a, busy, null, (_i, option) => ({ text: option })));
+    box.append(write);
   } else {
     const d = decisionOf(row)!;
-    const group = testid(el("div", "m-choices"), "m-decision-options");
-    group.setAttribute("role", "radiogroup");
     const text = testid(el("textarea", "m-text"), "m-decision-text");
     // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen.
-    const picked = () => a.picks.get(row.id) ?? -1;
+    // PX-3a: each option is a chip and one tap sends it ({choice}); the box is "Write your own".
     const send = sendButton("Answer", "m-decision-send", () => {
       const words = text.value.trim();
       if (words) a.send(row, { text: words });
-      else if (picked() >= 0) a.send(row, { choice: picked() });
     });
-    const sync = () => {
-      a.drafts.set(row.id, text.value);
-      send.disabled = busy || (!text.value.trim() && picked() < 0);
-    };
-    d.options.forEach((option, i) => {
-      const label = el("label", "m-choice");
-      const radio = testid(el("input", ""), "m-decision-option");
-      radio.type = "radio";
-      radio.name = "decision-" + row.id;
-      radio.value = String(i);
-      radio.checked = picked() === i;
-      radio.disabled = busy;
-      radio.addEventListener("change", () => { if (radio.checked) { a.picks.set(row.id, i); sync(); } });
-      // The suggestion's marker is the phone's own element before the option's
-      // words, never text an option could write (as the HUD's and P-3's).
-      label.append(radio, " ");
-      if (i === d.suggested) label.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
-      label.append(el("span", "option-text", option));
-      group.append(label);
-    });
+    const sync = () => { a.drafts.set(row.id, text.value); send.disabled = busy || !text.value.trim(); };
     text.setAttribute("aria-label", "Or answer in your own words");
-    text.placeholder = "Or answer in your own words";
+    text.placeholder = "Or write your own";
     text.rows = 2;
     text.value = a.drafts.get(row.id) ?? "";
     text.readOnly = busy;
     text.addEventListener("input", sync);
     sync();
-    box.append(group, text, send);
+    const write = testid(el("div", "m-write"), "m-answer-write");
+    write.append(text, send);
+    box.append(optionChips(row, d.options, a, busy, d.suggested, (i) => ({ choice: i })), write);
   }
   const note = a.notes.get(row.id);
   if (note) {
@@ -437,7 +442,8 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
   else if (row.kind === "question" || row.kind === "task_question") {
     const q = questionOf(row);
     if (q.text) box.append(testid(el("p", "question", q.text), "m-question"));
-    lines(box, "Options", q.options, "options");
+    // PX-3a: when the row answers here its options are the chips (not twice).
+    if (!(answers && answersHere(row, answers))) lines(box, "Options", q.options, "options");
   } else if (row.kind === "proposal" || row.kind === "task") {
     const brief = briefOf(row);
     if (brief) box.append(testid(el("p", "brief", brief), "m-brief"));

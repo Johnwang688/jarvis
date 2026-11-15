@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
 import { cardView, parseDetail, type CardState } from "./card";
@@ -181,6 +183,7 @@ function harness(rows: unknown[]) {
   const posts: { path: string; value: any }[] = [];
   const replies: Record<string, Posted> = {};
   const gets: Record<string, Got> = {};
+  const gate: { wait: Promise<void> | null } = { wait: null };
   const credential = vi.fn(async (_pk: Record<string, unknown>) => ({ id: "cred", response: {} }) as Record<string, unknown> | null);
   const root = document.createElement("main");
   document.body.replaceChildren(root);
@@ -189,14 +192,14 @@ function harness(rows: unknown[]) {
   const app = new PhoneApp({
     root, onSignedOut: () => {}, signOut: async () => {},
     fetchJson: async (path) => gets[path] ?? { ok: false, why: "error", status: 404, body: { error: "not found" } },
-    postJson: async (path, value) => { posts.push({ path, value }); return replies[path] ?? { status: 200, body: { ok: true } }; },
+    postJson: async (path, value) => { posts.push({ path, value }); if (gate.wait) await gate.wait; return replies[path] ?? { status: 200, body: { ok: true } }; },
     getCredential: credential,
     openStream: () => new Stream(),
     setTimer: (fn) => { queueMicrotask(fn); return 0; },
   });
   const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
   const click = async (id: string) => { root.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`)!.click(); await settle(); };
-  return { app, root, posts, replies, gets, credential, settle, click };
+  return { app, root, posts, replies, gets, credential, settle, click, gate };
 }
 
 const APPR = row({ id: "appr:r1", kind: "approval", rank: 1, title: "Claude asks to use Bash", detail: { req_id: "r1", tool: "Bash" } });
@@ -286,23 +289,22 @@ describe("the phone app answers (P-4)", () => {
     expect(h.posts).toEqual([]);
     await h.click("m-answer-send");
     expect(h.posts).toEqual([{ path: "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer", value: { text: "pnpm" } }]);
-    // The suggestion's tag is the phone's own element before the option's words (as the HUD's).
-    const choices = Array.from(h.root.querySelectorAll(".m-choice"));
-    const tag = choices[0].querySelector('[data-testid="m-suggested"]')!;
+    // PX-3a: the decision's options are chips; the suggestion's tag is the phone's own element
+    // before the option's words (as the HUD's), and nothing is chosen until the owner taps one.
+    const chips = Array.from(h.root.querySelectorAll<HTMLButtonElement>('[data-kind="decision"] [data-testid="m-option"]'));
+    expect(chips.length).toBe(2);
+    const tag = chips[0].querySelector('[data-testid="m-suggested"]')!;
     expect(tag.textContent).toBe("suggested");
-    expect(tag.compareDocumentPosition(choices[0].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(choices[1].querySelector('[data-testid="m-suggested"]')).toBeNull();
-    // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen;
-    // Answer is off until the owner picks, and the options are listed once (the radios).
-    expect(choices.map((c) => c.querySelector<HTMLInputElement>("input")!.checked)).toEqual([false, false]);
-    expect(h.root.querySelector<HTMLButtonElement>('[data-testid="m-decision-send"]')!.disabled).toBe(true);
-    expect(h.root.querySelectorAll('[data-kind="decision"] ul.options').length).toBe(0);
-    const radio = h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-decision-option"]')[1];
-    radio.checked = true;
-    radio.dispatchEvent(new Event("change"));
-    await h.click("m-decision-send");
+    expect(tag.compareDocumentPosition(chips[0].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(chips[1].querySelector('[data-testid="m-suggested"]')).toBeNull();
+    expect(h.root.querySelectorAll('[data-kind="decision"] ul.options, [data-kind="decision"] input[type=radio]').length).toBe(0);
+    expect(h.posts.length).toBe(1);
+    chips[1].click();
+    await h.settle();
     expect(h.posts[1]).toEqual({ path: "/m/api/inbox/decisions/d0123456789ab", value: { choice: 1 } });
-    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent to the asking chat.");
+    // The receipt is the phone's own copy of the option, not the daemon's note.
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: " + H);
+    noMarkup(h.root);
   });
 
   // QH: an approval deferred during quiet hours.
@@ -443,5 +445,139 @@ describe("AS: the phone's card and rows", () => {
     expect(view.querySelector('[data-testid="m-row-why"]')!.textContent).toContain("WHY ASKED");
     expect(view.querySelector('[data-testid="m-command"]')).toBeNull();
     expect(view.querySelector('[data-testid="m-command-preview"]')).not.toBeNull();
+  });
+});
+
+
+// PX-3a: one-tap answer chips.
+describe("one-tap answer chips (PX-3a)", () => {
+  const Q = row({ id: "q:aaaaaaaa:q-1", kind: "question", rank: 2, thread_id: "aaaaaaaa",
+    detail: { text: "Which scope?", options: ["Only user-visible", "Everything"] } });
+  const TQ = row({ id: "tq:0000beef:0", kind: "task_question", rank: 2, task_id: "0000beef",
+    detail: { text: "Which db?", options: ["pg", H] } });
+  const DEC = row({ id: "dec:d0123456789ab", kind: "decision", rank: 6, thread_id: "aaaaaaaa",
+    detail: { decision_id: "d0123456789ab", question: "Which?", options: ["sqlite", "pg"], default: 1, why: "w",
+      answer: null, delivery: null } });
+  const chipsOf = (h: ReturnType<typeof harness>, kind: string) =>
+    Array.from(h.root.querySelectorAll<HTMLButtonElement>(`[data-kind="${kind}"] [data-testid="m-option"]`));
+  const start = async (rows: unknown[]) => { const h = harness(rows); h.app.start(); await h.settle(); return h; };
+
+  it("render for a question, a task question and an open decision, as real buttons at least 48 px tall by rule", async () => {
+    const h = await start([Q, TQ, DEC, APPR]);
+    expect(chipsOf(h, "question").map((c) => c.querySelector(".option-text")!.textContent)).toEqual(["Only user-visible", "Everything"]);
+    expect(chipsOf(h, "task_question").map((c) => c.querySelector(".option-text")!.textContent)).toEqual(["pg", H]);
+    expect(chipsOf(h, "decision").length).toBe(2);
+    expect(chipsOf(h, "approval").length).toBe(0);
+    for (const c of chipsOf(h, "question")) {
+      expect(c.tagName).toBe("BUTTON");
+      expect(c.type).toBe("button");
+      expect(c.getAttribute("aria-label")).toBe(c.textContent!.trim());
+      expect(c.disabled).toBe(false);
+    }
+    expect(h.root.querySelector('[data-kind="question"] [data-testid="m-chips"]')!.getAttribute("role")).toBe("group");
+    // The approval keeps its card button and gains no Write your own.
+    expect(h.root.querySelector('[data-kind="approval"] [data-testid="m-open-card"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-kind="approval"] [data-testid="m-answer-write"]')).toBeNull();
+    // The options are not listed twice, and Write your own is still there.
+    expect(h.root.querySelectorAll('[data-kind="question"] ul.options').length).toBe(0);
+    expect(h.root.querySelector('[data-kind="question"] [data-testid="m-answer-write"] [data-testid="m-answer-text"]')).not.toBeNull();
+    noMarkup(h.root);
+    const css = readFileSync(join(__dirname, "items.css"), "utf8");
+    expect(css).toMatch(/\.tap\.m-chip\s*\{[^}]*min-height:\s*48px/);
+    expect(css).toMatch(/\.m-chips\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(css).not.toMatch(/url\s*\(/);
+  });
+
+  it("a question with no options keeps just its box", async () => {
+    const h = await start([row({ id: "q:aaaaaaaa:q-2", kind: "question", rank: 2, thread_id: "aaaaaaaa", detail: { text: "Why?", options: [] } })]);
+    expect(chipsOf(h, "question").length).toBe(0);
+    expect(h.root.querySelector('[data-testid="m-answer-text"]')).not.toBeNull();
+  });
+
+  it("one tap sends the exact option once, and the receipt is the local copy, not the server's text", async () => {
+    const h = await start([Q]);
+    h.replies["/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer"] = { status: 200, body: { ok: true, note: "Server says: Everything" } };
+    chipsOf(h, "question")[0].click();
+    await h.settle();
+    expect(h.posts).toEqual([{ path: "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer", value: { text: "Only user-visible" } }]);
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: Only user-visible");
+  });
+
+  it("a task question's chip sends its option text", async () => {
+    const h = await start([TQ]);
+    chipsOf(h, "task_question")[0].click();
+    await h.settle();
+    expect(h.posts).toEqual([{ path: "/m/api/inbox/tq%3A0000beef%3A0/answer", value: { text: "pg" } }]);
+  });
+
+  it("a double tap, or another chip while it is on its way, sends once; the chips are off meanwhile", async () => {
+    const h = await start([Q]);
+    let release = () => {};
+    h.gate.wait = new Promise<void>((r) => { release = r; });
+    const [first, second] = chipsOf(h, "question");
+    first.click();
+    first.click();
+    second.click();
+    await h.settle();
+    expect(h.posts.length).toBe(1);
+    const during = chipsOf(h, "question");
+    expect(during.length).toBe(2);
+    expect(during.every((c) => c.disabled)).toBe(true);
+    during[1].click();
+    during[0].click();
+    await h.settle();
+    expect(h.posts.length).toBe(1);
+    h.gate.wait = null;
+    release();
+    await h.settle();
+    expect(h.posts.length).toBe(1);
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: Only user-visible");
+  });
+
+  it("a failure re-enables the chips and shows the error; a second try sends again", async () => {
+    const h = await start([Q]);
+    const path = "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer";
+    h.replies[path] = { status: 500, body: { error: "the daemon failed" } };
+    chipsOf(h, "question")[1].click();
+    await h.settle();
+    expect(h.root.querySelector('[data-testid="m-answer-note"]')!.textContent).toBe("The daemon failed.");
+    expect(h.root.querySelector('[data-testid="m-flash"]')).toBeNull();
+    expect(chipsOf(h, "question").every((c) => !c.disabled)).toBe(true);
+    h.replies[path] = { status: 200, body: { ok: true } };
+    chipsOf(h, "question")[1].click();
+    await h.settle();
+    expect(h.posts.map((p) => p.value)).toEqual([{ text: "Everything" }, { text: "Everything" }]);
+  });
+
+  it("a 409 says it was already answered or gone, as today", async () => {
+    const h = await start([Q]);
+    h.replies["/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer"] = { status: 409, body: { error: "already answered or gone" } };
+    chipsOf(h, "question")[0].click();
+    await h.settle();
+    expect(h.root.querySelector('[data-testid="m-answer-note"]')!.textContent).toBe("Already answered or gone.");
+  });
+
+  it("a decision's chip sends its index", async () => {
+    const h = await start([DEC]);
+    h.replies["/m/api/inbox/decisions/d0123456789ab"] = { status: 200, body: { ok: true, note: "Sent to the asking chat." } };
+    expect(chipsOf(h, "decision")[1].querySelector('[data-testid="m-suggested"]')).not.toBeNull();
+    chipsOf(h, "decision")[0].click();
+    await h.settle();
+    expect(h.posts).toEqual([{ path: "/m/api/inbox/decisions/d0123456789ab", value: { choice: 0 } }]);
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent: sqlite");
+  });
+
+  it("Write your own still sends only from its button, and keeps the server's note", async () => {
+    const h = await start([Q]);
+    const text = h.root.querySelector<HTMLTextAreaElement>('[data-testid="m-answer-text"]')!;
+    const send = h.root.querySelector<HTMLButtonElement>('[data-testid="m-answer-send"]')!;
+    expect(send.disabled).toBe(true);
+    text.value = "Only the footer";
+    text.dispatchEvent(new Event("input"));
+    text.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await h.settle();
+    expect(h.posts).toEqual([]);
+    await h.click("m-answer-send");
+    expect(h.posts).toEqual([{ path: "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer", value: { text: "Only the footer" } }]);
   });
 });
