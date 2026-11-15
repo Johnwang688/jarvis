@@ -6,6 +6,8 @@ import { SlotCache, slotSignature, threadsView, type ListActions, type ListModel
 import type { InboxAnswers } from "./views";
 import { bands, buildSlots } from "./threads";
 import { agoWords } from "./reltime";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mkEntry, mkRow, mkTask, randomCase } from "./threads.fixtures";
 
 const NOW = Date.parse("2026-11-15T10:30:00Z");
@@ -82,12 +84,15 @@ describe("the bands and the strip", () => {
     expect(a.setFilter).toHaveBeenLastCalledWith(null);
   });
 
-  it("the Needs you chip is not amber without a rank 1 or 2 row; its header says Nothing needs you at 0", () => {
+  it("the Needs you chip is not amber without a rank 1 or 2 row; one empty card replaces the empty headings", () => {
     const v = draw(model({ rows: [mkRow("a", 5)] }));
     expect((v.querySelector('[data-testid="m-chip-needs"]') as HTMLElement).dataset.tone).toBeUndefined();
     const none = draw(model({ rows: [] }));
-    expect(none.querySelector('[data-testid="m-band-needs-head"]')!.textContent).toBe("Nothing needs you");
-    expect(none.querySelector('[data-testid="m-empty"]')!.textContent).toBe("All clear");
+    expect(none.querySelector('[data-testid="m-band-needs-head"]')).toBeNull();
+    expect(none.querySelectorAll('[data-testid="m-empty"]')).toHaveLength(1);
+    expect(none.querySelector('[data-testid="m-empty"]')!.textContent)
+      .toBe("Nothing needs youNo approvals, questions or pull requests are waiting. Nothing is running.");
+    expect(none.textContent).not.toContain("Nothing running");
   });
 
   it("a filter shows only its band, and the Tasks filter shows the tasks panel", () => {
@@ -116,6 +121,87 @@ describe("the bands and the strip", () => {
     (v.querySelector('[data-testid="m-retry"]') as HTMLElement).click();
     expect(a.retry).toHaveBeenCalled();
     expect(rowEls(v).length).toBe(1);
+  });
+});
+
+describe("RD-3 glass strip and dense slot heads", () => {
+  it("uses a translucent segmented track with no opaque sticky background", () => {
+    const css = readFileSync(join(__dirname, "threads.css"), "utf8");
+    const track = css.match(/\.m-strip\s*\{([^}]+)\}/)![1];
+    expect(track).toContain("background: var(--m-seg, rgba(255, 255, 255, 0.06))");
+    expect(track).not.toMatch(/sticky|--m-glass-sticky|#[\da-f]{3,8}/i);
+  });
+
+  it("keeps full accessible chip names and only the active filter pressed", () => {
+    const rows = Array.from({ length: 125 }, (_, i) => mkRow(`q:${i}`, 3));
+    for (const filter of [null, "needs", "running", "tasks"] as const) {
+      const a = actions();
+      const v = draw(model({ rows, filter }), a);
+      const chips = Array.from(v.querySelectorAll<HTMLButtonElement>(".chip"));
+      expect(chips.map((b) => b.getAttribute("aria-label"))).toEqual(["Needs you · 125", "Running · 0", "Tasks"]);
+      expect(chips.map((b) => b.getAttribute("aria-pressed"))).toEqual(["needs", "running", "tasks"].map((id) => String(id === filter)));
+      chips[0].click();
+      expect(a.setFilter).toHaveBeenLastCalledWith(filter === "needs" ? null : "needs");
+    }
+  });
+
+  it("draws the dot, project, kind, provider and relative age, retaining an error word", () => {
+    const rows = [mkRow("appr:1", 1, { kind: "approval", thread_id: "aaaaaaaa", detail: { provider: "codex" } })];
+    const v = draw(model({ rows, entries: [mkEntry("aaaaaaaa", "failed")] }));
+    const c = card(v, "thread:aaaaaaaa");
+    expect(c.querySelector('[data-testid="m-thread-dot"]')!.getAttribute("aria-hidden")).toBe("true");
+    expect(c.querySelector(".m-thread-project")!.textContent).toBe("Calc");
+    expect(c.querySelector(".m-thread-kind")!.textContent).toBe("Approval");
+    expect(c.querySelector(".m-thread-failed")!.textContent).toBe("Failed");
+    expect(c.querySelector(".m-thread-provider")!.textContent).toBe("Codex");
+    expect(c.querySelector(".m-thread-age")!.textContent).toBe("30 min ago");
+    expect(c.querySelector(".m-thread-age")!.getAttribute("title")).toBeTruthy();
+    expect(c.querySelector(".m-thread-age")!.getAttribute("data-rt-at")).toBe(String(Date.parse("2026-11-15T10:00:00Z")));
+  });
+
+  it("uses row ages for orphan/standalone heads and omits missing fields instead of guessing a provider", () => {
+    const rows = [mkRow("q:1", 2, { thread_id: "aaaaaaaa", asked_at: "2026-11-15T10:10:00Z" }),
+      mkRow("q:2", 3, { thread_id: "aaaaaaaa", asked_at: "2026-11-15T10:20:00Z" }),
+      mkRow("pr:1", 5, { kind: "pr", asked_at: "2026-11-15T10:00:00Z" }), mkRow("q:3", 3)];
+    const v = draw(model({ rows }));
+    expect(card(v, "orphan:aaaaaaaa").querySelector(".m-thread-age")!.textContent).toBe("10 min ago");
+    expect(card(v, "row:pr:1").querySelector(".m-thread-kind")!.textContent).toBe("Pull request");
+    expect(card(v, "row:pr:1").querySelector(".m-thread-age")!.textContent).toBe("30 min ago");
+    expect(card(v, "row:q:3").querySelector(".m-thread-age")).toBeNull();
+    expect(v.querySelector(".m-thread-provider, .m-thread-project")).toBeNull();
+  });
+
+  it("keeps a running task's kind, progress and open action", () => {
+    const a = actions();
+    const c = card(draw(model({ tasks: [mkTask("11111111", "running", { step: 3, steps: 7 })] }), a), "task:11111111");
+    expect(c.querySelector(".m-thread-kind")!.textContent).toBe("Working");
+    expect(c.querySelector(".m-thread-progress")!.textContent).toBe("step 3 of 7");
+    c.querySelector<HTMLButtonElement>(".m-thread-open")!.click();
+    expect(a.openTask).toHaveBeenCalledWith("11111111");
+  });
+
+  it("groups Recent heads in one list and keeps them tappable", () => {
+    const a = actions();
+    const v = draw(model({ entries: [mkEntry("aaaaaaaa", "idle"), mkEntry("bbbbbbbb", "unread")] }), a);
+    const list = v.querySelector('[data-testid="m-recent-list"]')!;
+    expect(list.querySelectorAll(":scope > .m-thread-recent")).toHaveLength(2);
+    list.querySelector<HTMLButtonElement>(".m-thread-open")!.click();
+    expect(a.openThread).toHaveBeenCalledWith("bbbbbbbb");
+    expect(list.querySelector(".m-thread-kind")!.textContent).toBe("Done, unread");
+  });
+
+  it("puts one empty card above Recent; never claims nothing is running when that read is unavailable", () => {
+    const v = draw(model({ entries: [mkEntry("aaaaaaaa", "idle")] }));
+    expect(v.querySelectorAll(".m-empty-card")).toHaveLength(1);
+    expect(Array.from(v.children).map((n) => (n as HTMLElement).dataset.testid)).toEqual(["m-strip", "m-band-needs", "m-band-recent"]);
+    expect(v.querySelector('[data-testid="m-band-needs"] > .m-empty-card')).not.toBeNull();
+    for (const over of [{ working: "unavailable" as const }, { tasks: null }, { tasksMore: true }, { tasks: [mkTask("11111111", "running")] }]) {
+      const partial = draw(model(over));
+      expect(partial.querySelectorAll(".m-empty-card")).toHaveLength(1);
+      expect(partial.querySelector(".m-empty-card")!.textContent).not.toContain("Nothing is running");
+    }
+    expect(draw(model({ rows: null, error: "boom" })).querySelector(".m-empty-card")).toBeNull();
+    expect(draw(model({ rows: [], error: "boom" })).querySelector(".m-empty-card")).toBeNull();
   });
 });
 
@@ -359,6 +445,47 @@ describe("keyed reuse: a card is rebuilt when anything it renders from changes",
     expect(agoWords("nope", NOW)).toBe("");
   });
 
+  it("redraws the rendered provider when only its detail field changes", () => {
+    const rows = [mkRow("appr:1", 1, { kind: "approval", thread_id: "aaaaaaaa", detail: { provider: "claude" } })];
+    const m = model({ rows, entries });
+    const cache = new SlotCache();
+    const a = actions();
+    const first = card(draw(m, a, cache), "thread:aaaaaaaa");
+    expect(first.querySelector(".m-thread-provider")!.textContent).toBe("Claude");
+    rows[0].detail.provider = "codex";
+    const next = card(draw(m, a, cache), "thread:aaaaaaaa");
+    expect(next).not.toBe(first);
+    expect(next.querySelector(".m-thread-provider")!.textContent).toBe("Codex");
+  });
+
+  it("redraws the rendered age when only time passes, including a row-only slot", () => {
+    for (const m of [model({ entries: [mkEntry("aaaaaaaa")] }),
+      model({ rows: [mkRow("q:1", 3, { thread_id: "aaaaaaaa", asked_at: "2026-11-15T10:00:00Z" })] })]) {
+      const cache = new SlotCache();
+      const a = actions();
+      const first = threadsView(m, a, cache, NOW, null).querySelector('[data-testid="m-thread"]')!;
+      const next = threadsView(m, a, cache, NOW + 60_000, null).querySelector('[data-testid="m-thread"]')!;
+      expect(next).not.toBe(first);
+      expect(next.querySelector(".m-thread-age")!.textContent).toBe("31 min ago");
+    }
+  });
+
+  it("redraws the absolute-time tooltip across midnight even if relative words stay the same", () => {
+    const at = new Date(2026, 10, 15, 23, 30, 30).getTime();
+    const before = new Date(2026, 10, 15, 23, 59, 55).getTime();
+    const after = before + 10_000;
+    const m = model({ entries: [mkEntry("aaaaaaaa", "idle", { last: new Date(at).toISOString() })] });
+    const cache = new SlotCache();
+    const a = actions();
+    const first = threadsView(m, a, cache, before, null).querySelector('[data-testid="m-thread"]')!;
+    // Move across local midnight within the same relative minute.
+    const next = threadsView(m, a, cache, after, null).querySelector('[data-testid="m-thread"]')!;
+    expect(next.querySelector(".m-thread-age")!.textContent).toBe(first.querySelector(".m-thread-age")!.textContent);
+    expect(next).not.toBe(first);
+    expect(next.querySelector(".m-thread-age")!.getAttribute("title"))
+      .not.toBe(first.querySelector(".m-thread-age")!.getAttribute("title"));
+  });
+
   it("a card that moves band is rebuilt for its new band", () => {
     const m = model({ entries: [mkEntry("aaaaaaaa", "idle")] });
     const cache = new SlotCache();
@@ -386,6 +513,12 @@ describe("untrusted text stays text", () => {
     expect(v.querySelectorAll(MARKUP).length).toBe(0);
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     expect(v.textContent).toContain(HOSTILE);
+  });
+
+  it("renders a provider as text", () => {
+    const v = draw(model({ rows: [mkRow("appr:1", 1, { kind: "approval", detail: { provider: HOSTILE } })] }));
+    expect(v.querySelector(".m-thread-provider")!.textContent).toContain("<img");
+    expect(v.querySelectorAll(MARKUP)).toHaveLength(0);
   });
 });
 

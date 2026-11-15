@@ -2,15 +2,16 @@
    no url(), no inline style, no backdrop-filter (skin.test.ts scans this file too).
    Every tap target is at least 3rem (48 px). */
 
-/* The summary strip is also the filter: three chips, sticky under the header. */
+/* One translucent track; no independent sticky rectangle over the aurora wash. */
 .m-strip {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: flex;
-  gap: 0.5rem;
-  padding: 0.25rem 0 0.5rem;
-  background: var(--m-glass-sticky);
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  margin-bottom: 0.625rem;
+  border: 1px solid var(--m-rim);
+  border-radius: var(--m-r-pill);
+  background: var(--m-seg, rgba(255, 255, 255, 0.06));
 }
 .tap.chip {
   flex: 1 1 auto;
@@ -23,25 +24,40 @@
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
-  border: 1px solid var(--control-edge);
+  border: 1px solid transparent;
   border-radius: var(--m-r-pill);
+  font-size: 0.875rem;
   color: var(--text-2);
+  background: none;
 }
 .m-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.m-chip-count { flex: none; white-space: pre; }
+.m-chip-count {
+  flex: none;
+  white-space: pre;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--m-r-pill);
+  padding: 0.125rem 0.375rem 0.125rem 0;
+  margin-left: 0.25rem;
+  background: var(--m-raise);
+  color: var(--text);
+}
 .m-threads[data-error="true"] > :not(.m-strip):not(.m-error) { opacity: 0.55; }
-.tap.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-/* Needs you is amber while a row is rank 1 or 2 (pending), the same rule as the badge. */
-.tap.chip[data-tone="pending"] { border-color: var(--amber-line); color: var(--amber); }
-.tap.chip[data-tone="pending"][aria-pressed="true"] { background: var(--amber-soft); }
+.tap.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--m-seg-on, var(--accent-soft)); color: var(--accent); }
+/* Pending and error meanings never follow the owner's accent. */
+.tap.chip[data-tone="pending"] { color: var(--amber); }
+.tap.chip[data-tone="pending"] .m-chip-count { background: var(--amber); color: var(--m-badge-ink, var(--bg-0)); }
+.tap.chip[data-tone="pending"][aria-pressed="true"] { border-color: var(--amber-line); background: var(--amber-soft); }
 
 .m-band { display: flex; flex-direction: column; gap: 0.5rem; }
-.m-band-head { margin-top: 0.75rem; }
+.m-band-head { margin: 0.75rem 0.25rem 0.125rem; font-size: 0.75rem; letter-spacing: 0.06em; }
+.m-band[data-band="needs"] .m-band-head { color: var(--amber); }
 .m-band-note { font-size: 0.875rem; color: var(--text-muted); padding: 0.25rem 0.125rem; }
 .m-band-note.m-unavailable { border: 1px dashed var(--border-strong); border-radius: var(--m-r-field); padding: 0.625rem 0.75rem; }
 
-/* A thread, a task or a row alone: one glass card with its items inside. */
-.m-thread {
+/* A thread, a task or a row alone: the existing slot, with its existing items inside. */
+.m-thread, .m-recent-list {
   border: 1px solid var(--m-rim);
   border-radius: var(--m-r-card);
   box-shadow: var(--m-rim-shadow);
@@ -50,51 +66,71 @@
 }
 .m-thread-needs { border-color: var(--amber-line); }
 .m-thread[data-state="failed"] { border-color: var(--red); }
-.tap.m-thread-open {
+.m-thread-head, .tap.m-thread-open {
   display: flex;
-  flex-direction: column;
   align-items: flex-start;
-  justify-content: center;
-  gap: 0.125rem;
+  gap: 0.625rem;
   width: 100%;
   min-height: 3.5rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.625rem 0.875rem 0.5rem;
+  text-align: left;
 }
-.m-thread-running .tap.m-thread-open, .m-thread-recent .tap.m-thread-open { min-height: 4rem; }
-.m-thread-title { font-weight: 600; overflow-wrap: anywhere; }
-.m-thread-meta { font-size: 0.8125rem; color: var(--text-muted); overflow-wrap: anywhere; }
-.m-thread-kind { font-size: 0.8125rem; color: var(--text-muted); padding: 0.625rem 0.75rem 0; margin: 0; font-weight: 600; }
-/* The inbox rows sit inside the card, as insets. */
+.tap.m-thread-open:active { background: var(--m-raise); }
+.m-thread-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.125rem; }
+.m-thread-title {
+  font-size: 1rem;
+  line-height: 1.3;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.m-thread-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 0.125rem 0.375rem; font-size: 0.8125rem; line-height: 1.25rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.m-thread-project { padding: 0 0.4375rem; border-radius: 0.375rem; background: var(--m-raise); font-size: 0.75rem; color: var(--text-2); max-width: 100%; }
+.m-thread-kind { font-weight: 600; }
+.m-thread-needs .m-thread-kind { color: var(--amber); }
+.m-thread-running .m-thread-kind { color: var(--accent); }
+.m-thread[data-state="failed"] .m-thread-kind, .m-thread-failed { color: var(--red); }
+.m-thread-provider { color: var(--text-2); }
+.m-thread-age { flex: none; padding-top: 0.125rem; font-size: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.m-thread-dot { flex: none; width: var(--m-dot, 0.625rem); height: var(--m-dot, 0.625rem); margin-top: 0.375rem; border-radius: 50%; box-shadow: inset 0 0 0 2px var(--text-muted); }
+.m-thread-needs .m-thread-dot { background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); }
+.m-thread[data-state="unread"] .m-thread-dot, .m-thread[data-state="done"] .m-thread-dot { background: var(--green); box-shadow: none; }
+.m-thread[data-state="working"] .m-thread-dot,
+.m-thread[data-state="running"] .m-thread-dot,
+.m-thread[data-state="verifying"] .m-thread-dot { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); animation: m-pulse 1.6s ease-in-out infinite; }
+.m-thread-needs[data-state] .m-thread-dot { background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); animation: none; }
+.m-thread[data-state="failed"] .m-thread-dot { background: var(--red); box-shadow: none; animation: none; }
 .m-thread-items { display: flex; flex-direction: column; gap: 0.5rem; padding: 0 0.5rem 0.5rem; }
 .m-thread-items .row { background: var(--m-raise); }
-.m-thread-kind + .m-thread-items { padding-top: 0.375rem; }
-
-/* A working thread pulses in the accent; a still screen shows a solid dot instead. */
-.m-thread[data-state="working"] .m-thread-meta::before,
-.m-thread[data-state="running"] .m-thread-meta::before,
-.m-thread[data-state="verifying"] .m-thread-meta::before {
-  content: "";
-  display: inline-block;
-  width: 0.5rem;
-  height: 0.5rem;
-  margin-right: 0.375rem;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: m-pulse 1.6s ease-in-out infinite;
-}
 @keyframes m-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .m-thread[data-state="working"] .m-thread-meta::before,
-  .m-thread[data-state="running"] .m-thread-meta::before,
-  .m-thread[data-state="verifying"] .m-thread-meta::before { animation: none; }
-}
+@media (prefers-reduced-motion: reduce) { .m-thread .m-thread-dot { animation: none; } }
 
-.tap.m-recent-all { min-height: var(--m-tap); align-self: stretch; text-align: center; }
-.m-recent-rest { display: flex; flex-direction: column; gap: 0.5rem; }
+/* Recent is one glass group; rows with received items retain all of those items. */
+.m-recent-list .m-thread-recent { border: 0; border-radius: 0; box-shadow: none; background: none; }
+.m-recent-list .m-thread-recent + .m-thread-recent,
+.m-recent-list .m-recent-rest { border-top: 1px solid var(--m-rim); }
+.m-thread-recent .tap.m-thread-open { min-height: 3.5rem; align-items: center; padding: 0.5rem 0.875rem; }
+.m-thread-recent .m-thread-dot { margin-top: 0; }
+.m-thread-recent .m-thread-title { display: block; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; }
+.m-thread-recent .m-thread-project { background: none; padding: 0; font-size: inherit; color: inherit; }
+.m-thread-recent .m-thread-kind { font-weight: 400; }
+.m-thread-recent .m-thread-meta > * + *::before { content: "· "; }
+.tap.m-recent-all { min-height: var(--m-tap); align-self: stretch; text-align: right; color: var(--accent); }
+.m-recent-rest { display: flex; flex-direction: column; }
 .m-recent-rest[hidden] { display: none; }
 .m-info { display: flex; flex-direction: column; gap: 0.5rem; }
 .m-info-summary { min-height: var(--m-tap); display: flex; align-items: center; padding: 0 0.25rem; color: var(--text-2); }
 .m-info[open] .m-info-summary { margin-bottom: 0.5rem; }
+
+.m-empty-card { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0.375rem; padding: 1.5rem 1rem 1.25rem; }
+.m-empty-card h3 { font-size: 1.0625rem; }
+.m-empty-card p { font-size: 0.875rem; color: var(--text-muted); max-width: 17rem; }
+.m-empty-mark { width: 3.5rem; height: 3.5rem; border: 1px solid var(--green); border-radius: 50%; display: grid; place-items: center; color: var(--green); background: var(--m-raise); margin-bottom: 0.375rem; }
+.m-empty-mark::after { content: ""; width: 1.125rem; height: 0.625rem; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); }
 
 .m-error {
   display: flex;
