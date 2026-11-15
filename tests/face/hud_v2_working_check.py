@@ -457,6 +457,7 @@ def _line_checks(page, mock, check, until):
     # With nothing waiting the line is quiet and still opens the page.
     _open(page, mock, until)
     line = page.locator('[data-testid="working-needs-line"]')
+    until(lambda: line.count() == 1 and line.inner_text() == "Needs you · 0", timeout=4)
     check("the Needs you line is shown with nothing waiting, as a quiet 'Needs you · 0' [mutation: hidden at 0]",
           line.count() == 1 and line.inner_text() == "Needs you · 0"
           and "quiet0" in (line.get_attribute("class") or "")
@@ -677,6 +678,109 @@ def _zfresh(page, mock, until, size, zoom):
     time.sleep(0.4)
 
 
+def _q6(thread="t6"):
+    return {"id": f"q:{thread}:r1", "kind": "question", "rank": 2, "title": f"chat {thread} is stopped until you answer",
+            "blocks": f"chat {thread} waits on this", "project_id": "p1", "thread_id": thread, "task_id": None,
+            "asked_at": "2026-11-14T09:00:00+00:00", "expires_at": None, "origin": "",
+            "detail": {"thread_id": thread, "req_id": "r1", "text": "Pick one", "options": ["left", "right"]}}
+
+
+def _focused(page):
+    return page.evaluate("() => document.activeElement && document.activeElement.dataset && document.activeElement.dataset.threadId || null")
+
+
+def _nav_checks(page, mock, check, until):
+    """Review of PR #368 (fix round 1): hint targets and the header's fallbacks."""
+    q = _q6()
+    # 1. A hint newer than the cached inbox rows: the page reads first, then focuses.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = []
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-line"]').inner_text() == "Needs you · 0", timeout=4)
+    page.locator('[data-testid="working-needs-line"]').click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').get_attribute("data-status") == "ready", timeout=4)
+    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 0, timeout=3)
+    mock_inbox.state(mock)["rows"] = [q]                       # the inbox moved on; this window has not heard (no inbox_changed)
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [q]
+    mock_working.changed(mock)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: _focused(page) == "t6", timeout=4)
+    check("a hint newer than the cached inbox rows still lands: the page reads first, then focuses the thread "
+          "[mutation: the target is judged before the read]", _focused(page) == "t6", str(_focused(page)))
+    # 2. A cancelled navigation leaves no target behind.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = [q]
+    mock_inbox.state(mock)["fail"] = (500, "boom")
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [q]
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-hint-t6"]').click()
+    until(lambda: page.locator('[data-testid="inbox-error"]').count() == 1, timeout=4)
+    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 0, timeout=3)
+    mock_inbox.state(mock)["fail"] = None
+    mock_inbox.changed(mock)
+    until(lambda: page.locator('[data-testid="owner-inbox-count"]').count() == 1, timeout=4)
+    page.locator('[data-testid="working-needs-line"]').click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').get_attribute("data-status") == "ready", timeout=4)
+    until(lambda: page.locator('[data-testid="inbox-thread"]').count() == 1, timeout=4)
+    time.sleep(0.4)
+    check("a hint opened while the inbox could not be read, then abandoned, leaves no target: a later ordinary open "
+          "focuses nothing [mutation: the request survives the page]", _focused(page) is None, str(_focused(page)))
+    # 3. A first /working error, whatever it is, keeps the row an opener.
+    _reset(mock)
+    _st(mock)["fail"] = (500, "boom")
+    _fresh(page, mock, until, SINGLE)
+    time.sleep(0.8)
+    row = page.locator('[data-testid="owner-inbox"]')
+    check("a first /working error (500) leaves the rainbow row a plain button with no list to fold [mutation: folds an empty list]",
+          row.count() == 1 and row.get_attribute("aria-expanded") is None
+          and page.locator('[data-testid="working-section"]').count() == 0
+          and page.locator('[data-testid="working-stale"]').count() == 1)
+    row.click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
+    check("and a click on it opens the Needs you page", page.locator('[data-testid="inbox-page-title"]').text_content() == "Needs you")
+    _st(mock)["fail"] = None
+    # 5. An unread inbox is a mark, not a zero.
+    _reset(mock)
+    mock_inbox.state(mock)["fail"] = (500, "boom")
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-needs-line"]').count() == 1, timeout=4)
+    time.sleep(0.5)
+    line = page.locator('[data-testid="working-needs-line"]')
+    check("with the inbox unread the line says so ('Needs you · –'), is still clickable and is not the quiet zero "
+          "[mutation: unknown shown as 0]",
+          line.inner_text() == "Needs you · –" and "quiet0" not in (line.get_attribute("class") or "")
+          and "nothing" not in (line.get_attribute("aria-label") or ""), line.inner_text())
+    mock_inbox.state(mock)["fail"] = None
+    # 9. With a hint on a row, the project chip gives way first and the title keeps its letters.
+    _reset(mock)
+    mock_inbox.state(mock)["rows"] = [q, {**q, "id": "dec:t6", "kind": "decision", "rank": 3,
+                                          "detail": {"decision_id": "d" + "0" * 12, "question": "which?",
+                                                     "options": [{"label": "a"}], "suggested": 0}}]
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = mock_inbox.state(mock)["rows"]
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    m = page.evaluate("""() => {
+      const row = document.querySelector('[data-testid="working-row"][data-id="t6"]');
+      const btn = row.querySelector('button.ttl-btn'), chip = row.querySelector('.wchip'), hint = row.querySelector('.whint');
+      return {title: btn.scrollWidth <= btn.clientWidth + 1, chip: chip ? chip.getBoundingClientRect().width : 0,
+              hint: hint.getBoundingClientRect().width, text: row.querySelector('[data-testid="working-name-t6"]').textContent};
+    }""")
+    check("a hinted row keeps its whole title: the project chip shrinks first [mutation: chip does not yield]",
+          m["title"], str(m))
+    _shot(page, "r1-hint-row")
+    mock_inbox.state(mock)["rows"] = []
+
+
 def _short_metrics(page):
     return page.evaluate("""() => {
       const r = (q) => { const e = document.querySelector(q); return e && e.getBoundingClientRect(); };
@@ -766,7 +870,7 @@ def _menukeys_checks(page, mock, check, until):
 
 SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
             _live_checks, _empty_checks, _stale_checks, _inbox_checks, _line_checks, _event_checks, _keys_checks,
-            _hint_checks, _page_checks, _tall_checks, _short_checks, _menukeys_checks)
+            _hint_checks, _page_checks, _nav_checks, _tall_checks, _short_checks, _menukeys_checks)
 
 
 def working_checks(browser, mock, base, check, until, guard, init_script):
