@@ -462,7 +462,7 @@ def run(browser, check, until, shots=None):
 
             # The approval sheet over the list: the list keeps its scroll; the safety gap holds on the sheet.
             page.evaluate("document.querySelector('[data-testid=m-main]').scrollTop = 0")
-            page.locator('[data-id="appr:r1"] [data-testid="m-open-card"]').click()
+            page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
             until(lambda: tid("m-sheet").count() == 1 and tid("approval-allow").count() == 1)
             # Read once the card has its body (the sheet grows from the bottom edge as it loads), both boxes in one read.
             until(lambda: page.locator(".m-card-body").inner_text() not in ("", "Loading the card…"), timeout=8)
@@ -477,8 +477,8 @@ def run(browser, check, until, shots=None):
             page.mouse.click(width / 2, 30)
             until(lambda: tid("m-sheet").count() == 0)
             check(f"PX-4 a tap on the dim area closes the sheet; the focus is back on the row's button {tag}",
-                  page.evaluate("document.activeElement?.dataset?.testid") == "m-open-card")
-            page.locator('[data-id="appr:r1"] [data-testid="m-open-card"]').click()
+                  page.evaluate("document.activeElement?.dataset?.testid") == "m-item-review")
+            page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
             until(lambda: tid("m-sheet").count() == 1)
             page.evaluate("history.back()")
             until(lambda: tid("m-sheet").count() == 0)

@@ -308,7 +308,7 @@ describe("the approval sheet", () => {
     await h.settle();
     const main = h.q("m-main")!;
     main.scrollTop = 250;
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     const sheet = h.q("m-sheet")!;
     expect(sheet).not.toBeNull();
     // The card is the sheet's content, whole, in its order: DENY, the gap, the allow row, the notice.
@@ -327,7 +327,7 @@ describe("the approval sheet", () => {
     expect(h.q("m-sheet")).toBeNull();
     expect(main.hasAttribute("inert")).toBe(false);
     expect(main.scrollTop).toBe(250);
-    expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-open-card"]'));
+    expect(document.activeElement).toBe(h.root.querySelector('[data-id="appr:r1"] [data-testid="m-item-review"]'));
     h.app.stop();
   });
 
@@ -336,7 +336,7 @@ describe("the approval sheet", () => {
     const h = harness({ rows: [approval()] });
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     h.app.card!.busy = true;
     await h.click("m-sheet-dim");
     expect(h.app.card).not.toBeNull();
@@ -364,7 +364,7 @@ describe("the approval sheet", () => {
     expect(h.q("m-tray")).not.toBeNull();
     // Rank 6 is not a tray row.
     expect(h.q("m-tray-body")!.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     expect(h.q("m-sheet")!.contains(h.q("approval-card"))).toBe(true);
     expect(h.q("m-transcript")).not.toBeNull();
     expect(h.app.tab).toBe("chats");
@@ -487,6 +487,42 @@ describe("the morning review is a line in the Inbox; its tab shows only for defe
     h.app.start();
     await h.settle();
     expect(h.q("m-review-open")).toBeNull();
+    h.app.stop();
+  });
+});
+
+describe("PX-3b state across the sheet and back-navigation", () => {
+  const rows = () => [approval(), mkRow("q:5", 5, { thread_id: T1, detail: { text: "Which?", options: [] } }),
+    mkRow("m:6", 6, { kind: "missed", thread_id: T1, detail: { text: "n", n: 1 } }),
+    mkRow("m:7", 7, { kind: "missed", thread_id: T1, detail: { text: "n", n: 1 } })];
+  const hidden = (h: ReturnType<typeof harness>, id: string) =>
+    !!h.root.querySelector(`[data-testid="m-inbox-row"][data-id="${id}"]`)?.closest("[hidden]");
+
+  it("focus returns to the Review button inside the thread card; the fold and Later survive the sheet and a chat's back", async () => {
+    history.replaceState(null, "", "/m/");
+    const h = harness({ rows: rows() });
+    h.app.start();
+    await h.settle();
+    expect(hidden(h, "m:6")).toBe(true);
+    await h.click("m-item-fold");
+    expect(hidden(h, "m:6")).toBe(false);
+    await h.click("m-item-later");
+    expect(h.q("m-item-unlater")).not.toBeNull();
+    await h.click("m-item-review");
+    expect(h.q("m-sheet")).not.toBeNull();
+    await h.click("m-back");
+    await h.traversed();
+    expect(h.q("m-sheet")).toBeNull();
+    expect(document.activeElement).toBe(h.root.querySelector('[data-thread="' + T1 + '"] [data-id="appr:r1"] [data-testid="m-item-review"]'));
+    expect(hidden(h, "m:6")).toBe(false);
+    expect(h.q("m-item-unlater")).not.toBeNull();
+    h.root.querySelector<HTMLElement>(`[data-thread="${T1}"] [data-testid="m-thread-open"]`)!.click();
+    await h.settle();
+    history.back();
+    await h.traversed();
+    expect(h.app.thread).toBeNull();
+    expect(hidden(h, "m:6")).toBe(false);
+    expect(h.q("m-item-unlater")).not.toBeNull();
     h.app.stop();
   });
 });

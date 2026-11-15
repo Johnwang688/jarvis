@@ -204,7 +204,7 @@ describe("M13: focus follows the card", () => {
     const h = harness([row({})]);
     h.app.start();
     await h.settle();
-    await h.click("m-open-card");
+    await h.click("m-item-review");
     h.app.render();
     expect(document.activeElement).toBe(h.q("m-card-heading"));
     h.q("approval-allow")!.focus();
