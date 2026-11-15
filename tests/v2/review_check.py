@@ -10,21 +10,20 @@ What it pins (the plan's unit list):
     approval is "Live now", with no tag and never an item;
   - tags: another id, digest, card or a restart is another tag; no digest
     and no unredacted argument in any payload;
-  - the subject: order-free, holds the tags, at most 64 characters; one id
-    or tag different is another subject; set A's assertion is refused for
-    set B; a `defer:<id>` assertion is refused at the group route and a
-    group's at the row route;
-  - all or nothing: one of three left at the desk between the options and
-    the answer is 409 `changed`, zero grants, the file unchanged, no write,
+  - the op token (WS-5c, in place of the subject): it binds the ids and
+    tags; one tag different is 409 changed; set A's token is reused on set
+    B; a per-row retry's token is reused at the group route;
+  - all or nothing: one of three left at the desk between the act-time
+    check and the grants is 409 `changed`, zero grants, the file unchanged, no write,
     nothing delivered; likewise a task resumed, a deferral past 24 h, a tag
     that no longer matches (a restart), a closed chat, a withheld card;
   - success: one write; each grant only for its exact call, once, 30
     minutes; two deferrals in one chat are one message, two in one blocked
     task one resume;
   - limits: 11 items, a duplicate, a malformed tag (400);
-  - the phone's authority: no assertion 401; each of the five §4.1
-    failures refuses a group but not a per-row retry; Leave needs no
-    assertion;
+  - the phone's authority (WS-5c): no op token 400, locked 423; each of
+    the five §4.1 failures refuses a group but not a per-row retry; Leave
+    needs the session only;
   - owner-only: 403 from the API listener, 401 without a session, 403 for a
     wrong Origin, 400 for a wrong Host; neither listener serves the other's
     paths; no tool, MCP entry or session tool names the module or its
@@ -243,20 +242,24 @@ class Binding(unittest.TestCase):
         self.assertNotIn("1" * 16, base)
         print("ok  a tag changes with the id, the digest, the card and a restart")
 
-    def test_subject(self):
-        a = [("defer:a1", "a" * 64), ("defer:b2", "b" * 64)]
-        s = review.subject(a)
-        self.assertEqual(s, review.subject(list(reversed(a))), "order-free")
-        self.assertTrue(re.fullmatch(r"defers:[0-9a-f]{56}", s) and len(s) <= 64, s)
+    def test_the_op_token_binds_the_set(self):
+        """WS-5c: the per-set passkey subject is gone; a group's op token is
+        spent on the digest of the method, the path and the body without the
+        token, so another id or another tag is another operation (409 reused
+        if the same token is sent again)."""
         from jarvis.v2 import remote_auth
-        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(s))
-        self.assertNotEqual(review.subject([("defer:a1", "a" * 64), ("defer:c3", "b" * 64)]), s, "another id")
-        self.assertNotEqual(review.subject([("defer:a1", "a" * 64), ("defer:b2", "c" * 64)]), s,
-                            "another tag [mutation: a subject from the ids only]")
-        self.assertNotEqual(review.subject(a[:1]), remote_answer.defer_binding("a1"),
-                            "one item's set is never the row's subject")
-        self.assertEqual(remote_answer.defer_binding("a1"), "defer:a1")
-        print("ok  the subject: order-free, holds the tags, <= 64 characters, never a row's")
+        self.assertFalse(hasattr(review, "subject"))
+
+        def digest(items, **extra):
+            return remote_auth.op_digest("POST", review.APPROVE,
+                                         {"items": [{"id": i, "tag": t} for i, t in items], **extra})
+        a = [("defer:a1", "a" * 64), ("defer:b2", "b" * 64)]
+        self.assertEqual(digest(a), digest(a, op="o1.anything"), "the token is not part of it")
+        self.assertNotEqual(digest([("defer:a1", "a" * 64), ("defer:c3", "b" * 64)]), digest(a), "another id")
+        self.assertNotEqual(digest([("defer:a1", "a" * 64), ("defer:b2", "c" * 64)]), digest(a), "another tag")
+        self.assertNotEqual(remote_auth.op_digest("POST", "/m/api/inbox/defer:a1/answer", {"action": "retry"}),
+                            digest(a[:1]), "a row's retry is never the group's")
+        print("ok  a group's op token binds its ids and tags (and the route); the per-set subject is gone")
 
     def test_limits_and_shapes(self):
         tag = "a" * 64
@@ -505,71 +508,79 @@ class Phone(ra.Phone):
         self.assertEqual(status, 200, body)
         return body
 
-    def group_options(self, items, cookie=None):
-        return self.phone("POST", "/m/api/review/approve/options", {"items": items}, cookie=cookie or self.cookie)
+    def approve(self, items, op=None, cookie=None, **extra):
+        body = {"items": items, **extra}
+        if op is not False:
+            body["op"] = op or self.op(cookie)
+        return self.phone("POST", "/m/api/review/approve", body, cookie=cookie or self.cookie)
 
-    def group_assertion(self, items):
-        status, _, body = self.group_options(items)
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body["count"], len(items))
-        return self.a.get(body["publicKey"])
+    def after_the_first_check(self, change):
+        """Make `change` happen once the act-time `check_group` has passed,
+        so only the locked-store recheck (`approve_many`) can see it."""
+        real = review.check_group
 
-    def approve(self, items, credential, cookie=None):
-        return self.phone("POST", "/m/api/review/approve", {"items": items, "assertion": credential},
-                          cookie=cookie or self.cookie)
+        def then(*args, **kw):
+            out = real(*args, **kw)
+            change()
+            return out
+        return patch.object(review, "check_group", then)
 
-    def session(self):
-        return self.auth.session_for([self.cookie])
-
-    def test_group_approve_with_one_assertion(self):
+    def test_group_approve_is_gated(self):
         self.secure_ok()
         r1, r2 = self.defer("make one"), self.defer("make two")
         out = self.review_report()
         self.assertTrue(out["group"]["ok"], out["group"])
         self.assertFalse(out["opens_here"], "no morning push in this process")
         items = picked(out, f"defer:{r1.req_id}", f"defer:{r2.req_id}")
-        status, _, body = self.approve(items, None)
-        self.assertEqual(status, 401, "no assertion")
-        credential = self.group_assertion(items)
+        self.assertEqual(self.approve(items, op=False)[0], 400, "no op token")
+        self.assertEqual(self.approve(items, op=False, assertion={})[0], 400, "the old body")
+        status, _, body = self.approve(items)
+        self.assertEqual((status, body), (423, {"error": "locked", "unlock": True}))
+        self.assertEqual({self.store.get(r.req_id)["state"] for r in (r1, r2)}, {"waiting"})
+        self.unlocked()
         self.mono2.now += quiet_defer.PRESENT_S
-        status, _, body = self.approve(list(reversed(items)), credential)
+        op = self.op()
+        status, _, body = self.approve(list(reversed(items)), op)
         self.assertEqual(status, 200, body)
         self.assertEqual({self.store.get(r.req_id)["state"] for r in (r1, r2)}, {"granted"})
         (tid, message), = self.told
         self.assertEqual((tid, message.via, message.desk), (self.thread.id, "phone", False))
-        self.assertTrue(self.d.owner_present(), "a verified group approval stamps presence")
-        print("ok  phone Approve selected: one assertion for the set (any order), one message, presence")
+        self.assertTrue(self.d.owner_present(), "a gated group approval stamps presence")
+        self.assertEqual(self.approve(list(reversed(items)), op)[2],
+                         {"error": "already sent", "duplicate": True, "state": "completed"})
+        # The per-set options route is gone.
+        self.assertEqual(self.phone("POST", "/m/api/review/approve/options", {"items": items},
+                                    cookie=self.cookie)[0], 404)
+        print("ok  phone Approve selected: gated (400 without a token, 423 locked), the set in any order, one "
+              "message, presence; a replay is 409 duplicate")
 
-    def test_set_a_assertion_is_refused_for_set_b(self):
+    def test_the_body_names_exactly_the_set(self):
+        """WS-5c §5.4: exactly the set the body names, ids and tags; one tag
+        different is 409 changed; the token spent on set A is reused on B."""
         r1, r2, r3 = self.defer("a"), self.defer("b"), self.defer("c")
         out = self.review_report()
         set_a = picked(out, f"defer:{r1.req_id}", f"defer:{r2.req_id}")
         set_b = picked(out, f"defer:{r1.req_id}", f"defer:{r3.req_id}")
-        credential = self.group_assertion(set_a)
-        status, _, body = self.approve(set_b, credential)
-        self.assertEqual(status, 401, body)
-        # One tag different is another subject too.
-        credential = self.group_assertion(set_a)
+        self.unlocked()
         forged = [set_a[0], {"id": set_a[1]["id"], "tag": "f" * 64}]
-        status, _, body = self.approve(forged, credential)
-        self.assertEqual(status, 401, body)
-        self.assertEqual({self.store.get(r.req_id)["state"] for r in (r1, r2, r3)}, {"waiting"})
-        print("ok  set A's assertion is refused for set B, and for A with one tag changed")
+        status, _, body = self.approve(forged)
+        self.assertEqual((status, body["changed"]), (409, [{"id": set_a[1]["id"], "reason": "changed"}]))
+        op = self.op()
+        self.assertEqual(self.approve(set_a, op)[0], 200)
+        self.assertEqual(self.approve(set_b, op)[2], {"error": "op token reused"})
+        self.assertEqual(self.store.get(r3.req_id)["state"], "waiting")
+        print("ok  the set the body names: one tag different is 409 changed; set A's token is reused on set B")
 
-    def test_a_row_assertion_and_a_group_assertion_never_cross(self):
-        r1 = self.defer("only")
+    def test_a_row_token_and_a_group_token_never_cross(self):
+        r1, r2 = self.defer("only"), self.defer("other")
         out = self.review_report()
-        items = picked(out, f"defer:{r1.req_id}")
-        # A per-row Approve and retry's assertion (`defer:<id>`), sent to the group route.
-        row_credential, _ = self.assertion(f"defer:{r1.req_id}", "allow")
-        status, _, body = self.approve(items, row_credential)
-        self.assertEqual(status, 401, body)
-        # A group's assertion for that one item, sent to the row route.
-        credential = self.group_assertion(items)
-        status, _, body = self.post_answer(f"defer:{r1.req_id}", {"action": "retry", "assertion": credential})
-        self.assertEqual(status, 401, body)
-        self.assertEqual(self.store.get(r1.req_id)["state"], "waiting")
-        print("ok  a defer:<id> assertion is refused at the group route, and a group's at the row route")
+        self.unlocked()
+        op = self.op()
+        self.assertEqual(self.post_answer(f"defer:{r1.req_id}", {"action": "retry", "op": op})[0], 200)
+        status, _, body = self.approve(picked(out, f"defer:{r2.req_id}"), op)
+        self.assertEqual((status, body), (409, {"error": "op token reused"}))
+        self.assertEqual(self.store.get(r2.req_id)["state"], "waiting")
+        print("ok  an op token spent on a per-row retry is refused at the group route (409 reused)")
 
     def nothing_happened(self, before, writes, ids):
         self.assertEqual(self.store.path.read_bytes(), before, "the file is unchanged")
@@ -582,15 +593,26 @@ class Phone(ra.Phone):
     def test_one_of_three_left_between_options_and_answer(self):
         reqs = [self.defer(f"c{i}") for i in range(3)]
         items = picked(self.review_report(), *(f"defer:{r.req_id}" for r in reqs))
-        credential = self.group_assertion(items)
-        self.assertTrue(quiet_defer.leave(self.d, reqs[1].req_id)["ok"], "left at the HUD meanwhile")
+        self.unlocked()
         before, writes = self.store.path.read_bytes(), Writes(self.store)
-        status, _, body = self.approve(items, credential)
+        # Left at the HUD after the act-time check: only the locked-store recheck sees it.
+        with self.after_the_first_check(lambda: self.assertTrue(quiet_defer.leave(self.d, reqs[1].req_id)["ok"])):
+            status, _, body = self.approve(items)
         self.assertEqual(status, 409, body)
         self.assertEqual(body["changed"], [{"id": f"defer:{reqs[1].req_id}", "reason": "answered"}])
+        before = self.store.path.read_bytes()     # the Leave itself wrote; nothing after it
+        writes.count = 0
+        self.assertEqual(self.store.get(reqs[1].req_id)["state"], "left")
         self.nothing_happened(before, writes, [reqs[0].req_id, reqs[2].req_id])
-        print("ok  phone all or nothing: one of three left between options and answer: 409 changed, zero grants, "
-              "the file unchanged, no write, nothing delivered [mutation: per-id settles]")
+        # And one left before the request: the act-time check refuses it.
+        more = [self.defer(f"d{i}") for i in range(2)]
+        items = picked(self.review_report(), *(f"defer:{r.req_id}" for r in more))
+        self.assertTrue(quiet_defer.leave(self.d, more[0].req_id)["ok"])
+        status, _, body = self.approve(items)
+        self.assertEqual((status, body["changed"]), (409, [{"id": f"defer:{more[0].req_id}", "reason": "answered"}]))
+        self.assertEqual(self.store.get(more[1].req_id)["state"], "waiting")
+        print("ok  phone all or nothing: one of three left between the act-time check and the grants: 409 "
+              "changed, zero grants, nothing delivered [mutation: per-id settles]")
 
     def test_the_second_check_after_the_assertion(self):
         task = self.d.stores.tasks.create(self.project.id, "migrate")
@@ -606,36 +628,36 @@ class Phone(ra.Phone):
             "expired": lambda: setattr(self.clock, "now", self.clock.now + timedelta(hours=24)),
         }
         key = review._KEY
+        self.unlocked()
         for reason, change in cases.items():
             with self.subTest(reason=reason):
                 review._KEY = key
                 if reason != "task-running" and self.d.stores.tasks.get(task.id).state != TaskState.BLOCKED:
                     self.d.stores.tasks.transition(task.id, TaskState.BLOCKED, reason="blocked again")
                 items = picked(self.review_report(), *(f"defer:{i}" for i in ids))
-                credential = self.group_assertion(items)
-                change()
                 before, writes = self.store.path.read_bytes(), Writes(self.store)
-                status, _, body = self.approve(items, credential)
+                with self.after_the_first_check(change):
+                    status, _, body = self.approve(items)
                 self.assertEqual(status, 409, body)
                 self.assertIn(reason, {c["reason"] for c in body["changed"]}, body)
                 self.nothing_happened(before, writes, ids)
                 if reason == "expired":
                     self.clock.now -= timedelta(hours=24)
         review._KEY = key
-        print("ok  after the assertion: a task resumed, a restart, past 24 h: 409, nothing written "
+        print("ok  after the act-time check: a task resumed, a restart, past 24 h: 409, nothing written "
               "[mutation: no second check]")
 
-    def test_a_closed_chat_after_the_options(self):
+    def test_a_closed_chat_after_the_first_check(self):
         from jarvis.v2.projects import archive_thread
         r1 = self.defer("one")
         items = picked(self.review_report(), f"defer:{r1.req_id}")
-        credential = self.group_assertion(items)
-        archive_thread(self.d, self.thread.id)
-        before, writes = self.store.path.read_bytes(), Writes(self.store)
-        status, _, body = self.approve(items, credential)
+        self.unlocked()
+        with self.after_the_first_check(lambda: archive_thread(self.d, self.thread.id)):
+            before, writes = self.store.path.read_bytes(), Writes(self.store)
+            status, _, body = self.approve(items)
         self.assertEqual((status, body["changed"]), (409, [{"id": f"defer:{r1.req_id}", "reason": "chat-closed"}]))
         self.nothing_happened(before, writes, [r1.req_id])
-        print("ok  a chat closed after the options: 409 chat-closed, nothing written")
+        print("ok  a chat closed after the act-time check: 409 chat-closed, nothing written")
 
     def test_a_withheld_card_is_never_in_a_group(self):
         r1 = self.defer("ls", reason="password: " + ra.PASSWORD)
@@ -648,64 +670,36 @@ class Phone(ra.Phone):
         self.assertNotIn(ra.PASSWORD, json.dumps(out))
         tag = review.item_tag(self.store.get(r1.req_id))
         items = [{"id": f"defer:{r1.req_id}", "tag": tag}] + picked(out, f"defer:{r2.req_id}")
-        status, _, body = self.group_options(items)
+        self.unlocked()
+        status, _, body = self.approve(items)
         self.assertEqual((status, body.get("changed")), (409, [{"id": f"defer:{r1.req_id}", "reason": "withheld"}]))
-        # A challenge for that set made past the first check: the answer refuses it too.
-        subject = review.subject([(i["id"], i["tag"]) for i in items])
-        credential = self.a.get(self.auth.answer_options(self.session(), subject, "allow"))
+        # Past a first check that let it through: the locked recheck refuses it too.
         before, writes = self.store.path.read_bytes(), Writes(self.store)
-        status, _, body = self.approve(items, credential)
+        with patch.object(review, "check_group", lambda *a, **k: []):
+            status, _, body = self.approve(items)
         self.assertEqual(status, 409, body)
         self.assertEqual(body["changed"], [{"id": f"defer:{r1.req_id}", "reason": "withheld"}])
         self.nothing_happened(before, writes, [r1.req_id, r2.req_id])
         # At the desk it shows whole, so it may be approved there.
         desk = review.report(self.d, phone=False)
         self.assertTrue({i["row"]["id"]: i for i in desk["overnight"]}[f"defer:{r1.req_id}"]["approve"])
-        print("ok  a card the phone's scrub would change: never ticked on the phone (report, options, answer)")
+        print("ok  a card the phone's scrub would change: never ticked on the phone (report, act time, the grants)")
 
-    def test_a_stale_tag_is_refused_before_any_challenge(self):
-        """#329 LOW 5: the first check compares the tags; a stale one is 409
-        and no challenge is issued."""
+    def test_a_stale_tag_is_refused_at_act_time(self):
+        """#329 LOW 5, as WS-5c moves it: the act-time check compares the
+        tags; a stale one is 409 and nothing is written."""
         r1, r2 = self.defer("one"), self.defer("two")
         items = picked(self.review_report(), f"defer:{r1.req_id}", f"defer:{r2.req_id}")
         stale = [items[0], {"id": items[1]["id"], "tag": "f" * 64}]
-        before = dict(self.auth._challenges)
-        status, _, body = self.group_options(stale)
+        self.unlocked()
+        before, writes = self.store.path.read_bytes(), Writes(self.store)
+        status, _, body = self.approve(stale)
         self.assertEqual((status, body.get("changed")), (409, [{"id": items[1]["id"], "reason": "changed"}]), body)
-        self.assertEqual(self.auth._challenges, before, "no challenge issued [mutation: no tag comparison]")
         with patch.object(review, "_KEY", pysecrets.token_bytes(32)):
-            status, _, body = self.group_options(items)
-        self.assertEqual(status, 409, "a restart's tags: refused before the challenge")
-        self.assertEqual(self.auth._challenges, before)
-        print("ok  a stale tag at the options: 409 changed, and no challenge is issued")
-
-    def test_the_answer_challenges_cannot_crowd_out_a_live_allow(self):
-        """#329 LOW 4: abandoned group prompts replace each other, deferrals
-        have their own budget, and a live card's Allow always gets a challenge."""
-        from jarvis.v2 import remote_auth
-        reqs = [self.defer(f"c{i}") for i in range(4)]
-        items = picked(self.review_report(), *(f"defer:{r.req_id}" for r in reqs))
-        for n in range(6):
-            status, _, body = self.group_options(items[: 1 + n % 4])
-            self.assertEqual(status, 200, body)
-        mine = [c for c in self.auth._challenges.values() if c["kind"] == "answer"]
-        self.assertEqual(len([c for c in mine if c["req_id"].startswith("defers:")]), 1,
-                         "only the latest set can be answered [mutation: earlier sets kept]")
-        for r in reqs:          # four per-row Approve and retry prompts, abandoned
-            status, _, body = self.options(f"defer:{r.req_id}", "allow")
-            self.assertEqual(status, 200, body)
-        status, _, body = self.options(f"defer:{reqs[0].req_id}", "allow")
-        self.assertEqual(status, 200, "the same row again replaces its own")
-        self.clock.now = at(12)
-        self.mono2.now += quiet_defer.PRESENT_S
-        approval, out, worker = self.ask()
-        status, _, body = self.options(self.row(approval), "allow")
-        self.assertEqual(status, 200, "a live card's Allow is never crowded out [mutation: one shared budget]")
-        # PM-D added the owner's PR actions as a family of their own.
-        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review", "pr"))
-        self.d.approvals.resolve(approval.req_id, Decision.DENY)
-        worker.join(5)
-        print("ok  challenges: a new set replaces the last; deferrals' prompts never crowd out a live Allow")
+            status, _, body = self.approve(items)
+        self.assertEqual(status, 409, "a restart's tags")
+        self.nothing_happened(before, writes, [r1.req_id, r2.req_id])
+        print("ok  a stale tag at act time: 409 changed, nothing written")
 
     def test_every_argument_reaches_the_phone_and_its_scrub(self):
         """#329 LOW 6: the phone shows a card's arguments beside its command,
@@ -729,35 +723,32 @@ class Phone(ra.Phone):
 
     def test_limits_on_the_phone(self):
         tag = "a" * 64
-        status, _, body = self.group_options([{"id": f"defer:x{i}", "tag": tag} for i in range(11)])
+        # Each is 400, before the window (these run locked).
+        status, _, body = self.approve([{"id": f"defer:x{i}", "tag": tag} for i in range(11)])
         self.assertEqual(status, 400, body)
-        status, _, body = self.group_options([{"id": "defer:x", "tag": tag}] * 2)
+        status, _, body = self.approve([{"id": "defer:x", "tag": tag}] * 2)
         self.assertEqual(status, 400, body)
-        status, _, body = self.group_options([{"id": "defer:x", "tag": "z"}])
+        status, _, body = self.approve([{"id": "defer:x", "tag": "z"}])
         self.assertEqual(status, 400, body)
-        status, _, body = self.approve([{"id": f"defer:x{i}", "tag": tag} for i in range(11)], {"x": 1})
+        status, _, body = self.approve([{"id": "defer:x", "tag": tag}], op="o1.x.y")
         self.assertEqual(status, 400, body)
         print("ok  phone limits: 11 items, a duplicate, a malformed tag: 400 [mutation: the 10-item cap removed]")
 
     def limited(self, name):
         r1, r2 = self.defer("one"), self.defer("two")
         items = picked(self.review_report(), f"defer:{r1.req_id}", f"defer:{r2.req_id}")
-        early = self.group_assertion(items)
+        self.unlocked()
         ra.FLIPS[name](self)
         result = self.d.secure.check()
         self.assertEqual((result["ok"], result["failed"]), (False, name), result)
-        status, _, body = self.group_options(items)
-        self.assertEqual(status, 409, body)
-        self.assertTrue(body["error"].startswith("limited: "), body)
-        status, _, body = self.approve(items, early)
+        status, _, body = self.approve(items)
         self.assertEqual(status, 409, body)
         self.assertTrue(body["error"].startswith("limited: "), body)
         self.assertEqual({self.store.get(r.req_id)["state"] for r in (r1, r2)}, {"waiting"})
         self.assertEqual(self.told, [])
         self.assertFalse(self.review_report()["group"]["ok"], "the report says so")
         # The per-row Approve and retry still works on a limited phone.
-        credential, _ = self.assertion(f"defer:{r1.req_id}", "allow")
-        status, _, body = self.post_answer(f"defer:{r1.req_id}", {"action": "retry", "assertion": credential})
+        status, _, body = self.post_answer(f"defer:{r1.req_id}", {"action": "retry", "op": self.op()})
         self.assertEqual(status, 200, body)
         self.assertEqual(self.store.get(r1.req_id)["state"], "granted")
 
@@ -792,7 +783,7 @@ class Phone(ra.Phone):
         self.assertEqual((status, body["results"][0]["ok"]), (200, True), body)
         self.assertEqual(self.store.get(r1.req_id)["state"], "left")
         self.assertFalse(self.d.owner_present(), "a Leave from the phone is not presence")
-        print("ok  phone Leave selected: the session only, no assertion; not presence")
+        print("ok  phone Leave selected: the session only, no window; not presence")
 
     def test_owner_only_on_the_remote_listener(self):
         self.defer("one")
@@ -929,15 +920,16 @@ class Boundary(unittest.TestCase):
         print("ok  shell probes of /m/api/review* DENY (v2 layer 1, v1); the grants' store is protected; "
               "review.py is SELF_PROTECTED")
 
-    def test_only_the_verified_phone_approves_as_the_phone(self):
-        source = inspect.getsource(review.route)
-        verify = source.index("auth.answer_verify(session, assertion, subject(items)")
-        secure = source.index("_monitor_check(daemon, session, handler)", verify)
-        approve = source.index('approve(daemon, items, via="phone", verified=True)')
-        self.assertLess(verify, secure)
+    def test_only_the_gated_phone_approves_as_the_phone(self):
+        source = inspect.getsource(review._approve_phone)
+        act = source.index("def act(ticket):")
+        secure = source.index("_monitor_check(daemon, session, handler)", act)
+        approve = source.index('approve(daemon, items, via="phone", unlocked=True)')
+        self.assertLess(act, secure)
         self.assertLess(secure, approve)
+        self.assertIn('return gated(handler, session, APPROVE, value, op, "review", act)', source)
         self.assertIn('approve(daemon, items, via="inbox")', inspect.getsource(review.hud_route))
-        print("ok  approve(verified=True) only after the set's assertion and §4.1")
+        print("ok  approve(unlocked=True) only inside the gated act, after §4.1")
 
 
 if __name__ == "__main__":

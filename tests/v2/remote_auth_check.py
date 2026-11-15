@@ -27,7 +27,10 @@ What it pins, the package's acceptance items:
   - the 64 KiB body cap (413) and that an unread body is drained;
   - 0600 files in a 0700 folder; only token hashes at rest;
   - the advisory Tailscale headers grant nothing;
-  - `/status`'s `remote` fields; the files are protected state.
+  - `/status`'s `remote` fields; the files are protected state;
+  - WS-5c: the unlock family is the only challenge family a signed-in
+    phone holds, one per session; the per-action `/options` routes are
+    404 (the window itself: tests/v2/remote_unlock_check.py).
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/remote_auth_check.py
 """
@@ -319,6 +322,43 @@ class Remote(Base):
 
     def me(self, cookie):
         return self.phone("GET", "/m/api/me", cookie=cookie)[0]
+
+    # -- WS-5c: the unlock window and op tokens ------------------------------------
+
+    def unlock_options(self, cookie=None):
+        return self.phone("POST", "/m/api/unlock/options", {}, cookie=cookie or self.cookie)
+
+    def unlock(self, cookie=None, authenticator=None, **kw):
+        """Open the session's window: options, the passkey, verify. The
+        (status, headers, body) of the verify."""
+        status, _, body = self.unlock_options(cookie)
+        self.assertEqual(status, 200, body)
+        credential = (authenticator or self.a).get(body["publicKey"], **kw)
+        return self.phone("POST", "/m/api/unlock", {"assertion": credential}, cookie=cookie or self.cookie)
+
+    def unlocked(self, cookie=None, authenticator=None):
+        status, _, body = self.unlock(cookie, authenticator)
+        self.assertEqual(status, 200, body)
+        return body
+
+    def op(self, cookie=None) -> str:
+        """One fresh op token for this session (`GET /m/api/ops/tokens`), from
+        a pool refilled whenever the fake monotonic clock has moved."""
+        cookie = cookie or self.cookie
+        pools = self.__dict__.setdefault("_op_pools", {})
+        at, pool = pools.get(cookie, (None, []))
+        if at != self.auth.mono() or not pool:
+            status, _, body = self.phone("GET", "/m/api/ops/tokens", cookie=cookie)
+            self.assertEqual(status, 200, body)
+            at, pool = self.auth.mono(), list(body["tokens"])
+        token = pool.pop()
+        pools[cookie] = (at, pool)
+        return token
+
+    def session_of(self, cookie=None) -> dict:
+        """The auth's own record of the session `cookie` names."""
+        token = (cookie or self.cookie).split("=", 1)[1]
+        return dict(self.auth._sessions[remote_auth.token_hash(token)])
 
 
 # -- pairing (PH-6) --------------------------------------------------------------------
@@ -1406,35 +1446,43 @@ class StatusAndState(Remote):
         self.assertEqual((remote_auth.WINDOW_S, remote_auth.CHALLENGE_S), (300, 60))
         self.assertTrue(remote_auth.REQUIRE_UV)
         self.assertEqual(remote_auth.COOKIE, "__Host-jarvis_m")
-        print("ok  guard strengths pinned: 256-bit code, token and challenge; 5 min window, 60 s challenge")
+        # WS-5c: the unlock window and the op tokens.
+        self.assertEqual((remote_auth.UNLOCK_S, remote_auth.OP_TTL_S, remote_auth.OP_FUTURE_S), (3600, 600, 1.0))
+        self.assertEqual((remote_auth.OP_KEY_BYTES, remote_auth.OP_NONCE_BYTES, remote_auth.OP_TOKENS),
+                         (32, 16, 4))
+        self.assertEqual((remote_auth.OPS_PER_SESSION, remote_auth.OPS_MAX, remote_auth.OP_ISSUE_RATE),
+                         (64, 64 * remote_auth.MAX_SESSIONS, 30))
+        print("ok  guard strengths pinned: 256-bit code, token and challenge; 5 min window, 60 s challenge; "
+              "1 h unlock, 600 s op tokens, 64/2048 ops")
 
-    def test_the_pr_subject_family(self):
-        """PM-D: the owner's PR actions are their own family: `pr:` and 56
-        hex only, their own decisions, their own per-session budget; no
-        other family's subject takes a PR decision, nor the reverse."""
-        self.assertEqual(remote_auth.PR_DECISIONS, ("merge", "merge_as_is", "update", "fix"))
-        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review", "pr"))
+    def test_the_unlock_family(self):
+        """WS-5c: the per-action challenge families (approval, task, defer,
+        review, pr) are gone; the only one a signed-in phone holds is
+        `unlock`, one per session, bound to `unlock:<session id>`."""
+        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("unlock",))
+        self.assertEqual(remote_auth.UNLOCK_DECISIONS, ("unlock",))
         self.assertEqual(remote_auth.MAX_ANSWER_CHALLENGES,
-                         remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION * remote_auth.MAX_SESSIONS * 5)
-        good = "pr:" + "0123456789abcdef" * 3 + "01234567"
-        self.assertRegex(good, remote_auth._PR_SUBJECT)
-        for bad in ("pr:" + "a" * 55, "pr:" + "a" * 57, "pr:" + "A" * 56, "PR:" + "a" * 56, "pr:" + "g" * 56):
-            self.assertIsNone(remote_auth._PR_SUBJECT.fullmatch(bad), bad)
+                         remote_auth.MAX_UNLOCK_CHALLENGES_PER_SESSION * remote_auth.MAX_SESSIONS)
+        self.assertEqual(remote_auth.MAX_UNLOCK_CHALLENGES_PER_SESSION, 1)
+        for gone in ("answer_options", "answer_verify"):
+            self.assertFalse(hasattr(RemoteAuth, gone), gone)
+        for gone in ("PR_DECISIONS", "TASK_DECISIONS", "DEFER_DECISIONS", "ANSWER_DECISIONS"):
+            self.assertFalse(hasattr(remote_auth, gone), gone)
+        self.assertRegex("unlock:s-0123456789abcdef", remote_auth._UNLOCK_SUBJECT)
         a = self.pair()
-        self.signed_in(a)
-        session = next(iter(self.auth._sessions.values()))
-        s = {"token_sha256": session["token_sha256"]}
-        for req_id, decision in ((good, "allow"), (good, "always"), (good, "cancel"), (good, "rebase"),
-                                 ("abc", "merge"), ("task:0123abcd", "merge"), ("defer:abc", "update"),
-                                 ("defers:" + "a" * 56, "merge"), ("pr:" + "a" * 55, "merge")):
-            with self.assertRaises(remote_auth.AuthError) as caught:
-                self.auth.answer_options(s, req_id, decision)
-            self.assertEqual(caught.exception.status, 400, (req_id, decision))
-        for decision in remote_auth.PR_DECISIONS:
-            self.auth.answer_options(s, good, decision)
-        families = {c["family"] for c in self.auth._challenges.values() if c.get("req_id") == good}
-        self.assertEqual(families, {"pr"})
-        print("ok  the pr: family: its own subject shape, decisions and budget; never another family's")
+        self.a, self.cookie = a, self.signed_in(a)
+        for _ in range(3):
+            self.assertEqual(self.unlock_options()[0], 200)
+        mine = [c for c in self.auth._challenges.values() if c["kind"] == "unlock"]
+        self.assertEqual(len(mine), 1, "asking again replaces the session's earlier unlock challenge")
+        self.assertEqual(mine[0]["subject"], "unlock:" + self.session_of()["id"])
+        self.assertEqual(mine[0]["decision"], "unlock")
+        # The per-action routes are gone (404 past the session).
+        for path in ("/m/api/inbox/appr:x/answer/options", "/m/api/tasks/0123abcd/cancel/options",
+                     "/m/api/inbox/pr/options", "/m/api/review/approve/options"):
+            self.assertEqual(self.phone("POST", path, {}, cookie=self.cookie)[0], 404, path)
+        print("ok  the unlock family only: one challenge per session, bound to unlock:<session id>; "
+              "the per-action /options routes are 404")
 
     def test_webauthn_missing_is_503_and_the_daemon_starts(self):
         text = (ROOT / "jarvis" / "v2" / "remote_auth.py").read_text(encoding="utf-8")

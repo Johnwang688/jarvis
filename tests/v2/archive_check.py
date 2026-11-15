@@ -1023,6 +1023,11 @@ class OwnerOnly(Base):
                     r"\bremote_answer\.(?!py\b)", r"import remote_answer", r"from \.+remote_answer",
                     r"\bremote_secure\.(?!py\b)", r"import remote_secure", r"from \.+remote_secure",
                     r"answer_verify", r"answer_options", r"owner_verified",
+                    # WS-5c's unlock window and op tokens (named only in SELF_PROTECTED).
+                    r"require_unlocked", r"touch_unlock", r"unlock_options", r"unlock_verify",
+                    r"\b_end_unlock\b", r"\blocked_reply\b", r"\b_unlocks\b", r"\bOP_KEY",
+                    r"\b_op_key\b", r"\bissue_ops\b",
+                    r"\bOps\b", r"\bop_status\b", r"\badmit_op\b", r"/m/api/unlock", r"/m/api/lock", r"/m/api/ops",
                     # P-6's Web Push and the owner's quiet hours (`push.py`,
                     # `quiet.py`, named only in SELF_PROTECTED and, for their
                     # files, in `_protected_state_paths`).
