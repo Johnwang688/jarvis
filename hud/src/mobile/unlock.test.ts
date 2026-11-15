@@ -469,7 +469,7 @@ describe("rule 2: the mirror, and Lock now", () => {
     expect(m.open()).toBe(false);
     expect(pillWords(m, now)).toBe("Locked");
     m.slideGated();
-    expect(pillWords(m, now)).toMatch(/^Unlocked until /);
+    expect(pillWords(m, now)).toMatch(/^Unlocked · /);
   });
 
   it("Lock now posts once and locks the mirror; the next tap takes the locked path", async () => {

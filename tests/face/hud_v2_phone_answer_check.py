@@ -403,7 +403,7 @@ def run(browser, check, until):
         pump(lambda: page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state") == "unlocked")
         check("WS-5c pill: unlocked after the unlock",
               page.locator('[data-testid="m-lock-pill"]').get_attribute("data-state") == "unlocked"
-              and "Unlocked until" in page.locator('[data-testid="m-lock-pill"]').inner_text())
+              and "Unlocked · " in page.locator('[data-testid="m-lock-pill"]').inner_text())
         until(lambda: page.locator('[data-testid="m-flash"]').count() == 1, timeout=8)
         check("P-4 Allow: the phone says so", "Authorized" in page.locator('[data-testid="m-flash"]').inner_text())
         check("P-4 Allow: no rule was written", not Path(config.ALLOWLIST_PATH).exists()

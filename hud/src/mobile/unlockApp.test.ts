@@ -75,7 +75,7 @@ describe("the lock pill and Lock now", () => {
     const h2 = harness({ unlockS: 1800 });
     h2.app.start();
     await h2.settle();
-    expect(h2.q("m-lock-pill")!.textContent).toMatch(/^Unlocked until \d{1,2}:\d{2}/);
+    expect(h2.q("m-lock-pill")!.textContent).toMatch(/^Unlocked · \d{1,2}:\d{2}/);
     expect(h2.q("m-lock-pill")!.dataset.state).toBe("unlocked");
     await h2.click("m-lock-pill");
     const rows = Array.from(h2.root.querySelectorAll('[data-testid="m-menu-panel"] > *')).map((n) => (n as HTMLElement).dataset.testid);

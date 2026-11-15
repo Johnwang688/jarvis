@@ -289,9 +289,10 @@ def run(browser, check, until):
         check("locked: the answer carries its op token and no assertion",
               trail and sorted(trail[-1][1]) == ["decision", "op"] and str(trail[-1][1]["op"]).startswith("o1."))
         pump(lambda: pill.get_attribute("data-state") == "unlocked")
-        check("pill: Unlocked until HH:MM, from the unlock", pill.get_attribute("data-state") == "unlocked"
-              and re.fullmatch(r"Unlocked until \d{1,2}:\d{2}( [AP]M)?", pill.inner_text().strip()) is not None,
-              pill.inner_text())
+        check("pill: Unlocked · HH:MM (VoiceOver: Unlocked until HH:MM), from the unlock",
+              pill.get_attribute("data-state") == "unlocked"
+              and re.fullmatch(r"Unlocked · \d{1,2}:\d{2}( [AP]M)?", pill.inner_text().strip()) is not None
+              and (pill.get_attribute("aria-label") or "").startswith("Unlocked until "), pill.inner_text())
         check("the window is open at Jarvis (unlock_left > 3500 s)", daemon.remote_auth.unlock_left(session()) > 3500)
 
         # -- unlocked: no credentials.get -----------------------------------------------------------

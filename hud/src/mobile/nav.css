@@ -143,11 +143,16 @@
 .tap.m-lock-pill {
   flex: none;
   min-height: var(--m-tap);
-  padding: 0 0.875rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--m-rim);
   border-radius: var(--m-r-pill);
   font-size: 0.875rem;
   color: var(--text-muted);
 }
+/* The header stays one line at 375 px: the brand and the connection word give way, never the pill or the ⋯. */
+.top { flex-wrap: nowrap; }
+.top .brand { flex: 1 0 auto; }
+.top .conn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tap.m-lock-pill[data-state="unlocked"] { color: var(--accent); border-color: var(--accent); }
 
 /* -- Done on an open chat (WS-5c §5.6): its words, and Undo while its window lasts -- */

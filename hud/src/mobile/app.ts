@@ -61,7 +61,7 @@ import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
-import { NOT_READY, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
+import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
@@ -1483,7 +1483,7 @@ export class PhoneApp {
     const words = pillWords(this.unlock.mirror, this.now());
     if (pill.textContent !== words) pill.textContent = words;
     pill.dataset.state = open ? "unlocked" : "locked";
-    pill.setAttribute("aria-label", `${words}. Open the menu`);
+    pill.setAttribute("aria-label", `${pillLabel(this.unlock.mirror, this.now())}. Open the menu`);
     pill.setAttribute("aria-haspopup", "true");
   }
 

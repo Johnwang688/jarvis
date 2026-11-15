@@ -167,13 +167,22 @@ export class Mirror {
   lock(): void { this.until = 0; }
 }
 
-/** The lock pill's words: "Locked", or "Unlocked until 14:32" (hours and minutes; a date only when not today). */
-export function pillWords(m: Mirror, now: number): string {
-  if (!m.open()) return "Locked";
+/** When the window ends, as hours and minutes ("14:32"; with the date only when not today). */
+export function untilWords(m: Mirror, now: number): string {
   const at = new Date(m.until);
   const clock = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const day = at.toDateString() === new Date(now).toDateString() ? "" : `${at.toLocaleDateString([], { month: "short", day: "numeric" })} `;
-  return `Unlocked until ${day}${clock}`;
+  return at.toDateString() === new Date(now).toDateString() ? clock
+    : `${at.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock}`;
+}
+
+/** The lock pill's words, short enough for the header at 375 px: "Locked", or "Unlocked · 14:32". */
+export function pillWords(m: Mirror, now: number): string {
+  return m.open() ? `Unlocked · ${untilWords(m, now)}` : "Locked";
+}
+
+/** What the pill says to VoiceOver: "Locked", or "Unlocked until 14:32". */
+export function pillLabel(m: Mirror, now: number): string {
+  return m.open() ? `Unlocked until ${untilWords(m, now)}` : "Locked";
 }
 
 // -- the frozen request -------------------------------------------------------------------------
