@@ -23,8 +23,6 @@ export interface WorkingSnapshot {
   pending: boolean;
   status: WorkingStatus;
   message: string;
-  /** How many reads have landed (the face check reads it). */
-  reads: number;
 }
 
 export type DoneResult =
@@ -42,10 +40,15 @@ export interface WorkingDeps {
 }
 
 const EMPTY: WorkingSnapshot = {
-  entries: [], needsYou: [], count: 0, pending: false, status: "loading", message: "", reads: 0,
+  entries: [], needsYou: [], count: 0, pending: false, status: "loading", message: "",
 };
 
 const messageOf = (e: unknown) => (e instanceof Error && e.message ? e.message : "the daemon could not be reached");
+
+/** Structural equality of two snapshots (the lists are small and plain). */
+function sameSnapshot(a: WorkingSnapshot, b: WorkingSnapshot): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
 
 export class WorkingStore {
   private snap: WorkingSnapshot = EMPTY;
@@ -62,8 +65,12 @@ export class WorkingStore {
 
   snapshot = (): WorkingSnapshot => this.snap;
 
+  /** Publish a change. A read that says what the last one said publishes nothing: no listener
+   * (so no sidebar row) is redrawn for a refresh that found the list as it was. */
   private set(next: Partial<WorkingSnapshot>) {
-    this.snap = { ...this.snap, ...next };
+    const merged = { ...this.snap, ...next };
+    if (sameSnapshot(this.snap, merged)) return;
+    this.snap = merged;
     for (const fn of Array.from(this.listeners)) fn();
   }
 
@@ -93,17 +100,16 @@ export class WorkingStore {
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 0;
       const gone = status === 404 || status === 403;
-      this.set({ status: gone ? "unavailable" : "error", message: messageOf(error), reads: this.snap.reads + 1,
-                 ...(gone ? { entries: [], needsYou: [], count: 0, pending: false } : {}) });
+      this.set({ status: gone ? "unavailable" : "error", message: messageOf(error), ...(gone ? { entries: [], needsYou: [], count: 0, pending: false } : {}) });
       return;
     }
     const view = parseWorking(raw);
     if (!view) {
-      this.set({ status: "error", message: "the daemon's working list was not a list", reads: this.snap.reads + 1 });
+      this.set({ status: "error", message: "the daemon's working list was not a list" });
       return;
     }
     this.set({ entries: view.entries, needsYou: view.needs_you, count: view.count, pending: view.pending,
-               status: "ready", message: "", reads: this.snap.reads + 1 });
+               status: "ready", message: "" });
   }
 
   /** Done for one entry, with the `seq` this window drew it with. A 409 is not

@@ -1261,7 +1261,14 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
    The chat threads being worked on, a second view of threads that stay in their
    projects. Rows are the tree's own (.tree-row, .act dots, .badge-like chips);
    amber is only a pending row's kind word, red only the failed dot. */
-.workingsec { flex: 0 0 auto; margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+/* The section never takes the project tree's room: at most 40% of the sidebar (and 220px), its list
+   scrolling inside that; collapsed or empty it is its header line alone. */
+.workingsec {
+  flex: 0 1 auto; min-height: 0; max-height: min(40%, 220px); display: flex; flex-direction: column;
+  margin-bottom: 2px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.workingsec .workinghead { flex: 0 0 auto; }
+.workingsec .wlist { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+#sidebar > .scroll { min-height: 88px; }
 .workinghead { display: flex; align-items: center; gap: 6px; padding: 1px 12px; color: var(--text-muted); }
 .workinghead .wtoggle {
   flex: 0 0 auto; font: 10px var(--mono); color: var(--text-muted); padding: 1px 4px;
@@ -1285,7 +1292,18 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong); border-radius: 3px;
   padding: 0 4px; color: var(--text-muted); word-spacing: normal; }
-.workingsec .wempty { padding: 3px 12px 3px 26px; }
+.workinghead .wnone { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; }
+.workinghead .wstale { color: var(--amber); font: 600 10px var(--mono); word-spacing: normal; margin-left: auto; cursor: help; }
+.workingsec button.wopen {
+  flex: 1 1 auto; min-width: 0; text-align: left; font: inherit; color: inherit; background: none; border: 0;
+  padding: 0; border-radius: var(--radius-btn); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workingsec button.wopen:hover:not(:disabled) { background: none; }
+.workingsec button.wopen:focus-visible, .workingsec button.whint:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+.workingsec button.whint {
+  flex: 0 0 auto; font: 9px var(--mono); letter-spacing: 0.04em; border: 1px solid var(--border-strong);
+  border-radius: 3px; padding: 0 4px; background: none; color: var(--text-muted); word-spacing: normal; }
+.workingsec button.whint.pending { color: var(--amber); border-color: var(--amber-line); }
+.workingsec button.whint:hover:not(:disabled) { background: var(--bg-3); }
 .workingtoast {
   display: flex; align-items: center; gap: 8px; margin: 2px 8px; padding: 4px 8px; flex: 0 0 auto;
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);

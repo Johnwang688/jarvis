@@ -1776,6 +1776,11 @@ export default function App() {
           // daemon's projection, so the inbox is read again (state/inbox.ts),
           // and so is the morning review, the same rows (state/review.ts).
           void inbox.refresh();
+          // The Needs you group and each Done's reason come from the same rows, and the
+          // daemon publishes `working_changed` only for membership or seq changes: a PR
+          // that went away or an approval that was answered is an `inbox_changed` alone.
+          // The store coalesces, so a burst of events is one read.
+          void working.refresh();
           void review.refresh();
           break;
         case "working_changed":

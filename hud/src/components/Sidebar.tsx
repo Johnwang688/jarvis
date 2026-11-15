@@ -65,8 +65,8 @@ import { CollapseButton } from "./Layout";
 import { toCss } from "../lib/layout";
 import { NO_ACTIVITY, projectActivity, type ActivityView } from "../lib/activity";
 import { Dot } from "./ActivityDot";
-import { WorkingSection } from "./WorkingSection";
-import { useWorking, working } from "../state/working";
+import { WorkingBlock, WorkingDoneItem } from "./WorkingSection";
+import { working } from "../state/working";
 import { UNDO_TOAST_MS, loadSectionOpen, saveSectionOpen } from "../lib/working";
 
 interface ProjectMenuAt {
@@ -160,9 +160,8 @@ export const Sidebar = memo(function Sidebar(props: {
   const [pmenu, setPmenu] = useState<ProjectMenuAt | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "project" | "thread"; id: string } | null>(null);
   const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
-  // The Inbox section under the owner Inbox row (WS-2): the working set is the
-  // store's, read in here so a keystroke in a chat box never redraws it.
-  const work = useWorking();
+  // The Inbox section under the owner Inbox row (WS-2). The store is read by
+  // `WorkingBlock`, not here: a refresh redraws that block only.
   const [workOpen, setWorkOpen] = useState<boolean>(() => loadSectionOpen());
   const toggleWork = () =>
     setWorkOpen((o) => {
@@ -242,10 +241,27 @@ export const Sidebar = memo(function Sidebar(props: {
     menu?.taskId ? ({ id: menu.threadId, task_id: menu.taskId } as Thread) : menuThread,
   );
 
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuOpener = useRef<HTMLElement | null>(null);
+  // Keyboard: focus goes to the menu's first enabled item as it opens and back to the
+  // button that opened it when it closes (unless the owner has put it somewhere else).
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button.mrow:not(:disabled)")?.focus();
+    const opener = menuOpener.current;
+    return () => {
+      const a = document.activeElement;
+      if (opener && opener.isConnected && (!a || a === document.body)) opener.focus();
+    };
+  }, [menu]);
+
   const openMenu = (e: React.MouseEvent, id: string, taskId: string | null = null, inWorking = false) => {
     e.preventDefault();
     e.stopPropagation();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    menuOpener.current = e.currentTarget as HTMLElement;
+    // The reason Done is greyed out is as of the last read: read again as the menu opens.
+    if (inWorking) void working.refresh();
     setMenu({ threadId: id, taskId, working: inWorking, x: Math.round(toCss(r.left, z)), y: Math.round(toCss(r.bottom, z)) });
   };
 
@@ -297,7 +313,6 @@ export const Sidebar = memo(function Sidebar(props: {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const workingEntry = menu?.working ? work.entries.find((e) => e.thread_id === menu.threadId) || null : null;
   const markDone = (id: string) => {
     setMenu(null);
     const thread = props.threads.find((t) => t.id === id);
@@ -371,13 +386,10 @@ export const Sidebar = memo(function Sidebar(props: {
           ) : null}
         </button>
       ) : null}
-      {props.inbox && props.onOpenInbox && work.status !== "unavailable" && work.status !== "loading" ? (
-        <WorkingSection
+      {props.inbox && props.onOpenInbox ? (
+        <WorkingBlock
           open={workOpen}
           onToggle={toggleWork}
-          entries={work.entries}
-          needsYou={work.needsYou}
-          stale={work.status === "error"}
           threads={props.threads}
           projects={props.projects}
           activity={activity}
@@ -814,33 +826,16 @@ export const Sidebar = memo(function Sidebar(props: {
         <div
           className="threadmenu"
           data-testid="thread-menu"
+          ref={menuRef}
+          role="menu"
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          {workingEntry ? (
-            <>
-              <button
-                type="button"
-                className="mrow"
-                style={{ display: "block", width: "100%", textAlign: "left", border: "none",
-                         background: "none", textTransform: "none", letterSpacing: 0 }}
-                data-testid="tmenu-done"
-                disabled={!!workingEntry.why_not}
-                aria-disabled={!!workingEntry.why_not}
-                title="Take it out of the Inbox; it stays in its project"
-                onClick={() => markDone(menu.threadId)}
-              >
-                Done
-              </button>
-              {workingEntry.why_not ? (
-                <div className="mwhy" data-testid="tmenu-done-why">{workingEntry.why_not}</div>
-              ) : null}
-              <div className="msep" />
-            </>
-          ) : null}
+          {menu.working ? <WorkingDoneItem threadId={menu.threadId} onDone={markDone} /> : null}
           <button
             type="button"
             className="mrow"
+            role="menuitem"
             style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                      background: "none", textTransform: "none", letterSpacing: 0 }}
             data-testid="tmenu-beside"
@@ -856,6 +851,7 @@ export const Sidebar = memo(function Sidebar(props: {
           <button
             type="button"
             className="mrow"
+            role="menuitem"
             style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                      background: "none", textTransform: "none", letterSpacing: 0 }}
             data-testid="tmenu-copyid"
@@ -878,6 +874,7 @@ export const Sidebar = memo(function Sidebar(props: {
               <button
                 type="button"
                 className="mrow"
+                role="menuitem"
                 style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                          background: "none", textTransform: "none", letterSpacing: 0 }}
                 data-testid="tmenu-rename"
@@ -892,6 +889,7 @@ export const Sidebar = memo(function Sidebar(props: {
               <button
                 type="button"
                 className="mrow danger"
+                role="menuitem"
                 style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                          background: "none", textTransform: "none", letterSpacing: 0 }}
                 data-testid="tmenu-archive"
@@ -910,6 +908,7 @@ export const Sidebar = memo(function Sidebar(props: {
                 <button
                   type="button"
                   className="mrow"
+                  role="menuitem"
                   key={p.id}
                   style={{ display: "block", width: "100%", textAlign: "left", border: "none",
                            background: "none", textTransform: "none", letterSpacing: 0 }}

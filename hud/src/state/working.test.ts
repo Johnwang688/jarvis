@@ -33,7 +33,7 @@ describe("WorkingStore reads", () => {
     expect(store.snapshot().status).toBe("loading");
     await store.refresh();
     const s = store.snapshot();
-    expect(s).toMatchObject({ status: "ready", reads: 1, count: 1, pending: true });
+    expect(s).toMatchObject({ status: "ready", count: 1, pending: true });
     expect(s.entries).toHaveLength(1);
     expect(s.entries[0]).toMatchObject({ thread_id: "t1", seq: 3, why_not: "a turn is running" });
     expect(s.needsYou.map((r) => r.id)).toEqual(["pr:a"]);
@@ -94,6 +94,25 @@ describe("WorkingStore reads", () => {
     await store.refresh();
     expect(store.snapshot().status).toBe("error");
     expect(store.snapshot().entries).toEqual([]);
+  });
+});
+
+describe("WorkingStore publishing", () => {
+  it("a read that finds the list as it was publishes nothing; a changed one does", async () => {
+    let list = [entry("t1")];
+    const store = new WorkingStore(deps({ fetch: async () => body(list) }));
+    const heard = vi.fn();
+    await store.refresh();
+    store.subscribe(heard);
+    const before = store.snapshot();
+    await store.refresh();
+    await store.refresh();
+    await store.refresh();
+    expect(heard).not.toHaveBeenCalled();
+    expect(store.snapshot()).toBe(before);
+    list = [entry("t1", 2)];
+    await store.refresh();
+    expect(heard).toHaveBeenCalledTimes(1);
   });
 });
 

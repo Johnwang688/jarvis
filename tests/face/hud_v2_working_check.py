@@ -28,6 +28,19 @@ What it pins, one section each (each names the mutation it is meant to catch):
   live      a `working_changed` event re-reads the list, once [no refresh]
   stale     an older daemon (404) has no section and leaves the Inbox row alone
   inbox     the aurora row still opens today's Inbox page
+  event     an `inbox_changed` alone (no `working_changed`) re-reads the list: a
+            removed PR leaves Needs you; Done's reason is read again as its menu
+            opens [no refresh on inbox_changed; no read on open]
+  keys      a thread row is a real button: Tab reaches it, Enter and Space open
+            the thread; the menu focuses its first enabled item and Escape gives
+            focus back to its opener; a disabled Done is described by its reason
+            [row without a tab stop; focus left behind]
+  hint      a thread with an attached decision says "1 decision" and the hint
+            opens the Inbox page [no hint]
+  tall      31 threads and a short window: the section stops at 40% of the
+            sidebar and scrolls inside, the project tree keeps rows, nothing
+            reaches the orb; collapsed or empty costs its header line
+            [no max-height / list scroll]
 
 `JARVIS_WORKING_SHOTS=<dir>` also saves the sidebar, expanded, collapsed, with a
 Needs you group and with a Done toast, as PNGs there.
@@ -317,12 +330,13 @@ def _done_checks(page, mock, check, until):
 def _conflict_checks(page, mock, check, until):
     _open(page, mock, until)
     until(lambda: len(_rows(page)) == 6, timeout=4)
-    for e in _st(mock)["entries"]:       # the daemon moved on; no event reached this window
+    _menu(page, "t6")                    # opening the menu reads the list
+    time.sleep(0.4)
+    for e in _st(mock)["entries"]:       # then the daemon moves on; no event reaches this window
         if e["thread_id"] == "t6":
             e["seq"] = 5
             e["why_not"] = None
     reads = _reads(mock)
-    _menu(page, "t6")
     page.locator('[data-testid="tmenu-done"]').click()
     until(lambda: _reads(mock) > reads, timeout=3)
     time.sleep(0.4)
@@ -366,7 +380,9 @@ def _empty_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="working-empty"]').count() == 1, timeout=3)
     check("with nothing in the set the section says so in one muted line",
           page.locator('[data-testid="working-empty"]').inner_text() == "Nothing in progress"
-          and page.locator('[data-testid="working-row"]').count() == 0)
+          and page.locator('[data-testid="working-row"]').count() == 0
+          and page.locator('[data-testid="working-list"]').count() == 0
+          and page.locator('[data-testid="working-section"]').evaluate("e => e.getBoundingClientRect().height") <= 36)
 
 
 def _stale_checks(page, mock, check, until):
@@ -391,8 +407,138 @@ def _inbox_checks(page, mock, check, until):
 
 # ---------------------------------------------------------------------------
 
+def _event_checks(page, mock, check, until):
+    _open(page, mock, until, [_need_row("pr:r1", "pr", 5, "Review PR 12")])
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 1, timeout=4)
+    _st(mock)["needs_you"] = []
+    reads = _reads(mock)
+    mock_inbox.changed(mock, ["pr:r1"], "pr_gone")          # the daemon says nothing of the working set
+    until(lambda: page.locator('[data-testid="working-need"]').count() == 0, timeout=3)
+    check("an inbox_changed alone re-reads the list: a removed PR leaves Needs you [mutation: no refresh on inbox_changed]",
+          page.locator('[data-testid="working-need"]').count() == 0 and _reads(mock) > reads,
+          f"{reads} -> {_reads(mock)}")
+    reads = _reads(mock)
+    for _ in range(5):
+        mock_inbox.changed(mock, [], "burst")
+    time.sleep(0.8)
+    check("a burst of five events is a few reads, not five more than needed",
+          _reads(mock) - reads <= 6, f"{reads} -> {_reads(mock)}")
+    for e in _st(mock)["entries"]:       # t2's turn ended: no event reached the window
+        if e["thread_id"] == "t2":
+            e["why_not"] = None
+    _menu(page, "t2")
+    until(lambda: page.locator('[data-testid="tmenu-done"]').is_enabled(), timeout=3)
+    check("opening an Inbox row's menu reads the list again, so Done is enabled once the turn ended [mutation: no read on open]",
+          page.locator('[data-testid="tmenu-done"]').is_enabled() and page.locator('[data-testid="tmenu-done-why"]').count() == 0)
+    _close_menu(page)
+
+
+def _active_id(page):
+    return page.evaluate("() => document.activeElement && document.activeElement.getAttribute('data-testid')")
+
+
+def _keys_checks(page, mock, check, until):
+    _open(page, mock, until)
+    until(lambda: len(_rows(page)) == 6, timeout=4)
+    btn = page.locator('[data-testid="working-open-t4"]')
+    check("a thread row holds a real button (a tab stop) named by its title, state and project",
+          btn.evaluate("e => e.tagName") == "BUTTON" and "finished one" in (btn.get_attribute("aria-label") or "")
+          and "jarvis" in (btn.get_attribute("aria-label") or ""), str(btn.get_attribute("aria-label")))
+    btn.focus()
+    page.keyboard.press("Enter")
+    until(lambda: _chat(page, 1)["threadId"] == "t4", timeout=3)
+    check("Enter on it opens the thread [mutation: row without a tab stop]", _chat(page, 1)["threadId"] == "t4")
+    page.locator('[data-testid="working-open-t1"]').focus()
+    page.keyboard.press("Space")
+    until(lambda: _chat(page, 1)["threadId"] == "t1", timeout=3)
+    check("Space on it opens the thread too", _chat(page, 1)["threadId"] == "t1")
+    opener = page.locator('[data-testid="working-menu-t2"]')
+    opener.focus()
+    page.keyboard.press("Enter")
+    page.wait_for_selector('[data-testid="thread-menu"]')
+    until(lambda: _active_id(page) == "tmenu-beside", timeout=2)
+    check("the menu opened from the keyboard focuses its first enabled item (Done is disabled here)",
+          _active_id(page) == "tmenu-beside", str(_active_id(page)))
+    done = page.locator('[data-testid="tmenu-done"]')
+    why = page.locator('[data-testid="tmenu-done-why"]')
+    check("the disabled Done is described by its reason",
+          done.is_disabled() and done.get_attribute("aria-describedby") == why.get_attribute("id")
+          and why.inner_text() == WHY["t2"])
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="thread-menu"]').count() == 0, timeout=2)
+    until(lambda: _active_id(page) == "working-menu-t2", timeout=2)
+    check("Escape closes it and gives focus back to its opener [mutation: focus left behind]",
+          _active_id(page) == "working-menu-t2", str(_active_id(page)))
+    page.locator('[data-testid="working-menu-t6"]').focus()
+    page.keyboard.press("Enter")
+    page.wait_for_selector('[data-testid="thread-menu"]')
+    until(lambda: _active_id(page) == "tmenu-done", timeout=2)
+    check("an eligible Done is the first item focused", _active_id(page) == "tmenu-done", str(_active_id(page)))
+    page.keyboard.press("Escape")
+
+
+def _hint_checks(page, mock, check, until):
+    _reset(mock)
+    dec = {**_need_row("dec:d9", "decision", 6, "Which way?"), "thread_id": "t6"}
+    for e in _st(mock)["entries"]:
+        if e["thread_id"] == "t6":
+            e["rows"] = [dec]
+    _fresh(page, mock, until, SINGLE)
+    until(lambda: page.locator('[data-testid="working-hint-t6"]').count() == 1, timeout=4)
+    hint = page.locator('[data-testid="working-hint-t6"]')
+    check("a thread with an attached decision says so on its row [mutation: no hint]",
+          hint.inner_text() == "1 decision" and page.locator('[data-testid="working-hint-t1"]').count() == 0,
+          hint.inner_text())
+    hint.click()
+    until(lambda: page.locator('[data-testid="inbox-view"]').count() == 1, timeout=3)
+    check("the hint opens today's Inbox page, not the thread",
+          page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+
+
+def _tall_checks(page, mock, check, until):
+    _reset(mock, [_need_row(f"pr:r{i}", "pr", 5, f"Review PR {i}") for i in range(4)])
+    w = mock.world
+    base = next(t for t in w["threads"] if t["id"] == "t1")
+    for n in range(7, 32):
+        w["threads"].append({**base, "id": f"t{n}", "project_id": "p2", "title": f"extra chat {n}", "turns": 1,
+                             "updated": f"2026-11-14T{(n % 12) + 8:02d}:00:00+00:00"})
+        w["transcripts"][f"t{n}"] = []
+        _st(mock)["entries"].append(mock_working.entry(f"t{n}", project_id="p2", last=f"2026-11-14T{(n % 12) + 8:02d}:00:00+00:00"))
+    page.evaluate("(k) => localStorage.removeItem(k)", KEY)
+    _fresh(page, mock, until, SINGLE, size=(1280, 720))
+    until(lambda: len(_rows(page)) == 31, timeout=5)
+    m = page.evaluate("""() => {
+      const r = (q) => { const e = document.querySelector(q); return e && e.getBoundingClientRect(); };
+      const side = r('#sidebar'), sec = r('[data-testid="working-section"]'), list = r('[data-testid="sidebar"]');
+      const orb = r('#orbdock'), wl = document.querySelector('[data-testid="working-list"]');
+      let rows = 0;
+      for (const e of document.querySelectorAll('[data-testid="sidebar"] .tree-row')) {
+        const b = e.getBoundingClientRect();
+        if (b.height < 4 || b.top < list.top - 0.5 || b.bottom > list.bottom + 0.5) continue;
+        const hit = document.elementFromPoint(b.left + Math.min(40, b.width / 2), b.top + b.height / 2);
+        if (hit && e.contains(hit)) rows++;
+      }
+      return {side: side.height, sec: sec.height, list: list.height, rows, secBottom: sec.bottom, listBottom: list.bottom,
+              orbTop: orb ? orb.top : null, scrolls: wl.scrollHeight > wl.clientHeight + 1};
+    }""")
+    check("31 threads: the section stops at 40% of the sidebar [mutation: no max-height]",
+          m["sec"] <= m["side"] * 0.4 + 1, str(m))
+    check("and its list scrolls inside that", m["scrolls"], str(m))
+    check("the project tree keeps its room: at least 88px and a few rows you can click",
+          m["list"] >= 88 and m["rows"] >= 3, str(m))
+    check("nothing reaches the orb: the section and the project list end above it",
+          m["orbTop"] is not None and m["secBottom"] <= m["orbTop"] + 1 and m["listBottom"] <= m["orbTop"] + 1, str(m))
+    _shot(page, "5-31-threads")
+    page.locator('[data-testid="working-toggle"]').click()
+    until(lambda: page.locator('[data-testid="working-list"]').count() == 0, timeout=2)
+    h = page.locator('[data-testid="working-section"]').evaluate("e => e.getBoundingClientRect().height")
+    check("collapsed it costs its header line", h <= 36, str(h))
+    page.evaluate("(k) => localStorage.removeItem(k)", KEY)
+
+
 SECTIONS = (_section_checks, _collapse_checks, _needs_checks, _open_checks, _done_checks, _conflict_checks,
-            _live_checks, _empty_checks, _stale_checks, _inbox_checks)
+            _live_checks, _empty_checks, _stale_checks, _inbox_checks, _event_checks, _keys_checks,
+            _hint_checks, _tall_checks)
 
 
 def working_checks(browser, mock, base, check, until, guard, init_script):

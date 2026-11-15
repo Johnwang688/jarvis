@@ -5,7 +5,7 @@
 //
 // Everything a row carries is text. A title or a row's words are never HTML.
 
-import { oneLine, parseRow, type InboxRow } from "./inbox";
+import { isHidden, oneLine, parseRow, type InboxRow } from "./inbox";
 import type { ActivityStatus, ActivityView } from "./activity";
 
 export interface WorkingEntry {
@@ -18,8 +18,8 @@ export interface WorkingEntry {
   seq: number;
   /** The daemon's sidebar status as of the read; the sidebar draws the live activity store instead. */
   status: string;
-  /** How many inbox rows sit on this thread. */
-  rows: number;
+  /** The inbox rows that sit on this thread (shown ones only): a hint on its row. */
+  attached: { kind: string; rank: number }[];
   /** Why Done would be refused as of the read; null when it would not. A hint: Done checks again. */
   why_not: string | null;
 }
@@ -46,7 +46,9 @@ export function parseEntry(raw: unknown): WorkingEntry | null {
     last: typeof raw.last === "string" ? raw.last : "",
     seq,
     status: typeof raw.status === "string" ? raw.status : "idle",
-    rows: Array.isArray(raw.rows) ? raw.rows.length : 0,
+    attached: Array.isArray(raw.rows)
+      ? raw.rows.map(parseRow).filter((r): r is InboxRow => !!r && !isHidden(r)).map((r) => ({ kind: r.kind, rank: r.rank }))
+      : [],
     why_not: typeof raw.why_not === "string" && raw.why_not ? oneLine(raw.why_not, 200) : null,
   };
 }
@@ -95,6 +97,15 @@ const KIND_LABEL: Record<string, string> = {
 
 export function kindLabel(row: Pick<InboxRow, "kind">): string {
   return KIND_LABEL[row.kind] || "Item";
+}
+
+/** The small hint on a thread row that has inbox rows attached: "1 decision", "2 items". */
+export function attachedHint(attached: readonly { kind: string; rank: number }[]): string {
+  if (!attached.length) return "";
+  const kinds = new Set(attached.map((a) => kindLabel(a)));
+  const n = attached.length;
+  if (kinds.size === 1) return `${n} ${[...kinds][0].toLowerCase()}${n > 1 ? "s" : ""}`;
+  return `${n} items`;
 }
 
 /** Amber means pending, the same rule as the Inbox count (ranks 1 and 2). */
