@@ -13,7 +13,7 @@
   background: var(--m-glass-sticky);
 }
 .tap.chip {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: var(--m-tap);
   padding: 0 0.5rem;

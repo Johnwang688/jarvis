@@ -917,6 +917,8 @@ export class PhoneApp {
    * drew them (PX-3a): the receipt says them, never the server's `note`. */
   async sendAnswer(row: InboxRow, body: Record<string, unknown>, echo?: string): Promise<void> {
     if (this.answering.has(row.id)) return;
+    // The row as it was answered: only that same row is removed on the 200 (a GET may have installed new contents under its id).
+    const answered = JSON.stringify(row);
     this.flash = "";
     this.answering.add(row.id);
     this.notes.delete(row.id);
@@ -932,7 +934,11 @@ export class PhoneApp {
       this.withdrawing.delete(row.id);
       // D6: its row leaves at once (only this one); the re-read below restores it if the server still lists it.
       // A read that was in flight before this 200 is dropped by the afterWrite trigger, so it cannot bring the row back.
-      if (this.inbox) { this.inbox = this.inbox.filter((r) => r.id !== row.id); this.renderBadge(); }
+      const current = this.inbox?.find((r) => r.id === row.id);
+      if (this.inbox && current && JSON.stringify(current) === answered) {
+        this.inbox = this.inbox.filter((r) => r.id !== row.id);
+        this.renderBadge();
+      }
       const note = echo !== undefined ? `Sent: ${echo}`
         : typeof result.body.note === "string" ? result.body.note
         : row.kind === "proposal" ? "Withdrawn: the task will not start." : "Sent.";
@@ -1457,7 +1463,10 @@ export class PhoneApp {
     } else if (event.kind === "task_changed") {
       this.later("tasks", () => void this.loadTasks());
       // Checked again when the debounce fires: leaving the task (Chats, Review, the Inbox) meanwhile must not reopen it.
-      this.later("task", () => { if (this.tab === "tasks" && this.task?.id === event.taskId) void this.openTask(event.taskId); });
+      // One debounce per task, scheduled only for the open task: an event for another task can never claim it.
+      if (this.tab === "tasks" && this.task?.id === event.taskId) {
+        this.later("task:" + event.taskId, () => { if (this.tab === "tasks" && this.task?.id === event.taskId) void this.openTask(event.taskId); });
+      }
     } else {
       this.refreshVisible();
     }

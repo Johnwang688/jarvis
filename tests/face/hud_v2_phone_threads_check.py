@@ -256,11 +256,12 @@ def run(browser, check, until, shots=None):
                 const chip = document.querySelector('[data-testid="m-chip-needs"]');
                 const count = chip.querySelector('.m-chip-count').getBoundingClientRect();
                 const box = chip.getBoundingClientRect();
-                return {text: chip.textContent, fits: count.right <= box.right + 0.5 && count.left >= box.left - 0.5,
+                const label = chip.querySelector('.m-chip-label');
+                return {text: chip.textContent, labelClipped: label.scrollWidth > label.clientWidth, fits: count.right <= box.right + 0.5 && count.left >= box.left - 0.5,
                         height: box.height};
             }""")
-            check(f"PX-2 a count of 125 is fully visible in its chip @{width}",
-                  geometry["text"].endswith("· 125") and geometry["fits"] and geometry["height"] >= 48, str(geometry))
+            check(f"PX-2 the full 'Needs you · 125' is visible in its chip @{width}",
+                  geometry["text"] == "Needs you · 125" and not geometry["labelClipped"] and geometry["fits"] and geometry["height"] >= 48, str(geometry))
             shot(page, f"strip-125-{width}", '[data-testid="m-strip"]')
         finally:
             ctx.close()

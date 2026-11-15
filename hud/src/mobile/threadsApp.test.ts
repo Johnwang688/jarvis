@@ -363,6 +363,20 @@ describe("launch and task navigation", () => {
     }
   });
 
+  it("an event for another task cannot suppress the open task's refresh (B then A inside the debounce)", async () => {
+    const h = harness();
+    h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: false });
+    h.answers[`/m/api/tasks/${K1}`] = ok({ task: task(K1, "running") });
+    await started(h);
+    await h.app.openTask(K1);
+    const reads = () => h.count(`/m/api/tasks/${K1}`);
+    const before = reads();
+    h.streams[0].send({ kind: "task_changed", data: { task_id: "22222222", project_id: null, reason: "task_status_changed" } });
+    h.streams[0].send({ kind: "task_changed", data: { task_id: K1, project_id: null, reason: "task_status_changed" } });
+    await h.flush();
+    expect(reads()).toBe(before + 1);
+  });
+
   it("closing New task, opened from the Tasks filter, lands on the Tasks filter; the Inbox tab resets the way back", async () => {
     const h = harness();
     await started(h);
@@ -407,6 +421,27 @@ describe("D6: an answered row leaves at once", () => {
     expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 1");
     expect(h.q("m-tab-inbox")!.textContent).toBe("Inbox · 1");
     expect(count).toBeGreaterThan(0);                 // the afterWrite re-read was still asked for
+  });
+
+  it("an old answer's 200 leaves a row a GET replaced under the same id (and its badge count)", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    let release!: (p: Posted) => void;
+    h.postReplies[path] = () => new Promise<Posted>((res) => { release = res; });
+    await started(h);
+    type(h);
+    h.q("m-answer-send")!.click();                       // the POST is held
+    await h.settle();
+    // A GET installs changed contents under the same id (a newer question).
+    h.answers["/m/api/inbox"] = ok({ rows: [mkRow(id, 2, { thread_id: T1, detail: { text: "A NEWER question?", options: [] } })] });
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: [id], reason: "question" } });
+    await h.flush();
+    h.answers["/m/api/inbox"] = () => new Promise<Got>(() => {});    // the re-read after the 200 stalls
+    release({ status: 200, body: {} });
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
+    expect(h.root.textContent).toContain("A NEWER question?");
+    expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 1");
   });
 
   it("a failure keeps the row, with its error", async () => {
