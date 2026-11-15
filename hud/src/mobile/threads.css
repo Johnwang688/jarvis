@@ -1,0 +1,113 @@
+/* PX-2: the thread list (threadsView.ts). The skin's --m-* tokens only, sized in rem,
+   no url(), no inline style, no backdrop-filter (skin.test.ts scans this file too).
+   Every tap target is at least 3rem (48 px). */
+
+/* The summary strip is also the filter: three chips, sticky under the header. */
+.m-strip {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0 0.5rem;
+  background: var(--m-glass-sticky);
+}
+.tap.chip {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--m-tap);
+  padding: 0 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--m-r-pill);
+  color: var(--text-2);
+}
+.m-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.m-chip-count { flex: none; white-space: pre; }
+.m-threads[data-error="true"] > :not(.m-strip):not(.m-error) { opacity: 0.55; }
+.tap.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+/* Needs you is amber while a row is rank 1 or 2 (pending), the same rule as the badge. */
+.tap.chip[data-tone="pending"] { border-color: var(--amber-line); color: var(--amber); }
+.tap.chip[data-tone="pending"][aria-pressed="true"] { background: var(--amber-soft); }
+
+.m-band { display: flex; flex-direction: column; gap: 0.5rem; }
+.m-band-head { margin-top: 0.75rem; }
+.m-band-note { font-size: 0.875rem; color: var(--text-muted); padding: 0.25rem 0.125rem; }
+.m-band-note.m-unavailable { border: 1px dashed var(--border-strong); border-radius: var(--m-r-field); padding: 0.625rem 0.75rem; }
+
+/* A thread, a task or a row alone: one glass card with its items inside. */
+.m-thread {
+  border: 1px solid var(--m-rim);
+  border-radius: var(--m-r-card);
+  box-shadow: var(--m-rim-shadow);
+  background: var(--m-sheen), var(--m-glass);
+  overflow: hidden;
+}
+.m-thread-needs { border-color: var(--amber-line); }
+.m-thread[data-state="failed"] { border-color: var(--red); }
+.tap.m-thread-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.125rem;
+  width: 100%;
+  min-height: 3.5rem;
+  padding: 0.5rem 0.75rem;
+}
+.m-thread-running .tap.m-thread-open, .m-thread-recent .tap.m-thread-open { min-height: 4rem; }
+.m-thread-title { font-weight: 600; overflow-wrap: anywhere; }
+.m-thread-meta { font-size: 0.8125rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.m-thread-kind { font-size: 0.8125rem; color: var(--text-muted); padding: 0.625rem 0.75rem 0; margin: 0; font-weight: 600; }
+/* The inbox rows sit inside the card, as insets. */
+.m-thread-items { display: flex; flex-direction: column; gap: 0.5rem; padding: 0 0.5rem 0.5rem; }
+.m-thread-items .row { background: var(--m-raise); }
+.m-thread-kind + .m-thread-items { padding-top: 0.375rem; }
+
+/* A working thread pulses in the accent; a still screen shows a solid dot instead. */
+.m-thread[data-state="working"] .m-thread-meta::before,
+.m-thread[data-state="running"] .m-thread-meta::before,
+.m-thread[data-state="verifying"] .m-thread-meta::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.375rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: m-pulse 1.6s ease-in-out infinite;
+}
+@keyframes m-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .m-thread[data-state="working"] .m-thread-meta::before,
+  .m-thread[data-state="running"] .m-thread-meta::before,
+  .m-thread[data-state="verifying"] .m-thread-meta::before { animation: none; }
+}
+
+.tap.m-recent-all { min-height: var(--m-tap); align-self: stretch; text-align: center; }
+.m-recent-rest { display: flex; flex-direction: column; gap: 0.5rem; }
+.m-recent-rest[hidden] { display: none; }
+.m-info { display: flex; flex-direction: column; gap: 0.5rem; }
+.m-info-summary { min-height: var(--m-tap); display: flex; align-items: center; padding: 0 0.25rem; color: var(--text-2); }
+.m-info[open] .m-info-summary { margin-bottom: 0.5rem; }
+
+.m-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--red);
+  border-radius: var(--m-r-field);
+  background: var(--red-soft);
+  color: var(--red);
+}
+.m-skeleton { min-height: 4rem; border-radius: var(--m-r-card); background: var(--m-raise); border: 1px solid var(--m-rim); }
+.m-skeleton + .m-skeleton { margin-top: 0.5rem; }
+.m-threads[aria-busy="true"] .m-skeleton { animation: m-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .m-threads[aria-busy="true"] .m-skeleton { animation: none; } }

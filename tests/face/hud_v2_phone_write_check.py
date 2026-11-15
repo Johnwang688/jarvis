@@ -317,7 +317,8 @@ def run(browser, check, until):
               and tid("m-compose").count() == 1, str(made))
 
         # -- New task, Start ---------------------------------------------------------------
-        tid("m-tab-tasks").click()
+        tid("m-tab-inbox").click()
+        tid("m-chip-tasks").click()
         until(lambda: tid("m-new-task-open").count() == 1, timeout=8)
         tid("m-new-task-open").click()
         tid("m-new-brief").fill("add divide " + HOSTILE)

@@ -504,6 +504,7 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
   return card;
 }
 
+/** Retired from the app by PX-2 (the list is `threadsView.ts`); kept only for the older view tests that draw rows flat. */
 export function inboxView(rows: InboxRow[] | null, open: (row: InboxRow) => void, answers?: InboxAnswers,
                           secure?: { ok: boolean; label: string } | null): HTMLElement {
   const view = testid(el("section", "view"), "m-inbox");

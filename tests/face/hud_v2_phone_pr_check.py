@@ -299,7 +299,7 @@ class Phone:
 
     def reread(self):
         page = self.page
-        page.locator('[data-testid="m-tab-tasks"]').click()
+        page.locator('[data-testid="m-tab-chats"]').click()
         page.locator('[data-testid="m-tab-inbox"]').click()
 
     def rect(self, row_id, selector):
@@ -526,7 +526,7 @@ def run(browser, check, until):
         check("fix question: its link goes to the task's question row", True)
         groups = page.evaluate("""() => [...document.querySelectorAll('[data-testid="m-inbox"] h2.group')]
             .map(h => h.textContent)""")
-        check("rank 4 rows (ended fixes) sit under 'Waiting on you'", "Waiting on you" in groups, str(groups))
+        check("rank 4 rows (ended fixes) sit under 'Needs you'", "Needs you" in groups, str(groups))
         check("no link anywhere in the inbox, no markup made from daemon text",
               page.locator('[data-testid="m-inbox"] :is(' + MARKUP + ')').count() == 0
               and page.evaluate("window.__pwned === undefined"))

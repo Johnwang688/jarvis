@@ -60,7 +60,11 @@ describe("the phone's model (P-3)", () => {
   it("reads only the stream's own kinds, ids validated", () => {
     expect(parseEvent('{"kind":"inbox_changed","data":{"ids":["appr:1"],"reason":"x"}}')).toEqual({ kind: "inbox_changed", ids: ["appr:1"] });
     expect(parseEvent('{"kind":"thread_changed","data":{"thread_id":"aaaaaaaa","project_id":"cccccccc"}}'))
-      .toEqual({ kind: "thread_changed", threadId: "aaaaaaaa", projectId: "cccccccc" });
+      .toEqual({ kind: "thread_changed", threadId: "aaaaaaaa", projectId: "cccccccc", reason: "" });
+    expect(parseEvent('{"kind":"thread_changed","data":{"thread_id":"aaaaaaaa","reason":"turn_started"}}'))
+      .toEqual({ kind: "thread_changed", threadId: "aaaaaaaa", projectId: null, reason: "turn_started" });
+    expect(parseEvent('{"kind":"working_changed","data":{}}')).toEqual({ kind: "working_changed" });
+    expect(parseEvent('{"kind":"working_changed"}')).toEqual({ kind: "working_changed" });
     expect(parseEvent('{"kind":"thread_changed","data":{"thread_id":"../x"}}')).toBeNull();
     expect(parseEvent('{"kind":"text","data":{"text":"hi"}}')).toBeNull();
     expect(parseEvent("not json")).toBeNull();
@@ -375,7 +379,7 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     h.app.start();
     await h.settle();
     expect(h.streams.map((s) => s.url)).toEqual([STREAM_URL]);
-    expect(h.root.querySelector('[data-testid="m-empty"]')!.textContent).toBe("Nothing is waiting on you.");
+    expect(h.root.querySelector('[data-testid="m-empty"]')!.textContent).toBe("All clear");
     h.answers["/m/api/inbox"] = h.ok({ rows: [row({ id: "appr:r9", kind: "approval", rank: 1, title: "Claude asks to use Bash",
       detail: { tool: "Bash", command: "ls" } })] });
     h.streams[0].open();

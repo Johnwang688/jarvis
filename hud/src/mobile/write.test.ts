@@ -495,7 +495,7 @@ describe("task verbs (P-5)", () => {
     const h = harness();
     h.app.start();
     await h.settle();
-    await h.click("m-tab-tasks");
+    await h.click("m-chip-tasks");
     await h.click("m-new-task-open");
     await h.settle();
     expect((h.q("m-new-create") as HTMLButtonElement).disabled).toBe(true);

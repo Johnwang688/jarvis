@@ -141,6 +141,41 @@ export function parseTasks(raw: unknown): TaskView[] {
   return list.map(parseTask).filter((t): t is TaskView => t !== null);
 }
 
+/** The activity words a working entry carries (jarvis/v2/remote_api.py `WORKING_LABELS`). */
+export const WORKING_STATUSES = ["needs_input", "failed", "unread", "working", "idle"] as const;
+export type WorkingStatus = (typeof WORKING_STATUSES)[number];
+
+/** One In progress entry as `GET /m/api/working` sends it (WS-5a: `WORKING_ENTRY_FIELDS`, nothing else). */
+export interface WorkingItem {
+  thread_id: string;
+  project_id: string | null;
+  project: string;
+  title: string;
+  status: WorkingStatus;
+  /** The last activity, ISO; "" when the daemon could not read it. */
+  last: string;
+}
+
+/** `more`: the daemon cut the list; `total` is how many there were before the cut. */
+export interface WorkingList { entries: WorkingItem[]; more: boolean; total: number }
+
+/** The route's answer, or null when it is not one (a shape error is "unavailable", never an empty list). */
+export function parseWorkingList(raw: unknown): WorkingList | null {
+  if (!isObj(raw) || !Array.isArray(raw.entries)) return null;
+  const entries: WorkingItem[] = [];
+  const seen = new Set<string>();
+  for (const e of raw.entries) {
+    if (!isObj(e)) continue;
+    const id = idOrNull(e.thread_id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const status = (WORKING_STATUSES as readonly string[]).includes(str(e.status)) ? (e.status as WorkingStatus) : "idle";
+    entries.push({ thread_id: id, project_id: idOrNull(e.project_id), project: oneLine(e.project, 80),
+      title: oneLine(e.title, 120), status, last: str(e.last) });
+  }
+  return { entries, more: raw.more === true, total: Math.max(num(raw.total), entries.length) };
+}
+
 export function parseDiff(raw: unknown): DiffView | null {
   if (!isObj(raw) || !Array.isArray(raw.files)) return null;
   const files: DiffFile[] = [];
@@ -189,8 +224,11 @@ export function lineKind(line: string): "add" | "del" | "hunk" | "file" | "ctx" 
 /** The stream's records (remote_api.stream_record): anything else is dropped. */
 export type StreamEvent =
   | { kind: "inbox_changed"; ids: string[] }
-  | { kind: "thread_changed"; threadId: string; projectId: string | null }
+  /** `reason` is the bus kind that moved it (`turn_started`, `turn_finished`, ...): "" when absent. */
+  | { kind: "thread_changed"; threadId: string; projectId: string | null; reason: string }
   | { kind: "task_changed"; taskId: string; projectId: string | null }
+  /** WS-5a: the In progress list may have changed. A bare cue: no ids, no data. */
+  | { kind: "working_changed" }
   | { kind: "resync" };
 
 export function parseEvent(text: string): StreamEvent | null {
@@ -203,12 +241,14 @@ export function parseEvent(text: string): StreamEvent | null {
   }
   if (raw.kind === "thread_changed") {
     const id = idOrNull(data.thread_id);
-    return id ? { kind: "thread_changed", threadId: id, projectId: idOrNull(data.project_id) } : null;
+    const reason = typeof data.reason === "string" && /^[a-z_]{1,40}$/.test(data.reason) ? data.reason : "";
+    return id ? { kind: "thread_changed", threadId: id, projectId: idOrNull(data.project_id), reason } : null;
   }
   if (raw.kind === "task_changed") {
     const id = idOrNull(data.task_id);
     return id ? { kind: "task_changed", taskId: id, projectId: idOrNull(data.project_id) } : null;
   }
+  if (raw.kind === "working_changed") return { kind: "working_changed" };
   if (raw.kind === "resync") return { kind: "resync" };
   return null;
 }

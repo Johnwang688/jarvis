@@ -13,6 +13,7 @@ const MOBILE = strip(mobile);
 const TALK = strip(readFileSync(join(__dirname, "talk.css"), "utf8"));
 const WRITE = strip(readFileSync(join(__dirname, "write.css"), "utf8"));
 const ITEMS = strip(readFileSync(join(__dirname, "items.css"), "utf8"));
+const THREADS = strip(readFileSync(join(__dirname, "threads.css"), "utf8"));
 
 /** The custom properties declared on a stylesheet's `:root`. */
 function rootTokens(css: string): Map<string, string> {
@@ -68,7 +69,7 @@ describe("the phone's skin is the phone's alone", () => {
 
 describe("Dynamic Type: sized in rem", () => {
   it("has no px size past a hairline in any phone stylesheet", () => {
-    for (const [name, css] of [["mobile.css", MOBILE], ["talk.css", TALK], ["write.css", WRITE], ["items.css", ITEMS]]) {
+    for (const [name, css] of [["mobile.css", MOBILE], ["talk.css", TALK], ["write.css", WRITE], ["items.css", ITEMS], ["threads.css", THREADS]]) {
       const bad = [...css.matchAll(/(?<![\w.-])(\d+(?:\.\d+)?)px\b/g)].filter((m) => Number(m[1]) > 2).map((m) => m[0]);
       expect([name, bad]).toEqual([name, []]);
     }
@@ -132,7 +133,7 @@ describe("aurora glass, with no blur per card", () => {
   });
 
   it("paints a tint, a sheen and a rim; backdrop-filter appears nowhere in the phone", () => {
-    expect(MOBILE + WRITE + TALK).not.toMatch(/backdrop-filter/);
+    expect(MOBILE + WRITE + TALK + THREADS).not.toMatch(/backdrop-filter/);
     expect(MOBILE).toMatch(/\.row \{[^}]*var\(--m-sheen\), var\(--m-glass\)/);
     expect(MOBILE).toMatch(/\.m-card \{[^}]*var\(--m-sheen\), var\(--m-glass\)/);
     expect(MOBILE).toMatch(/\.tabs \{[^}]*var\(--m-glass-bar\)/);
