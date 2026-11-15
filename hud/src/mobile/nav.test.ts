@@ -1,82 +1,11 @@
-// PX-4: history (state only), scroll memory, the approval sheet, the ⋯ menus, the tray and the review line.
+// PX-4: no browser-history integration, scroll memory, the approval sheet, the ⋯ menus, the tray and the review line.
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { Nav, ScrollMemory, depthOf, menuView, sheetView, trayView, type HistoryEnv } from "./nav";
+import { ScrollMemory, menuView, sheetView, trayView } from "./nav";
 import { mkRow } from "./threads.fixtures";
-
-// -- the history, on its own, with a fake browser ---------------------------------------------
-
-function fakeHistory() {
-  const entries: unknown[] = [null];
-  let at = 0;
-  const pops: ((s: unknown) => void)[] = [];
-  const log: string[] = [];
-  const env: HistoryEnv = {
-    state: () => entries[at],
-    push: (s) => { entries.splice(at + 1); entries.push(s); at += 1; log.push("push " + JSON.stringify(s)); },
-    replace: (s) => { entries[at] = s; log.push("replace " + JSON.stringify(s)); },
-    go: (d) => { log.push("go " + d); queueMicrotask(() => { at += d; pops.forEach((f) => f(entries[at])); }); },
-    onPop: (f) => { pops.push(f); return () => { pops.splice(pops.indexOf(f), 1); }; },
-  };
-  return { env, entries, log, get at() { return at; }, pop: (d: number) => { at += d; pops.forEach((f) => f(entries[at])); } };
-}
-
-describe("Nav: history that holds a depth and nothing else", () => {
-  it("reads a depth only from a whole number it made", () => {
-    expect([depthOf({ jv: 2 }), depthOf(null), depthOf({ jv: "2" }), depthOf({ jv: -1 }), depthOf({ jv: 1.5 }), depthOf("x")])
-      .toEqual([2, 0, 0, 0, 0, 0]);
-  });
-
-  it("pushes one entry per level opened, with state {jv} only, and goes back for a level closed", async () => {
-    const h = fakeHistory();
-    let depth = 0;
-    const nav = new Nav(h.env, () => depth, () => {});
-    nav.start();
-    depth = 2;
-    nav.sync();
-    expect(h.log).toEqual(['replace {"jv":0}', 'push {"jv":1}', 'push {"jv":2}']);
-    depth = 1;
-    nav.sync();
-    expect(h.log.at(-1)).toBe("go -1");
-    await Promise.resolve();
-    expect(nav.hist).toBe(1);
-    for (const entry of h.entries) expect(JSON.stringify(entry)).not.toMatch(/[a-f0-9]{8}/);
-  });
-
-  it("a pop runs the app's own back to the landed depth, and pushes nothing while it does", () => {
-    const h = fakeHistory();
-    let depth = 0;
-    const closed: number[] = [];
-    const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); while (depth > d) { depth -= 1; nav.sync(); } });
-    nav.start();
-    depth = 2;
-    nav.sync();
-    const before = h.log.length;
-    h.pop(-2);
-    expect(closed).toEqual([0]);
-    expect(depth).toBe(0);
-    // `sync` ran inside the close (one level at a time) and must not have pushed a forward entry.
-    expect(h.log.slice(before).filter((l) => l.startsWith("push"))).toEqual([]);
-    expect(nav.hist).toBe(0);
-  });
-
-  it("a forward pop to a level the app has closed is walked back", async () => {
-    const h = fakeHistory();
-    let depth = 1;
-    const nav = new Nav(h.env, () => depth, () => {});
-    nav.start();
-    nav.sync();
-    depth = 0;
-    nav.sync();
-    await Promise.resolve();
-    h.log.length = 0;
-    h.pop(1);
-    expect(h.log).toEqual(["go -1"]);
-  });
-});
 
 describe("ScrollMemory", () => {
   it("keeps a top per view and the row left from, matched by attribute", () => {
@@ -157,11 +86,9 @@ function harness(opts: { rows?: unknown[]; review?: unknown } = {}) {
   });
   let signedOut = false;
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
-  /** jsdom's history traversal is asynchronous. */
-  const traversed = async () => { await new Promise((r) => setTimeout(r, 25)); await settle(); };
   const q = (id: string) => root.querySelector<HTMLElement>(`[data-testid="${id}"]`);
   const click = async (id: string) => { q(id)!.click(); await settle(); };
-  return { app, root, gets, posts, replies, settle, traversed, q, click, get signedOut() { return signedOut; } };
+  return { app, root, gets, posts, replies, settle, q, click, get signedOut() { return signedOut; } };
 }
 
 const cssOf = (f: string) => readFileSync(join(__dirname, f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -182,74 +109,99 @@ describe("the sheet keeps the safety gap", () => {
 
 const here = () => location.pathname + location.search + location.hash;
 
-describe("history is state only: no id ever reaches the address", () => {
-  it("opening a chat, a card and a task pushes {jv} entries and leaves the URL as it was", async () => {
+describe("no browser-history integration: no entry, no listener, the URL as it was", () => {
+  const spied = () => {
+    const push = vi.spyOn(history, "pushState");
+    const go = vi.spyOn(history, "go");
+    const back = vi.spyOn(history, "back");
+    const listeners: string[] = [];
+    const add = vi.spyOn(window, "addEventListener").mockImplementation(((type: string) => { listeners.push(type); }) as never);
+    return { push, go, back, listeners, restore: () => { push.mockRestore(); go.mockRestore(); back.mockRestore(); add.mockRestore(); } };
+  };
+
+  it("opening and closing a chat, a card and a task makes no history entry and listens for no popstate", async () => {
+    history.replaceState(null, "", "/m/");
+    const before = { length: history.length, state: history.state };
+    const spy = spied();
+    try {
+      const h = harness({ rows: [approval()] });
+      h.app.start();
+      await h.settle();
+      await h.app.openThread(T1);
+      await h.settle();
+      h.app.openCard(approval() as never);
+      await h.settle();
+      await h.click("m-back");
+      await h.click("m-back");
+      await h.app.openTask(K1);
+      await h.settle();
+      await h.click("m-back");
+      expect(spy.push).not.toHaveBeenCalled();
+      expect(spy.go).not.toHaveBeenCalled();
+      expect(spy.back).not.toHaveBeenCalled();
+      expect(spy.listeners).not.toContain("popstate");
+      expect([history.length, history.state]).toEqual([before.length, before.state]);
+      expect(here()).toBe("/m/");
+      h.app.stop();
+    } finally { spy.restore(); }
+  });
+
+  it("the source has no pushState, popstate or history.go in the phone app", () => {
+    for (const f of ["app.ts", "nav.ts"]) {
+      const src = readFileSync(join(__dirname, f), "utf8").replace(/\/\/.*|\/\*[\s\S]*?\*\//g, "");
+      expect([f, /pushState|popstate|history\.(go|back|forward)\b/.test(src)]).toEqual([f, false]);
+    }
+  });
+
+  it("the in-app back closes one level per tap, directly: a fast double tap goes up two", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness({ rows: [approval()] });
     h.app.start();
     await h.settle();
-    const length = history.length;
-    expect(history.state).toEqual({ jv: 0 });
     await h.app.openThread(T1);
     await h.settle();
-    expect(history.state).toEqual({ jv: 1 });
     h.app.openCard(approval() as never);
     await h.settle();
-    expect(history.state).toEqual({ jv: 2 });
-    expect(history.length).toBe(length + 2);
-    expect(here()).toBe("/m/");
-    expect(location.href).not.toContain(T1);
-    expect(JSON.stringify(history.state)).not.toContain(T1);
+    expect([h.app.depth(), !!h.app.card, !!h.app.thread]).toEqual([2, true, true]);
+    // Two taps with nothing awaited between them: the sheet's back, then the chat's back.
+    h.q("m-back")!.click();
+    expect([h.app.depth(), !!h.app.card, h.app.thread?.id]).toEqual([1, false, T1]);
+    h.q("m-back")!.click();
+    // Opened from the Inbox, so back is the Inbox, not the Chats list.
+    expect([h.app.depth(), h.app.thread, h.app.tab]).toEqual([0, null, "inbox"]);
     h.app.stop();
   });
 
-  it("opening a task pushes one entry and no id either", async () => {
+  it("answering from the sheet over a chat, then Back on the exposed chat, works", async () => {
+    history.replaceState(null, "", "/m/");
+    const h = harness({ rows: [approval()] });
+    h.app.start();
+    await h.settle();
+    await h.app.openThread(T1);
+    await h.settle();
+    await h.click("m-item-review");
+    expect(h.q("m-sheet")).not.toBeNull();
+    h.gets["/m/api/inbox"] = { ok: true, body: { rows: [] } };
+    await h.click("approval-deny");
+    expect(h.q("m-sheet")).toBeNull();
+    expect(h.app.thread?.id).toBe(T1);
+    await h.click("m-back");
+    expect([h.app.thread, h.app.tab]).toEqual([null, "inbox"]);
+    h.app.stop();
+  });
+
+  it("the in-app back on a task page and on a New chat form closes at once", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness();
     h.app.start();
     await h.settle();
     await h.app.openTask(K1);
     await h.settle();
-    expect(history.state).toEqual({ jv: 1 });
-    expect(here()).toBe("/m/");
-    expect(location.href).not.toContain(K1);
-    h.app.stop();
-  });
-
-  it("the browser's back closes the sheet first, then the chat, one level each", async () => {
-    history.replaceState(null, "", "/m/");
-    const h = harness({ rows: [approval()] });
-    h.app.start();
+    h.q("m-back")!.click();
+    expect(h.app.task).toBeNull();
+    await h.app.openNewChat();
     await h.settle();
-    await h.app.openThread(T1);
-    h.app.openCard(approval() as never);
-    await h.settle();
-    expect([h.app.depth(), !!h.app.card, !!h.app.thread]).toEqual([2, true, true]);
-    history.back();
-    await h.traversed();
-    expect([h.app.depth(), !!h.app.card, h.app.thread?.id]).toEqual([1, false, T1]);
-    expect(history.state).toEqual({ jv: 1 });
-    history.back();
-    await h.traversed();
-    // Opened from the Inbox, so back is the Inbox, not the Chats list.
-    expect([h.app.depth(), h.app.thread, h.app.tab]).toEqual([0, null, "inbox"]);
-    expect(history.state).toEqual({ jv: 0 });
-    h.app.stop();
-  });
-
-  it("the in-app back works with no browser back at all: it closes the level, then trims the history", async () => {
-    history.replaceState(null, "", "/m/");
-    const h = harness();
-    h.app.start();
-    await h.settle();
-    await h.app.openThread(T1);
-    await h.settle();
-    expect(history.state).toEqual({ jv: 1 });
-    await h.click("m-back");
-    // The in-app back goes through the browser (history.back): the level closes when the popstate lands.
-    await h.traversed();
-    expect(h.app.thread).toBeNull();
-    expect(history.state).toEqual({ jv: 0 });
+    expect(h.app.sheet?.kind).toBe("chat");
     h.app.stop();
   });
 });
@@ -272,7 +224,7 @@ describe("scroll memory and the row you came from", () => {
     expect(h.q("m-inbox")).toBeNull();
     expect(h.q("m-back")!.textContent).toBe("‹ Inbox");
     await h.click("m-back");
-    await h.traversed();
+    await h.settle();
     expect(h.app.tab).toBe("inbox");
     expect(h.q("m-main")!.scrollTop).toBe(321);
     expect(document.activeElement).toBe(h.root.querySelector(`[data-thread="${T1}"] [data-testid="m-thread-open"]`));
@@ -323,7 +275,7 @@ describe("the approval sheet", () => {
     expect(h.q("m-card-heading")!.tabIndex).toBe(-1);
     expect(document.activeElement).not.toBe(h.q("approval-deny"));
     await h.click("m-back");
-    await h.traversed();
+    await h.settle();
     expect(h.q("m-sheet")).toBeNull();
     expect(main.hasAttribute("inert")).toBe(false);
     expect(main.scrollTop).toBe(250);
@@ -342,7 +294,7 @@ describe("the approval sheet", () => {
     expect(h.app.card).not.toBeNull();
     h.app.card!.busy = false;
     await h.click("m-sheet-dim");
-    await h.traversed();
+    await h.settle();
     expect(h.app.card).toBeNull();
     expect(h.q("m-sheet")).toBeNull();
     h.app.stop();
@@ -512,15 +464,14 @@ describe("PX-3b state across the sheet and back-navigation", () => {
     await h.click("m-item-review");
     expect(h.q("m-sheet")).not.toBeNull();
     await h.click("m-back");
-    await h.traversed();
+    await h.settle();
     expect(h.q("m-sheet")).toBeNull();
     expect(document.activeElement).toBe(h.root.querySelector('[data-thread="' + T1 + '"] [data-id="appr:r1"] [data-testid="m-item-review"]'));
     expect(hidden(h, "m:6")).toBe(false);
     expect(h.q("m-item-unlater")).not.toBeNull();
     h.root.querySelector<HTMLElement>(`[data-thread="${T1}"] [data-testid="m-thread-open"]`)!.click();
     await h.settle();
-    history.back();
-    await h.traversed();
+    await h.click("m-back");
     expect(h.app.thread).toBeNull();
     expect(hidden(h, "m:6")).toBe(false);
     expect(h.q("m-item-unlater")).not.toBeNull();
@@ -529,22 +480,18 @@ describe("PX-3b state across the sheet and back-navigation", () => {
 });
 
 describe("PX-4 fix round", () => {
-  it("app: close the sheet and reopen it at once; the late history traversal leaves it open", async () => {
+  it("app: close the sheet and reopen it at once: it closes, then it is open, with nothing pending", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness({ rows: [approval()] });
     h.app.start();
     await h.settle();
     await h.click("m-item-review");
     await h.click("m-back");
+    expect(h.app.card).toBeNull();
     await h.click("m-item-review");
     expect(h.app.card).not.toBeNull();
-    await h.traversed();
-    expect(h.app.card).not.toBeNull();
     expect(h.q("m-sheet")).not.toBeNull();
-    expect(history.state).toEqual({ jv: 1 });
-    // And the browser's back still closes it.
-    history.back();
-    await h.traversed();
+    await h.click("m-back");
     expect(h.app.card).toBeNull();
     h.app.stop();
   });
@@ -564,7 +511,7 @@ describe("PX-4 fix round", () => {
     await h.settle();
     expect(h.q("m-back")!.textContent).toBe("‹ Chats");
     await h.click("m-back");
-    await h.traversed();
+    await h.settle();
     expect([h.app.tab, h.app.thread]).toEqual(["chats", null]);
     h.app.stop();
   });
@@ -581,7 +528,7 @@ describe("PX-4 fix round", () => {
     expect(h.q("m-sheet")).not.toBeNull();
     expect(h.app.tab).toBe("review");
     await h.click("m-back");
-    await h.traversed();
+    await h.settle();
     expect(h.q("m-sheet")).toBeNull();
     expect(document.activeElement).toBe(h.q("m-review-open-card"));
     h.app.stop();
@@ -610,128 +557,6 @@ describe("PX-4 fix round", () => {
     expect(h.q("m-review-open")).toBeNull();
     expect(h.q("m-tab-review")!.hidden).toBe(true);
     h.app.stop();
-  });
-});
-
-// A history whose traversals are released by hand. "go" holds the whole traversal (state and event); "pop"
-// runs it at once but holds its popstate (the state is already the new one). `userBack` is the owner's own Back.
-function slowHistory(mode: "go" | "pop") {
-  const entries: unknown[] = [null];
-  let at = 0;
-  const pops: ((s: unknown) => void)[] = [];
-  const held: (() => void)[] = [];
-  const pushes: unknown[] = [];
-  const traverse = (d: number, fire: boolean) => {
-    if (at + d < 0 || at + d >= entries.length) return;
-    at += d;
-    const s = entries[at];
-    if (fire) pops.forEach((f) => f(s));
-    return () => pops.forEach((f) => f(s));
-  };
-  const env: HistoryEnv = {
-    state: () => entries[at],
-    push: (s) => { entries.splice(at + 1); entries.push(s); at += 1; pushes.push(s); },
-    replace: (s) => { entries[at] = s; },
-    go: (d) => {
-      if (mode === "go") held.push(() => { traverse(d, true); });
-      else { const fire = traverse(d, false); if (fire) held.push(fire); }
-    },
-    onPop: (f) => { pops.push(f); return () => { pops.splice(pops.indexOf(f), 1); }; },
-  };
-  return { env, entries, pushes, release: () => { while (held.length) held.shift()!(); },
-    userBack: () => { traverse(-1, true); }, get at() { return at; }, get heldCount() { return held.length; } };
-}
-
-/** The app's side: one level, opened and closed the way app.ts does it (only a popstate closes it). */
-function level(h: ReturnType<typeof slowHistory>) {
-  let depth = 0;
-  const closed: number[] = [];
-  const nav = new Nav(h.env, () => depth, (d) => { closed.push(d); depth = Math.min(depth, d); });
-  nav.start();
-  return { nav, closed, get depth() { return depth; }, open: () => nav.open(() => { depth = 1; nav.sync(); }),
-    back: () => nav.back() };
-}
-
-describe("Nav: one path, no attribution", () => {
-  const depthOnes = (h: { entries: unknown[] }) => h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length;
-
-  it("the owner's Back during a delayed app traversal closes on the FIRST press", () => {
-    const h = slowHistory("go");
-    const l = level(h);
-    l.open();
-    l.back();                 // ours: go(-1), held
-    expect(l.depth).toBe(1);  // nothing closes until the browser says so
-    h.userBack();             // the owner's own Back lands first
-    expect(l.closed).toEqual([0]);
-    expect(l.depth).toBe(0);
-  });
-
-  for (const mode of ["pop", "go"] as const) {
-    it(`close then immediate reopen, ${mode === "pop" ? "popstate" : "go()"} delayed 2 s: the level ends open, with exactly one entry`, () => {
-      vi.useFakeTimers();
-      try {
-        const h = slowHistory(mode);
-        const l = level(h);
-        l.open();
-        l.back();
-        l.open();                       // queued: the old traversal is still on its way
-        expect(h.pushes.length).toBe(1);
-        vi.advanceTimersByTime(2000);
-        expect(h.pushes.length).toBe(1); // nothing pushed meanwhile
-        expect(l.closed).toEqual([]);
-        h.release();                    // the late traversal lands: it closes, THEN the queued open runs
-        expect(l.closed).toEqual([0]);
-        expect(l.depth).toBe(1);
-        expect(depthOnes(h)).toBe(1);
-        expect(l.nav.hist).toBe(1);
-      } finally { vi.useRealTimers(); }
-    });
-  }
-
-  it("160 rapid close/reopen cycles keep the history bounded and the level open", async () => {
-    const h = fakeHistory();
-    let depth = 0;
-    const nav = new Nav(h.env, () => depth, (d) => { depth = Math.min(depth, d); });
-    nav.start();
-    for (let i = 0; i < 160; i++) {
-      nav.open(() => { depth = 1; nav.sync(); });
-      nav.back();
-      nav.open(() => { depth = 1; nav.sync(); });
-      if (i % 7 === 0) for (let k = 0; k < 4; k++) await Promise.resolve();
-    }
-    for (let k = 0; k < 10; k++) await Promise.resolve();
-    expect(depth).toBe(1);
-    expect(h.entries.length).toBeLessThanOrEqual(3);
-    expect(h.entries.filter((e) => JSON.stringify(e) === '{"jv":1}').length).toBe(1);
-  });
-
-  it("a traversal that never answers is let go after the timeout: queued opens run, and the next Back is one press", () => {
-    vi.useFakeTimers();
-    try {
-      const h = slowHistory("go");
-      const l = level(h);
-      l.open();
-      l.back();                 // go(-1) held for ever: no popstate
-      l.open();                 // queued
-      vi.advanceTimersByTime(5000);
-      expect(l.depth).toBe(1);  // the queue ran (the level was never closed)
-      expect(h.pushes.length).toBe(1);
-      // Recovered: the next Back is requested at once (not blocked until some render repairs it).
-      const before = h.heldCount;
-      l.back();
-      expect(h.heldCount).toBe(before + 1);
-      h.release();
-      expect(l.depth).toBe(0);
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("a popstate is never ignored: every landing closes the levels deeper than it", () => {
-    const h = slowHistory("pop");
-    const l = level(h);
-    l.open();
-    l.back();                   // ours, event held
-    h.release();
-    expect(l.closed).toEqual([0]);
   });
 });
 

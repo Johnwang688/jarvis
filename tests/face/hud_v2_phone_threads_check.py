@@ -396,7 +396,7 @@ def run(browser, check, until, shots=None):
         finally:
             ctx.close()
 
-    # -- PX-4: state-only history, scroll memory, the sheet and the ⋯ menus, at 375 and 390 -------------------
+    # -- PX-4: scroll memory, back, the sheet (no browser-history entries), the sheet and the ⋯ menus, at 375 and 390 -------------------
     shots4 = os.environ.get("JARVIS_PX4_SHOTS")
 
     def shot4(page, name):
@@ -438,7 +438,7 @@ def run(browser, check, until, shots=None):
             page.keyboard.press("Escape")
             until(lambda: tid("m-menu-panel").count() == 0)
 
-            # Scroll the list, open a chat from a card low in it: no id in the address, one history entry.
+            # Scroll the list, open a chat from a card low in it: no id in the address, no history entry.
             target = '[data-key="orphan:e0000009"] [data-testid="m-thread-open"]'
             page.evaluate("document.querySelector('[data-key=\"orphan:e0000009\"]').scrollIntoView({block: 'center'})")
             before = scroll()
@@ -446,9 +446,9 @@ def run(browser, check, until, shots=None):
             check(f"PX-4 the list is long enough to scroll {tag}", before > 100, str(before))
             page.locator(target).click()
             until(lambda: tid("m-transcript").count() == 1)
-            check(f"PX-4 opening a chat pushes one history entry, state only: the address and the state hold no id {tag}",
-                  page.url == f"https://{HOST}/m/" and page.evaluate("history.state") == {"jv": 1}
-                  and page.evaluate("history.length") == hist0 + 1 and "e0000009" not in page.url, f"{page.url} {page.evaluate('history.state')}")
+            check(f"PX-4 opening a chat makes no history entry and no id reaches the address {tag}",
+                  page.url == f"https://{HOST}/m/" and page.evaluate("history.length") == hist0 and "e0000009" not in page.url,
+                  f"{page.url} {page.evaluate('history.length')} vs {hist0}")
             check(f"PX-4 the back button says where it goes {tag}", tid("m-back").inner_text() == "‹ Inbox")
             # The in-app back works with no swipe: the list as it was, the row focused.
             tid("m-back").click()
@@ -456,16 +456,15 @@ def run(browser, check, until, shots=None):
             check(f"PX-4 back: the Inbox is as it was left, scroll kept {tag}", abs(scroll() - before) <= 1, f"{before} -> {scroll()}")
             check(f"PX-4 back: the row it was opened from has the focus {tag}",
                   page.evaluate("document.activeElement.closest('[data-key]')?.dataset.key") == "orphan:e0000009")
-            until(lambda: page.evaluate("history.state") == {"jv": 0})
-            check(f"PX-4 the in-app back also trimmed the history {tag}", page.evaluate("history.length") == hist0 + 1)
-            # The browser's back (iOS swipe, Android button) does the same.
+            check(f"PX-4 the in-app back left the history and the address alone {tag}",
+                  page.evaluate("history.length") == hist0 and page.url == f"https://{HOST}/m/")
+            # Again, to the same row: the scroll and the row are remembered every time.
             page.locator(target).click()
             until(lambda: tid("m-transcript").count() == 1)
-            page.evaluate("history.back()")
+            tid("m-back").click()
             until(lambda: tid("m-inbox").count() == 1)
-            check(f"PX-4 history back: the Inbox, scroll kept, the address unchanged {tag}",
-                  abs(scroll() - before) <= 1 and page.url == f"https://{HOST}/m/" and page.evaluate("history.state") == {"jv": 0},
-                  f"{before} -> {scroll()} {page.url}")
+            check(f"PX-4 back again: the Inbox, scroll kept, the address unchanged {tag}",
+                  abs(scroll() - before) <= 1 and page.url == f"https://{HOST}/m/", f"{before} -> {scroll()} {page.url}")
 
             # Inbox -> chat -> tap Chats -> open a chat from that list: back goes to the Chats list, not the Inbox.
             page.locator(target).click()
@@ -493,8 +492,8 @@ def run(browser, check, until, shots=None):
                 return d && a ? a.getBoundingClientRect().top - d.getBoundingClientRect().bottom : null; }""")  # noqa: E731
             until(lambda: (gap() or 0) > 0, timeout=4)
             check(f"PX-4 sheet over the list: AUTHORIZE is more than 100 px below DENY {tag}", (gap() or 0) > 100, str(gap()))
-            check(f"PX-4 sheet over the list: one history entry, the list still in the page {tag}",
-                  page.evaluate("history.state") == {"jv": 1} and tid("m-inbox").count() == 1)
+            check(f"PX-4 sheet over the list: no history entry, the list still in the page {tag}",
+                  page.evaluate("history.length") == hist0 and tid("m-inbox").count() == 1)
             shot4(page, f"sheet-{width}")
             page.mouse.click(width / 2, 30)
             until(lambda: tid("m-sheet").count() == 0)
@@ -502,9 +501,10 @@ def run(browser, check, until, shots=None):
                   page.evaluate("document.activeElement?.dataset?.testid") == "m-item-review")
             page.locator('[data-id="appr:r1"] [data-testid="m-item-review"]').click()
             until(lambda: tid("m-sheet").count() == 1)
-            page.evaluate("history.back()")
+            tid("m-back").click()
             until(lambda: tid("m-sheet").count() == 0)
-            check(f"PX-4 the browser's back closes the sheet {tag}", page.evaluate("history.state") == {"jv": 0})
+            check(f"PX-4 the sheet's back closes it at once, the list kept {tag}",
+                  tid("m-inbox").count() == 1 and page.evaluate("history.length") == hist0)
 
             # A task page, its ⋯ open: Cancel is the only row.
             tid("m-chip-tasks").click()
