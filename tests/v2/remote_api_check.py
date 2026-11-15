@@ -1116,6 +1116,95 @@ class Working(Api):
             self.assertEqual(ids, sorted(ids, reverse=True), word)
         print("ok  103 tied entries: the 100 sent are the desk's first 100, tie-break included; total 103")
 
+    def _101(self):
+        made = [self.join(self.thread(f"m {i}"), minutes=10 + i) for i in range(101)]
+        self.assertEqual(len(self.ws.members()), 101)
+        return made
+
+    def test_a_thread_gone_mid_read_keeps_the_slot_and_the_counts(self):
+        made = self._101()
+        victim = made[-1]                           # the newest: inside the first 100
+        real = self.ws.entries
+
+        calls = {"n": 0}
+        real_get = self.stores.threads.get
+
+        def get(thread_id):
+            if thread_id == victim.id and calls["n"]:
+                return None
+            return real_get(thread_id)
+
+        def entries():
+            out = real()
+            calls["n"] += 1                         # from here the victim reads as missing
+            return out
+
+        with patch.object(self.ws, "entries", entries), patch.object(self.stores.threads, "get", get):
+            body = self.entries()
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, False, 100))
+        self.assertNotIn(victim.id, [e["thread_id"] for e in body["entries"]])
+        print("ok  a thread deleted mid-read: 100 returned, total 100, more false")
+
+    def test_a_thread_archived_mid_read_is_not_named(self):
+        made = self._101()
+        victim = made[-1]
+        real = self.ws.entries
+
+        def entries():
+            out = real()
+            gone = self.stores.threads.get(victim.id)
+            gone.archived = "2026-11-02T00:00:00+00:00"
+            self.stores.threads.save(gone)
+            return out
+
+        with patch.object(self.ws, "entries", entries):
+            body = self.entries()
+        text = json.dumps(body)
+        self.assertNotIn(victim.id, text)
+        self.assertNotIn(f"m {len(made) - 1}", text)
+        self.assertEqual((len(body["entries"]), body["more"], body["total"]), (100, False, 100))
+        print("ok  a thread archived mid-read is left out, titles included; counts from the same set")
+
+    def test_a_project_archived_mid_read_is_not_named(self):
+        named = self.stores.projects.create("Soon archived", str(self.repo))
+        late = self.join(self.thread("late in a project", project=named))
+        self.join(self.chat)
+        real = self.ws.entries
+
+        def entries():
+            out = real()
+            named.archived = "2026-11-02T00:00:00+00:00"
+            self.stores.projects.save(named)
+            return out
+
+        with patch.object(self.ws, "entries", entries):
+            body = self.entries()
+        self.assertNotIn(late.id, json.dumps(body))
+        self.assertNotIn("Soon archived", json.dumps(body))
+        self.assertEqual((len(body["entries"]), body["total"]), (1, 1))
+        print("ok  a project archived mid-read: its chats and its name are not sent")
+
+    def test_a_member_of_an_archived_project_is_absent(self):
+        named = self.stores.projects.create("Archived later", str(self.repo))
+        member = self.join(self.thread("planted member", project=named))
+        self.join(self.chat)
+        self.assertIn(member.id, self.ws.members())
+        named.archived = "2026-11-02T00:00:00+00:00"
+        self.stores.projects.save(named)
+        self.assertNotIn(member.id, [e["thread_id"] for e in self.ws.entries()], "entries() filter")
+        body = self.entries()
+        self.assertEqual([e["thread_id"] for e in body["entries"]], [self.chat.id])
+        self.assertEqual(body["total"], 1)
+        print("ok  a member whose project was archived is absent (entries() and the route)")
+
+    def test_path_spellings_are_not_the_route(self):
+        self.join(self.chat)
+        for path in ("/m/api//working", "/m/api/Working", "/m/api/working%2F", "/m/api/working;x",
+                     "/m/api/working%2f", "/m/api/./working"):
+            self.assertEqual(self.get(path)[0], 404, path)
+            self.assertEqual(self.get(path, cookie=None)[0], 401, path)
+        print("ok  odd spellings of the path are 404 signed in and 401 signed out")
+
     def test_order_labels_then_newest_and_the_cap_boundary(self):
         a = self.join(self.thread("a"), status="working", minutes=5)
         b = self.join(self.thread("b"), status="unread", minutes=1)
@@ -1455,6 +1544,10 @@ class Events(Api):
         # An event published after the revoke never reaches it.
         self.d.bus.publish({"kind": "inbox_changed", "data": {"ids": ["appr:late"], "reason": "x"}})
         self.assertNotIn(b"appr:late", s.buffer)
+        self.d.bus.publish({"kind": "working_changed"})
+        self.assertNotIn(b"working_changed", s.buffer)
+        self.assertTrue(s.ends_within(3))
+        self.assertNotIn(b"working_changed", s.body(0.5))
         print("ok  stream: a revoke at the desk ends every stream of that passkey at once")
 
     def test_ends_on_expiry_and_is_not_activity(self):

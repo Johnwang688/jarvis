@@ -2421,8 +2421,8 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
 
 The daemon half of "the Inbox is your working set of threads" (plan
 `docs/plans/2026-11-14-inbox-working-set-plan.md`, revision 2). The HUD
-halves are in `docs/notes/hud-workspace.md` (WS-2, WS-3, WS-4); the phone
-and the morning review are unchanged, and so is what `inbox.rows()` returns
+halves are in `docs/notes/hud-workspace.md` (WS-2, WS-3, WS-4); the phone (until WS-5a's read-only
+`GET /m/api/working`, above) and the morning review are unchanged, and so is what `inbox.rows()` returns
 (it gained only an optional `failures=` list). The owner's answers behind it
 (O-1 to O-4, the 3-day limit, unread and failed rows not holding a thread in,
 agents seeing membership) are summarised in hud-workspace.md, "Working set:

@@ -607,34 +607,46 @@ def working(daemon) -> dict:
         entries = [e for e in found.entries() if isinstance(e, dict)]
     except Exception:  # noqa: BLE001 — as the desk's read: a refusal, not a 500
         raise _Refused(409, "the In progress list cannot be read now") from None
-    entries = [e for e in entries if isinstance(e.get("thread_id"), str) and _ID.fullmatch(e["thread_id"])]
+    # Valid and visible first (a thread or project that went away, or was
+    # archived, since `entries()` is left out), so the order, the cap, `more`
+    # and `total` all come from the same collection and a slot is never lost.
+    hidden = _hidden(daemon)
+    kept = []
+    for e in entries:
+        if not (isinstance(e.get("thread_id"), str) and _ID.fullmatch(e["thread_id"])):
+            continue
+        record = _get(daemon.stores.threads, e["thread_id"])
+        if record is None or record.archived or record.project_id in hidden:
+            continue
+        owner = _get(daemon.stores.projects, record.project_id)
+        if owner is None or owner.archived:
+            continue
+        kept.append((e, record, owner))
     # The desk's own order: its read is newest first, the label order is a
     # stable sort over it (hud/src/lib/working.ts `orderEntries`).
-    entries.sort(key=lambda e: (e.get("last") if isinstance(e.get("last"), str) else "", e["thread_id"]),
-                 reverse=True)
+    kept.sort(key=lambda k: (k[0].get("last") if isinstance(k[0].get("last"), str) else "", k[0]["thread_id"]),
+              reverse=True)
 
     def stamp(e):
         at = parse_time(e.get("last"))
         return at.timestamp() if at is not None else 0.0
 
-    entries.sort(key=lambda e: (WORKING_LABELS.index(_label(e.get("status"))), -stamp(e)))
+    kept.sort(key=lambda k: (WORKING_LABELS.index(_label(k[0].get("status"))), -stamp(k[0])))
     out = []
-    for e in entries[:WORKING_ENTRIES]:
-        record = _get(daemon.stores.threads, e["thread_id"])
-        if record is None:
-            continue
-        title = thread(daemon.thread_json(record)).get("title")
-        owner = _get(daemon.stores.projects, e.get("project_id"))
+    for e, record, owner in kept[:WORKING_ENTRIES]:
+        try:
+            title = thread(daemon.thread_json(record)).get("title")
+        except Exception:  # noqa: BLE001 — a title that cannot be built is blank, the slot stays
+            title = ""
         name = getattr(owner, "name", None)
         at = parse_time(e.get("last"))
         out.append({"thread_id": e["thread_id"],
-                    "project_id": e["project_id"] if isinstance(e.get("project_id"), str)
-                    and _ID.fullmatch(e["project_id"]) else None,
+                    "project_id": record.project_id,
                     "project": _scrub(name) if isinstance(name, str) else "",
                     "title": title if isinstance(title, str) else "",
                     "status": _label(e.get("status")),
                     "last": e["last"] if at is not None else ""})
-    return {"entries": out, "more": len(entries) > WORKING_ENTRIES, "total": len(entries)}
+    return {"entries": out, "more": len(kept) > WORKING_ENTRIES, "total": len(kept)}
 
 
 def project(view: dict) -> dict:
