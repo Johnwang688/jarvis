@@ -347,6 +347,22 @@ describe("launch and task navigation", () => {
     expect(h.app.tab).toBe("chats");
   });
 
+  it("a task_changed whose debounce fires after you left for Chats or Review does not reopen the task", async () => {
+    for (const dest of ["m-tab-chats", "m-tab-review"] as const) {
+      const h = harness();
+      h.answers["/m/api/tasks"] = ok({ tasks: [task(K1, "running")], more: false });
+      h.answers[`/m/api/tasks/${K1}`] = ok({ task: task(K1, "running") });
+      h.answers["/m/api/review"] = ok({ open: 1, items: [] });
+      await started(h);
+      await h.app.openTask(K1);
+      h.streams[0].send({ kind: "task_changed", data: { task_id: K1, project_id: null, reason: "task_status_changed" } });
+      await h.settle();                                 // the debounce is armed, not fired
+      if (dest === "m-tab-review") h.app.show("review"); else h.app.show("chats");
+      await h.flush();                                  // now it fires
+      expect(h.app.tab, dest).toBe(dest === "m-tab-review" ? "review" : "chats");
+    }
+  });
+
   it("closing New task, opened from the Tasks filter, lands on the Tasks filter; the Inbox tab resets the way back", async () => {
     const h = harness();
     await started(h);
@@ -366,6 +382,66 @@ describe("launch and task navigation", () => {
   });
 });
 
+describe("D6: an answered row leaves at once", () => {
+  const id = "q:" + T1 + ":1";
+  const rowQ = () => mkRow(id, 2, { thread_id: T1, detail: { text: "Which?", options: [] } });
+  const path = `/m/api/inbox/${encodeURIComponent(id)}/answer`;
+  const type = (h: H) => {
+    const box = h.q("m-answer-text") as unknown as HTMLTextAreaElement;
+    box.value = "go on";
+    box.dispatchEvent(new Event("input"));
+  };
+
+  it("a 200 removes only that row at once, updating the badge, before the re-read answers", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ(), mkRow("q:other:1", 3, { detail: { text: "Other?", options: [] } })] });
+    await started(h);
+    expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 2");
+    let count = 0;
+    h.answers["/m/api/inbox"] = () => { count += 1; return new Promise<Got>(() => {}); };   // the re-read never answers
+    type(h);
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    const ids = Array.from(h.root.querySelectorAll<HTMLElement>('[data-testid="m-inbox-row"]')).map((r) => r.dataset.id);
+    expect(ids).toEqual(["q:other:1"]);
+    expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 1");
+    expect(h.q("m-tab-inbox")!.textContent).toBe("Inbox · 1");
+    expect(count).toBeGreaterThan(0);                 // the afterWrite re-read was still asked for
+  });
+
+  it("a failure keeps the row, with its error", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    h.postReplies[path] = async () => ({ status: 409, body: { error: "already answered" } });
+    await started(h);
+    type(h);
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
+    expect(h.q("m-answer-note")!.textContent).toContain("Already answered");
+  });
+
+  it("a read that was in flight before the answer cannot bring the row back; the next read restores it only if the server lists it", async () => {
+    const h = harness();
+    h.answers["/m/api/inbox"] = ok({ rows: [rowQ()] });
+    await started(h);
+    const olds: ((g: Got) => void)[] = [];
+    let phase = 0;
+    h.answers["/m/api/inbox"] = () => {
+      phase += 1;
+      return phase === 1 ? new Promise<Got>((res) => olds.push(res)) : ok({ rows: [] });
+    };
+    h.streams[0].send({ kind: "inbox_changed", data: { ids: [id], reason: "question" } });
+    await h.flush();                                    // read 1 is now in flight, holding the row
+    type(h);
+    h.q("m-answer-send")!.click();
+    await h.settle();
+    olds[0](ok({ rows: [rowQ()] }));                    // the older read lands after the 200
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(0);
+  });
+});
+
 describe("the inbox read that fails without being offline", () => {
   it("keeps the last list, names the failure and Retry reads again", async () => {
     const h = harness();
@@ -375,6 +451,9 @@ describe("the inbox read that fails without being offline", () => {
     h.streams[0].send({ kind: "inbox_changed", data: { ids: [], reason: "x" } });
     await h.flush();
     expect(h.q("m-list-error")!.textContent).toContain("broken");
+    // Dimmed for its own error, never offline.
+    expect(h.q("m-inbox")!.dataset.error).toBe("true");
+    expect(h.app.online).toBe(true);
     expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
     h.answers["/m/api/inbox"] = ok({ rows: [] });
     h.q("m-retry")!.click();

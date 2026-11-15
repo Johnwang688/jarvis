@@ -186,14 +186,17 @@ function strip(model: ListModel, a: ListActions, running: number): HTMLElement {
   bar.setAttribute("aria-label", "Show");
   const waitingN = model.rows ? waitingCount(model.rows) : 0;
   const pending = !!model.rows?.some((r) => r.rank <= 2);
-  const chip = (id: Exclude<Filter, null>, label: string, tone = "") => {
-    const b = tap(label, () => a.setFilter(model.filter === id ? null : id), "chip", "m-chip-" + id);
+  const chip = (id: Exclude<Filter, null>, label: string, tone = "", count: string | null = null) => {
+    const b = tap("", () => a.setFilter(model.filter === id ? null : id), "chip", "m-chip-" + id);
+    // The count never shrinks: a long label gives way to an ellipsis, never the number.
+    b.append(el("span", "m-chip-label", label));
+    if (count !== null) b.append(el("span", "m-chip-count", ` · ${count}`));
     b.setAttribute("aria-pressed", String(model.filter === id));
     if (tone) b.dataset.tone = tone;
     bar.append(b);
   };
-  chip("needs", model.rows === null && model.error !== null ? "Needs you · ?" : `Needs you · ${waitingN}`, pending ? "pending" : "");
-  chip("running", `Running · ${running}`);
+  chip("needs", "Needs you", pending ? "pending" : "", model.rows === null && model.error !== null ? "?" : String(waitingN));
+  chip("running", "Running", "", String(running));
   chip("tasks", "Tasks");
   return bar;
 }
@@ -203,6 +206,8 @@ export function threadsView(model: ListModel, a: ListActions, cache: SlotCache, 
   const view = testid(el("section", "view m-threads"), "m-inbox");
   const loading = model.rows === null && model.error === null;
   if (loading) view.setAttribute("aria-busy", "true");
+  // The inbox read failed: the list stays, dimmed (its own state; the app is not offline).
+  if (model.error) view.dataset.error = "true";
   const rows = model.rows ?? [];
   // A first inbox read that failed (rows null, error set) still shows what the other reads brought: the
   // running threads and tasks. It never says Nothing needs you, and never All clear.

@@ -167,9 +167,9 @@ def run(browser, check, until, shots=None):
             order = page.evaluate("Array.from(document.querySelectorAll('section.m-band')).map(s => s.dataset.band)")
             check(f"PX-2 bands: Needs you, Running, Recent in order {tag}", order == ["needs", "running", "recent"], str(order))
             check(f"PX-2 summary strip: Needs you · N, Running · M, Tasks {tag}",
-                  tid("m-chip-needs").inner_text() == "Needs you · 5" and tid("m-chip-running").inner_text() == "Running · 2"
-                  and tid("m-chip-tasks").inner_text() == "Tasks",
-                  " / ".join(tid(i).inner_text() for i in ("m-chip-needs", "m-chip-running", "m-chip-tasks")))
+                  tid("m-chip-needs").text_content() == "Needs you · 5" and tid("m-chip-running").text_content() == "Running · 2"
+                  and tid("m-chip-tasks").text_content() == "Tasks",
+                  " / ".join(tid(i).text_content() for i in ("m-chip-needs", "m-chip-running", "m-chip-tasks")))
             ids = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-inbox-row]')).map(r => r.dataset.id)")
             want = sorted(r["id"] for r in state["rows"])
             check(f"PX-2 IN-8: every received row drawn exactly once {tag}", sorted(ids) == want, f"{sorted(ids)} vs {want}")
@@ -202,7 +202,7 @@ def run(browser, check, until, shots=None):
             until(lambda: tid("m-band-needs").count() == 0)
             check(f"PX-2 the Running chip filters to Running, pressed {tag}",
                   tid("m-band-running").count() == 1 and tid("m-chip-running").get_attribute("aria-pressed") == "true"
-                  and tid("m-chip-needs").inner_text() == "Needs you · 5")
+                  and tid("m-chip-needs").text_content() == "Needs you · 5")
             tid("m-chip-running").click()
             until(lambda: tid("m-band-needs").count() == 1)
             check(f"PX-2 the chip again shows everything {tag}", tid("m-band-recent").count() == 1)
@@ -242,6 +242,26 @@ def run(browser, check, until, shots=None):
             check(f"PX-2 with working down, the thread's rows fall to orphan cards, still under Needs you {tag}",
                   page.locator(f'[data-testid="m-band-needs"] [data-key="orphan:{T_NEEDS}"]').count() == 1)
             shot(page, f"in-progress-unavailable-{width}", '[data-testid="m-band-running"]')
+        finally:
+            ctx.close()
+
+    # -- a big count stays whole in its chip -------------------------------------------------------
+    for width in (375, 390):
+        state.update(world())
+        state["rows"] = [row(f"q:{i:03d}", "question", 3, f"Question {i}", {"text": "Which?", "options": []}) for i in range(125)]
+        ctx, page, problems = open_page(width, 900)
+        try:
+            page.wait_for_selector('[data-testid="m-chip-needs"] .m-chip-count', timeout=10000)
+            geometry = page.evaluate("""() => {
+                const chip = document.querySelector('[data-testid="m-chip-needs"]');
+                const count = chip.querySelector('.m-chip-count').getBoundingClientRect();
+                const box = chip.getBoundingClientRect();
+                return {text: chip.textContent, fits: count.right <= box.right + 0.5 && count.left >= box.left - 0.5,
+                        height: box.height};
+            }""")
+            check(f"PX-2 a count of 125 is fully visible in its chip @{width}",
+                  geometry["text"].endswith("· 125") and geometry["fits"] and geometry["height"] >= 48, str(geometry))
+            shot(page, f"strip-125-{width}", '[data-testid="m-strip"]')
         finally:
             ctx.close()
 

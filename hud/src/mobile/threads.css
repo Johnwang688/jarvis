@@ -17,14 +17,19 @@
   min-width: 0;
   min-height: var(--m-tap);
   padding: 0 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   border: 1px solid var(--control-edge);
   border-radius: var(--m-r-pill);
   color: var(--text-2);
 }
+.m-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.m-chip-count { flex: none; }
+.m-threads[data-error="true"] > :not(.m-strip):not(.m-error) { opacity: 0.55; }
 .tap.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 /* Needs you is amber while a row is rank 1 or 2 (pending), the same rule as the badge. */
 .tap.chip[data-tone="pending"] { border-color: var(--amber-line); color: var(--amber); }

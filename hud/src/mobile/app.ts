@@ -930,6 +930,9 @@ export class PhoneApp {
       this.drafts.delete(row.id);
       this.picks.delete(row.id);
       this.withdrawing.delete(row.id);
+      // D6: its row leaves at once (only this one); the re-read below restores it if the server still lists it.
+      // A read that was in flight before this 200 is dropped by the afterWrite trigger, so it cannot bring the row back.
+      if (this.inbox) { this.inbox = this.inbox.filter((r) => r.id !== row.id); this.renderBadge(); }
       const note = echo !== undefined ? `Sent: ${echo}`
         : typeof result.body.note === "string" ? result.body.note
         : row.kind === "proposal" ? "Withdrawn: the task will not start." : "Sent.";
@@ -1453,7 +1456,8 @@ export class PhoneApp {
       }
     } else if (event.kind === "task_changed") {
       this.later("tasks", () => void this.loadTasks());
-      if (this.tab === "tasks" && this.task?.id === event.taskId) this.later("task", () => void this.openTask(event.taskId));
+      // Checked again when the debounce fires: leaving the task (Chats, Review, the Inbox) meanwhile must not reopen it.
+      this.later("task", () => { if (this.tab === "tasks" && this.task?.id === event.taskId) void this.openTask(event.taskId); });
     } else {
       this.refreshVisible();
     }
