@@ -1,3 +1,4 @@
+import { CODE_SVG } from "./icons";
 import { describe, expect, it, vi } from "vitest";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 import { REPO, fixRow, prRow, tqRow } from "../lib/prRow.fixtures";
@@ -11,7 +12,9 @@ import { join } from "node:path";
 import { mkEntry, mkRow, mkTask, randomCase } from "./threads.fixtures";
 
 const NOW = Date.parse("2026-11-15T10:30:00Z");
-const MARKUP = "img, script, b, svg, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+const MARKUP = "img, script, b, iframe, object, embed, a[href^='javascript'], [onerror], [onload]";
+// Code-built icons (icons.ts, orb.ts) are the only <svg> allowed; any other one is injected markup.
+const injectedSvg = (root: ParentNode) => [...root.querySelectorAll("svg")].filter((el) => !CODE_SVG.has(el));
 const HOSTILE = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=2</script>';
 
 function answers(over: Partial<InboxAnswers> = {}): InboxAnswers {
@@ -532,6 +535,7 @@ describe("untrusted text stays text", () => {
     const v = draw(model({ rows, entries: [mkEntry("aaaaaaaa", "idle", { title: HOSTILE, project: HOSTILE })],
       tasks: [mkTask("11111111", "running", { brief: HOSTILE })] }));
     expect(v.querySelectorAll(MARKUP).length).toBe(0);
+    expect(injectedSvg(v)).toEqual([]);
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     expect(v.textContent).toContain(HOSTILE);
   });
@@ -540,6 +544,7 @@ describe("untrusted text stays text", () => {
     const v = draw(model({ rows: [mkRow("appr:1", 1, { kind: "approval", detail: { provider: HOSTILE } })] }));
     expect(v.querySelector(".m-thread-provider")!.textContent).toContain("<img");
     expect(v.querySelectorAll(MARKUP)).toHaveLength(0);
+    expect(injectedSvg(v)).toEqual([]);
   });
 });
 

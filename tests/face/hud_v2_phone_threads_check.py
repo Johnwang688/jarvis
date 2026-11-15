@@ -525,6 +525,9 @@ def run(browser, check, until, shots=None):
             until(lambda: tid("m-transcript").count() == 1)
             tid("m-tab-chats").click()
             until(lambda: tid("m-chat").count() == 1)
+            check(f"RD-5 idle Chats project starts folded {tag}",
+                  tid("m-project-head").get_attribute("aria-expanded") == "false")
+            tid("m-project-head").click()
             tid("m-chat").click()
             until(lambda: tid("m-transcript").count() == 1)
             check(f"PX-4 a chat opened from the Chats list says and goes back to Chats, not to the earlier Inbox origin {tag}",
