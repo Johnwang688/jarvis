@@ -10,12 +10,22 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import threading
+import time
 import wave
 
 PROTOCOL = "jarvis-voice-link/1"
 MAX_CLIP_S = 120
 MAX_LINE = 6 * 1024 * 1024
+# Local TTS WAVs are larger than microphone uploads (typically 24 kHz).
+MAX_AUDIO_LINE = 32 * 1024 * 1024
 HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+ERRORS = frozenset(("The clip could not be transcribed.", "That didn't sound like you.",
+                    "The voice request is invalid.", "The text could not be spoken.",
+                    "The voice question could not be answered.",
+                    "The voice answer took too long. Please check the Voice chat.",
+                    "The clip must be a 16 kHz mono 16-bit WAV of at most 120 seconds."))
+KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
 
 
 class LinkError(Exception):
@@ -66,8 +76,12 @@ def wav_bytes(pcm: bytes, rate=16000):
     return out.getvalue()
 
 
+def json_line(value):
+    return (json.dumps(value, separators=(",", ":")) + "\n").encode()
+
+
 def send_json(stream, value):
-    stream.write((json.dumps(value, separators=(",", ":")) + "\n").encode())
+    stream.write(json_line(value))
     stream.flush()
 
 
@@ -89,6 +103,7 @@ class Client:
         self.host, self.port, self.key, self.timeout = host, port, key, timeout
         self._socket = self._stream = None
         self._id = 0
+        self._request_lock = threading.Lock()
 
     def connect(self):
         self.close()
@@ -112,32 +127,91 @@ class Client:
                 raise
             raise LinkError("Jarvis isn't running") from None
 
-    def _request(self, payload):
+    def _request(self, payload, on_delta=None, on_status=None):
+        with self._request_lock:
+            return self._exchange(payload, on_delta, on_status)
+
+    def _exchange(self, payload, on_delta, on_status):
         if self._stream is None:
             raise LinkError("Jarvis isn't running")
         try:
             self._id += 1
             send_json(self._stream, {**payload, "id": self._id})
-            got = read_json(self._stream)
-            if got.get("id") != self._id or type(got.get("ok")) is not bool:
-                raise ValueError()
+            asking = payload.get("op") == "ask"
+            deadline = time.monotonic() + 185.0
+            while True:
+                if asking and self._socket is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValueError()
+                    self._socket.settimeout(remaining)
+                got = read_json(self._stream, MAX_AUDIO_LINE if payload.get("op") == "say" else MAX_LINE)
+                if type(got.get("id")) is not int or got["id"] != self._id:
+                    raise ValueError()
+                if asking and "event" in got:
+                    if got["event"] == "delta" and isinstance(got.get("text"), str):
+                        if on_delta:
+                            on_delta(got["text"])
+                    elif got["event"] == "status" and isinstance(got.get("text"), str):
+                        if on_status:
+                            on_status(got["text"])
+                    else:
+                        raise ValueError()
+                    continue
+                if type(got.get("ok")) is not bool:
+                    raise ValueError()
+                break
         except Exception:
             self.close()
             raise LinkError("The voice link disconnected.") from None
+        finally:
+            if self._socket is not None:
+                self._socket.settimeout(self.timeout)
         if not got["ok"]:
             # Never display arbitrary peer exception text or paths.
-            raise LinkError("The clip could not be transcribed.")
+            error = got.get("error")
+            raise LinkError(error if isinstance(error, str) and error in ERRORS
+                            else "The voice request failed.")
         return got
 
     def ping(self):
         self._request({"op": "ping"})
 
-    def dictate(self, wav):
-        got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii")})
+    def dictate(self, wav, source="hotkey"):
+        got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
+                             "source": source})
         if not isinstance(got.get("text"), str) or got.get("backend") not in ("local", "cloud"):
             self.close()
             raise LinkError("The voice link sent an invalid reply.")
         return {"text": got["text"], "backend": got["backend"]}
+
+    def route(self, text, source):
+        got = self._request({"op": "route", "text": text, "source": source})
+        value = got.get("intent")
+        if (not isinstance(value, dict) or set(value) != {"kind", "text", "target"}
+                or not isinstance(value["kind"], str) or value["kind"] not in KINDS
+                or not isinstance(value["text"], str) or len(value["text"]) > 2000
+                or not isinstance(value["target"], str) or len(value["target"]) > 80):
+            self.close()
+            raise LinkError("The voice link sent an invalid reply.")
+        return value
+
+    def ask(self, text, on_delta=None, on_status=None):
+        got = self._request({"op": "ask", "text": text}, on_delta, on_status)
+        if got.get("done") is not True or not isinstance(got.get("text"), str):
+            self.close()
+            raise LinkError("The voice link sent an invalid reply.")
+        return got["text"]
+
+    def say(self, text):
+        got = self._request({"op": "say", "text": text})
+        try:
+            if not isinstance(got.get("wav_b64"), str):
+                raise ValueError()
+            return base64.b64decode(got["wav_b64"], validate=True)
+        except ValueError:
+            self.close()
+            raise LinkError("The voice link sent an invalid reply.") from None
 
     def close(self):
         sock, stream = self._socket, self._stream

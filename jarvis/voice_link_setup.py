@@ -98,7 +98,7 @@ def setup():
     if not venv_python.is_file():
         console.print("Bridge venv missing. Run jarvis desktop setup first.")
         return 1
-    installed = subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "sounddevice", "numpy"],
+    installed = subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "sounddevice", "numpy", "sherpa-onnx"],
                                capture_output=True, text=True, timeout=600)
     if installed.returncode:
         console.print("Could not install the voice dependencies.")

@@ -56,6 +56,13 @@ SELF_PROTECTED = frozenset(
         "windows/voicewire.py",
         "windows/voice_agent.py",
         "jarvis/voice_link_setup.py",
+        # VA-2/4/5 (2026-11-16): typing, actions, the wake listener and the
+        # overlay run in the same owner-started process.
+        "windows/voicetype.py",
+        "windows/voiceactions.py",
+        "windows/voiceflow.py",
+        "windows/voiceui.py",
+        "windows/voicewake.py",
         # VA3-D2: decides what a dictation cleanup may type into any app.
         "jarvis/v2/dictation_guard.py",
         "jarvis/tools/secrets.py",

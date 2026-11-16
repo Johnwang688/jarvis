@@ -582,7 +582,7 @@ export interface ChatMessage {
   proposal?: { task_id: string; until: number };
   /** PR C: the owner's message came from Discord (a thread or the DM); inbox
    * B1: it is the owner's answer to a decision, sent from the inbox. */
-  via?: "discord" | "dm" | "inbox" | "phone";
+  via?: "discord" | "dm" | "inbox" | "phone" | "voice";
   /** The daemon's id for an owner message that reached a running turn. */
   message_id?: string;
   /** This window's id for its own message, until the daemon names it. */
