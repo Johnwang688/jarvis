@@ -41,7 +41,7 @@ DATA = [
     REPORTED,
     "python3 - <<'EOF'\nfor f in []:\n    pass\nEOF",
     "python3 <<'PY'\nclass A:\n    pass\nPY",
-    "/usr/bin/python3.14 - <<'EOF'\npass\nEOF",
+    "python3.14 -u - <<'EOF'\npass\nEOF",
     "python3 - <<'EOF'\ngit config --list\nEOF",
     "python3 - <<'EOF'\ngit credential fill\nEOF",
     "cat > notes.txt <<'EOF'\npass\nEOF",
@@ -85,6 +85,40 @@ STILL_ASKED = {
     "python3 - <<'EOF'\npass\nEOF\ngit credential fill": "credentials-read",
     # a body with no terminator runs to the end, as in bash
     "bash <<'EOF'\npass show x": "credentials-read",
+    # The review of #396: every route below takes a body to a shell.
+    # a compound command piped on from its closing word
+    "{ cat <<'EOF'; } | sh\npass show github\nEOF": "credentials-read",
+    "{ cat <<'EOF'\npass show github\nEOF\n} | sh": "credentials-read",
+    "{ cat; } <<'EOF' | sh\npass show github\nEOF": "credentials-read",
+    "( cat <<'EOF' ) | sh\npass show github\nEOF": "credentials-read",
+    "if true; then cat <<'EOF'; fi | sh\npass show github\nEOF": "credentials-read",
+    "for i in 1; do cat <<'EOF'; done | bash\npass show github\nEOF": "credentials-read",
+    "case x in x) cat <<'EOF';; esac | sh\npass show github\nEOF": "credentials-read",
+    # output into a shell through a process substitution or an fd
+    "cat <<'EOF' > >(sh)\npass show github\nEOF": "credentials-read",
+    "tee >(sh) <<'EOF'\npass show github\nEOF": "credentials-read",
+    "tee -a >(sh) <<'EOF'\npass show github\nEOF": "credentials-read",
+    "exec 3> >(sh)\ncat <<'EOF' >&3\npass show github\nEOF": "credentials-read",
+    "exec > >(sh)\ncat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "exec 4> >(bash); cat <<'EOF' >/dev/fd/4\npass show github\nEOF": "credentials-read",
+    "coproc sh\ncat <<'EOF' >&${COPROC[1]}\npass show github\nEOF": "credentials-read",
+    # a name that is not the program it says
+    "cat() { sh; }; cat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "function grep { bash; }\ngrep x <<'EOF'\npass show github\nEOF": "credentials-read",
+    "shopt -s expand_aliases\nalias cat=sh\ncat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "ln -sf /bin/sh ./cat; ./cat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "/tmp/evil/cat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "PATH=/tmp/evil:$PATH cat <<'EOF'\npass show github\nEOF": "credentials-read",
+    "export PATH=/tmp/evil\ncat <<'EOF'\npass show github\nEOF": "credentials-read",
+    # written, then run on the same line
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\nsh /tmp/x.sh": "credentials-read",
+    "tee /tmp/x.sh <<'EOF'\npass show github\nEOF\nsource /tmp/x.sh": "credentials-read",
+    "cat > x.sh <<'EOF'\npass show github\nEOF\nchmod +x x.sh; ./x.sh": "credentials-read",
+    # an interpreter told to run its stdin
+    "python3 -c 'import os,sys; os.system(sys.stdin.read())' <<'EOF'\npass show github\nEOF":
+        "credentials-read",
+    "node -e 'require(\"child_process\").execSync(require(\"fs\").readFileSync(0))' <<'EOF'\n"
+    "pass show github\nEOF": "credentials-read",
     # other credential rules are untouched
     "eval \"$(cat <<'EOF'\npass show x\nEOF\n)\"": "credentials-inner",
     "bash <<'EOF'\ncat ~/.ssh/id_rsa\nEOF": "credentials-path",
@@ -127,11 +161,39 @@ class HeredocCredentialsRead(unittest.TestCase):
             self.assertIsNone(permissions._heredoc_data_reading(REPORTED))
             self.assertEqual(rule_of(REPORTED), "credentials-read")
 
+        real = rules._inline_heredocs
+        clean = "cat > notes.txt <<'EOF'\npass\nEOF"
+        self.assertIsNotNone(permissions._heredoc_data_reading(clean))
+
         def flagged(text, keep=True, bodies=None, unsure=None):
+            out = real(text, keep=keep, bodies=bodies, unsure=unsure)
             unsure.append("flagged")
-            return text.replace("<<", "<<<", 1)
+            return out
         with patch.object(rules, "_inline_heredocs", flagged):
-            self.assertIsNone(permissions._heredoc_data_reading(REPORTED))
+            self.assertIsNone(permissions._heredoc_data_reading(clean))
+
+    def test_each_guard_alone(self):
+        # One line per guard that only that guard refuses (the others would
+        # let it through), so removing any one of them fails here. The
+        # outcome a card shows can be the same either way: these pin the
+        # reading's own contract.
+        for guard, command in (
+                ("syntax", "cat <<'EOF' > a.txt; { true; }\nhi\nEOF"),
+                ("live in double quotes", "cat <<'EOF' \"$(true)\"\nhi\nEOF"),
+                ("compound closer", "if true; then cat <<'EOF'; fi | tee out\nhi\nEOF"),
+                ("PATH=", "PATH=/tmp/evil cat <<'EOF'\nhi\nEOF"),
+                ("program by path", "cat <<'EOF' > a.txt\nhi\nEOF\n./a.txt"),
+                ("shell on the line", "cat > x.sh <<'EOF'\nhi\nEOF\nsh x.sh"),
+                ("runner on the line", "cat > x.sh <<'EOF'\nhi\nEOF\nsource x.sh"),
+                ("pipe onward", "cat <<'EOF' | tee out\nhi\nEOF"),
+                ("consumer", "sed -n p <<'EOF'\nhi\nEOF"),
+                ("fd duplication", "cat <<'EOF' >&2\nhi\nEOF"),
+                ("fd path", "cat <<'EOF' >/dev/fd/4\nhi\nEOF"),
+                ("python -c", "python3 -c 'print(1)' <<'EOF'\nhi\nEOF"),
+                ("node -e", "node -e '1' <<'EOF'\nhi\nEOF"),
+                ("unplaced here-string", "cat > n <<'EOF'\nhi\nEOF\necho 'a <<< b'")):
+            with self.subTest(guard=guard):
+                self.assertIsNone(permissions._heredoc_data_reading(command))
 
     def test_the_reading_refuses_what_it_cannot_place(self):
         # The reading's own contract. Today the verdict is the same either
@@ -153,12 +215,16 @@ class HeredocCredentialsRead(unittest.TestCase):
                                   "sudo", "su", "exec", "nohup", "timeout", "parallel"}
         self.assertFalse(permissions.HEREDOC_DATA_CONSUMERS & runners)
 
-    def test_widening_the_table_to_a_shell_is_caught(self):
-        # Mutation evidence inside the suite: a table holding `bash` would
-        # let a shell-fed body through, and this check would see it.
+    def test_a_shell_in_the_table_is_still_refused_by_the_line_check(self):
+        # Two layers: a table wrongly holding `bash` is still stopped by the
+        # line's shell check; with that check also emptied, the body passes.
         wide = permissions.HEREDOC_DATA_CONSUMERS | {"bash", "sh"}
+        line = "bash <<'EOF'\npass show github\nEOF"
         with patch.object(permissions, "HEREDOC_DATA_CONSUMERS", wide):
-            self.assertIsNone(rule_of("bash <<'EOF'\npass show github\nEOF"))
+            self.assertEqual(rule_of(line), "credentials-read")
+            with patch.object(rules, "SHELLS", frozenset()), \
+                    patch.object(permissions, "_heredoc_consumer_ok", lambda segment: True):
+                self.assertIsNone(rule_of(line))
 
 
 if __name__ == "__main__":

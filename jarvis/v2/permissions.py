@@ -1546,24 +1546,75 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
 # Programs a here-document's body may be fed to and still be data to the
 # shell (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md): none of them
 # hands its input to a shell. A closed list of what is safe, so a missing
-# entry costs a prompt, never a hole. A Python counts too (`rules._PYTHON`):
-# inline source is not read by layer 2 in any spelling, `python3 -c` included.
-HEREDOC_DATA_CONSUMERS = frozenset({"cat", "tee", "node", "wc", "grep"})
-# A here-string word that is one single-quoted span, or several joined by
-# `\'` (how `rules._here_word` writes a quoted body): nothing in it is live.
-_SINGLE_QUOTED = re.compile(r"'[^']*'(?:\\''[^']*')*")
+# entry costs a prompt, never a hole. A Python or `node` counts only when the
+# body *is* its program (`python3 -`): inline source is not read by layer 2
+# in any spelling, `python3 -c` included; a `-c`/`-e` that reads stdin would
+# hand the body to whatever that source does, so those are not data.
+HEREDOC_DATA_CONSUMERS = frozenset({"cat", "tee", "wc", "grep"})
+_HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
+_HEREDOC_NODE_ARGS = frozenset({"-"})
+# Shell syntax that can route a body's output into a program not judged here,
+# or change which program a name runs: a group, subshell, function body or
+# substitution (`{ cat <<E; } | sh`, `cat() { sh; }`, `> >(sh)`, `tee >(sh)`).
+_HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
+# Programs that, anywhere on the line, run text as shell commands later or
+# change what a name means for the rest of it (a body written to a file and
+# then `sh file`; `alias cat=sh`; `exec 3> >(sh)`).
+_HEREDOC_LINE_RUNNERS = frozenset({"source", ".", "eval", "exec", "coproc", "alias", "unalias",
+                                   "shopt", "enable", "builtin", "command", "hash", "trap",
+                                   "xargs", "ssh", "declare", "typeset", "export", "set",
+                                   "readonly", "local", "unset", "function", "env",
+                                   "parallel", "watch", "script", "nohup", "setsid"})
+_HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
+# Redirections a data body's own segment may also carry: plain reads and
+# writes of a path (`cat > notes.txt <<'EOF'`), never an fd duplication.
+_HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
+
+
+def _heredoc_consumer_ok(segment: str) -> bool:
+    """The segment's program, as written (no wrapper, no path, no
+    assignment), takes a here-document body as data, and its redirections
+    only read or write plain paths."""
+    words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
+    if not words:
+        return False
+    program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
+    if program in HEREDOC_DATA_CONSUMERS:
+        pass
+    elif rules._PYTHON.fullmatch(program):
+        if not set(args) <= _HEREDOC_PYTHON_ARGS:
+            return False
+    elif program == "node":
+        if not set(args) <= _HEREDOC_NODE_ARGS:
+            return False
+    else:
+        return False
+    for redirect in rules.redirections(segment):
+        if redirect.op not in _HEREDOC_REDIRECTS:
+            return False
+        if redirect.op != "<<<":
+            word = redirect.word.strip("'\"")
+            if not word or word[0] in "(&" or word.startswith(("/dev/fd", "/proc", "/dev/tcp",
+                                                                "/dev/udp")):
+                return False
+    return all(not str(a).startswith(("/dev/fd", "/proc")) for a in args)
 
 
 def _heredoc_data_reading(text: str) -> str | None:
     """`text` with its here-document bodies moved into their operators as
     here-strings (`rules._inline_heredocs`), when every here-string on the
-    line is data: fed to a `HEREDOC_DATA_CONSUMERS` program or a Python, not
-    piped on, and holding nothing live (`$(…)`, backticks) unless it is
-    single-quoted. None otherwise — the inlining raised or flagged itself
-    unsure, or a here-string's program or place could not be told — and the
+    line is data: fed straight to a data program (`_heredoc_consumer_ok`),
+    not piped on, with nothing live (`$(…)`, backticks) outside single
+    quotes anywhere on the line, on a plain line — no group, subshell,
+    function, process substitution or compound command, no shell or
+    name-changer anywhere on it (`_HEREDOC_LINE_RUNNERS`), no program run by
+    path, no `PATH=`. None
+    otherwise (the inlining raised or flagged itself unsure too), and the
     caller keeps the raw line, every body line a command, as before HD-0.
     Only `credentials-read` reads it: a sub-agent's line had a Python body
-    whose `pass` was judged as the password store."""
+    whose `pass` was judged as the password store. The review of #396 found
+    each of these routes for a body to reach a shell; every one keeps the
+    raw reading."""
     if "<<" not in text:
         return None
     flagged: list = []
@@ -1574,27 +1625,45 @@ def _heredoc_data_reading(text: str) -> str | None:
     if flagged or inlined == text:
         return None
     joined = rules.join_continuations(inlined)
+    if rules.first_unquoted(joined, _HEREDOC_LINE_SYNTAX):
+        return None
+    # Anything live outside single quotes, a body's included (an unquoted
+    # delimiter leaves its `$(…)` and backticks running).
+    if rules.first_unquoted(joined, ("$(", "`"), double_is_quote=False):
+        return None
     found = 0
     cursor = 0
-    for segment in rules.segments(inlined):
-        at = joined.find(segment, cursor)
-        if at < 0:
-            return None
-        cursor = at + len(segment)
-        heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
-        if not heres:
-            continue
-        found += len(heres)
-        after = joined[cursor:].lstrip(" \t")
-        if after.startswith("|") and not after.startswith("||"):
-            return None             # its output goes on to a program not judged here
-        tokens = _tokens_of(segment)
-        program = tokens[0].rsplit("/", 1)[-1].lower() if tokens else ""
-        if program not in HEREDOC_DATA_CONSUMERS and not rules._PYTHON.fullmatch(program):
-            return None
-        for here in heres:
-            if not _SINGLE_QUOTED.fullmatch(here.word) and ("$(" in here.word or "`" in here.word):
+    try:
+        for segment in rules.segments(inlined):
+            at = joined.find(segment, cursor)
+            if at < 0:
                 return None
+            cursor = at + len(segment)
+            raw = rules._tokens(segment)
+            if any(_HEREDOC_NAME_ENV.match(word) for word in raw):
+                return None
+            # No program: a compound command's closing word (`fi`, `done`,
+            # `esac`), whose output can be piped on (`if …; fi | sh`). A
+            # program run by path: what it is cannot be told (`./cat`).
+            words = rules.command_start(raw)
+            if not words or "/" in words[0]:
+                return None
+            programs = [_tokens_of(segment)] + rules.started_commands(segment)
+            for program in programs:
+                name = program[0].rsplit("/", 1)[-1].lower() if program else ""
+                if name in rules.SHELLS or name in _HEREDOC_LINE_RUNNERS:
+                    return None
+            heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
+            if not heres:
+                continue
+            found += len(heres)
+            after = joined[cursor:].lstrip(" \t")
+            if after.startswith("|") and not after.startswith("||"):
+                return None         # its output goes on to a program not judged here
+            if not _heredoc_consumer_ok(segment):
+                return None
+    except Exception:       # noqa: BLE001 — unreadable: the raw reading
+        return None
     # Every here-string the inlined text holds was placed above (one inside a
     # substitution or a quote was not): otherwise its program is unknown.
     if found != joined.count("<<<"):

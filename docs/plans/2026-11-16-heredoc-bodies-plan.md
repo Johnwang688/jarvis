@@ -211,11 +211,24 @@ the heredoc-aware reading. Every other rule, `_inner_segments` and
 `protected_state` are unchanged. Per judged text, all or nothing:
 
 - the line's bodies are inlined as here-strings (`rules._inline_heredocs`);
-- that reading is used only when **every** here-string on the line (a
-  former body or one written as `<<<`) is fed to a program in
-  `HEREDOC_DATA_CONSUMERS`, is not piped on, and holds no `$(` or backtick;
-- otherwise, or when the inlining raises or flags itself unsure, or the
-  inlined segments cannot be placed in the text: the raw line, as on main.
+- that reading is used only on a **plain line**, where **every** here-string
+  (a former body or one written as `<<<`) goes straight to `cat`, `tee`,
+  `wc`, `grep`, `python3 -` or `node -`, as a bare name with no wrapper; is
+  not piped on; and has no redirection beyond plain path reads and writes
+  (no `>&`, no `/dev/fd`, `/proc`);
+- a plain line has no unquoted `( ) { } <( >(`, nothing live (`$(`,
+  backticks) outside single quotes, no program run by path, no `PATH=`-style
+  assignment, and no shell or name-changer anywhere on it (`source`, `.`,
+  `eval`, `exec`, `coproc`, `alias`, `shopt`, `xargs`, `ssh`, `env` …);
+- otherwise, or when the inlining raises or flags itself unsure, or a segment
+  or here-string cannot be placed: the raw line, as on main.
+
+The first version checked only the consumer's name and the text right after
+it; the Opus review of #396 found bodies reaching a shell through `{ …; } |
+sh`, `if …; fi | sh`, `> >(sh)`, `tee >(sh)`, `exec 3> >(sh)`, `coproc`, a
+`cat` function or alias, `./cat`, `PATH=`, write-then-`sh file`, and
+`python3 -c`/`node -e` reading stdin. Each now keeps the raw reading and is
+a case in the regression test.
 
 So HD-0 only ever removes asks whose cause was a data body; it never reads
 less than main.

@@ -3906,15 +3906,18 @@ recursive file-name scan.
 `pass` line was judged as the password store and carded. Only the
 `credential_read` kind now reads a line through
 `permissions._heredoc_data_reading`: bodies inlined as here-strings
-(`rules._inline_heredocs`), used only when every here-string on the line is
-fed to a `HEREDOC_DATA_CONSUMERS` program (`cat`, `tee`, `node`, `wc`,
-`grep`) or a Python, is not piped on, and holds no `$(`/backtick unless
-single-quoted. Anything else — a shell, `source /dev/stdin`, `ssh`, `xargs`,
-`$X`, a pipe onward, an unsure inlining, a here-string it cannot place —
-keeps the raw reading, so nothing asked before stops being asked. The table
-lists what is safe; a missing program costs a prompt. The other layer-2
-readings (always-ask stems and git rules, gate-state, the vex backstop) still
-read bodies as commands: the owner deferred them
+(`rules._inline_heredocs`), used only on a plain line where every
+here-string goes straight to `cat`, `tee`, `wc`, `grep`, `python3 -` or
+`node -` (bare name, no wrapper), is not piped on and has only plain path
+redirections. A plain line has no unquoted `( ) { } <( >(`, nothing live
+outside single quotes, no program run by path, no `PATH=`, and no shell or
+name-changer anywhere (`_HEREDOC_LINE_RUNNERS`: `source`, `eval`, `exec`,
+`coproc`, `alias`, `shopt`, `xargs`, `ssh`, `env` …). Anything else keeps the
+raw reading, so nothing asked before stops being asked; the review of #396
+found each excluded route (`{ …; } | sh`, `> >(sh)`, `tee >(sh)`, a `cat`
+function or alias, `./cat`, write-then-`sh`, `python3 -c` reading stdin).
+The other layer-2 readings (always-ask stems and git rules, gate-state, the
+vex backstop) still read bodies as commands: the owner deferred them
 (`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
 (layer 2 reads no `$(…)` or shell-fed here-string). Regression:
 `tests/v2/heredoc_credentials_read_check.py`.
