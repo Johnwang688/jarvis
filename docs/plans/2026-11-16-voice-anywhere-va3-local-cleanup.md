@@ -59,7 +59,12 @@ VRAM). Loaded on first use, like `stt_local`. Optional: if the runtime or the we
 are missing, VA-3 is rules only and says so in Settings → Voice.
 
 The Windows agent must report the foreground app's category (terminal / other) with
-each clip for rule 4. That change lands in VA-2, in the self-protected Windows files,
+each clip for rule 4. **Editors and IDEs that embed a terminal (VS Code, JetBrains,
+Windows Terminal panes inside other apps) count as terminals**, because the focus
+inside them can be a shell while the window looks like an editor. The guard is
+also hardened for that case: it refuses flag syntax, command separators at the
+start, sign and decimal changes, and merged numbers (Sol review of #392). But the
+category is the first line of defence. That change lands in VA-2, in the self-protected Windows files,
 written by the lead, not an agent.
 
 Latency target (estimate, to be checked against VA-0's receipts): cleanup at most
@@ -166,12 +171,17 @@ skipped.
 
 ## Evaluation (built before any training)
 
-- **Gold set:** about 100 real dictations by the owner at their own mic, with a clean
-  target written by the owner. Real audio is required. The plan notes that no voice
-  package has yet been accepted with the owner's real voice. Recorded by a deliberate
-  owner-run command into an owner-only folder outside the repo (VA3-D3). This is the
-  only exception to the base plan's "nothing written to disk", and it never applies
-  to everyday dictation.
+- **Gold set (VA3-D6):** the owner's existing spoken HUD messages, about 25
+  (`origin: owner`, `spoken: true` in v2 thread logs). These are real Parakeet
+  transcripts of the owner's voice. `gold-from-history` shows each one with the
+  rules cleanup prefilled; Enter accepts, or the owner types a correction. About 3
+  minutes, nothing new recorded. The 30-minute recorder (`record`, VA3-D3) stays
+  as an option the owner need not use.
+- **Usage signal (VA3-D6), once VA-3b ships:** a "scratch that" within a few
+  seconds of a typed cleanup counts as a rejection of that cleanup. The rate per
+  pass (model / rules / raw) is shown in Diagnostics, as counts only. Keeping the
+  (raw, typed) pairs locally for later bulk grading is a separate owner opt-in,
+  off by default.
 - **Hard-case suites:**
   - questions and instructions to an AI ("write me a function that…"), where the
     output must stay a question or instruction, never an answer;
@@ -214,8 +224,8 @@ Only if B2 misses the bar.
 
 | Pkg | What | Notes |
 |---|---|---|
-| **VA-3a** | Rules pass, the guard (added to `SELF_PROTECTED`), the eval harness (B0, B1) and the owner-run gold-set recorder. No model. | Guard has negative tests: added word, substitution, newline, control character, over-deletion. Mutation check: a guard that skips the subset test must fail them. Recorder: owner-run only, owner-only folder (0700/0600), outside the repo. |
-| **VA-3b** | llama.cpp runtime in the daemon, prompted Qwen3.5 (B2), behind a Settings → Voice switch, default off. Terminals rules-only. | Needs VA-2's foreground category. Latency into VA-0's Diagnostics. |
+| **VA-3a** | Rules pass, the guard (added to `SELF_PROTECTED`), the eval harness (B0, B1) and the owner-run gold-set recorder. No model. | Guard has negative tests: added word, substitution, newline, control character, over-deletion. Mutation check: a guard that skips the subset test must fail them. Recorder: owner-run only, owner-only folder (0700/0600), outside the repo. **Built 2026-11-16** as `jarvis.v2.dictation_guard`, `jarvis.v2.dictation_rules`, `voiceclean.eval` and `voiceclean.record`. |
+| **VA-3b** | llama.cpp runtime in the daemon, prompted Qwen3.5 (B2), behind a Settings → Voice switch, default off. Terminals rules-only. The "scratch that" usage signal per pass (VA3-D6). | Needs VA-2's foreground category. Latency and usage counts into VA-0's Diagnostics. |
 | **VA-3c** | Data generator: synthetic pairs, Kokoro→Parakeet round trip, provenance per example. | Offline tool, not in the daemon. **Built 2026-11-16** as `voiceclean/` (`python -m voiceclean.data`); first-run numbers under *Data*. |
 | **VA-3d** | SFT run and report against B0–B3. | Only if B2 misses the bar. |
 | **VA-3e** | GRPO run and report. | Only if SFT leaves a measurable gap on hard cases. |
@@ -237,6 +247,7 @@ extension can, within the browser only.
 | VA3-D3 | Record a gold set? | **Yes, owner-run only.** About 100 clips (audio and text), recorded only by a command the owner runs, kept in an owner-only folder outside the repo, used only for evaluation. Everyday dictation still writes nothing. |
 | VA3-D4 | Owner's own messages as training text? | **Yes, locally.** Owner-written messages only, never assistant turns; they and anything derived from them stay on this machine. |
 | VA3-D5 | Base model | **Qwen3.5-0.8B.** |
+| VA3-D6 | Real-voice check without a 30-minute session | **Review the ~25 existing spoken HUD messages (rules cleanup prefilled, Enter accepts), plus the "scratch that" usage signal once VA-3b ships.** The recorder stays optional. |
 
 ## Open questions (defaults in use until answered)
 

@@ -31,6 +31,17 @@ def private_dir(path: Path) -> None:
     path.chmod(0o700)
 
 
+def create_private_file(path: Path) -> int:
+    """Create a new private binary output; the caller owns the returned fd."""
+    if path.is_symlink():
+        raise ValueError('refusing a symlink output file')
+    path = safe_input(path)
+    data_dir(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    return fd
+
+
 def write_json(path: Path, value, *, lines: bool = False) -> None:
     # Validate again at each write, including dataset/ and existing symlinks.
     if path.is_symlink():

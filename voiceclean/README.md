@@ -1,15 +1,17 @@
-# VA-3c private training-data generator
+# VA-3 offline data and evaluation tools
 
 This is an offline tool, separate from the daemon. It imports no Jarvis runtime
-configuration. The only Jarvis dependency is the pure, shape-based scrubber in
-`jarvis.v2.redact`; credential values and credential files are never read.
+configuration. Jarvis dependencies are the pure guard, rules and shape-based
+scrubber (`jarvis.v2.redact`); credential values and credential files are never read.
 Python 3.14 and the standard library suffice except for real audio backends.
 
 Data defaults to `~/.local/share/jarvis/va3-data`. Set `VOICECLEAN_DATA_DIR` or pass
 `--data-dir PATH` before or after the subcommand. The directory must be outside
 any git work tree (including linked worktrees with a `.git` file). Directories
 are 0700 and all output files are opened with mode 0600, including replacements.
-No audio is saved. Every step prints counts only. No step reads `.env` files.
+Only the deliberate owner-run `record` step saves audio. Other steps print
+counts and metrics only; `record` and `gold-from-history` also show suggestions,
+prompts and the owner's transcript for review. No step reads `.env` files.
 
 Run from this checkout so another installed Jarvis cannot be imported:
 
@@ -26,6 +28,12 @@ PY=/home/johnw/projects/Jarvis/.venv/bin/python
 "$PY" -m voiceclean.data teach --model openai/gpt-oss-20b --task messify --limit 20 --max-usd 0.02
 "$PY" -m voiceclean.data teach --model deepseek/deepseek-r1 --task clean --limit 20 --max-usd 0.02
 "$PY" -m voiceclean.data build
+"$PY" -m voiceclean.data eval --split dev --system b0
+"$PY" -m voiceclean.data eval --split test --system b1 --limit 100
+# Interactive owner-run command only; requires stdin AND stdout TTYs.
+"$PY" -m voiceclean.data record
+# Review existing spoken owner messages instead of recording new audio.
+"$PY" -m voiceclean.data gold-from-history
 ```
 
 Obtain the messages export from the official
@@ -102,12 +110,61 @@ records counts, guard compatibility, licences, input hashes, seeds, teacher ids
 and the fixed machine-local privacy note. Re-running a step with the same output
 name replaces that file; use different seeds to retain separate runs.
 
-The checker mirrors the plan and is never a runtime authorization component.
-VA-3a's runtime guard is authoritative and should replace this implementation
-once a side-effect-free guard is available.
+`jarvis.v2.dictation_guard` is the authoritative, side-effect-free runtime guard;
+the offline `pair_check` delegates to it. `jarvis.v2.dictation_rules.clean(raw,
+app='other')` removes hesitation fillers and immediate repeats, converts narrow
+spoken punctuation and fixes case and final punctuation. Terminal mode only
+removes fillers and collapses whitespace. Every edit is checked; rejection
+returns the original input. Neither module imports configuration. The guard
+removes spoken punctuation only from the raw side, so identity pairs containing
+literal `period`, `colon`, etc. can fail too; the required raw fallback cannot
+guarantee a passing guard verdict for every possible input.
+
+`eval` reads `dataset/dev.jsonl` (or `--split test`) followed by every `gold/*.json`
+in filename order. A missing dataset is allowed for gold-only evaluation.
+`--limit N` caps this combined stream. `b0` types raw input; `b1` uses guarded
+rules. `--system MODULE:FUNC` imports a local callable `f(raw) -> str`, then
+checks its result and falls back through rules to raw. Models are not bundled
+or loaded by the built-in baselines. Reports contain aggregates only and are
+saved as `eval/<UTC timestamp>-<system>.json`, mode 0600. The printed table gives
+counts, content WER, formatting WER, exact-match and rejection rates, rejection
+reason counts, and system latency in milliseconds for each suite. WER pools edit
+counts and reference lengths across rows (denominator at least one); content
+uses guard token normalization on both target and typed text, formatting uses
+whitespace tokens with case and punctuation intact. Exact match compares strings.
+Latency uses nearest-rank p50/p95 and includes rules, model call and guard choice,
+excluding file IO and metric calculation. Empty suites have zero-valued metrics.
+
+`record` presents 30 everyday suggestions; the owner may say anything. Enter
+starts recording and Enter stops it, with a 30-second hard cap. After local
+Parakeet transcription, type the desired clean target: empty skips, `r` redoes
+the same suggestion, and `q` quits. Skipped, redone and unreviewed clips are
+deleted, including on EOF or interrupted recording. Reviewed clips save a WAV
+and JSON under `gold/`, both 0600 in a 0700 directory, with the guard compatibility
+flag even when the target cannot pass. This is evaluation data only: `build`
+does not read gold rows. The real backend requires `parecord` and the same
+Parakeet/numpy installation as `roundtrip`; use `--parakeet-dir` and `--threads`
+to override its defaults. Backends load only after an interactive recording.
+Tests inject IO, recorder and transcriber; they never open a microphone or load
+real models.
+
+`gold-from-history` requires both stdin and stdout TTYs and reads only spoken
+owner turns from `~/.local/share/jarvis/v2/threads/*/log.jsonl`; override the root
+with `--threads-dir PATH`. It uses `text`, falling back to `typed`, and drops
+empty transcripts and rows containing credential shapes or labelled credentials.
+Each transcript appears with its rules cleanup: Enter accepts, `s` skips, `q`
+quits, and any other input supplies the desired target. Reviewed rows save as
+`gold/hist-<raw SHA-256 prefix>.json` with `source: history` and `wav: null`;
+reruns skip transcripts already present in any gold JSON. Corrections rejected
+by the guard are still saved with `guard_compatible: false` and a reason is shown.
+The final line contains counts only. These rows join the eval `gold` suite,
+including without a dataset or audio files. No microphone or model is used.
 
 Free, fake-HOME checks (network and real model imports are blocked):
 
 ```bash
 PYTHONPATH=$PWD /home/johnw/projects/Jarvis/.venv/bin/python tests/voiceclean_check.py
+PYTHONPATH=$PWD /home/johnw/projects/Jarvis/.venv/bin/python tests/voiceclean_eval_check.py
+PYTHONPATH=$PWD /home/johnw/projects/Jarvis/.venv/bin/python tests/v2/dictation_guard_check.py
+PYTHONPATH=$PWD /home/johnw/projects/Jarvis/.venv/bin/python tests/v2/dictation_rules_check.py
 ```

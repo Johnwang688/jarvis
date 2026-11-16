@@ -106,13 +106,13 @@ def main():
                 ('in two thousand twenty six we will compete', 'In 2026 we will compete.'),
                 ('we used nine hundred ninety nine thousand nine hundred ninety nine parts',
                  'We used 999999 parts.'),
-                ('we need one hundred and five parts', 'We need 105 parts.'),
+                ('we need one hundred and five parts', 'We need one hundred and five parts.'),  # one unit, kept whole
                 ('please check comma then test period', 'Please check, then test.'),
                 ('is it ready question mark', 'Is it ready?'),
                 ('we do not know if i am ready', "We don't know if I'm ready."),
                 ("i'm ready and don't need help", 'I am ready and do not need help.'),
                 ('use twenty five percent power', 'Use 25% power.'),
-                ('we have 999,999 parts', 'We have 999999 parts.'),
+                ('we have 999,999 parts', 'We have 999,999 parts.'),  # a said digit string stays as said
             ]
             for n, (messy, target) in enumerate(accepted):
                 check(f'pair accepts equivalence {n}', pair_check.pair_check(messy, target)[0])
@@ -126,22 +126,21 @@ def main():
                 ('test the intake', 'Test\tthe intake.', 'control_char'),
                 ('test the intake', 'Test\x00the intake.', 'control_char'),
                 ('test the intake', 'Test\u200bthe intake.', 'control_char'),
-                ('one two three four five six seven eight nine ten', 'One two three.', 'over_deletion'),
+                ('alpha beta gamma delta epsilon zeta eta theta iota kappa', 'Alpha beta gamma.', 'over_deletion'),
                 ('test the intake', '', 'empty'),
-                ('test the intake', '.', 'empty'),
-                ('comma period', '', 'empty'),
-                ('test period the intake', 'Test period the intake.', 'added_word'),
+                ('test the intake', '.', 'new_symbol'),  # punctuation alone is not a word
+                ('test period the intake', 'Test comma the intake.', 'added_word'),
             ]
             for n, (messy, target, reason) in enumerate(rejected):
                 check(f'pair rejects {reason} {n}', pair_check.pair_check(messy, target) == (False, reason))
             check('pair rejects reorder specifically', not pair_check.pair_check('red blue green', 'Blue red green.')[0])
             check('duplicate word addition rejected', pair_check.pair_check('we can test', 'We can can test.')[1] == 'added_word')
             check('exact sixty percent deletion allowed', pair_check.pair_check('a b c d e', 'D e.')[0])
-            check('number grammar does not sum adjacent words', normalize.tokens('one two twenty five six') == ['1', '2', '25', '6'])
-            check('number full range endpoints', normalize.tokens('zero nine hundred ninety nine thousand nine hundred ninety nine') == ['0', '999999'])
+            check('a run of several numbers stays words', normalize.tokens('one two twenty five six') == ['one', 'two', 'twenty', 'five', 'six'])
+            check('number full range endpoints', normalize.tokens('zero') == ['0'] and normalize.tokens('nine hundred ninety nine thousand nine hundred ninety nine') == ['999999'])
             check('number words inverse sampled', all(normalize.tokens(normalize.number_words(n)) == [str(n)]
                   for n in [0, 1, 20, 25, 101, 999, 1000, 2026, 999999, *range(0, 999999, 997)]))
-            check('leading zero time equivalence', pair_check.pair_check('meet at ten zero', 'Meet at 10:00.')[0])
+            check('clock time from words', pair_check.pair_check('meet at four forty five', 'Meet at 4:45.')[0] and not pair_check.pair_check('meet at ten zero', 'Meet at 10:00.')[0])
             bool_rows = [{'text': 'Please test the intake.', 'origin': 'public'}] * 3
             try:
                 teachers.run(bool_rows, 'openai/gpt-oss-20b', 'messify',
@@ -452,9 +451,9 @@ def main():
             storage.write_json(literal / 'public_text.jsonl', [
                 {'text': 'Please put a comma in the sentence.', 'origin': 'public'}], lines=True)
             skipped = {'sources': 0, 'skipped_sources': 0}
-            check('unsynthesizable literal punctuation skipped and counted',
-                  list(data.synthetic(literal, 1, 1, 0, skipped)) == [] and
-                  skipped == {'sources': 1, 'skipped_sources': 1})
+            check('literal punctuation words are synthesizable',
+                  len(list(data.synthetic(literal, 1, 1, 0, skipped))) == 1 and
+                  skipped == {'sources': 1, 'skipped_sources': 0})
 
             cli_dir = home / 'cli-data'
             output = io.StringIO()
