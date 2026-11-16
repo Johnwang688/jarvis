@@ -1061,6 +1061,81 @@ class VexBuildCli(Base):
         self.assertEqual(self.world.calls("make"), [])
 
 
+class HeadCommit(unittest.TestCase):
+    """`vex.head_commit`, the download's commit label (PR #398 review)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(os.path.realpath(tmp.name))
+        env = patch.dict(os.environ, {"HOME": str(self.root), "GIT_CONFIG_GLOBAL": os.devnull})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                               "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def repo(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        self.git(path, "init", "-q")
+        return path
+
+    def commit(self, path):
+        self.git(path, "add", "-A")
+        self.git(path, "commit", "-q", "-m", "c")
+        return self.git(path, "rev-parse", "HEAD")
+
+    def test_a_project_in_a_subfolder_counts_only_its_own_changes(self):
+        top = self.repo(self.root / "robotics")
+        (top / "override" / "src").mkdir(parents=True)
+        (top / "override" / "src" / "main.cpp").write_text("int main() {}\n")
+        (top / "other.txt").write_text("a\n")
+        sha = self.commit(top)
+        (top / "other.txt").write_text("b\n")                 # outside the project
+        self.assertEqual(vex.head_commit(top / "override"), (sha, False))
+        (top / "override" / "src" / "main.cpp").write_text("int main() { return 1; }\n")
+        self.assertEqual(vex.head_commit(top / "override"), (sha, True))
+
+    def test_a_tracked_build_link_still_counts_and_build_output_does_not(self):
+        top = self.repo(self.root / "p")
+        (top / "src").mkdir()
+        (top / "src" / "main.cpp").write_text("x\n")
+        os.symlink("src", top / "build")
+        sha = self.commit(top)
+        (top / "build").unlink()
+        (top / "build").mkdir()
+        (top / "build" / "p.bin").write_bytes(b"\0")
+        self.assertEqual(vex.head_commit(top), (sha, True))     # the tracked link is gone
+        self.git(top, "rm", "-q", "--cached", "build")
+        sha = self.commit(top)
+        self.assertEqual(vex.head_commit(top), (sha, False))    # build output alone is no change
+
+    def test_the_config_judged_is_the_config_obeyed(self):
+        # A nested repository whose `core.worktree` names its parent: git
+        # reports the parent as the toplevel, but runs from the project obey
+        # the nested config, here a clean filter. It is judged, and nothing runs.
+        outer = self.repo(self.root / "outer")
+        (outer / "a.txt").write_text("a\n")
+        self.commit(outer)
+        project = self.repo(outer / "override")
+        (project / "main.cpp").write_text("x\n")
+        self.commit(project)
+        marker = self.root / "ran"
+        self.git(project, "config", "core.worktree", str(outer))
+        self.git(project, "config", "filter.x.clean", f"touch {marker}; cat")
+        (project / ".gitattributes").write_text("* filter=x\n")
+        self.assertEqual(vex.head_commit(project), (None, None))
+        self.assertFalse(marker.exists(), "a program the repository's config names ran")
+
+    def test_no_repository_or_no_commit_names_nothing(self):
+        bare = self.root / "plain"
+        bare.mkdir()
+        self.assertEqual(vex.head_commit(bare), (None, None))
+        self.assertEqual(vex.head_commit(self.repo(self.root / "fresh")), (None, None))
+
+
 # -- device actions ---------------------------------------------------------------------------------------
 
 class Device(DaemonBase):

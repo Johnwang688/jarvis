@@ -779,19 +779,21 @@ def head_commit(root) -> tuple[str | None, bool | None]:
     """The commit a download is sent from, for the owner to read beside it:
     `(sha, dirty)`, HEAD of the repository holding `root`, and whether the
     project folder has changes HEAD does not hold (tracked or untracked,
-    `build/` aside). `(None, None)` when there is no repository or no commit,
+    the `build/` folder's contents aside; a tracked `build` file or symlink
+    still counts). `(None, None)` when there is no repository or no commit,
     when the repository's own config names a program for git to run
     (`gitops._config_risk`, as the editor's gutter refuses it; config
-    that cannot be listed counts) and when git fails or is slow; `dirty` is None when only that check failed. Only
-    `gitops`' hardened git (hooks and fsmonitor off, scrubbed environment)
+    that cannot be listed counts) and when git fails or is slow; `dirty` is
+    None when only that check failed. Only `gitops`' hardened git (hooks and fsmonitor off, scrubbed environment)
     and never anything that writes. It decides nothing: a label."""
     from jarvis import gitops
     cwd = Path(root)
     try:
-        code, out, _ = gitops._git(cwd, ["rev-parse", "--show-toplevel"], timeout=COMMIT_TIMEOUT_S)
-        if code != 0 or not out.strip():
-            return None, None
-        risk = gitops._config_risk(Path(out.rstrip("\n")), timeout=COMMIT_TIMEOUT_S)
+        # Judged from `root` itself, where every later git here runs, so the
+        # config judged is the config those runs obey: from the toplevel git
+        # reports, a nested repository's `core.worktree` naming its parent
+        # had the parent's config judged and its own obeyed (PR #398 review).
+        risk = gitops._config_risk(cwd, timeout=COMMIT_TIMEOUT_S)
         if risk is None or risk:            # unlisted config is not a clean one
             return None, None
         code, out, _ = gitops._git(cwd, ["rev-parse", "-q", "--verify", "HEAD^{commit}"],
@@ -801,7 +803,7 @@ def head_commit(root) -> tuple[str | None, bool | None]:
             return None, None
         # No optional locks (gitops pins GIT_OPTIONAL_LOCKS=0 too): never an index write.
         code, out, _ = gitops._git(cwd, ["--no-optional-locks", "status", "--porcelain",
-                                         "--untracked-files=normal", "--", ".", ":(exclude)build"],
+                                         "--untracked-files=normal", "--", ".", ":(exclude)build/"],
                                    timeout=COMMIT_TIMEOUT_S)
     except Exception:
         return None, None

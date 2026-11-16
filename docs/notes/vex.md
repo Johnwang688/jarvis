@@ -1299,10 +1299,15 @@ The check reads text, not data flow. A copy reached through the cache's `key` or
 The owner asked for the download terminal to say which commit was sent and
 when the download started. `Vex.download` reads `head_commit(root)` before it
 holds the device or the build lock: HEAD's full id and whether the project
-folder has changes HEAD does not hold (tracked or untracked, `build/` aside).
+folder has changes HEAD does not hold (tracked or untracked; the `build/`
+folder's contents aside, though a tracked `build` file or symlink still counts).
 It uses `gitops`' hardened git with optional locks off, so it never writes the
 index. It reads nothing past a repository whose own config names a program for
-git to run, or whose config cannot be listed (`_config_risk` None). Any failure
+git to run, or whose config cannot be listed (`_config_risk` None). That
+config is judged from the project folder, where every later git run happens.
+PR #398's review found that judging from the toplevel git reports was wrong:
+a nested repository whose `core.worktree` names its parent had the parent's
+config judged while its own clean filter ran. Any failure
 or 3-second timeout gives `(None, None)`. The download record carries `commit`
 and `dirty`. The terminal title reads
 `vex download · <project> → slot N · a1b2c3d+ · started HH:MM:SS` on the
