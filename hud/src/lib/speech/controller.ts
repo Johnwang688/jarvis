@@ -165,6 +165,8 @@ export class SpeechController {
   /** Notices handed to the queue and not yet stale, with the timer that drops one that never began to sound. */
   private noticeLive = new Map<string, unknown>();
   private ownerBusy: (() => boolean) | null = null;
+  private audioListeners = new Set<(thread: string) => void>();
+  private heardAudio = new Set<number>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -193,7 +195,7 @@ export class SpeechController {
     });
     this.wasSpeaker = deps.gate.isSpeaker();
     this.unsubs.push(deps.gate.subscribe(() => this.gateChanged()));
-    const blocked = deps.player.subscribeBlocked?.(() => this.notify());
+    const blocked = deps.player.subscribeBlocked?.(() => { this.observeAudio(); this.notify(); });
     if (blocked) this.unsubs.push(blocked);
   }
 
@@ -219,6 +221,7 @@ export class SpeechController {
 
   /** The queue changed: keep the hangover that holds `active` just after the last chunk. */
   private settle(): void {
+    this.observeAudio();
     this.trackName();
     const state = this.queue.view().state;
     const live = state === "playing" || state === "buffering";
@@ -296,6 +299,28 @@ export class SpeechController {
     for (const cb of [...this.listeners]) {
       try { cb(); } catch { /* a subscriber never breaks speech */ }
     }
+  }
+
+  /** VA-0: observe a reply chunk only once it is playing and the platform lets audio out. */
+  onAudioStart(cb: (thread: string) => void): () => void {
+    this.audioListeners.add(cb);
+    return () => { this.audioListeners.delete(cb); };
+  }
+
+  outputEnabled(thread: string): boolean { return this.on && !this.micOff && !this.muted.has(thread); }
+
+  private observeAudio(): void {
+    try {
+      const items = this.queue.items();
+      const live = new Set(items.map(item => item.id));
+      for (const id of this.heardAudio) if (!live.has(id)) this.heardAudio.delete(id);
+      if (this.deps.player.blocked()) return;
+      for (const item of items) {
+        if (item.state !== "playing" || item.kind === "notice" || item.kind === "note" || this.heardAudio.has(item.id)) continue;
+        this.heardAudio.add(item.id);
+        for (const cb of this.audioListeners) { try { cb(item.thread); } catch { /* diagnostics cannot change speech */ } }
+      }
+    } catch { /* observations cannot change playback */ }
   }
 
   // ---- who is read --------------------------------------------------------
@@ -760,6 +785,8 @@ export class SpeechController {
     if (this.hang !== null) this.deps.clock.clearTimeout(this.hang);
     this.hang = null;
     this.idleListeners.clear();
+    this.audioListeners.clear();
+    this.heardAudio.clear();
     this.notices.dispose();
     for (const h of this.noticeLive.values()) this.deps.clock.clearTimeout(h);
     this.noticeLive.clear();
