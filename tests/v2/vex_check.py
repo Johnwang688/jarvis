@@ -1115,17 +1115,20 @@ class HeadCommit(unittest.TestCase):
     def test_the_config_judged_is_the_config_obeyed(self):
         # A nested repository whose `core.worktree` names its parent: git
         # reports the parent as the toplevel, but runs from the project obey
-        # the nested config, here a clean filter. It is judged, and nothing runs.
+        # the nested config, here a clean filter on a file it tracks. It is
+        # judged, and nothing runs.
         outer = self.repo(self.root / "outer")
         (outer / "a.txt").write_text("a\n")
         self.commit(outer)
         project = self.repo(outer / "override")
-        (project / "main.cpp").write_text("x\n")
-        self.commit(project)
-        marker = self.root / "ran"
         self.git(project, "config", "core.worktree", str(outer))
+        (project / "main.cpp").write_text("x\n")
+        self.git(project, "add", "main.cpp")             # tracked as override/main.cpp
+        self.git(project, "commit", "-q", "-m", "c")
+        marker = self.root / "ran"
         self.git(project, "config", "filter.x.clean", f"touch {marker}; cat")
         (project / ".gitattributes").write_text("* filter=x\n")
+        (project / "main.cpp").write_text("y\n")     # a change: status runs the filter on it
         self.assertEqual(vex.head_commit(project), (None, None))
         self.assertFalse(marker.exists(), "a program the repository's config names ran")
 
