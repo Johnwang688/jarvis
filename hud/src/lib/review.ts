@@ -76,7 +76,8 @@ const DEFER_ID = /^defer:[A-Za-z0-9_-]{1,64}$/;
 const MORE_ID = /^defer:more\.[A-Za-z0-9_-]{1,200}$/;
 const PLACE_KEY = /^(?:chat|task):[^\s]{1,200}$|^none$/;
 
-function parseItem(raw: unknown, section: Section): ReviewItem | null {
+/** One review item, or null when it is not one (exported so a surface can count what a read dropped). */
+export function parseItem(raw: unknown, section: Section): ReviewItem | null {
   if (!isObj(raw)) return null;
   const row = parseRow(raw.row);
   if (!row) return null;

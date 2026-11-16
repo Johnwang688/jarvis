@@ -185,4 +185,41 @@ describe("RD-2 icon tabs and Settings", () => {
       expect(h.app.tab).toBe("inbox");
     }
   });
+
+  it.each([null, "needs", "running", "tasks"] as const)("returns to the Morning review line under filter %s after Back and refreshes", async (filter) => {
+    const h = await started();
+    h.gets["/m/api/review"] = { ok: true, body: { v: 1, open: 1, overnight: [], before: [],
+      summary: { approvals: 1 }, quiet: { enabled: true, now: true } } };
+    await h.app.loadReview();
+    h.app.filter = filter;
+    h.app.render();
+    for (const back of [() => h.app.goBack(), () => h.q("m-review-back").click()]) {
+      // Touch devices need not focus the opener when tapped.
+      h.q("m-tab-inbox").focus();
+      await h.click("m-review-open");
+      h.q("m-review-back").focus();
+      back();
+      await settle();
+      expect(h.app.filter).toBe(filter);
+      expect(document.activeElement).toBe(h.q("m-review-open"));
+      await h.app.loadReview();
+      await h.app.loadInbox();
+      h.app.render();
+      expect(document.activeElement).toBe(h.q("m-review-open"));
+    }
+  });
+
+  it("refreshes Settings quiet hours after a valid review read and keeps them after a malformed read", async () => {
+    const h = await started();
+    await h.click("m-tab-settings");
+    h.gets["/m/api/review"] = { ok: true, body: { v: 1, open: 0, overnight: [], before: [],
+      quiet: { enabled: true, start: "21:00", end: "06:00" } } };
+    await h.app.loadReview();
+    expect(h.q("m-settings-quiet").textContent).toContain("21:00 to 06:00");
+    h.gets["/m/api/review"] = { ok: true, body: {} };
+    await h.app.loadReview();
+    expect(h.q("m-settings-quiet").textContent).toContain("21:00 to 06:00");
+    await h.click("m-tab-inbox");
+    expect(h.root.querySelector('[data-resource="review"][data-stale="true"]')).not.toBeNull();
+  });
 });
