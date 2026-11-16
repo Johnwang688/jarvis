@@ -104,6 +104,7 @@ import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
 import { VoiceTimingsLink } from "./lib/voiceTimingsLink";
+import { observeVoiceTiming } from "./lib/voiceTimings";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
@@ -722,11 +723,14 @@ export default function App() {
   // ---- capture ------------------------------------------------------------
 
   const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
-  const voiceTimings = useMemo(() => new VoiceTimingsLink(voiceDiagnostics), [voiceDiagnostics]);
+  const voiceTimings = useMemo(() => new VoiceTimingsLink(voiceDiagnostics, () => performance.now(),
+    chat => speech.controller.audioTextStartedAt(chat)), [voiceDiagnostics, speech]);
   useEffect(() => {
-    const audio = speech.controller.onAudioStart(chat => voiceTimings.firstAudio(chat));
-    const output = speech.controller.subscribe(() => voiceTimings.retain(chat => speech.controller.outputEnabled(chat)));
-    return () => { audio(); output(); };
+    const audio = observeVoiceTiming(() => speech.controller.onAudioStart(chat => voiceTimings.firstAudio(chat)));
+    const output = observeVoiceTiming(() => speech.controller.subscribe(() => {
+      observeVoiceTiming(() => voiceTimings.retain(chat => speech.controller.outputEnabled(chat)));
+    }));
+    return () => { observeVoiceTiming(() => audio?.()); observeVoiceTiming(() => output?.()); };
   }, [speech, voiceTimings]);
   // What stops a recording whatever else is true (Capture `hardStop`): a card, a
   // picker, Settings or a crashed window, in the order that names the strongest.
@@ -1336,7 +1340,7 @@ export default function App() {
         const result = await voiceTimings.issue(threadId, timingRows, chat => api.send(chat, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
-        }), speech.controller.outputEnabled(threadId));
+        }), observeVoiceTiming(() => speech.controller.outputEnabled(threadId!)) ?? false);
         const status = result?.status ?? "started";
         // A message went to this thread: the reply being read is stale (V-7).
         if (status !== "dropped") speech.controller.messageSent(threadId);
@@ -1595,7 +1599,7 @@ export default function App() {
       browserSound.event(e);
       const kind = e.kind;
       const data = e.data || e;
-      voiceTimings.event(e);
+      observeVoiceTiming(() => voiceTimings.event(e));
       try { speech.controller.event(e); } catch { /* speech never breaks the stream */ }
       if (devservers.event(e)) return;
       if (kind === "_connected") { devservers.connect(); void speech.voices.load(); void speaker.load(); }

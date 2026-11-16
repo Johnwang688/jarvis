@@ -43,7 +43,7 @@ import {
 import { CLAIM_CAP_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk } from "./recorder";
 import { SEND_WORD_SILENCE_MS } from "./voiceWords";
 
-import type { Marks } from "./voiceTimings";
+import { observeVoiceTiming, type Marks } from "./voiceTimings";
 import { CLEAR, type SelfFrame } from "./selfvoice";
 import type { ClaimSource, DetectorKind, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
@@ -518,8 +518,10 @@ export class Capture {
       return;
     }
     // The utterance ended a hangover ago: drop the silence that proved it.
-    const endpoint = this.now();
-    const marks = event === "close" ? { speechEnd: endpoint - samplesToMs(this.vad.quiet), endpoint } : undefined;
+    const marks = observeVoiceTiming(() => {
+      const endpoint = this.now();
+      return event === "close" ? { speechEnd: endpoint - samplesToMs(this.vad.quiet), endpoint } : undefined;
+    });
     this.finishRecording(Math.max(0, this.ring.written - to), false, this.vad.quiet, marks);
   }
 
@@ -659,7 +661,7 @@ export class Capture {
     this.vad.run = 0;
     this.vad.open = false;
     this.segClaimed = false;
-    this.finishRecording(0, false, quiet, { speechEnd: this.now() });
+    this.finishRecording(0, false, quiet, observeVoiceTiming(() => ({ speechEnd: this.now() })));
     this.claimSource = "unclaimed";
   }
 

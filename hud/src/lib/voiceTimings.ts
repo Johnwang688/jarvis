@@ -4,6 +4,11 @@ export const STAGES: readonly Stage[] = ["endpoint", "transcribed", "sent", "fir
 export type Marks = { speechEnd?: number } & Partial<Record<Stage, number>>;
 export interface StageStat { n: number; p50: number; p90: number }
 
+/** Diagnostics are best effort: failures must never enter the observed pipeline. */
+export function observeVoiceTiming<T>(observe: () => T): T | undefined {
+  try { return observe(); } catch { return undefined; }
+}
+
 export function stageDurations(m: Marks): Partial<Record<Stage | "total", number>> {
   const out: Partial<Record<Stage | "total", number>> = {};
   if (m.speechEnd === undefined || !Number.isFinite(m.speechEnd)) return out;

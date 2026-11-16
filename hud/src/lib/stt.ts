@@ -36,7 +36,7 @@
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
-import type { Marks } from "./voiceTimings";
+import { observeVoiceTiming, type Marks } from "./voiceTimings";
 import type { ClaimSource, DetectorKind, DropReason, VoiceDiagnostics } from "./voiceDiagnostics";
 import { dropLeadingOverlap, dropTrailingOverlap, overlapMerge } from "./joinChunks";
 
@@ -331,10 +331,12 @@ export class SttAssembler<M = undefined> {
     const g = this.groups.get(gid);
     if (!g) return;
     if (opts.late) g.partial = true;
-    if (opts.marks?.speechEnd !== undefined) this.o.diagnostics.mark(g.diag, "speechEnd", opts.marks.speechEnd);
-    if (opts.marks?.endpoint !== undefined) this.o.diagnostics.mark(g.diag, "endpoint", opts.marks.endpoint);
+    observeVoiceTiming(() => {
+      if (opts.marks?.speechEnd !== undefined) this.o.diagnostics.mark(g.diag, "speechEnd", opts.marks.speechEnd);
+      if (opts.marks?.endpoint !== undefined) this.o.diagnostics.mark(g.diag, "endpoint", opts.marks.endpoint);
+    });
     g.open = false;
-    this.markTranscribed(g);
+    observeVoiceTiming(() => this.markTranscribed(g));
     if (!g.members.length) { this.settleGroup(g); this.groups.delete(gid); return; }
     this.release();
     this.settleGroup(g);
@@ -453,7 +455,7 @@ export class SttAssembler<M = undefined> {
       this.fail(e, describe(failure, deadline));
       return;
     }
-    if (g) g.transcribedAt = this.now();
+    observeVoiceTiming(() => { if (g) g.transcribedAt = this.now(); });
     if (served) this.o.diagnostics.served(e.diag, served.backend, served.fellBack === true);
     // A blank text is a normal answer for a chunk of mostly silence: it is
     // settled with the rest of its message (release).
@@ -464,7 +466,7 @@ export class SttAssembler<M = undefined> {
     // until then would make its length a memory bound, so it is let go here.
     e.state = "ready"; e.error = ""; e.blob = null;
     this.syncKept(g);
-    if (g) this.markTranscribed(g);
+    observeVoiceTiming(() => { if (g) this.markTranscribed(g); });
     this.emit(); this.release();
   }
 
