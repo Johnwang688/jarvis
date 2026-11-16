@@ -1444,8 +1444,9 @@ class ClaudeProvider:
             # Nor any message from the phone (via "phone"): a decision
             # answered there (P-4) or words typed into the chat there (P-5).
             # The phone carries no desk authority (design §11 question 2).
+            # Speech never authorizes; wake-word speech has no desk authority.
             session.owner_turn = (getattr(message, "origin", None) == "owner"
-                                  and getattr(message, "via", None) not in ("inbox", "phone"))
+                                  and getattr(message, "via", None) not in ("inbox", "phone", "voice"))
             session.generation += 1
             # A steer an earlier turn wrote and never saw drain may still be
             # waiting in the CLI: then this message goes in at priority

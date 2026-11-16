@@ -25,7 +25,7 @@ from jarvis.v2 import chat_reads, projects, voice_link
 from jarvis.v2.daemon import Daemon
 from jarvis.v2.desk import desk_message
 from jarvis.v2.discord.mirror import user_line
-from jarvis.v2.model import ProviderName as PN
+from jarvis.v2.model import ProviderName as PN, Role
 from jarvis.v2.provider import Event, EventKind as EK, UserMessage
 from jarvis.v2.stores import Stores
 from windows import voicewire as wire
@@ -90,6 +90,19 @@ class Base(existing.Base):
 
 
 class Backends(Base):
+    def test_unknown_model_kind_falls_back_to_original_speech(self):
+        self.start()
+        c = self.client()
+        for kind in ("run_shell", "", 7, None):
+            for source, fallback in (("hotkey", "dictate"), ("wake", "ask")):
+                with self.subTest(kind=kind, source=source):
+                    raw = json.dumps({"kind": kind, "text": "model replacement",
+                                      "target": "untrusted target"})
+                    expected = {"kind": fallback, "text": "original speech", "target": ""}
+                    self.assertEqual(voice_link.parse_intent(raw, source, "original speech"), expected)
+                    with patch.object(self.link, "route_model", return_value=raw):
+                        self.assertEqual(c.route("original speech", source), expected)
+
     def test_voice_created_once_reused_after_restart_and_owner_message(self):
         self.start()
         c = self.client()
@@ -125,6 +138,27 @@ class Backends(Base):
         (self.d.stores.root / "voice-chat.json").unlink()
         self.assertEqual(self.client().ask("recover"), "Hello")
         self.assertEqual([t.id for t in self.d.stores.threads.list()], [thread.id])
+
+    def test_saved_reference_must_identify_an_active_default_project_voice_chat(self):
+        self.start()
+        c = self.client()
+        c.ask("create Voice")
+        voice_thread = self.voice_thread()
+        other_project = self.d.stores.projects.create("Other", str(self.root))
+        self.d.stores.projects.save(other_project)
+        for changed in ({"title": "Unrelated"}, {"project_id": other_project.id},
+                        {"provider": PN.CLAUDE}, {"archived": "2026-11-16T00:00:00Z"},
+                        {"role": Role.IMPLEMENTER}, {"task_id": "abcd1234"}):
+            with self.subTest(changed=changed):
+                values = {"project_id": voice_thread.project_id, "role": Role.CHAT,
+                          "provider": PN.FAST, "title": "Voice", **changed}
+                unrelated = self.d.stores.threads.create(**values)
+                self.d.stores.threads.save(unrelated)
+                path = self.d.stores.root / "voice-chat.json"
+                path.write_text(json.dumps(unrelated.id))
+                self.assertEqual(c.ask("only in Voice"), "Hello")
+                self.assertEqual(json.loads(path.read_text()), voice_thread.id)
+                self.assertEqual(self.d.stores.threads.read_log(unrelated.id), [])
 
     def test_archived_or_deleted_voice_is_replaced(self):
         self.start()
@@ -211,6 +245,37 @@ class Backends(Base):
 
 
 class Concurrency(Base):
+    def test_ask_line_limit_includes_escaping_and_newline_and_keeps_connection(self):
+        self.start()
+        c = self.client()
+        cap = 192
+        with patch.object(wire, "MAX_LINE", cap):
+            for delta in (False, True):
+                for excess in (0, 1):
+                    with self.subTest(delta=delta, excess=excess):
+                        prefix = '\u2603\n"'
+                        reply = {"id": c._id + 1, "text": prefix}
+                        reply.update({"event": "delta"} if delta else {"ok": True, "done": True})
+                        answer = prefix + "x" * (cap - len(wire.json_line(reply)) + excess)
+
+                        def asker(_text, on_delta):
+                            if delta:
+                                on_delta(answer)
+                                return "end"
+                            return answer
+
+                        self.link.asker = asker
+                        seen = []
+                        if excess:
+                            with self.assertRaises(wire.LinkError) as caught:
+                                c.ask("hello", seen.append)
+                            self.assertEqual(str(caught.exception), voice_link.ASK_FAILED)
+                            self.assertEqual(seen, [])
+                        else:
+                            self.assertEqual(c.ask("hello", seen.append), "end" if delta else answer)
+                            self.assertEqual(seen, [answer] if delta else [])
+                        c.ping()
+
     def test_voice_deliver_never_steers_and_default_ask_waits_for_approval(self):
         self.start()
         c = self.client()

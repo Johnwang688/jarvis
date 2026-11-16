@@ -1096,7 +1096,7 @@ class Daemon:
             self._lifecycle("task_created", task)
         return task
 
-    def open_thread(self, project_id, role, provider, brief) -> Thread:
+    def open_thread(self, project_id, role, provider, brief, *, title=None) -> Thread:
         project = self.require(self.stores.projects, project_id)
         if project.archived:
             raise DaemonError(f"project {project.name} is archived; restore it from the Archive first")
@@ -1117,7 +1117,11 @@ class Daemon:
             recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
-                                               cwd=brief.cwd, cost_recount=recounted)
+                                               cwd=brief.cwd, cost_recount=recounted,
+                                               # A title fixed at birth (the Voice chat, VA-D4)
+                                               # is in the first metadata write, so a crash
+                                               # before anything else cannot leave it unnamed.
+                                               **({"title": title, "title_source": "owner"} if title else {}))
         try:
             self._open(thread, brief)
         except BaseException:

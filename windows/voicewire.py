@@ -76,8 +76,12 @@ def wav_bytes(pcm: bytes, rate=16000):
     return out.getvalue()
 
 
+def json_line(value):
+    return (json.dumps(value, separators=(",", ":")) + "\n").encode()
+
+
 def send_json(stream, value):
-    stream.write((json.dumps(value, separators=(",", ":")) + "\n").encode())
+    stream.write(json_line(value))
     stream.flush()
 
 

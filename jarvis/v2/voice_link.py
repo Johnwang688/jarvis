@@ -206,9 +206,17 @@ class VoiceLink:
                 if not isinstance(value, str):
                     return {"id": ident, "ok": False, "error": ASK_FAILED}
                 if kind == "done":
-                    return {"id": ident, "ok": True, "done": True, "text": value}
+                    reply = {"id": ident, "ok": True, "done": True, "text": value}
+                else:
+                    reply = {"id": ident, "event": "delta", "text": value}
+                # Check the exact wire bytes, including JSON escaping and the
+                # newline, before writing any part of an oversized answer.
+                if len(wire.json_line(reply)) > wire.MAX_LINE:
+                    return {"id": ident, "ok": False, "error": ASK_FAILED}
+                if kind == "done":
+                    return reply
                 if self._current(conn, server):
-                    wire.send_json(stream, {"id": ident, "event": "delta", "text": value})
+                    wire.send_json(stream, reply)
             return None
         finally:
             stopped.set()

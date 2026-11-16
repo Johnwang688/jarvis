@@ -22,6 +22,14 @@ class VoiceChat:
     def _thread(self):
         d = self.daemon
         path = d.stores.root / "voice-chat.json"
+        project = d.stores.projects.inbox()
+
+        def is_voice(thread):
+            return (thread is not None and thread.title == "Voice"
+                    and thread.project_id == project.id and not project.archived
+                    and not thread.archived and thread.role == Role.CHAT
+                    and thread.task_id is None and thread.provider == ProviderName.FAST)
+
         thread = None
         try:
             ident = json.loads(path.read_text(encoding="ascii"))
@@ -29,29 +37,25 @@ class VoiceChat:
                 thread = d.stores.threads.get(ident)
         except (OSError, ValueError):
             pass
-        if thread is not None:
-            project = d.stores.projects.get(thread.project_id)
-            if (thread.archived or project is None or project.archived
-                    or thread.role != Role.CHAT or thread.task_id is not None
-                    or thread.provider != ProviderName.FAST):
-                thread = None
-        if thread is None:
-            project = d.stores.projects.inbox()
+        if not is_voice(thread):
             # Recover a creation interrupted before the reference was saved.
             thread = next((t for t in d.stores.threads.list(project_id=project.id)
-                           if t.title == "Voice" and not t.archived
-                           and t.role == Role.CHAT and t.task_id is None
-                           and t.provider == ProviderName.FAST), None)
+                           if is_voice(t)), None)
             if thread is None:
-                thread = d.open_thread(project.id, "chat", "fast", {})
+                thread = self._create(project)
                 d.stores.threads.set_title(thread.id, "Voice", "owner")
-                # open_thread shares this object with the live session. Publish
+                # The thread shares this object with the live session. Publish
                 # the fixed title as well as saving it, as a HUD rename does.
                 thread.title, thread.title_source = "Voice", "owner"
                 from .projects import _title_changed
                 _title_changed(d, thread)
             _write_bytes(path, (json.dumps(thread.id) + "\n").encode("ascii"))
         return thread
+
+    def _create(self, project):
+        # Titled at creation: its first metadata write identifies it as Voice
+        # even if the process dies before set_title or the id file.
+        return self.daemon.open_thread(project.id, "chat", "fast", {}, title="Voice")
 
     def ask(self, text, on_delta, *, cancelled=lambda: False, timeout=180.0):
         from .daemon import DaemonError
