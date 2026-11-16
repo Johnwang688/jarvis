@@ -21,7 +21,7 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
   const load = useCallback(() => api.sttSettings().then(v => { sttSettingsStore.apply(v); setError(""); })
     .catch(e => setError(e instanceof Error ? e.message : "The speech-to-text settings could not be read.")), []);
   useEffect(() => { void load(); }, [load]);
-  const change = async (c: { backend?: SttChoice; cloud_fallback?: boolean }) => {
+  const change = async (c: { backend?: SttChoice; cloud_fallback?: boolean; dictation_cleanup?: "off" | "rules" }) => {
     if (blocked || busy) return;
     setBusy(true); setError("");
     try { sttSettingsStore.apply(await api.setSttSettings(c)); }
@@ -59,6 +59,16 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
           {!value.local.installed && value.local.fetch ? ` · install the package, then run: ${value.local.fetch}` : ""}
         </p>
       ) : null}
+      <h3>Dictation cleanup</h3>
+      <div role="radiogroup" aria-label="Dictation cleanup" className="stt-backends">
+        {(["off", "rules"] as const).map(c => <label key={c}>
+          <input type="radio" name="dictation-cleanup" data-testid={`dictation-cleanup-${c}`}
+            checked={value?.dictationCleanup === c} disabled={off}
+            onChange={() => { void change({ dictation_cleanup: c }); }} />{" "}
+          {c === "off" ? "Off" : "Rules"}
+        </label>)}
+      </div>
+      <p className="muted">Cleans hotkey dictation before typing. Terminals and IDEs only remove hesitation sounds. Off keeps the original words.</p>
       {value?.error ? <p className="err" role="status" data-testid="stt-settings-error">{value.error}</p> : null}
       {error ? <p className="err" role="status" data-testid="stt-settings-fault">{error}</p> : null}
     </section>

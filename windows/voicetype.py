@@ -4,6 +4,30 @@ from __future__ import annotations
 import re
 import time
 import unicodedata
+import ntpath
+from typing import Literal
+
+
+_TERMINALS = frozenset("windowsterminal cmd powershell pwsh wsl wslhost conhost openconsole "
+                      "mintty bash alacritty wezterm-gui hyper putty kitty code cursor windsurf "
+                      "zed idea64 pycharm64 webstorm64 clion64 goland64 rider64 studio64 devenv "
+                      "sublime_text".split()) | {"code - insiders"}
+# Unrecognised processes fail closed. These known document/browser apps receive
+# prose cleanup; an executable name is never sent across the link.
+_PROSE_APPS = frozenset("notepad notepad++ chrome msedge firefox brave opera winword outlook "
+                       "onenote powerpnt excel slack discord teams ms-teams wordpad claude chatgpt "
+                       "notion obsidian whatsapp telegram signal thunderbird messenger".split())
+
+
+def app_category(exe_name: str | None) -> Literal["terminal", "other"]:
+    if not isinstance(exe_name, str):
+        return "terminal"
+    name = ntpath.basename(exe_name).casefold()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name in _TERMINALS or name not in _PROSE_APPS:
+        return "terminal"
+    return "other"
 
 
 def sanitize(text):
@@ -86,6 +110,46 @@ class WindowsInput:
     def foreground(self):
         return self.user32.GetForegroundWindow()
 
+    def foreground_exe(self):
+        from ctypes import wintypes as w
+        handle = None
+        result = None
+        try:
+            if not hasattr(self, "kernel32"):
+                c = self.ctypes
+                self.user32.GetWindowThreadProcessId.argtypes = [w.HWND, c.POINTER(w.DWORD)]
+                self.user32.GetWindowThreadProcessId.restype = w.DWORD
+                kernel32 = c.windll.kernel32
+                kernel32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+                kernel32.OpenProcess.restype = w.HANDLE
+                kernel32.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
+                kernel32.QueryFullProcessImageNameW.restype = w.BOOL
+                kernel32.CloseHandle.argtypes = [w.HANDLE]
+                kernel32.CloseHandle.restype = w.BOOL
+                self.kernel32 = kernel32
+            pid = w.DWORD()
+            hwnd = self.foreground()
+            if not hwnd or not self.user32.GetWindowThreadProcessId(hwnd, self.ctypes.byref(pid)) or not pid.value:
+                return None
+            handle = self.kernel32.OpenProcess(0x1000, False, pid.value)
+            if not handle:
+                return None
+            size = w.DWORD(32768)
+            path = self.ctypes.create_unicode_buffer(size.value)
+            if not self.kernel32.QueryFullProcessImageNameW(handle, 0, path, self.ctypes.byref(size)):
+                return None
+            result = ntpath.basename(path.value) or None
+        except Exception:
+            pass
+        finally:
+            if handle:
+                try:
+                    if not self.kernel32.CloseHandle(handle):
+                        result = None
+                except Exception:
+                    result = None
+        return result
+
     def _send(self, records):
         for start in range(0, len(records), 128):
             batch = records[start:start + 128]
@@ -120,10 +184,17 @@ class WindowsInput:
 
 
 class Typer:
-    def __init__(self, backend=None, clock=time.monotonic):
+    def __init__(self, backend=None, clock=time.monotonic, on_scratch=None):
         self.backend = backend if backend is not None else WindowsInput()
         self.clock = clock
         self.last = None
+        self.on_scratch = on_scratch
+
+    def category(self):
+        try:
+            return app_category(self.backend.foreground_exe())
+        except Exception:
+            return "terminal"
 
     def run(self, steps):
         for step in steps:
@@ -133,18 +204,27 @@ class Typer:
                     hwnd = self.backend.foreground()
                     self.last = None
                     self.backend.text(text)
-                    self.last = (text, hwnd, self.clock())
+                    self.last = (text, hwnd, self.clock(), step[2] if len(step) > 2 else "raw")
             elif step[0] == "key":
                 self.last = None  # Enter can move to a different line or field.
                 self.backend.key(step[1])
             elif step[0] == "scratch":
                 last, self.last = self.last, None
                 if last:
-                    text, hwnd, at = last
+                    text, hwnd, at, which = last
                     if hwnd and hwnd == self.backend.foreground() and 0 <= self.clock() - at < 60:
-                        for _ in text:
-                            if self.backend.foreground() != hwnd:
-                                break
-                            self.backend.key("backspace")
+                        deleted = False
+                        try:
+                            for _ in text:
+                                if self.backend.foreground() != hwnd:
+                                    break
+                                self.backend.key("backspace")
+                                deleted = True
+                        finally:
+                            if deleted and self.on_scratch:
+                                try:
+                                    self.on_scratch(which)
+                                except Exception:
+                                    pass
             else:
                 raise ValueError("Unknown typing step")

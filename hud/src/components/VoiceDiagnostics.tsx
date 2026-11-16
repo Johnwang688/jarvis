@@ -3,6 +3,7 @@ import type { Capture } from "../lib/capture";
 import type { VoiceDiagnostics } from "../lib/voiceDiagnostics";
 import { CONTINUE_MS, SEGMENT_GAP_MS } from "../lib/vad";
 import { playClip, type SttAssembler, type SttCapture } from "../lib/stt";
+import { api } from "../api";
 
 import { STAGES, stageDurations, summarize, type Marks, type Stage } from "../lib/voiceTimings";
 
@@ -18,11 +19,36 @@ const noSubscribe = () => () => {};
 const emptyClips = { clips: [], pending: 0 };
 const noClips = () => emptyClips;
 
+const cleanupPasses = ["off", "rules", "raw", "model"] as const;
+type CleanupCounts = Partial<Record<typeof cleanupPasses[number], { typed: number; scratched: number }>>;
+function cleanupCounts(raw: unknown): CleanupCounts {
+  const counts: CleanupCounts = {};
+  if (!raw || typeof raw !== "object") return counts;
+  for (const pass of cleanupPasses) {
+    const row = (raw as Record<string, unknown>)[pass];
+    if (!row || typeof row !== "object") continue;
+    const { typed, scratched } = row as Record<string, unknown>;
+    if (Number.isSafeInteger(typed) && Number.isSafeInteger(scratched) && (typed as number) >= 0 && (scratched as number) >= 0)
+      counts[pass] = { typed: typed as number, scratched: scratched as number };
+  }
+  return counts;
+}
+
 export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetryDetector, onRetryNoise }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<SttCapture>; onRetryDetector?: () => void; onRetryNoise?: () => void }) {
   const value = useSyncExternalStore(diagnostics.subscribe, diagnostics.snapshot);
   const stats = summarize(value.rows.map(row => row.marks ?? {}));
   const clips = useSyncExternalStore(stt?.subscribe ?? noSubscribe, stt?.snapshot ?? noClips).clips;
   const [meter, setMeter] = useState({ rms: 0, floor: 0, pause: capture.endPauseMs });
+  const [cleanup, setCleanup] = useState<CleanupCounts>({});
+  useEffect(() => {
+    let live = true;
+    const refresh = () => { void api.dictationCleanupCounts().then(raw => {
+      if (live) setCleanup(cleanupCounts(raw));
+    }).catch(() => {}); };
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => { live = false; clearInterval(timer); };
+  }, []);
   useEffect(() => {
     const timer = setInterval(() => setMeter({ rms: capture.vad.rms, floor: capture.vad.floor, pause: capture.endPauseMs }), 250);
     return () => clearInterval(timer);
@@ -30,6 +56,14 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
   const setting = (v: boolean | "unknown") => v === "unknown" ? "not reported" : v ? "on" : "off";
   return <section className="voice-diagnostics" data-testid="voice-diagnostics" aria-label="Microphone diagnostics">
     <h3>Microphone diagnostics</h3>
+    <div data-testid="dictation-cleanup-counts" aria-label="Dictation cleanup counts">
+      <h3>Dictation cleanup</h3>
+      <p>Counts since the daemon started.</p>
+      {cleanupPasses.map(pass => {
+        const row = cleanup[pass];
+        return row ? <p key={pass}>{pass} · typed {row.typed} · scratched {row.scratched} · scratch rate {row.typed ? (100 * row.scratched / row.typed).toFixed(1) : "0.0"}%</p> : null;
+      })}
+    </div>
     <p>Kept in this window only. Reload clears the last 50 utterances and any audio held for Retry.</p>
     <p data-testid="voice-mic-capability">Microphone: {value.mic === "unavailable" ? "unavailable — check the browser microphone permission" : value.mic === "unknown" ? "not checked" : "available"} · {muted ? "MIC MUTED" : "mic live"}</p>
     <p data-testid="voice-detector" data-detector={value.detector} data-phase={value.detectorPhase}>

@@ -14,6 +14,36 @@ class Flow:
         self.client, self.typer, self.actions = client, typer, actions
         self.ui, self.player = ui, player
         self.link_error = None
+        self.typer.on_scratch = self._scratch
+
+    def _scratch(self, which):
+        try:
+            self.client.scratch(which)
+        except Exception:
+            pass
+
+    def _type(self, text):
+        steps = []
+        for step in plan(text):
+            # The daemon refuses text over its cap; type such a step raw rather
+            # than drop the link over it.
+            if step[0] == "text" and len(step[1]) <= 2000:
+                try:
+                    app = self.typer.category()
+                except Exception:
+                    app = "terminal"
+                app = "other" if app == "other" else "terminal"
+                try:
+                    got = self.client.clean(step[1], app)
+                    if (isinstance(got, dict) and isinstance(got.get("text"), str)
+                            and got.get("pass") in ("off", "rules", "raw")):
+                        step = ("text", got["text"], got["pass"])
+                except LinkError as exc:
+                    self.link_error = exc
+                except Exception:
+                    pass  # cleanup is optional; preserve every raw typing step
+            steps.append(step)
+        self.typer.run(steps)
 
     def on_clip(self, wav, source):
         self.link_error = None
@@ -26,7 +56,7 @@ class Flow:
                 self.ui.set_state("done", "No speech heard")
                 return
             if source == "hotkey" and not might_be_command(text):
-                self.typer.run(plan(text))
+                self._type(text)
             else:
                 self.ui.set_state("thinking")
                 try:
@@ -41,7 +71,7 @@ class Flow:
                 kind = intent["kind"]
                 words, target = intent.get("text", text), intent.get("target", "")
                 if kind == "dictate" and source == "hotkey":
-                    self.typer.run(plan(words))
+                    self._type(words)
                 elif kind in {"ask", "dictate"}:
                     partial = ""
 
