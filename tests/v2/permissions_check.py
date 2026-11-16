@@ -4189,7 +4189,8 @@ def cred_dir_read_checks():
             remote = Path(config.remote_dir())
             folders = {".ssh": home / ".ssh", ".aws": home / ".aws",
                        "gh": home / ".config" / "gh", "jarvis": home / ".config" / "jarvis",
-                       ".gnupg": home / ".gnupg", "browser": browser, "remote": remote}
+                       ".gnupg": home / ".gnupg", "browser": browser, "remote": remote,
+                       "voice-link": config.voice_link_key().parent}
             eq(sorted(str(Path(os.path.expanduser(d))) for d in config.credential_dirs()),
                sorted(str(p) for p in folders.values()), "the suite covers every credential folder")
             project = home / "projects" / "app"

@@ -118,8 +118,8 @@ Findings and what was done (probes in `~/.cache/jarvis-lead/listfiles/review/`):
 what dash makes of a line. Once the line holds no operator, substitution or
 `$`, `/bin/sh -c 'printf "%s\0" LINE'` can only expand quotes, `~` and
 patterns into its printf builtin, which runs nothing. `run_readonly` then:
-judges every resulting word as a path, as it stands; runs the name check over
-them (`cat .e[[:lower:]]v`); refuses an option word that only a pattern
+judges every resulting word as a path, as it stands, and by name
+(`secrets.is_credential` since #388 merged: `cat .e[[:lower:]]v`); refuses an option word that only a pattern
 produced; and refuses any pattern among the wrappers' words or as the program
 (`timeout * ls` beside files `5` and `rm` runs `rm`). Too slow (5 s), too
 many words (2,000) or a syntax error: refused. The shell runs in the same
@@ -145,6 +145,19 @@ Two findings, fixed:
 - **MED: refusals named expanded files** (`cat ~/.s[[:lower:]]h/i*` named
   `id_secretname`). A refusal now repeats only words as written.
 
+## Delta review 3 and the merge with #388 (2026-11-16)
+
+Held: the quoting round trip, comment balancing, dash-only option words,
+POSIX classes, literal `~`, `-`-leading operands, home/companion magic,
+`watch`, `ionice` via a pattern, patterns before the program. Fixed: `time
+-o` echoed an expanded name; output that is not UTF-8 crashed the decode
+(older; now replaced characters). Merged with #388: every word and glued tail
+is judged by name (`is_credential`); by folder, every word and path-like
+tail, and a bare tail or `-` word only when it names something that exists
+(`-fkeylink` refused, #388's pinned `-falias` not). The separate name check
+over dash's words was dropped as redundant once `is_credential` judges every
+expanded word.
+
 Accepted false refusals, deliberately: a literal file named like a refused
 option after `--` (`file -- -foo`, `wc -- --files0-from`) and a refused
 letter as another option's value (`file -F -f x`). Honouring `--` needs exact
@@ -164,4 +177,4 @@ and leaks nothing, the sentinel never appears and the fake program never
 runs; negatives that must still run (`file -m one.magic x`, `file -bmone.magic
 x`, `wc -l`, `du -sh .`, `grep -n env -C 2 f`, `grep -f pats f`, `date -f
 dates`, `env LANG=C ls`, `timeout 5 ls`, `env`, `find . -name x`). Mutation:
-each refusal removed in turn makes the suite fail (44 of 44).
+each refusal removed in turn makes the suite fail (46 of 46).

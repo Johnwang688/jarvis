@@ -382,6 +382,20 @@ class ListFiles(unittest.TestCase):
         out = run_readonly("ls *")
         self.assertTrue(out.startswith("Error:"), out)
         self.assertNotIn("zzz_planted", out)
+        # Delta review 3: a wrapper's written file, and a protected name.
+        out = run_readonly("time -o ~/.s[[:lower:]]h/i* ls")
+        self.assertTrue(out.startswith("Error:"), out)
+        self.assertNotIn("id_", out)
+        (self.home / ".netrc").write_text("machine " + SENTINEL + "\n")
+        out = run_readonly("cat ~/.n[[:lower:]]trc")
+        self.assertTrue(out.startswith("Error:"), out)
+        self.assertNotIn("netrc", out)
+        self.assertNotIn(SENTINEL, out)
+
+    def test_output_that_is_not_utf8(self):
+        os.close(os.open(os.path.join(os.fsencode(self.project), b"\xff\xfeplain"),
+                         os.O_CREAT | os.O_WRONLY, 0o644))
+        self.assertRuns("ls")
 
     def test_what_runs_is_what_was_judged(self):
         from jarvis.tools import shell

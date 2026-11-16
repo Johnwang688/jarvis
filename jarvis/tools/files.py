@@ -50,6 +50,12 @@ DEFAULT_LINES = 1500
 # the boundary rather than a smaller version of one.
 SELF_PROTECTED = frozenset(
     {
+        # VA-2 will type into any app: code holding the owner's microphone,
+        # keyboard and pairing is authorization code.
+        "jarvis/v2/voice_link.py",
+        "windows/voicewire.py",
+        "windows/voice_agent.py",
+        "jarvis/voice_link_setup.py",
         "jarvis/tools/secrets.py",
         "jarvis/tools/files.py",
         "jarvis/tools/__init__.py",

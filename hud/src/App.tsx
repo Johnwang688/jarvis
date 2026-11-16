@@ -103,6 +103,8 @@ import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type
 import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
+import { VoiceTimingsLink } from "./lib/voiceTimingsLink";
+import { observeVoiceTiming } from "./lib/voiceTimings";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
@@ -721,6 +723,15 @@ export default function App() {
   // ---- capture ------------------------------------------------------------
 
   const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
+  const voiceTimings = useMemo(() => new VoiceTimingsLink(voiceDiagnostics, () => performance.now(),
+    chat => speech.controller.audioTextStartedAt(chat)), [voiceDiagnostics, speech]);
+  useEffect(() => {
+    const audio = observeVoiceTiming(() => speech.controller.onAudioStart(chat => voiceTimings.firstAudio(chat)));
+    const output = observeVoiceTiming(() => speech.controller.subscribe(() => {
+      observeVoiceTiming(() => voiceTimings.retain(chat => speech.controller.outputEnabled(chat)));
+    }));
+    return () => { observeVoiceTiming(() => audio?.()); observeVoiceTiming(() => output?.()); };
+  }, [speech, voiceTimings]);
   // What stops a recording whatever else is true (Capture `hardStop`): a card, a
   // picker, Settings or a crashed window, in the order that names the strongest.
   // Asked on its own, so his voice or a closed chat cannot mask one of them.
@@ -1033,7 +1044,7 @@ export default function App() {
       u.meta.tailMs = end.tailMs;
       // Cut short (OFF, a card, a crash) or partly refused: what is placed is not all
       // of what was said, so it is marked late and AUTO boxes it instead of sending it.
-      stt.closeGroup(u.gid, { late: end.truncated || u.refused });
+      stt.closeGroup(u.gid, { late: end.truncated || u.refused, marks: end.marks });
       // Resolve only when the message's fate is known (placed or sent, empty,
       // failed for good): a barge-in ends then (V-7), not when the first
       // upload merely starts.
@@ -1124,7 +1135,7 @@ export default function App() {
         // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
         done("handed_to_chat", items);
         bargeEnd("sent", items);
-        await send(n, items.map((i) => i.text).join(" "), [], true);
+        await send(n, items.map((i) => i.text).join(" "), [], true, items);
       };
       // A send word: the words go out now, in REVIEW too (it sends the box).
       // False when something moved since they were said -- another chat, a
@@ -1153,7 +1164,7 @@ export default function App() {
         }
         if (boxed) { dispatch({ type: "input", pane: n, text: "", files: [] }); chatPatch(n, { pendingTranscript: "" }); }
         afterSend = true;
-        await send(n, body, files, true);
+        await send(n, body, files, true, boxed ? [] : step.items);
         return true;
       };
       // A cancel word: everything dictated since the last send goes -- these
@@ -1217,7 +1228,7 @@ export default function App() {
   // ---- sending ------------------------------------------------------------
 
   const send = useCallback(
-    async (pane: PaneNo, text: string, attachments: Attachment[], spoken = false) => {
+    async (pane: PaneNo, text: string, attachments: Attachment[], spoken = false, timingRows: readonly SttPlaced<SttCapture>[] = []) => {
       const at = live.current;
       const chat = at.chats[pane];
       let threadId = chat.threadId;
@@ -1325,10 +1336,11 @@ export default function App() {
         }
         sendStops.current.bind(local, threadId);
         if (!known) dispatch({ type: "turn", event: "send", threadId, at: sentAt, by: local });
-        const result = await api.send(threadId, {
+        // VA-0: the request is issued now, after a new compose chat has an id.
+        const result = await voiceTimings.issue(threadId, timingRows, chat => api.send(chat, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
-        });
+        }), observeVoiceTiming(() => speech.controller.outputEnabled(threadId!)) ?? false);
         const status = result?.status ?? "started";
         // A message went to this thread: the reply being read is stale (V-7).
         if (status !== "dropped") speech.controller.messageSent(threadId);
@@ -1587,6 +1599,7 @@ export default function App() {
       browserSound.event(e);
       const kind = e.kind;
       const data = e.data || e;
+      observeVoiceTiming(() => voiceTimings.event(e));
       try { speech.controller.event(e); } catch { /* speech never breaks the stream */ }
       if (devservers.event(e)) return;
       if (kind === "_connected") { devservers.connect(); void speech.voices.load(); void speaker.load(); }

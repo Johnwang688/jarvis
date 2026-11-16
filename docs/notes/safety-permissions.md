@@ -2270,6 +2270,8 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   by letting **dash expand the words**: once a line holds no operator,
   substitution or `$`, `sh -c 'printf "%s\0" LINE'` can only expand quotes,
   `~` and patterns. Every resulting word is judged as it stands and by name
+  (`is_credential`; a bare glued tail or `-` word by folder only when it
+  names something that exists)
   (`~/.s[[:lower:]]h/id_ed25519`, `cat -- -keylink`, `cat .e[[:lower:]]v`); an
   option word only a pattern produced is refused (a planted `-f` reached by
   `-?`, `find -de?ete`); so is a pattern before or as the program. Every
@@ -2281,7 +2283,7 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   companions. **Open:** rg's `.ignore`/`.rgignore` read from searched
   folders, links followed (invalid glob lines are quoted); other processes'
   environments through `ps eww` and `/proc/PID/environ`.
-  `tests/readonly_list_files_check.py`, 44 of 44 mutations biting.
+  `tests/readonly_list_files_check.py`, 46 of 46 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.
@@ -3874,3 +3876,27 @@ offered (79), the rule missing from the defaults (229).
   | xargs file readers allowed | 12 |
   | git env ignored | 18 |
   | `-f` symlink unresolved | 3 |
+
+**Name-only credential hardening (2026-11-15).** `secrets.is_credential_name`
+judges `PROTECTED_NAMES`, `EXACT_NAMES` and the owner's env-name rule as whole
+names, case-folded both as written and with Windows' trailing dots/spaces
+trimmed. `is_protected` asks that name rule; `is_credential` uses the same
+walker as the env-only `is_env_credential` to judge every last-component
+symlink hop and the realpath, refusing unfollowable links. Agent reads,
+`grep_files` and v2 `denied_read` inherit it; `run_readonly` also judges each
+placed, expanded/globbed operand by `is_credential`, alongside its existing
+credential-folder and recursion checks. Short-option tails also judge bare
+relative aliases by name; folder checks still require path-like tails.
+Parent directories resolve in kernel order before walking the final name,
+and an initial lookup error keeps the name verdict; errors after following
+a link refuse. `grep_files` judges its root before resolving it. Raw command
+names are matched after Unicode case folding of the line and the names (the
+name rule's own folding; not a regex IGNORECASE, which pairs `İ` with `i`, and
+not ASCII-only, which misses `ſ` and the Kelvin sign), with the same
+name-character boundaries. Accepted cost, by the lead (PR #388 verifier round 2):
+with no per-program table of which letters take a value, a short-option tail is
+judged as a file, so `ls -la` is refused in a folder that holds a credential
+alias named exactly `a` or `la`; the refusal names the word. A plain
+recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
+remains the stated limit, the class of `grep -r foo .`; this adds no
+recursive file-name scan.

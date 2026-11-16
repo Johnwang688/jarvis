@@ -36,6 +36,7 @@ DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 # binds only when `remote_host()` names the tailnet host it answers for, so a
 # daemon with no name configured holds no fourth port at all.
 REMOTE_PORT = int(os.environ.get("JARVIS_REMOTE_PORT", "8408"))
+VOICE_LINK_PORT = int(os.environ.get("JARVIS_VOICE_LINK_PORT", "8409"))
 # A tailnet machine name: lowercase DNS labels, at least `<machine>.<tailnet>`
 # in front of `.ts.net`. Nothing else is a name the phone can reach through
 # `tailscale serve`, and a loopback spelling (`localhost`, `127.0.0.1`) must
@@ -113,11 +114,12 @@ def is_loopback(host: str) -> bool:
 # Jarvis's own listeners at their default ports: 8402 the face and v2's HUD,
 # 8404 the desktop bridge's listener, 8405 the daemon (v2's API, which serves
 # the HUD page too), 8406 the Spotify consent callback, 8408 the phone's
-# remote listener (`REMOTE_PORT`, phone design PH-1). 8403, the workshop, is
+# remote listener (`REMOTE_PORT`, phone design PH-1), 8409 the paired voice
+# link. 8403, the workshop, is
 # deliberately absent: v1's designer browses its own work there, and nothing
 # on it can approve or change anything. `hud/src/lib/devopen.ts`'s
 # `CONTROL_PORTS` mirrors this set (tests/v2/remote_listener_check.py).
-DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406, 8408})
+DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406, 8408, 8409})
 
 
 def control_ports() -> frozenset[int]:
@@ -131,7 +133,7 @@ def control_ports() -> frozenset[int]:
     shell), and this process cannot see that. Read at call time, so a test
     that repoints a port is covered.
     """
-    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT, REMOTE_PORT}
+    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT, REMOTE_PORT, VOICE_LINK_PORT}
 
 
 def own_host_header(value, port) -> bool:
@@ -713,7 +715,7 @@ BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))
 
 def credential_dirs() -> tuple[str, ...]:
     """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a) and the phone's
-    folder under the v2 data root (`remote_dir()`), read at call time: either
+    folder and voice pairing under the v2 data root, read at call time: each
     can be moved (`JARVIS_BROWSER_DIR`, `JARVIS_V2_DATA`), and a test that
     repoints one must protect its own. What every credential-folder check
     asks: v2's read tools refuse every one of these folders in every task
@@ -722,7 +724,7 @@ def credential_dirs() -> tuple[str, ...]:
     that holds one; v2's shell and write tools ask (`credentials-path`);
     v1's file, search and shell tools refuse; `folders`, `editor_policy`,
     Codex's denied paths and grants (`denied_grant`) close them too."""
-    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()))
+    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()), str(voice_link_key().parent))
 
 
 # Credential stores outside the credential folders, by their place under
@@ -794,6 +796,18 @@ def remote_dir() -> Path:
     (`secrets.EXACT_NAMES`) and scrubbed. See `push.py` for what is not
     covered."""
     return Path(V2_DATA_DIR).expanduser() / "remote"
+
+# Pairing lives with the v2 stores. Resolve the default at call time like
+# remote_dir(); explicit overrides of VOICE_LINK_KEY remain useful in tests.
+VOICE_LINK_KEY = Path(V2_DATA_DIR).expanduser() / "voice-link" / "voice-link.key"
+_VOICE_LINK_KEY_DEFAULT = VOICE_LINK_KEY
+
+
+def voice_link_key() -> Path:
+    if VOICE_LINK_KEY != _VOICE_LINK_KEY_DEFAULT:
+        return Path(VOICE_LINK_KEY).expanduser()
+    return Path(V2_DATA_DIR).expanduser() / "voice-link" / "voice-link.key"
+
 
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.

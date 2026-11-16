@@ -16,7 +16,7 @@ from typing import Annotated
 
 from .. import protected_state, rules
 from . import tool
-from .secrets import protected_in_command, refusal
+from .secrets import is_credential, protected_in_command, refusal
 
 # `git` is deliberately not here (2026-10-09). This tool is ungated, so its
 # allowlist is the whole boundary, and git is a program whose *flags* run other
@@ -75,7 +75,8 @@ def _run(command: str) -> str:
 
     try:
         proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=TIMEOUT_S,
+            command, shell=True, capture_output=True, text=True, errors="replace",
+            timeout=TIMEOUT_S,
             cwd=runtime.working_dir(),
             # Nothing to read from: a program that would take stdin (`rg TODO`
             # with no folder named, in a process whose stdin is a pipe) reads
@@ -139,11 +140,6 @@ def run_readonly(
     if argv is None:
         return ("Error: what the shell makes of these words cannot be told (a pattern too "
                 "broad or slow, or a syntax error). Use run_command.")
-    # The name check above read the line as written; `cat .e[[:lower:]]v`
-    # names `.env` only once dash has expanded it.
-    protected = protected_in_command(shlex.join(argv))
-    if protected:
-        return refusal(protected)
     # A pattern that expands to a name starting with `-` hands the program an
     # option nobody wrote, which none of the option checks below saw: with a
     # planted file `-f`, `file -m m -? list` ran as `file -m m -f list`, and
@@ -186,8 +182,9 @@ def run_readonly(
     # of PR #75, H-B: `time -o <allowlist> -f '<entries>' ls` ran here) — is
     # not a read, whatever it runs.
     if written:
+        named = written[0][:80] if written[0] in written_as else "a pattern's expansion"
         return ("Error: a wrapper on this line writes a file it names "
-                f"({written[0][:80]}), so it is not a read. Use run_command.")
+                f"({named}), so it is not a read. Use run_command.")
     # xargs hands its program arguments from a file (`-a list`) this check
     # never sees: `xargs -a list cat` reads whatever `list` names. Here,
     # with no pipe and no input, that is the only thing xargs adds.
@@ -283,8 +280,8 @@ def run_readonly(
         # list the folder one refusal at a time (review of 2026-11-16).
         reached = "a word this line's patterns expand to"
     if reached:
-        return (f"Error: {reached} is in a credential folder, or holds one this search would "
-                "read (SSH, cloud and Git logins, "
+        return (f"Error: {reached} is a credential file, is in a credential folder, or holds "
+                "one this search would read (SSH, cloud and Git logins, "
                 "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
                 "not read. Ask the owner for what you need instead.")
 
@@ -614,19 +611,21 @@ def _grep_dir_action_harmless(value: str) -> bool:
 
 def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     """The first operand of a `run_readonly` line that is, or reaches into, a
-    credential folder (`config.credential_dirs()`), or None.
+    credential file or folder (`config.credential_dirs()`), or None.
 
     `tokens` are the words as dash hands them to the program (`_shell_words`,
     since 2026-11-16): patterns and `~` already expanded, so each word is
     judged as it stands. Every word after the program is judged as a path: a
     relative word placed in the run's working folder (`runtime.working_dir()`,
-    else the process's own), and a symlink followed
-    (`files.credential_folder_judge`, the read tools' own judge). A `~` left
+    else the process's own), and a symlink followed (`secrets.is_credential`
+    for names and `files.credential_folder_judge` for folders, the read
+    tools' own judges). A `~` left
     in a word was literal to the shell and is judged both literally and
     expanded. Patterns and other non-paths simply judge as nothing. A
     recursive search (`grep -r`, `rg`) of a folder that *holds* a credential
     folder reads it too, so that is refused as well.
     """
+    import glob
     import os
 
     from .. import runtime
@@ -651,9 +650,19 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         return found
 
     def reaches(candidate: str, path_like: bool) -> bool:
+        # By name (`secrets.is_credential`, PR #388) for every word and glued
+        # tail; by folder for every word, every path-like tail, and a bare
+        # tail that names something that exists — `date -fkeylink`, `keylink`
+        # a relative symlink to the key, printed it (Sol verifier,
+        # 2026-11-16), while a bare tail naming nothing (`-falias`, `-la`)
+        # keeps #388's rule and is judged by name only.
+        if is_credential(candidate):
+            return True
+        if not (path_like or os.path.lexists(candidate)):
+            return False
         if judge(candidate):
             return True
-        if recursive and path_like:
+        if recursive:
             # The shared reading (`files.credential_folder_holds`): the
             # stores, case, kernel-order `..` and the Windows profiles
             # too (cred-dir reads, 2026-10-29).
@@ -670,7 +679,7 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
             # The whole word too: after `--` (or to a program that reads it
             # so) `-keylink` is a file, and `cat -- -keylink` printed the key
             # it links to (review of 2026-11-16, older than that day).
-            attached.extend((word, path, True) for path in places(word))
+            attached.extend((word, path, False) for path in places(word))
         if word.startswith("--"):
             if "=" in word and word.split("=", 1)[1]:
                 words.extend((word, path) for path in places(word.split("=", 1)[1]))
@@ -696,7 +705,17 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         # is the one they run in.
         words.append((".", base))
     for word, path, path_like in [(w, p, True) for w, p in words] + attached:
-        if reaches(path, path_like):
+        # The words are dash's, already expanded; a pattern character left in
+        # one was literal. Expanding it again here as well (and judging the
+        # literal) only errs toward refusing, and keeps the function's own
+        # contract for callers that hand it words as written.
+        found = [path]
+        if glob.has_magic(path):
+            for match in glob.iglob(path):
+                found.append(match)
+                if len(found) > _GLOB_CAP:
+                    return word
+        if any(reaches(candidate, path_like) for candidate in found):
             return word
     return None
 

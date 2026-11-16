@@ -760,6 +760,11 @@ class Daemon:
             if remote is not None:
                 servers.append(remote)
                 self.remote_port = remote.server_address[1]
+            # VA-1 is paired by the human CLI, never provisioned on start.
+            if config.voice_link_key().exists():
+                from .voice_link import VoiceLink
+                self.voice_link = VoiceLink(self)
+                self.voice_link.start()
             # Only now, holding all three ports (the bind is the
             # single-instance lock) and before anything is served: a second
             # daemon started by hand on the live data folder fails the bind
@@ -3203,6 +3208,9 @@ class Daemon:
         return len(released)
 
     def stop(self):
+        voice_link = getattr(self, "voice_link", None)
+        if voice_link is not None:
+            voice_link.stop()
         # Before anything else closes: no jarvis-mcp call is answered for a
         # session from here on (plan §1.4).
         self.callers.revoke_all()
