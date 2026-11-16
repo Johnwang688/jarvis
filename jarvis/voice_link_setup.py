@@ -13,19 +13,27 @@ import subprocess
 import tempfile
 
 from . import config, desktop_setup
+from .tools import files
 
 
 def windows_folder_closed(path) -> bool:
-    """Whether the normalized folder is within a closed profile entry."""
+    """Whether a closed profile folder is also refused by the read guard."""
     try:
         root = os.path.realpath(config.windows_users_root()).casefold()
-        normalized = os.path.realpath(path).casefold()
-        parts = Path(normalized).relative_to(root).parts
+        resolved = os.path.realpath(path)
+        parts = Path(resolved.casefold()).relative_to(root).parts
+        if not (len(parts) >= 2
+                and parts[0] not in {name.casefold() for name in config.WINDOWS_NOT_PROFILES}
+                and config.windows_closed_name(parts[1])):
+            return False
+        # A resolved users root can differ from the read guard's lexical
+        # root. Certify only if direct and recursive reads refuse both forms.
+        judge = files.credential_folder_judge()
+        key = Path(path) / "voice-link.key"
+        return all(judge(candidate) for candidate in
+                   (path, resolved, key, os.path.realpath(key)))
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    return (len(parts) >= 2
-            and parts[0] not in {name.casefold() for name in config.WINDOWS_NOT_PROFILES}
-            and config.windows_closed_name(parts[1]))
 
 
 def _stage(path, data):
