@@ -1484,10 +1484,13 @@ _CREDENTIAL_KINDS = frozenset({"credential_command", "credential_path", "credent
 
 def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str]]],
                   targets: list[str], *, inner: list | None = None,
-                  bases: tuple = (None,)) -> tuple[bool, str, str]:
+                  bases: tuple = (None,),
+                  read_segments: list | None = None) -> tuple[bool, str, str]:
     """(matched, rule id, reason) for one rule against one tool call. A
     credential rule also reads `inner`: the commands the line hands another
-    shell (`sh -c STR`, `eval`, `ssh host STR` …)."""
+    shell (`sh -c STR`, `eval`, `ssh host STR` …). `credential_read` reads
+    `read_segments` in place of `segments` when given: the line with its data
+    here-document bodies set aside (`_heredoc_data_reading`, HD-0)."""
     if isinstance(rule, str):
         phrase = tuple(part for part in rule.split() if part)
         if not phrase:
@@ -1517,7 +1520,8 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     require_any = list(rule.get("any") or [])
     forbid = list(rule.get("none") or [])
 
-    judged = segments + (inner or []) if kind in _CREDENTIAL_KINDS else segments
+    own = read_segments if kind == "credential_read" and read_segments is not None else segments
+    judged = own + (inner or []) if kind in _CREDENTIAL_KINDS else own
     for segment, tokens, stems in judged:
         if kind is not None:
             if _kind_matches(str(kind), segment, tokens, stems, bases):
@@ -1537,6 +1541,65 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     if kind == "credential_path" and any(_under_credential_dir(t) for t in targets):
         return True, rule_id, reason
     return False, "", ""
+
+
+# Programs a here-document's body may be fed to and still be data to the
+# shell (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md): none of them
+# hands its input to a shell. A closed list of what is safe, so a missing
+# entry costs a prompt, never a hole. A Python counts too (`rules._PYTHON`):
+# inline source is not read by layer 2 in any spelling, `python3 -c` included.
+HEREDOC_DATA_CONSUMERS = frozenset({"cat", "tee", "node", "wc", "grep"})
+# A here-string word that is one single-quoted span, or several joined by
+# `\'` (how `rules._here_word` writes a quoted body): nothing in it is live.
+_SINGLE_QUOTED = re.compile(r"'[^']*'(?:\\''[^']*')*")
+
+
+def _heredoc_data_reading(text: str) -> str | None:
+    """`text` with its here-document bodies moved into their operators as
+    here-strings (`rules._inline_heredocs`), when every here-string on the
+    line is data: fed to a `HEREDOC_DATA_CONSUMERS` program or a Python, not
+    piped on, and holding nothing live (`$(…)`, backticks) unless it is
+    single-quoted. None otherwise — the inlining raised or flagged itself
+    unsure, or a here-string's program or place could not be told — and the
+    caller keeps the raw line, every body line a command, as before HD-0.
+    Only `credentials-read` reads it: a sub-agent's line had a Python body
+    whose `pass` was judged as the password store."""
+    if "<<" not in text:
+        return None
+    flagged: list = []
+    try:
+        inlined = rules._inline_heredocs(text, unsure=flagged)
+    except Exception:       # noqa: BLE001 — too complex: the raw reading
+        return None
+    if flagged or inlined == text:
+        return None
+    joined = rules.join_continuations(inlined)
+    found = 0
+    cursor = 0
+    for segment in rules.segments(inlined):
+        at = joined.find(segment, cursor)
+        if at < 0:
+            return None
+        cursor = at + len(segment)
+        heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
+        if not heres:
+            continue
+        found += len(heres)
+        after = joined[cursor:].lstrip(" \t")
+        if after.startswith("|") and not after.startswith("||"):
+            return None             # its output goes on to a program not judged here
+        tokens = _tokens_of(segment)
+        program = tokens[0].rsplit("/", 1)[-1].lower() if tokens else ""
+        if program not in HEREDOC_DATA_CONSUMERS and not rules._PYTHON.fullmatch(program):
+            return None
+        for here in heres:
+            if not _SINGLE_QUOTED.fullmatch(here.word) and ("$(" in here.word or "`" in here.word):
+                return None
+    # Every here-string the inlined text holds was placed above (one inside a
+    # substitution or a quote was not): otherwise its program is unknown.
+    if found != joined.count("<<<"):
+        return None
+    return inlined
 
 
 def _segments_of(text: str) -> list[tuple[str, list[str], list[str]]]:
@@ -1640,6 +1703,22 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
             return "too-complex", rules.RUNNERS_TOO_COMPLEX
         for inner in started:
             segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
+    # `credentials-read` reads each line with its data here-document bodies
+    # set aside (HD-0): a Python body's `pass` is not the password store. A
+    # line without such a reading, or one whose reading cannot be walked,
+    # keeps its raw segments.
+    read_segments: list | None = None
+    readings = [_heredoc_data_reading(text) for text in lines]
+    if any(readings):
+        read_segments = []
+        for text, reading in zip(lines, readings):
+            try:
+                read_segments.extend(_segments_of(reading or text))
+            except rules.TooComplex:
+                try:
+                    read_segments.extend(_segments_of(text))
+                except rules.TooComplex:
+                    return "too-complex", rules.RUNNERS_TOO_COMPLEX
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     inner = _inner_segments(lines) if lines else []
     # Where a `cd`/`pushd` on the line (or in a string it hands a shell)
@@ -1647,7 +1726,8 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     bases = bases + tuple(b for b in _cd_bases(segments + (inner or []), bases) if b not in bases)
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets,
-                                                 inner=inner, bases=bases)
+                                                 inner=inner, bases=bases,
+                                                 read_segments=read_segments)
         if matched:
             return rule_id, reason
     if inner is None:

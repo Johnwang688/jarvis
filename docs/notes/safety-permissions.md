@@ -3900,3 +3900,21 @@ alias named exactly `a` or `la`; the refusal names the word. A plain
 recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
 remains the stated limit, the class of `grep -r foo .`; this adds no
 recursive file-name scan.
+
+**`credentials-read` sets data here-document bodies aside (HD-0,
+2026-11-16).** Layer 2 split the raw line, so a `python3 - <<'EOF'` body's
+`pass` line was judged as the password store and carded. Only the
+`credential_read` kind now reads a line through
+`permissions._heredoc_data_reading`: bodies inlined as here-strings
+(`rules._inline_heredocs`), used only when every here-string on the line is
+fed to a `HEREDOC_DATA_CONSUMERS` program (`cat`, `tee`, `node`, `wc`,
+`grep`) or a Python, is not piped on, and holds no `$(`/backtick unless
+single-quoted. Anything else — a shell, `source /dev/stdin`, `ssh`, `xargs`,
+`$X`, a pipe onward, an unsure inlining, a here-string it cannot place —
+keeps the raw reading, so nothing asked before stops being asked. The table
+lists what is safe; a missing program costs a prompt. The other layer-2
+readings (always-ask stems and git rules, gate-state, the vex backstop) still
+read bodies as commands: the owner deferred them
+(`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
+(layer 2 reads no `$(…)` or shell-fed here-string). Regression:
+`tests/v2/heredoc_credentials_read_check.py`.
