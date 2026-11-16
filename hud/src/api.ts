@@ -502,8 +502,9 @@ export const api = {
   },
   /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
   sttSettings: () => req<unknown>("/stt/settings").then(parseSttSettings),
-  setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean }) =>
+  setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean; dictation_cleanup?: "off" | "rules" }) =>
     req<unknown>("/stt/settings", json(change)).then(parseSttSettings),
+  dictationCleanupCounts: () => req<unknown>("/stt/cleanup"),
   // --- speaker enrollment and Guest voice (V12): the owner's, never audio or embeddings back ---
   speaker: () => req<unknown>("/speaker").then(parseSpeakerStatus),
   /** One prompted reading (16-bit mono WAV). The daemon judges it and answers whether it was kept. */

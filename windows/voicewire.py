@@ -196,6 +196,17 @@ class Client:
             raise LinkError("The voice link sent an invalid reply.")
         return value
 
+    def clean(self, text, app):
+        got = self._request({"op": "clean", "text": text, "app": app})
+        if (not isinstance(got.get("text"), str) or len(got["text"]) > 2000
+                or got.get("pass") not in ("off", "rules", "raw")):
+            self.close()
+            raise LinkError("The voice link sent an invalid reply.")
+        return {"text": got["text"], "pass": got["pass"]}
+
+    def scratch(self, pass_):
+        self._request({"op": "scratch", "pass": pass_})
+
     def ask(self, text, on_delta=None, on_status=None):
         got = self._request({"op": "ask", "text": text}, on_delta, on_status)
         if got.get("done") is not True or not isinstance(got.get("text"), str):

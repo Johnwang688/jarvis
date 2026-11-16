@@ -17,6 +17,7 @@ export interface SttLocalStatus {
   fetch: string;
 }
 export interface SttSettings {
+  dictationCleanup: "off" | "rules";
   backend: SttChoice;
   cloudFallback: boolean;
   /** Non-empty when the daemon's settings file could not be trusted and it failed closed. */
@@ -32,6 +33,7 @@ export function parseSttSettings(raw: unknown): SttSettings {
   const o = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const l = o.local && typeof o.local === "object" && !Array.isArray(o.local) ? (o.local as Record<string, unknown>) : {};
   return {
+    dictationCleanup: o.dictation_cleanup === "off" ? "off" : "rules",
     backend: STT_CHOICES.includes(o.backend as SttChoice) ? (o.backend as SttChoice) : "local",
     cloudFallback: o.cloud_fallback === true,
     error: text(o.error),

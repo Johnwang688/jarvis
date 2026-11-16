@@ -376,13 +376,17 @@ every one of these routes asks (`kind`):
   nothing transcribed); enrolled but unable to judge the clip (damaged or other-model
   voiceprint, no engine, audio that is not 16-bit PCM WAV, a busy engine) fails closed,
   a **503** or **415** with a sentence.
-- `GET /stt/settings` → `{backend, cloud_fallback, error, backends, local:
+- `GET /stt/settings` → `{backend, cloud_fallback, dictation_cleanup, error, backends, local:
   {installed, reason, loaded, threads, idle_unload_min, model, fetch}}`;
-  `POST /stt/settings {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}`
+  `POST /stt/settings {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool,
+  dictation_cleanup?: "off"|"rules"}`
   (at least one; anything else a 400, nothing written). Owner-only, the HUD
   listener. `stt.json` is protected state. A read never loads the model. After each
   successful POST, and when a read finds the resolved value changed by itself, the
   daemon publishes `{kind: "stt_settings", data: <the GET body>}` on `/events`.
+  Dictation cleanup defaults to Rules and is read on each Windows link `clean` request.
+- `GET /stt/cleanup` → `{off, rules, raw, model}`, each `{typed, scratched}`.
+  Owner-only, read-only counts since daemon startup, with no dictation text.
 - `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one
   prompted reading; `{accepted, problems, metrics, readings}`) · `POST /speaker`
   with exactly one of `{propose: true}` (score the readings against each other

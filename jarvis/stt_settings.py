@@ -3,7 +3,8 @@
 One small JSON object at `config.STT_SETTINGS_PATH` (`~/.config/jarvis/stt.json`,
 env `JARVIS_STT_SETTINGS`):
 
-    {"backend": "cloud" | "local" | "auto", "cloud_fallback": true | false}
+    {"backend": "cloud" | "local" | "auto", "cloud_fallback": true | false,
+     "dictation_cleanup": "off" | "rules"}
 
 - **`backend`**: `cloud` is today's OpenRouter chain; `local` decodes in the
   daemon (jarvis/stt_local.py) and only falls to the cloud when the fallback
@@ -12,6 +13,8 @@ env `JARVIS_STT_SETTINGS`):
 - **`cloud_fallback`**: whether audio may be uploaded at all. Off means nothing
   is ever sent to a cloud model, by any caller, and a local failure is an
   error the HUD shows.
+- **`dictation_cleanup`**: rules-only Windows dictation cleanup (default Rules).
+  `load_cleanup()` reads it on each cleanup request; Off preserves raw words.
 
 A missing file, or a missing key, reads as the default. A file that EXISTS but
 cannot be trusted (not JSON, not an object, a symlink, too large, or a key of
@@ -32,11 +35,21 @@ from . import config
 from .private_write import write_private
 
 BACKENDS = ("cloud", "local", "auto")
+CLEANUP = ("off", "rules")
 FILE_CAP = 4096
 
 
 def _path() -> Path:
     return Path(config.STT_SETTINGS_PATH)
+
+
+def load_cleanup() -> str:
+    """Read the cleanup switch on every use; corrupt settings preserve raw text."""
+    raw, problem = _read(_path())
+    if problem:
+        return "off"
+    value = (raw or {}).get("dictation_cleanup", "rules")
+    return value if value in CLEANUP else "off"
 
 
 def defaults() -> dict:
@@ -127,7 +140,7 @@ def _load() -> dict:
 
 
 def update(**changes) -> dict:
-    """Merge `backend` / `cloud_fallback` into the file (atomic, mode 600) and return `load()`.
+    """Merge voice switches into the file (atomic, mode 600) and return `load()`.
 
     Raises ValueError for an unknown key or a bad value, before anything is written.
     """
@@ -138,6 +151,9 @@ def update(**changes) -> dict:
         elif key == "cloud_fallback":
             if not isinstance(value, bool):
                 raise ValueError("cloud_fallback must be a boolean")
+        elif key == "dictation_cleanup":
+            if value not in CLEANUP:
+                raise ValueError("dictation_cleanup must be off or rules")
         else:
             raise ValueError(f"unknown setting {key!r}")
     path = _path()
@@ -146,7 +162,8 @@ def update(**changes) -> dict:
     if effective["error"]:
         # A repair through one switch must not turn the other one toward "upload":
         # keep the fail-closed values the reader has been using.
-        current = {"backend": effective["backend"], "cloud_fallback": effective["cloud_fallback"]}
+        current = {"backend": effective["backend"], "cloud_fallback": effective["cloud_fallback"],
+                   "dictation_cleanup": load_cleanup()}
     else:
         current = dict(raw or {})
     current.update(changes)

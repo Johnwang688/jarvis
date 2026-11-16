@@ -24,7 +24,7 @@ import unicodedata
 
 from jarvis import config
 from windows import voicewire as wire
-from . import remote_stt
+from . import remote_stt, dictation_guard, dictation_rules
 
 HANDSHAKE_TIMEOUT_S = 5.0
 MAX_UNAUTHENTICATED = 4
@@ -36,6 +36,8 @@ ASK_FAILED = "The voice question could not be answered."
 ASK_TIMEOUT = "The voice answer took too long. Please check the Voice chat."
 SAY_FAILED = "The text could not be spoken."
 SAY_CHARS = 2000
+CLEAN_CHARS = 2000
+CLEAN_PASSES = ("off", "rules", "raw", "model")
 ASK_TIMEOUT_S = 180.0
 KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
 ROUTE_PROMPT = """Classify the owner's speech. Return JSON only with kind, text, target.
@@ -110,6 +112,23 @@ class VoiceLink:
         self._pending = 0
         self._lock = threading.Lock()
         self._key = None
+        self._cleanup_counts = {name: {"typed": 0, "scratched": 0} for name in CLEAN_PASSES}
+
+    def cleanup_counts(self):
+        """Counts only, copied under the connection lock; never retain words."""
+        with self._lock:
+            return {name: dict(counts) for name, counts in self._cleanup_counts.items()}
+
+    def _clean_dictation(self, text, app):
+        from jarvis import stt_settings
+        if stt_settings.load_cleanup() == "off":
+            typed, which = text, "off"
+        else:
+            app = "other" if app == "other" else "terminal"
+            typed, which = dictation_guard.choose(text, dictation_rules.clean(text, app), None)
+        with self._lock:
+            self._cleanup_counts[which]["typed"] += 1
+        return {"text": typed, "pass": which}
 
     def _transcribe(self, data):
         return self._dictate(data, verify=False)
@@ -335,6 +354,21 @@ class VoiceLink:
                 reply = {"id": ident if type(ident) is int else None, "ok": False, "error": BAD_REQUEST}
                 if type(ident) is int and request.get("op") == "ping":
                     reply = {"id": ident, "ok": True}
+                elif type(ident) is int and request.get("op") == "clean":
+                    text = request.get("text")
+                    if isinstance(text, str) and len(text) <= CLEAN_CHARS:
+                        try:
+                            result = self._clean_dictation(text, request.get("app"))
+                            reply = {"id": ident, "ok": True, **result}
+                        except Exception:
+                            pass  # fixed BAD_REQUEST; no exception or text escapes
+                elif type(ident) is int and request.get("op") == "scratch":
+                    which = request.get("pass")
+                    if isinstance(which, str):
+                        with self._lock:
+                            if which in self._cleanup_counts:
+                                self._cleanup_counts[which]["scratched"] += 1
+                        reply = {"id": ident, "ok": True}
                 elif type(ident) is int and request.get("op") == "dictate":
                     source = request.get("source", "hotkey")
                     if source not in ("hotkey", "wake"):
