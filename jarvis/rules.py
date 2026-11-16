@@ -2390,6 +2390,10 @@ READER_HAZARDS: dict[str, Callable[[list[str]], "str | Hazard"]] = {
 # operands. Options that only *read* a named file — `grep -f`, `sort
 # --files0-from`, `date -f`, `du -X`, `hexdump -f`, `diff --from-file` — are
 # not hazards: the file is named on the line, where the secrets layer sees it.
+# That holds only when the file's content is the input. When its content is
+# more paths (`file -f`, `--files0-from`, `find -files0-from`) or settings
+# (`env -f`/`-C`), what is opened is never on the line: `run_readonly` refuses
+# those itself (`shell._reads_elsewhere`, `shell._env_elsewhere`, 2026-11-16).
 # Two that run a *fixed* program are not hazards either, as with rg's and
 # file's built-in decompression: `diff -l` pipes through `pr`. And two that
 # write state no one else reads are recorded, not listed: `sort -T DIR`
