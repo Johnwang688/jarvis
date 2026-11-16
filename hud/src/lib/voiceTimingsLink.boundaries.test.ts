@@ -270,6 +270,34 @@ describe("VoiceTimingsLink: audio must come from the send's own reply", () => {
     expect(h.marks().firstAudio).toBeUndefined();
   });
 
+  it("a reply whose text began before a stream gap still gets its audio after the gap", () => {
+    const h = audioHarness();
+    h.ev("turn_started", "mine"); h.at(10); h.ev("text", "mine", { text: "One." });
+    h.at(20); h.link.event({ kind: "_disconnected" }); h.at(1020); h.link.event({ kind: "_connected" });
+    h.at(1100); h.playing(10); h.link.firstAudio("A");
+    expect(h.marks()).toMatchObject({ firstToken: 10, firstAudio: 1100 });
+  });
+
+  it("a late answer still sees where its reply ended", async () => {
+    let t = 0, playingTextAt: number | undefined;
+    const diagnostics = new VoiceDiagnostics(() => t);
+    const link = new VoiceTimingsLink(diagnostics, () => t, () => playingTextAt);
+    const ev = (kind: string, turn: string, data?: SpeechEventLike["data"]) =>
+      link.event({ kind, thread_id: "A", turn_id: turn, ...(data === undefined ? {} : { data }) } as SpeechEventLike);
+    const id = diagnostics.add(1000, "ptt", "transcribing");
+    diagnostics.mark(id, "speechEnd", 0); diagnostics.mark(id, "transcribed", 0);
+    let settle!: (v: unknown) => void;
+    const p = new Promise(ok => { settle = ok; });
+    link.issue("A", [{ diag: id, meta: { mode: "auto" } }], () => p);
+    ev("turn_started", "mine"); t = 10; ev("text", "mine", { text: "Mine." }); ev("turn_finished", "mine");
+    t = 20; ev("turn_started", "next"); ev("text", "next", { text: "Next." });
+    settle({ status: "started", turn_id: "mine" }); await p; await Promise.resolve();
+    t = 300; playingTextAt = 20; link.firstAudio("A");
+    const m = diagnostics.snapshot().rows.find(r => r.id === id)!.marks!;
+    expect(m.firstToken).toBe(10);
+    expect(m.firstAudio).toBeUndefined();
+  });
+
   it("another message's text on the reply's end tick makes that edge unsure", () => {
     const h = audioHarness();
     h.ev("turn_started", "mine"); h.at(10); h.ev("text", "mine", { text: "One." }); h.ev("turn_finished", "mine");

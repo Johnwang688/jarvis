@@ -5,10 +5,17 @@ import { observeVoiceTiming } from "./voiceTimings";
 export const REPLY_TIMING_TTL_MS = 120_000;
 /** Turn ids remembered per chat: an older turn cannot still be running. */
 const SEEN_TURNS = 32;
-/** First-text times kept per pending send, for text that beats the send's answer. */
+/** Turn spans kept per pending send, for a turn named by an answer that comes late. */
 const EARLY_TURNS = 8;
 
 type TimingEvent = SpeechEventLike & { turn_id?: unknown };
+
+/**
+ * One reply as the link saw it: its first text, and when it ended (its finish,
+ * a newer turn, a turn-less message's close, or a stream gap that may hide
+ * either). A tie is another message's text on the same tick as that edge.
+ */
+interface Span { first: number; startTie: boolean; end?: number; endTie: boolean }
 
 interface Link {
   ids: readonly number[];
@@ -34,14 +41,11 @@ interface Link {
   steered: boolean;
   /** steer_queued after the send: message id -> its new turn id. */
   requeued: Map<unknown, string>;
-  /** First text per turn after the send, for a target learned later. */
-  early: Map<string, number>;
+  /** Spans of turns first seen after the send, kept up to date whether or not one is known to be its. */
+  spans: Map<string, Span>;
   tokenAt?: number;
-  /** When the reply that gave `tokenAt` ended: later text is another message's. */
-  end?: number;
-  /** Another message's text shares the tick of `tokenAt` / `end`: that edge is unsure. */
-  startTie?: boolean;
-  endTie?: boolean;
+  /** The span of the reply that gave `tokenAt`: audio must come from it. */
+  span?: Span;
   /** The chat's last text time since the send. */
   lastTextAt?: number;
 }
@@ -117,7 +121,7 @@ export class VoiceTimingsLink {
     if (!ids.length) return undefined;
     const link: Link = {
       ids: [...ids], at, seq: ++this.seq, behindTurn: this.replies.has(chat), awaiting: false,
-      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), steered: false, requeued: new Map(), early: new Map(),
+      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), steered: false, requeued: new Map(), spans: new Map(),
     };
     this.pending.set(chat, link);
     for (const id of ids) observeVoiceTiming(() => this.diagnostics.mark(id, "sent", at));
@@ -149,19 +153,24 @@ export class VoiceTimingsLink {
 
   private target(link: Link, turn: string) {
     link.target = turn;
-    const at = link.early.get(turn);
-    if (at !== undefined) this.token(link, at);
+    const span = link.spans.get(turn);
+    if (span) this.token(link, span);
   }
 
-  private token(link: Link, at: number) {
+  private token(link: Link, span: Span) {
     if (link.tokenAt !== undefined) return;
-    for (const id of link.ids) observeVoiceTiming(() => this.diagnostics.mark(id, "firstToken", at));
-    link.tokenAt = at;
+    for (const id of link.ids) observeVoiceTiming(() => this.diagnostics.mark(id, "firstToken", span.first));
+    link.tokenAt = span.first;
+    link.span = span;
   }
 
-  /** The reply that gave the first token is over (one turn runs per chat). */
-  private ended(link: Link | undefined, at: number) {
-    if (link && link.tokenAt !== undefined && link.end === undefined) link.end = at;
+  /** Every open reply is over: a newer turn (one runs per chat) or a gap. */
+  private endAll(link: Link | undefined, at: number, except?: string) {
+    if (!link) return;
+    for (const [turn, span] of link.spans) if (turn !== except && span.end === undefined) span.end = at;
+    if (link.span && link.span.end === undefined && !(except !== undefined && link.span === link.spans.get(except))) {
+      link.span.end = at;
+    }
   }
 
   private remember(chat: string, turn: string) {
@@ -179,7 +188,10 @@ export class VoiceTimingsLink {
       this.expire(at);
       if (e.kind === "_connected" || e.kind === "_disconnected") {
         // Whatever was published in a stream gap is not replayed, so every live
-        // reply's end may be lost: forget them all, and the sends waiting behind them.
+        // reply's end may be lost: forget them all, and the sends waiting behind
+        // them. A reply that gave a first token ends here as far as audio goes:
+        // text after the gap could be another message's.
+        for (const link of this.pending.values()) this.endAll(link, at);
         for (const chat of [...this.replies.keys()]) this.forget(chat);
         return;
       }
@@ -187,17 +199,18 @@ export class VoiceTimingsLink {
       if (!chat) return;
       const turn = str(e.turn_id);
       if (turn) this.remember(chat, turn);
+      const link = this.pending.get(chat);
+      // Any turn starting, even one never spoken or timed, ends the one before.
+      if (e.kind === "turn_started" && (!turn || turn !== link?.target)) this.endAll(link, at, turn);
       if (e.self_started || e.compaction || (e.relayed !== null && typeof e.relayed === "object")) return;
       const live = this.replies.get(chat);
       if (live) live.lastAt = at;
       const data = e.data !== null && typeof e.data === "object" ? e.data : undefined;
-      const link = this.pending.get(chat);
       if (e.kind === "turn_started") {
         // A steer still unaccounted for was taken by the turn that just ended,
         // or its fate was missed: this new turn is not its reply.
         if (link && link.tokenAt === undefined && typeof link.target !== "string"
             && (link.steers.size || link.target === null)) this.pending.delete(chat);
-        if (!turn || turn !== link?.target) this.ended(link, at);
         this.replies.set(chat, { seq: ++this.seq, turn: true, lastAt: at });
         return;
       }
@@ -220,7 +233,11 @@ export class VoiceTimingsLink {
       // (a missed end costs marks, a false one mis-attributes the old turn's text).
       const fatal = e.kind === "error" && data?.fatal === true;
       if (e.kind === "turn_finished" || fatal) {
-        if (!turn || typeof link?.target !== "string" || turn === link.target) this.ended(link, at);
+        if (!turn) this.endAll(link, at);
+        else {
+          const span = link?.spans.get(turn);
+          if (span && span.end === undefined) span.end = at;
+        }
         this.replies.delete(chat);
         return;
       }
@@ -235,7 +252,10 @@ export class VoiceTimingsLink {
       if (e.kind === "user_message" || e.kind === "error") {
         // Queued, steering or refused-steer messages and nonfatal errors leave a live
         // turn running; they only close a turn-less message.
-        if (!this.replies.get(chat)?.turn) { this.ended(link, at); this.replies.delete(chat); }
+        if (!this.replies.get(chat)?.turn) {
+          if (!turn) this.endAll(link, at);
+          this.replies.delete(chat);
+        }
         return;
       }
       if (e.kind !== "text_delta" && e.kind !== "text") return;
@@ -243,25 +263,33 @@ export class VoiceTimingsLink {
       if (typeof text !== "string" || !text.length) return;
       let reply = this.replies.get(chat);
       if (!reply) this.replies.set(chat, (reply = { seq: ++this.seq, turn: false, lastAt: at }));
-      if (link?.end !== undefined && at === link.end) link.endTie = true;
-      const prevTextAt = link?.lastTextAt;
-      if (link) link.lastTextAt = at;
-      if (link && link.tokenAt === undefined) {
-        if (turn) {
-          // By id: the send's own turn, once known. Before that, a turn that
-          // was already there at the send is never its reply.
-          if (!link.before.has(turn) && !link.early.has(turn) && link.early.size < EARLY_TURNS) link.early.set(turn, at);
-          if (typeof link.target === "string") { if (turn === link.target) this.token(link, at); }
-          else if (link.target === undefined && !link.awaiting && !link.steered && !link.before.has(turn) && reply.seq > link.seq) {
-            this.token(link, at);
-          }
-        } else if (link.target !== null && !link.steers.size && reply.seq > link.seq) {
-          // No ids (an older daemon): judged by order.
-          this.token(link, at);
+      if (link) {
+        const prevTextAt = link.lastTextAt;
+        let span = turn ? link.spans.get(turn) : undefined;
+        // Another message's text on the tick an ended reply closed.
+        for (const other of link.spans.values()) if (other !== span && other.end === at) other.endTie = true;
+        if (link.span && link.span !== span && link.span.end === at) link.span.endTie = true;
+        if (turn && !span && !link.before.has(turn) && link.spans.size < EARLY_TURNS) {
+          link.spans.set(turn, (span = { first: at, startTie: prevTextAt === at, endTie: false }));
         }
-        if (link.tokenAt === at && prevTextAt === at) link.startTie = true;
+        link.lastTextAt = at;
+        if (link.tokenAt === undefined) {
+          if (turn) {
+            // By id: the send's own turn, once known. Before that, a turn that
+            // was already there at the send is never its reply.
+            if (!span) { /* not trackable: never credited */ }
+            else if (typeof link.target === "string") { if (turn === link.target) this.token(link, span); }
+            else if (link.target === undefined && !link.awaiting && !link.steered && reply.seq > link.seq) this.token(link, span);
+          } else if (link.target !== null && !link.steers.size && reply.seq > link.seq) {
+            // No ids (an older daemon): judged by order.
+            this.token(link, { first: at, startTie: prevTextAt === at, endTie: false });
+          }
+        }
       }
-      if (e.kind === "text" && !reply.turn) { this.ended(link, at); this.replies.delete(chat); }
+      if (e.kind === "text" && !reply.turn) {
+        if (!turn) this.endAll(link, at);
+        this.replies.delete(chat);
+      }
     });
   }
 
@@ -279,9 +307,10 @@ export class VoiceTimingsLink {
       // first when the reply's own speech was cancelled). Same-tick edges with
       // another message's text are unsure, so omitted.
       const textAt = this.audioTextStartedAt ? this.audioTextStartedAt(chat) : link.tokenAt;
-      if (textAt === undefined || !Number.isFinite(textAt) || textAt < link.at || textAt < link.tokenAt) return;
-      if (textAt === link.tokenAt && link.startTie) return;
-      if (link.end !== undefined && (textAt > link.end || (textAt === link.end && link.endTie))) return;
+      const span = link.span;
+      if (!span || textAt === undefined || !Number.isFinite(textAt) || textAt < link.at || textAt < span.first) return;
+      if (textAt === span.first && span.startTie) return;
+      if (span.end !== undefined && (textAt > span.end || (textAt === span.end && span.endTie))) return;
       const rows = this.diagnostics.snapshot().rows;
       for (const id of link.ids) {
         if (rows.find(row => row.id === id)?.marks?.firstToken === undefined) continue;
