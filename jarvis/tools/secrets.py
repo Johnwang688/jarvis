@@ -68,7 +68,7 @@ PROTECTED_NAMES = frozenset(
 # `run_command` and v2's shell wherever the file was copied. A glob that
 # reaches them in the folder is the folder rule's; what one prints anyway is
 # scrubbed (`_push_values`).
-EXACT_NAMES = frozenset({"jarvis_push_key.json", "jarvis_push_subscriptions.json",
+EXACT_NAMES = frozenset({"voice-link.key", "jarvis_push_key.json", "jarvis_push_subscriptions.json",
                          # Login files that hold a password or token wherever
                          # they are (cred-dir reads, 2026-10-29): git's store,
                          # netrc (`_netrc` on Windows) and PyPI's. `.npmrc` is

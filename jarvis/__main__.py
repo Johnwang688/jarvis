@@ -334,6 +334,12 @@ def cmd_auth(args) -> int:
     return google_auth.connect(args.client_json)
 
 
+def cmd_voice_link(args) -> int:
+    # Human-only: the existing command judge asks for every jarvis CLI verb.
+    from . import voice_link_setup
+    return voice_link_setup.setup()
+
+
 def cmd_desktop(args) -> int:
     # Human-only, like `jarvis auth`: installing and starting the bridge is
     # how the owner hands over the desktop, so it is never a tool.
@@ -935,6 +941,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="onshape only: redo the setup (keys, sandbox, libraries) even if connected",
     )
     auth.set_defaults(func=cmd_auth)
+
+    voice_link = sub.add_parser("voice-link", help="pair the Windows voice agent (human-only)")
+    voice_link.add_argument("action", choices=["setup"])
+    voice_link.set_defaults(func=cmd_voice_link)
 
     desktop = sub.add_parser(
         "desktop", help="set up or check the Windows desktop bridge (human-only)")
