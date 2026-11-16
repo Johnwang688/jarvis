@@ -437,6 +437,8 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
     if data.get("written_by"):
         written = data["written_by"]
         marks.append(_WRITTEN_MARK.get(written, _WRITTEN_OTHER) if isinstance(written, str) else _WRITTEN_OTHER)
+    elif via == "voice":
+        marks.append("via voice")
     elif via == "phone" and not data.get("decision_id"):
         marks.append(_PHONE_TYPED)
     elif via in _VIA_MARK:

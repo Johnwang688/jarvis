@@ -353,11 +353,12 @@ def is_running(port: int) -> bool:
 # no desk authority either; and (P-5, `remote_write`) a message the owner
 # typed on the phone, through `deliver`: the owner's queue, never at the
 # desk, never Bypass, and never steered into a running turn (`NEVER_STEER`).
-VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone")
+VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone", "voice")
 # Where a message comes from that never steers a running turn: it waits in
 # the owner's queue behind it (phone design P-5: a phone message queues).
 # Read from the message itself, so no caller can forget it.
-NEVER_STEER = ("phone",)
+# Voice questions likewise wait; they carry no desk authority.
+NEVER_STEER = ("phone", "voice")
 
 
 def user_data(message: UserMessage) -> dict:
@@ -1095,7 +1096,7 @@ class Daemon:
             self._lifecycle("task_created", task)
         return task
 
-    def open_thread(self, project_id, role, provider, brief) -> Thread:
+    def open_thread(self, project_id, role, provider, brief, *, title=None) -> Thread:
         project = self.require(self.stores.projects, project_id)
         if project.archived:
             raise DaemonError(f"project {project.name} is archived; restore it from the Archive first")
@@ -1116,7 +1117,11 @@ class Daemon:
             recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
-                                               cwd=brief.cwd, cost_recount=recounted)
+                                               cwd=brief.cwd, cost_recount=recounted,
+                                               # A title fixed at birth (the Voice chat, VA-D4)
+                                               # is in the first metadata write, so a crash
+                                               # before anything else cannot leave it unnamed.
+                                               **({"title": title, "title_source": "owner"} if title else {}))
         try:
             self._open(thread, brief)
         except BaseException:
