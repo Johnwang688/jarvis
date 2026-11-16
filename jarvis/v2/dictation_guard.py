@@ -210,7 +210,7 @@ _MAX_WORDS = 300
 # apostrophes, or a number. "$", "/tmp/" and other syntax may not ("$" -> "$?").
 # A number here is an integer, one decimal, grouping commas or a clock time
 # (H:MM): "127.0.0.1" and "123:456" are not, so "?" cannot be added after them.
-_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d{1,3}(?:,\d{3})+%?|\d+(?:\.\d+)?%?|\d{1,2}:\d{2}")
+_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d{1,3}(?:,\d{3})+%?|\d+(?:\.\d+)?%?|(?:[01]?\d|2[0-3]):[0-5]\d")
 # A raw word that is a number however it is signed or dotted: "5", "-5", ".5",
 # "-.5", "+0.5".
 _NUMERIC_START = re.compile(r"[-+]?\.?\d")
@@ -284,10 +284,10 @@ class _Aligner:
         return self.keys[x] in _NUMBER_WORDS or bool(_NUMERIC_START.match(core))
 
     def _past_fillers(self, x: int) -> int:
-        """The first index at or after x that is not a filler. A filler with
-        punctuation after it is not skipped (the punctuation ends a unit)."""
+        """The first index at or after x that is not a filler. A filler's own
+        punctuation ("um,") does not end a unit: it is hesitation, not a break."""
         n = len(self.raw)
-        while x < n and self.keys[x] in FILLERS and not self.raw[x][1]:
+        while x < n and self.keys[x] in FILLERS:
             x += 1
         return x
 
