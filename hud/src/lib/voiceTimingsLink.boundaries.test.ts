@@ -239,3 +239,66 @@ describe("VoiceTimingsLink: matched by the send's answer", () => {
     await expect(s.back).rejects.toThrow("409");
   });
 });
+
+describe("VoiceTimingsLink: audio must come from the send's own reply", () => {
+  function audioHarness() {
+    let t = 0, playingTextAt: number | undefined;
+    const diagnostics = new VoiceDiagnostics(() => t);
+    const link = new VoiceTimingsLink(diagnostics, () => t, () => playingTextAt);
+    const ev = (kind: string, turn: string, data?: SpeechEventLike["data"]) =>
+      link.event({ kind, thread_id: "A", turn_id: turn, ...(data === undefined ? {} : { data }) } as SpeechEventLike);
+    const id = diagnostics.add(1000, "ptt", "transcribing");
+    diagnostics.mark(id, "speechEnd", 0); diagnostics.mark(id, "transcribed", 0);
+    link.issue("A", [{ diag: id, meta: { mode: "auto" } }], () => ({ status: "started", turn_id: "mine" }));
+    const marks = () => diagnostics.snapshot().rows.find(r => r.id === id)!.marks!;
+    return { link, ev, marks, at: (ms: number) => { t = ms; }, playing: (v: number) => { playingTextAt = v; } };
+  }
+
+  it("audio whose text began inside the reply is credited", () => {
+    const h = audioHarness();
+    h.ev("turn_started", "mine"); h.at(10); h.ev("text", "mine", { text: "One." });
+    h.at(20); h.ev("text", "mine", { text: "Two." }); h.ev("turn_finished", "mine");
+    h.at(300); h.playing(20); h.link.firstAudio("A");
+    expect(h.marks()).toMatchObject({ firstToken: 10, firstAudio: 300 });
+  });
+
+  it("audio whose text began after the reply ended is omitted", () => {
+    const h = audioHarness();
+    h.ev("turn_started", "mine"); h.at(10); h.ev("text", "mine", { text: "One." }); h.ev("turn_finished", "mine");
+    h.at(30); h.ev("turn_started", "next"); h.ev("text", "next", { text: "Later message." });
+    h.at(300); h.playing(30); h.link.firstAudio("A");
+    expect(h.marks().firstAudio).toBeUndefined();
+  });
+
+  it("another message's text on the reply's end tick makes that edge unsure", () => {
+    const h = audioHarness();
+    h.ev("turn_started", "mine"); h.at(10); h.ev("text", "mine", { text: "One." }); h.ev("turn_finished", "mine");
+    h.ev("turn_started", "next"); h.ev("text", "next", { text: "Same tick." });
+    h.at(300); h.playing(10); h.link.firstAudio("A");
+    expect(h.marks().firstAudio).toBeUndefined();
+  });
+
+  it("another message's text on the first token's tick makes that edge unsure", () => {
+    const h = audioHarness();
+    h.ev("turn_started", "older"); h.at(10); h.ev("text_delta", "older", { text: "Older tail" });
+    h.ev("turn_finished", "older"); h.ev("turn_started", "mine"); h.ev("text", "mine", { text: "Mine." });
+    h.at(300); h.playing(10); h.link.firstAudio("A");
+    expect(h.marks().firstToken).toBe(10);
+    expect(h.marks().firstAudio).toBeUndefined();
+  });
+});
+
+describe("VoiceTimingsLink: steers without the send's answer", () => {
+  it("with turn ids, any steer after the send leaves its owner unknown: nothing is marked", () => {
+    const h = harness();
+    const ev = (kind: string, turn: string, data?: SpeechEventLike["data"]) =>
+      h.link.event({ kind, thread_id: "A", turn_id: turn, ...(data === undefined ? {} : { data }) } as SpeechEventLike);
+    ev("turn_started", "old");
+    const id = h.row(); h.link.sent("A", [id]);
+    ev("user_message", "old", { steer: true, message_id: "s1" });
+    ev("turn_finished", "old");
+    ev("steer_queued", "t-s1", { message_id: "s1", turn_id: "t-s1" });
+    ev("turn_started", "t-s1"); h.advance(10); ev("text", "t-s1", { text: "Whose?" });
+    expect(h.marks(id).firstToken).toBeUndefined();
+  });
+});

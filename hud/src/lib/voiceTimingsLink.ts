@@ -30,11 +30,20 @@ interface Link {
   steerId?: string;
   /** Steer message ids seen after the send and not yet requeued. */
   steers: Set<unknown>;
+  /** Any steer was seen after the send: by id, only its answer can say which was its. */
+  steered: boolean;
   /** steer_queued after the send: message id -> its new turn id. */
   requeued: Map<unknown, string>;
   /** First text per turn after the send, for a target learned later. */
   early: Map<string, number>;
   tokenAt?: number;
+  /** When the reply that gave `tokenAt` ended: later text is another message's. */
+  end?: number;
+  /** Another message's text shares the tick of `tokenAt` / `end`: that edge is unsure. */
+  startTie?: boolean;
+  endTie?: boolean;
+  /** The chat's last text time since the send. */
+  lastTextAt?: number;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -108,7 +117,7 @@ export class VoiceTimingsLink {
     if (!ids.length) return undefined;
     const link: Link = {
       ids: [...ids], at, seq: ++this.seq, behindTurn: this.replies.has(chat), awaiting: false,
-      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), requeued: new Map(), early: new Map(),
+      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), steered: false, requeued: new Map(), early: new Map(),
     };
     this.pending.set(chat, link);
     for (const id of ids) observeVoiceTiming(() => this.diagnostics.mark(id, "sent", at));
@@ -150,6 +159,11 @@ export class VoiceTimingsLink {
     link.tokenAt = at;
   }
 
+  /** The reply that gave the first token is over (one turn runs per chat). */
+  private ended(link: Link | undefined, at: number) {
+    if (link && link.tokenAt !== undefined && link.end === undefined) link.end = at;
+  }
+
   private remember(chat: string, turn: string) {
     let turns = this.seen.get(chat);
     if (!turns) this.seen.set(chat, (turns = []));
@@ -183,6 +197,7 @@ export class VoiceTimingsLink {
         // or its fate was missed: this new turn is not its reply.
         if (link && link.tokenAt === undefined && typeof link.target !== "string"
             && (link.steers.size || link.target === null)) this.pending.delete(chat);
+        if (!turn || turn !== link?.target) this.ended(link, at);
         this.replies.set(chat, { seq: ++this.seq, turn: true, lastAt: at });
         return;
       }
@@ -193,15 +208,19 @@ export class VoiceTimingsLink {
         if (!link || link.tokenAt !== undefined) return;
         const message = data?.message_id, next = str(data?.turn_id);
         if (next && link.requeued.size < EARLY_TURNS) link.requeued.set(message, next);
-        const ours = link.steerId !== undefined ? message === link.steerId : link.steers.has(message);
         link.steers.delete(message);
-        if (ours && next && typeof link.target !== "string") this.target(link, next);
+        // Only the send's own answer names its steer; any steer seen meanwhile
+        // may be another message's.
+        if (link.steerId !== undefined && message === link.steerId && next && typeof link.target !== "string") {
+          this.target(link, next);
+        }
         return;
       }
       // Only an explicit `fatal: true` ends a turn; unknown severity leaves it live
       // (a missed end costs marks, a false one mis-attributes the old turn's text).
       const fatal = e.kind === "error" && data?.fatal === true;
       if (e.kind === "turn_finished" || fatal) {
+        if (!turn || typeof link?.target !== "string" || turn === link.target) this.ended(link, at);
         this.replies.delete(chat);
         return;
       }
@@ -211,11 +230,12 @@ export class VoiceTimingsLink {
         // `steer_queued` for it names a turn of its own. The steer may be another
         // message's; omitting this send's marks is then the safe side.
         link.steers.add(data.message_id);
+        link.steered = true;
       }
       if (e.kind === "user_message" || e.kind === "error") {
         // Queued, steering or refused-steer messages and nonfatal errors leave a live
         // turn running; they only close a turn-less message.
-        if (!this.replies.get(chat)?.turn) this.replies.delete(chat);
+        if (!this.replies.get(chat)?.turn) { this.ended(link, at); this.replies.delete(chat); }
         return;
       }
       if (e.kind !== "text_delta" && e.kind !== "text") return;
@@ -223,21 +243,25 @@ export class VoiceTimingsLink {
       if (typeof text !== "string" || !text.length) return;
       let reply = this.replies.get(chat);
       if (!reply) this.replies.set(chat, (reply = { seq: ++this.seq, turn: false, lastAt: at }));
+      if (link?.end !== undefined && at === link.end) link.endTie = true;
+      const prevTextAt = link?.lastTextAt;
+      if (link) link.lastTextAt = at;
       if (link && link.tokenAt === undefined) {
         if (turn) {
           // By id: the send's own turn, once known. Before that, a turn that
           // was already there at the send is never its reply.
           if (!link.before.has(turn) && !link.early.has(turn) && link.early.size < EARLY_TURNS) link.early.set(turn, at);
           if (typeof link.target === "string") { if (turn === link.target) this.token(link, at); }
-          else if (link.target === undefined && !link.awaiting && !link.steers.size && !link.before.has(turn) && reply.seq > link.seq) {
+          else if (link.target === undefined && !link.awaiting && !link.steered && !link.before.has(turn) && reply.seq > link.seq) {
             this.token(link, at);
           }
         } else if (link.target !== null && !link.steers.size && reply.seq > link.seq) {
           // No ids (an older daemon): judged by order.
           this.token(link, at);
         }
+        if (link.tokenAt === at && prevTextAt === at) link.startTie = true;
       }
-      if (e.kind === "text" && !reply.turn) this.replies.delete(chat);
+      if (e.kind === "text" && !reply.turn) { this.ended(link, at); this.replies.delete(chat); }
     });
   }
 
@@ -249,10 +273,15 @@ export class VoiceTimingsLink {
       if (!link || link.tokenAt === undefined) return;
       // The controller supplies the first text time of the playing message,
       // preserved across synthesis, summaries and queue waits. Playback time
-      // alone cannot identify a reply; a message whose text began before this
-      // send's first token is an older one.
+      // alone cannot identify a reply. Only a message whose text began within
+      // the send's own reply counts: not before its first token (an older
+      // message), not after that reply ended (a later one, whose audio can play
+      // first when the reply's own speech was cancelled). Same-tick edges with
+      // another message's text are unsure, so omitted.
       const textAt = this.audioTextStartedAt ? this.audioTextStartedAt(chat) : link.tokenAt;
       if (textAt === undefined || !Number.isFinite(textAt) || textAt < link.at || textAt < link.tokenAt) return;
+      if (textAt === link.tokenAt && link.startTie) return;
+      if (link.end !== undefined && (textAt > link.end || (textAt === link.end && link.endTie))) return;
       const rows = this.diagnostics.snapshot().rows;
       for (const id of link.ids) {
         if (rows.find(row => row.id === id)?.marks?.firstToken === undefined) continue;
