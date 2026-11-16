@@ -34,7 +34,7 @@ from typing import Annotated, Callable, Iterable
 
 from . import tool
 from .files import credential_folder_judge, in_working_dir
-from .secrets import is_env_credential, is_protected
+from .secrets import is_credential
 
 MODES = ("content", "files", "count")
 TIMEOUT_S = 30
@@ -56,9 +56,10 @@ SKIP_DIRS = frozenset(
 
 def refused(path: str | Path) -> bool:
     """**The one protected-file filter** for a search: a credential bundle by
-    name (`secrets.PROTECTED_NAMES`) or a credential env file
-    (`secrets.is_env_credential`: `.env`, `.env.<anything>` but `*.example`,
-    by its own name, a symlink's or where it resolves).
+    name (`secrets.PROTECTED_NAMES`/`EXACT_NAMES`) or a credential env file
+    (`.env`, `.env.<anything>` but `*.example`). `secrets.is_credential`
+    judges every name case-folded and Windows-trimmed, on the path, each
+    symlink hop and where it resolves; unfollowable links refuse too.
 
     `grep_files` (both backends, every mode) and the HUD's find in files
     (`jarvis/v2/editor_nav.py`, ED-7) both ask this and nothing else keeps a
@@ -77,7 +78,7 @@ def refused(path: str | Path) -> bool:
 def refuser() -> Callable[[str | Path], bool]:
     """`refused`, for the files of one search."""
     folder = credential_folder_judge()
-    return lambda path: is_protected(path) or is_env_credential(path) or folder(path)
+    return lambda path: is_credential(path) or folder(path)
 
 
 @dataclass
@@ -557,7 +558,12 @@ def grep_files(
         return f"Error: mode must be one of {', '.join(MODES)}."
     # A relative path is the run's working folder's (the v2 fast path's
     # project, decision F-6); with nothing bound, the process's, as before.
-    root = Path(in_working_dir(path)).expanduser().resolve()
+    root = Path(in_working_dir(path)).expanduser()
+    # Keep a protected root's own name and intermediate symlink names before
+    # resolving it for either backend, including files/count search modes.
+    if refused(root):
+        return f"No matches for {pattern!r} under {root}."
+    root = root.resolve()
     if not root.exists():
         return f"Error: {root} does not exist."
     try:
