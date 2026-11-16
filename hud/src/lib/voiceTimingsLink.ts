@@ -15,7 +15,11 @@ type TimingEvent = SpeechEventLike & { turn_id?: unknown };
  * a newer turn, a turn-less message's close, or a stream gap that may hide
  * either). A tie is another message's text on the same tick as that edge.
  */
-interface Span { first: number; startTie: boolean; end?: number; endTie: boolean }
+interface Span {
+  first: number; startTie: boolean; end?: number; endTie: boolean;
+  /** Steered before its first text: none of its text can be told to answer the send. */
+  steered?: boolean;
+}
 
 interface Link {
   ids: readonly number[];
@@ -43,6 +47,8 @@ interface Link {
   requeued: Map<unknown, string>;
   /** Spans of turns first seen after the send, kept up to date whether or not one is known to be its. */
   spans: Map<string, Span>;
+  /** Turns steered after the send before any text of theirs was seen. */
+  steeredEarly: Set<string>;
   tokenAt?: number;
   /** The span of the reply that gave `tokenAt`: audio must come from it. */
   span?: Span;
@@ -121,7 +127,7 @@ export class VoiceTimingsLink {
     if (!ids.length) return undefined;
     const link: Link = {
       ids: [...ids], at, seq: ++this.seq, behindTurn: this.replies.has(chat), awaiting: false,
-      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), steered: false, requeued: new Map(), spans: new Map(),
+      before: new Set(this.seen.get(chat) ?? []), steers: new Set(), steered: false, requeued: new Map(), spans: new Map(), steeredEarly: new Set(),
     };
     this.pending.set(chat, link);
     for (const id of ids) observeVoiceTiming(() => this.diagnostics.mark(id, "sent", at));
@@ -158,7 +164,7 @@ export class VoiceTimingsLink {
   }
 
   private token(link: Link, span: Span) {
-    if (link.tokenAt !== undefined) return;
+    if (link.tokenAt !== undefined || span.steered) return;
     for (const id of link.ids) observeVoiceTiming(() => this.diagnostics.mark(id, "firstToken", span.first));
     link.tokenAt = span.first;
     link.span = span;
@@ -246,6 +252,8 @@ export class VoiceTimingsLink {
         // the message it was answering: as far as audio goes, that reply ends.
         const steered = turn ? link.spans.get(turn) : link.span;
         if (steered && steered.end === undefined) steered.end = at;
+        // Steered before saying anything: all of its text may answer the steer.
+        if (turn && !steered && !link.before.has(turn) && link.steeredEarly.size < EARLY_TURNS) link.steeredEarly.add(turn);
       }
       if (e.kind === "user_message" && data?.steer === true && link && link.tokenAt === undefined) {
         // A steer is answered inside the running turn, whose text cannot be told
@@ -276,7 +284,7 @@ export class VoiceTimingsLink {
         for (const other of link.spans.values()) if (other !== span && other.end === at) other.endTie = true;
         if (link.span && link.span !== span && link.span.end === at) link.span.endTie = true;
         if (turn && !span && !link.before.has(turn) && link.spans.size < EARLY_TURNS) {
-          link.spans.set(turn, (span = { first: at, startTie: prevTextAt === at, endTie: false }));
+          link.spans.set(turn, (span = { first: at, startTie: prevTextAt === at, endTie: false, steered: link.steeredEarly.has(turn) }));
         }
         link.lastTextAt = at;
         if (link.tokenAt === undefined) {
