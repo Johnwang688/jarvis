@@ -3855,7 +3855,13 @@ relative aliases by name; folder checks still require path-like tails.
 Parent directories resolve in kernel order before walking the final name,
 and an initial lookup error keeps the name verdict; errors after following
 a link refuse. `grep_files` judges its root before resolving it. Raw command
-names ignore ASCII case with the same name-character boundaries. A plain
+names are matched after Unicode case folding of the line and the names (the
+name rule's own folding; not a regex IGNORECASE, which pairs `İ` with `i`, and
+not ASCII-only, which misses `ſ` and the Kelvin sign), with the same
+name-character boundaries. Accepted cost, by the lead (PR #388 verifier round 2):
+with no per-program table of which letters take a value, a short-option tail is
+judged as a file, so `ls -la` is refused in a folder that holds a credential
+alias named exactly `a` or `la`; the refusal names the word. A plain
 recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
 remains the stated limit, the class of `grep -r foo .`; this adds no
 recursive file-name scan.

@@ -267,9 +267,13 @@ def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
 # prints, and a clear refusal the model can rephrase past is cheaper than a
 # credential in the transcript, which is only fixable by rotating the key.
 _NAME_CHAR = r"A-Za-z0-9_.\-"
+# Case is judged by the same rule as `is_credential_name`: Unicode case
+# folding, applied to the line and the names alike (`raw_names_in`). Not a
+# regex IGNORECASE: that matches simple case pairs (`İ` against `i`) the
+# file-name rule does not, and an ASCII-only flag misses folds it does
+# (`ſ` folds to `s`, the Kelvin sign to `k`) — PR #388, verifier rounds 1-2.
 _RAW_NAMES = [
-    (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])",
-                      re.IGNORECASE | re.ASCII))
+    (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name.casefold())}(?![{_NAME_CHAR}])"))
     for name in sorted(PROTECTED_NAMES | EXACT_NAMES)
 ]
 
@@ -860,8 +864,9 @@ def raw_names_in(text: str) -> str | None:
     (`_RAW_NAMES`), or a credential env file named from `.env` on. The last step of
     `protected_in_command`; v2 asks it of Claude's Grep `glob` and `path` too,
     so the two layers agree (`--include='*.env*'` and `glob: "*.env*"`)."""
+    folded = text.casefold()
     for name, pattern in _RAW_NAMES:
-        if pattern.search(text):
+        if pattern.search(folded):
             return name
     return env_credential_in_text(text)
 
