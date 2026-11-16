@@ -1629,7 +1629,7 @@ export default function App() {
           // already on screen from send(), so it is never added twice. The
           // owner's answer to a decision (inbox B1, via "inbox"; from the
           // phone, P-4, via "phone") appears too.
-          if (tid && (data.via === "discord" || data.via === "dm" || data.via === "inbox" || data.via === "phone")) {
+          if (tid && (data.via === "discord" || data.via === "dm" || data.via === "inbox" || data.via === "phone" || data.via === "voice")) {
             const mark = data.steer ? "steering" : data.queued ? "queued" : undefined;
             for (const n of mine) {
               dispatch({

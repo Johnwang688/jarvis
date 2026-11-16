@@ -353,11 +353,12 @@ def is_running(port: int) -> bool:
 # no desk authority either; and (P-5, `remote_write`) a message the owner
 # typed on the phone, through `deliver`: the owner's queue, never at the
 # desk, never Bypass, and never steered into a running turn (`NEVER_STEER`).
-VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone")
+VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone", "voice")
 # Where a message comes from that never steers a running turn: it waits in
 # the owner's queue behind it (phone design P-5: a phone message queues).
 # Read from the message itself, so no caller can forget it.
-NEVER_STEER = ("phone",)
+# Voice questions likewise wait; they carry no desk authority.
+NEVER_STEER = ("phone", "voice")
 
 
 def user_data(message: UserMessage) -> dict:
