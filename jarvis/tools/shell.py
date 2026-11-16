@@ -8,7 +8,6 @@ one catch-all `run_command` would leave the harness nothing to reason about.
 
 from __future__ import annotations
 
-import glob
 import re
 import shlex
 import subprocess
@@ -152,10 +151,20 @@ def run_readonly(
     produced = (Counter(w for w in argv if w.startswith("-"))
                 - Counter(t for t in tokens if t.startswith("-")))
     if produced:
-        word = next(iter(produced))
-        return (f"Error: a pattern expands to {word[:80]}, which the program reads as an "
-                "option this check cannot judge. Use run_command, or name the files "
-                "without a pattern.")
+        # The name is not repeated: it may lie in a folder this tool never
+        # lists (review of 2026-11-16).
+        return ("Error: a pattern expands to a name starting with `-`, which the program "
+                "reads as an option this check cannot judge. Use run_command, or name the "
+                "files without a pattern.")
+    # From here on every check reads dash's words, the ones that will run:
+    # shlex keeps the words after an unquoted `#` that dash drops as a
+    # comment, so `file -m m [-]C -- # -C` balanced the count above and ran
+    # `file -m m -C --`, a write, while every scan that stops at `--` read
+    # the shlex copy (review of 2026-11-16).
+    written_as = tokens
+    tokens = argv
+    if not tokens:
+        return "Error: empty command."
 
     # Judge the command that actually runs, not the costume it arrived in.
     # `env` is on the allowlist because printing the environment is a read, and
@@ -208,12 +217,13 @@ def run_readonly(
                                       and _SAFE_ENV_VALUE.fullmatch(parts[3])):
             return (f"Error: setting {parts[0]} changes what the program runs with, so it is "
                     "not a read. Use run_command.")
-    # A pattern among the wrappers' words or as the program: one that matches
-    # several names shifts which word is the program (`timeout * ls` beside
-    # files `5` and `rm` runs `rm`).
-    if any(glob.has_magic(word) for word in tokens[:tail + 1]):
-        return ("Error: a pattern before or as the program can change which program runs. "
-                "Use run_command.")
+    # The wrappers' words and the program exactly as written: a pattern there
+    # that matches several names shifts which word is the program (`timeout *
+    # ls` beside files `5` and `rm` runs `rm`), and one matching a planted
+    # `-p<pid>` is an option (`ionice -c3 -* ls`).
+    if tokens[:tail + 1] != written_as[:tail + 1]:
+        return ("Error: a pattern or `~` before or as the program can change what runs, "
+                "which this check cannot judge. Use run_command.")
     line = tokens
     tokens = sure
     if not tokens:
@@ -267,14 +277,22 @@ def run_readonly(
     _recursive, follows = _search_modes(binary, tokens)
     if follows:
         return f"Error: {follows}. Symlinks named on the line are judged; nested ones are not."
-    reached = _credential_operand(binary, tokens, argv)
+    reached = _credential_operand(binary, tokens)
+    if reached and reached not in written_as:
+        # An expanded name is not repeated: `cat ~/.s[[:lower:]]h/i*` would
+        # list the folder one refusal at a time (review of 2026-11-16).
+        reached = "a word this line's patterns expand to"
     if reached:
         return (f"Error: {reached} is in a credential folder, or holds one this search would "
                 "read (SSH, cloud and Git logins, "
                 "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
                 "not read. Ask the owner for what you need instead.")
 
-    return _run(command)
+    # The judged words, each quoted, so the shell's second reading is exactly
+    # them: no pattern, `~` or comment left to expand again, and no file made
+    # in between can change them (review of 2026-11-16). Leading assignments
+    # (locale and time zone, plain values) stay unquoted and stay assignments.
+    return _run(shlex.join(line))
 
 
 # --- what a line reads from somewhere other than the line (2026-11-16) ---------
@@ -486,8 +504,8 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
     return None
 
 
-# How many files one operand's glob may name before the line is refused as
-# too broad to judge, rather than judged in part.
+# How many words dash's expansion of one line may come to before the line is
+# refused as too broad to judge, rather than judged in part.
 _GLOB_CAP = 2000
 
 
@@ -594,21 +612,21 @@ def _grep_dir_action_harmless(value: str) -> bool:
                             or "skip".startswith(value))
 
 
-def _credential_operand(binary: str, tokens: list[str],
-                        argv: list[str] | None = None) -> str | None:
+def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     """The first operand of a `run_readonly` line that is, or reaches into, a
     credential folder (`config.credential_dirs()`), or None.
 
-    Every word after the program is judged as a path where the shell would
-    find it: `~` expanded, a relative word placed in the run's working folder
-    (`runtime.working_dir()`, else the process's own), a glob expanded, and a
-    symlink followed (`files.credential_folder_judge`, the read tools' own
-    judge). Patterns and other non-paths simply judge as nothing. A recursive
-    search (`grep -r`, `rg`) of a folder that *holds* a credential folder
-    reads it too, so that is refused as well. A glob too broad to judge is
-    refused rather than judged in part.
+    `tokens` are the words as dash hands them to the program (`_shell_words`,
+    since 2026-11-16): patterns and `~` already expanded, so each word is
+    judged as it stands. Every word after the program is judged as a path: a
+    relative word placed in the run's working folder (`runtime.working_dir()`,
+    else the process's own), and a symlink followed
+    (`files.credential_folder_judge`, the read tools' own judge). A `~` left
+    in a word was literal to the shell and is judged both literally and
+    expanded. Patterns and other non-paths simply judge as nothing. A
+    recursive search (`grep -r`, `rg`) of a folder that *holds* a credential
+    folder reads it too, so that is refused as well.
     """
-    import glob
     import os
 
     from .. import runtime
@@ -648,6 +666,11 @@ def _credential_operand(binary: str, tokens: list[str],
     attached = []   # the same for every tail of a short-option cluster, and
     #                 whether it looks like a path
     for word in tokens[1:]:
+        if word.startswith("-") and len(word) > 1:
+            # The whole word too: after `--` (or to a program that reads it
+            # so) `-keylink` is a file, and `cat -- -keylink` printed the key
+            # it links to (review of 2026-11-16, older than that day).
+            attached.extend((word, path, True) for path in places(word))
         if word.startswith("--"):
             if "=" in word and word.split("=", 1)[1]:
                 words.extend((word, path) for path in places(word.split("=", 1)[1]))
@@ -673,23 +696,7 @@ def _credential_operand(binary: str, tokens: list[str],
         # is the one they run in.
         words.append((".", base))
     for word, path, path_like in [(w, p, True) for w, p in words] + attached:
-        if glob.has_magic(path):
-            found = []
-            for match in glob.iglob(path):
-                found.append(match)
-                if len(found) > _GLOB_CAP:
-                    return word
-        else:
-            found = [path]
-        for candidate in found:
-            if reaches(candidate, path_like):
-                return word
-    # Every word as the shell hands it over (`_shell_words`), judged as it
-    # stands, with no `~` or pattern left in it to guess at: `[[:class:]]`
-    # patterns, a quoted `~`, and the whole of a word starting with `-`
-    # (`cat -- -keylink` printed the key it links to; review of 2026-11-16).
-    for word in argv or ():
-        if reaches(word if os.path.isabs(word) else os.path.join(base, word), True):
+        if reaches(path, path_like):
             return word
     return None
 

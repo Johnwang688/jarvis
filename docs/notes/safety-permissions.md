@@ -2272,12 +2272,16 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   `~` and patterns. Every resulting word is judged as it stands and by name
   (`~/.s[[:lower:]]h/id_ed25519`, `cat -- -keylink`, `cat .e[[:lower:]]v`); an
   option word only a pattern produced is refused (a planted `-f` reached by
-  `-?`, `find -de?ete`); so is a pattern before or as the program. Also
+  `-?`, `find -de?ete`); so is a pattern before or as the program. Every
+  check after the expansion reads dash's words, and **what runs is those
+  words, each quoted** (a `#` comment had hidden a word from shlex's copy;
+  delta review), so nothing is expanded twice. Refusals repeat only words as
+  written, never an expanded name. Also
   refused: procps `watch` (runs `sh -c`), home magic folders, `.mime.mgc`
   companions. **Open:** rg's `.ignore`/`.rgignore` read from searched
   folders, links followed (invalid glob lines are quoted); other processes'
   environments through `ps eww` and `/proc/PID/environ`.
-  `tests/readonly_list_files_check.py`, 41 of 41 mutations biting.
+  `tests/readonly_list_files_check.py`, 44 of 44 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.

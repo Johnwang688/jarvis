@@ -126,6 +126,25 @@ many words (2,000) or a syntax error: refused. The shell runs in the same
 folder and environment as `_run`, so locale and HOME agree. grep patterns
 such as `'[[:space:]]'` keep working.
 
+## Delta review (Opus, 2026-11-16, of f4e16ffa)
+
+The dash step itself held: no line that passes the earlier checks makes dash
+do more than expand (`(` is a syntax error, reserved words are plain words
+after `printf`, a fixed format, a 5 s bound that leaves no process behind).
+Two findings, fixed:
+
+- **HIGH: a comment hid a word.** shlex keeps words after an unquoted `#`
+  that dash drops, so `file -m m [-]C -- # -C` balanced the produced-option
+  count while the scans that stop at `--` read the shlex copy: `file -C`
+  wrote `magic.txt.mgc`, and `grep -r x . [-]R -- # -R` followed a nested
+  link into `~/.ssh`. **Now every check after the expansion reads dash's
+  words, and what runs is those words, each quoted (`shlex.join`)**, so the
+  shell's second reading cannot expand anything again; that also closes the
+  gap between the two expansions (a file made in between). The wrappers'
+  words and the program must be exactly as written.
+- **MED: refusals named expanded files** (`cat ~/.s[[:lower:]]h/i*` named
+  `id_secretname`). A refusal now repeats only words as written.
+
 Accepted false refusals, deliberately: a literal file named like a refused
 option after `--` (`file -- -foo`, `wc -- --files0-from`) and a refused
 letter as another option's value (`file -F -f x`). Honouring `--` needs exact
@@ -145,4 +164,4 @@ and leaks nothing, the sentinel never appears and the fake program never
 runs; negatives that must still run (`file -m one.magic x`, `file -bmone.magic
 x`, `wc -l`, `du -sh .`, `grep -n env -C 2 f`, `grep -f pats f`, `date -f
 dates`, `env LANG=C ls`, `timeout 5 ls`, `env`, `find . -name x`). Mutation:
-each refusal removed in turn makes the suite fail (41 of 41).
+each refusal removed in turn makes the suite fail (44 of 44).

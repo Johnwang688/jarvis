@@ -321,6 +321,11 @@ class ListFiles(unittest.TestCase):
         for command in ("timeout * ls", "env LANG=C l?", "nice -n * ls", "l? -la",
                         "timeout 5 [l]s"):
             self.assertRefused(command, None)
+        # Even when the pattern lands on an allowlisted name: the program and
+        # the wrappers' words are taken only as written.
+        (self.project / "ls").write_text("")
+        for command in ("timeout 5 [l]s", "env LANG=C l?", "[l]s"):
+            self.assertRefused(command, "before or as the program")
 
     def test_dash_operands_are_judged_whole(self):
         # Review of 2026-11-16 (older than that day): a word starting with
@@ -347,6 +352,46 @@ class ListFiles(unittest.TestCase):
         for command in ("rg -F -e '--files-from' src.txt", "grep -F -- --files0-from src.txt",
                         "echo --files0-from", "grep -e --files-from src.txt"):
             self.assertRuns(command)
+
+    def test_a_comment_never_hides_a_word(self):
+        # Delta review of 2026-11-16: shlex keeps the words after an unquoted
+        # `#` that dash drops, so a copy there balanced the produced-option
+        # count while scans stopping at `--` read the shlex words.
+        (self.project / "-C").write_text("")
+        out = run_readonly("file -m magic.txt [-]C -- # -C")
+        self.assertTrue(out.startswith("Error:"), out)
+        self.assertFalse((self.project / "magic.txt.mgc").exists(), "file -C wrote")
+        (self.project / "-C").unlink()
+        (self.project / "-R").write_text("")
+        (self.project / "sub").mkdir()
+        (self.project / "sub" / "deep").symlink_to(self.home / ".ssh", target_is_directory=True)
+        for command in ("grep -r x . [-]R -- # -R", "grep -r x sub [-]R -- # -R"):
+            self.assertRefused(command, None)
+        # A comment by itself is fine, and what runs is what dash made.
+        self.assertRuns("ls bin # -la")
+        self.assertEqual(run_readonly("echo a # b"), "a\n[exit 0]")
+
+    def test_refusals_never_name_expanded_files(self):
+        (self.home / ".ssh" / "id_secretname").write_text(SENTINEL + "\n")
+        for command in ("cat ~/.s[[:lower:]]h/i*", "ls -d ~/.s[[:lower:]]h/*"):
+            out = run_readonly(command)
+            self.assertTrue(out.startswith("Error:"), out)
+            self.assertNotIn("id_secretname", out)
+            self.assertNotIn("id_rsa", out)
+        (self.project / "-zzz_planted").write_text("")
+        out = run_readonly("ls *")
+        self.assertTrue(out.startswith("Error:"), out)
+        self.assertNotIn("zzz_planted", out)
+
+    def test_what_runs_is_what_was_judged(self):
+        from jarvis.tools import shell
+        # The judged words run, with no second expansion by a shell.
+        with patch.object(shell, "_shell_words", return_value=["echo", "judged"]):
+            self.assertEqual(run_readonly("echo ran"), "judged\n[exit 0]")
+        # Leading locale and time-zone assignments reach the environment.
+        self.assertIn("UTC", run_readonly("TZ=UTC date +%Z"))
+        self.assertRuns("LANG=C ls")
+        self.assertRuns("env LC_ALL=C ls ~")
 
     def test_glued_bare_tail_symlink(self):
         # Sol verifier, 2026-11-16 (older than this change): a value glued to
