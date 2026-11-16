@@ -15,7 +15,7 @@ from typing import Annotated
 
 from .. import protected_state, rules
 from . import tool
-from .secrets import protected_in_command, refusal
+from .secrets import is_credential, protected_in_command, refusal
 
 # `git` is deliberately not here (2026-10-09). This tool is ungated, so its
 # allowlist is the whole boundary, and git is a program whose *flags* run other
@@ -224,8 +224,8 @@ def run_readonly(
         return f"Error: {follows}. Symlinks named on the line are judged; nested ones are not."
     reached = _credential_operand(binary, tokens)
     if reached:
-        return (f"Error: {reached} is in a credential folder, or holds one this search would "
-                "read (SSH, cloud and Git logins, "
+        return (f"Error: {reached} is a credential file, is in a credential folder, or holds "
+                "one this search would read (SSH, cloud and Git logins, "
                 "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
                 "not read. Ask the owner for what you need instead.")
 
@@ -316,13 +316,14 @@ def _grep_dir_action_harmless(value: str) -> bool:
 
 def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     """The first operand of a `run_readonly` line that is, or reaches into, a
-    credential folder (`config.credential_dirs()`), or None.
+    credential file or folder (`config.credential_dirs()`), or None.
 
     Every word after the program is judged as a path where the shell would
     find it: `~` expanded, a relative word placed in the run's working folder
     (`runtime.working_dir()`, else the process's own), a glob expanded, and a
-    symlink followed (`files.credential_folder_judge`, the read tools' own
-    judge). Patterns and other non-paths simply judge as nothing. A recursive
+    symlink followed (`secrets.is_credential` for names and
+    `files.credential_folder_judge` for folders, the read tools' own judges).
+    Patterns and other non-paths simply judge as nothing. A recursive
     search (`grep -r`, `rg`) of a folder that *holds* a credential folder
     reads it too, so that is refused as well. A glob too broad to judge is
     refused rather than judged in part.
@@ -342,7 +343,7 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         return text if os.path.isabs(text) else os.path.join(base, text)
 
     words = []      # (as written, placed path) for an operand or a long option's value
-    attached = []   # the same for every path-like tail of a short-option cluster
+    attached = []   # (as written, placed path, also judge folders)
     for word in tokens[1:]:
         if word.startswith("--"):
             if "=" in word and word.split("=", 1)[1]:
@@ -352,20 +353,21 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
             # A value glued to a short option (`-f/abs`, `-nf/abs`) is never
             # a word of its own (review 3 of PR #182: `file -f<key>`, `date
             # -f<key>` and `ss -F<key>` printed it). No per-program table of
-            # which letters take a value: every tail of the cluster that
-            # looks like a path is judged. A `~` mid-word is literal to the
-            # shell, so judging it expanded only errs toward refusing.
+            # which letters take a value: every tail is judged for credential
+            # names/aliases, including bare relative filenames. Only path-like
+            # tails keep the existing folder/recursion checks. A `~` mid-word
+            # is literal to the shell, so expanding it errs toward refusing.
             for k in range(2, len(word)):
                 tail = word[k:]
-                if tail.startswith(("/", "~", ".")) or "/" in tail:
-                    attached.append((word, place(tail)))
+                path_like = tail.startswith(("/", "~", ".")) or "/" in tail
+                attached.append((word, place(tail), path_like))
             continue
         words.append((word, place(word)))
     if recursive and not any(os.path.exists(path) for _word, path in words):
         # `rg session`, `grep -r x`: no folder named, so the one they search
         # is the one they run in.
         words.append((".", base))
-    for word, path in words + attached:
+    for word, path, check_folders in [(w, p, True) for w, p in words] + attached:
         if glob.has_magic(path):
             found = []
             for match in glob.iglob(path):
@@ -375,9 +377,9 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         else:
             found = [path]
         for candidate in found:
-            if judge(candidate):
+            if is_credential(candidate) or (check_folders and judge(candidate)):
                 return word
-            if recursive:
+            if recursive and check_folders:
                 # The shared reading (`files.credential_folder_holds`): the
                 # stores, case, kernel-order `..` and the Windows profiles
                 # too (cred-dir reads, 2026-10-29).
