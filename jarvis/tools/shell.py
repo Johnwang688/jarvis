@@ -15,7 +15,7 @@ from typing import Annotated
 
 from .. import protected_state, rules
 from . import tool
-from .secrets import protected_in_command, refusal
+from .secrets import is_credential, protected_in_command, refusal
 
 # `git` is deliberately not here (2026-10-09). This tool is ungated, so its
 # allowlist is the whole boundary, and git is a program whose *flags* run other
@@ -224,8 +224,8 @@ def run_readonly(
         return f"Error: {follows}. Symlinks named on the line are judged; nested ones are not."
     reached = _credential_operand(binary, tokens)
     if reached:
-        return (f"Error: {reached} is in a credential folder, or holds one this search would "
-                "read (SSH, cloud and Git logins, "
+        return (f"Error: {reached} is a credential file, is in a credential folder, or holds "
+                "one this search would read (SSH, cloud and Git logins, "
                 "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
                 "not read. Ask the owner for what you need instead.")
 
@@ -316,13 +316,14 @@ def _grep_dir_action_harmless(value: str) -> bool:
 
 def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     """The first operand of a `run_readonly` line that is, or reaches into, a
-    credential folder (`config.credential_dirs()`), or None.
+    credential file or folder (`config.credential_dirs()`), or None.
 
     Every word after the program is judged as a path where the shell would
     find it: `~` expanded, a relative word placed in the run's working folder
     (`runtime.working_dir()`, else the process's own), a glob expanded, and a
-    symlink followed (`files.credential_folder_judge`, the read tools' own
-    judge). Patterns and other non-paths simply judge as nothing. A recursive
+    symlink followed (`secrets.is_credential` for names and
+    `files.credential_folder_judge` for folders, the read tools' own judges).
+    Patterns and other non-paths simply judge as nothing. A recursive
     search (`grep -r`, `rg`) of a folder that *holds* a credential folder
     reads it too, so that is refused as well. A glob too broad to judge is
     refused rather than judged in part.
@@ -375,7 +376,7 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         else:
             found = [path]
         for candidate in found:
-            if judge(candidate):
+            if is_credential(candidate) or judge(candidate):
                 return word
             if recursive:
                 # The shared reading (`files.credential_folder_holds`): the

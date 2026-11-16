@@ -26,6 +26,8 @@ Coverage: every **credential env file** (the owner's `.env*` rule, below:
 `.env` and `.env.<anything>` at any depth, except a name ending `.example`)
 and the use-but-never-see credential bundles — `google_token.json` (Gmail),
 `onshape_keys.json` (CAD), `discord_token.json`, and `spotify_token.json`.
+The fixed names in `EXACT_NAMES` are protected too. All credential names
+are case-folded and judged both as written and as Windows trims them.
 `.env.example` and `.env.local.example` are meant to be read, and are the only
 env files Jarvis may write (ENV-1, 2026-10-12).
 """
@@ -33,13 +35,14 @@ env files Jarvis may write (ENV-1, 2026-10-12).
 from __future__ import annotations
 
 import contextvars
+import errno
 import json
 import os
 import re
 import stat as _stat
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from .. import config
 
@@ -59,15 +62,16 @@ PROTECTED_NAMES = frozenset(
     }
 )
 
-# Refused by their exact name only (review of PR #325, MED-A): the phone's
-# Web Push credentials (`v2/push.py`), the VAPID private key and the push
+# Refused by their whole name, case-folded and Windows-trimmed too (review
+# of PR #325, MED-A): the phone's Web Push credentials (`v2/push.py`),
+# the VAPID private key and the push
 # subscriptions, in `<data root>/remote` (a credential folder too). Exact:
-# never matched as a glob or a program's pattern (`_BUNDLE_NAMES` leaves them
-# out), so `ls j*`, `rg -g '*key.json'` and `ls *push*` keep main's verdict
-# (LOW-1); the literal name refuses `cat …/jarvis_push_key.json` in v1's
+# never structurally matched as a glob or a program's pattern (`_BUNDLE_NAMES`
+# leaves them out), so `ls j*`, `rg -g '*key.json'` and `ls *push*` keep the
+# raw-command verdict (LOW-1); the literal name refuses `cat …/jarvis_push_key.json` in v1's
 # `run_command` and v2's shell wherever the file was copied. A glob that
-# reaches them in the folder is the folder rule's; what one prints anyway is
-# scrubbed (`_push_values`).
+# reaches them is also judged by name in `run_readonly`'s placed operands;
+# what one prints anyway is scrubbed (`_push_values`).
 EXACT_NAMES = frozenset({"jarvis_push_key.json", "jarvis_push_subscriptions.json",
                          # Login files that hold a password or token wherever
                          # they are (cred-dir reads, 2026-10-29): git's store,
@@ -75,6 +79,8 @@ EXACT_NAMES = frozenset({"jarvis_push_key.json", "jarvis_push_subscriptions.json
                          # not: a project's holds registry settings; `~/.npmrc`
                          # is `config.CREDENTIAL_STORES`'.
                          ".git-credentials", ".netrc", "_netrc", ".pypirc"})
+
+_CREDENTIAL_NAMES = frozenset(name.casefold() for name in PROTECTED_NAMES | EXACT_NAMES)
 
 # Values shorter than this are things like `DEBUG=1` or `PORT=8080`. Redacting
 # them would mangle unrelated output for no gain.
@@ -106,23 +112,38 @@ def write_refusal(name: str) -> str:
     )
 
 
+def is_credential_name(name: str) -> bool:
+    """One whole file name, case-folded as written and as Windows trims it.
+
+    Fixed names in `PROTECTED_NAMES`/`EXACT_NAMES`, or the owner's env-name
+    rule; never a glob or a substring. No directory or filesystem lookup.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    return (any(candidate.casefold() in _CREDENTIAL_NAMES
+                for candidate in (name, name.rstrip(" .")))
+            or is_env_credential_name(name))
+
+
 def is_protected(path: str | Path) -> bool:
     """True if `path`'s own name is a credential file's, at any depth: a
-    bundle or `.env`/`.env.local` (`PROTECTED_NAMES`), or any credential env
-    file by the owner's `.env*` rule (`is_env_credential_name`).
+    fixed name (`PROTECTED_NAMES`/`EXACT_NAMES`) or any credential env file
+    by the owner's `.env*` rule. All use `is_credential_name`, including
+    case-folding and Windows trimming.
 
     By name only — no filesystem, so it answers for a path that does not
     exist and for a name from elsewhere (a grep line's attribution). Ask
     `is_credential` about a real path: it also follows symlinks."""
     name = PurePosixPath(str(path)).name
-    return name in PROTECTED_NAMES or name in EXACT_NAMES or is_env_credential_name(name)
+    return is_credential_name(name)
 
 
 def is_credential(path: str | Path) -> bool:
-    """`is_protected`, plus a credential env file reached through a symlink
-    (`is_env_credential`: every hop of the last component and where it
-    resolves). What v1's file tools ask about a path they are handed."""
-    return is_protected(path) or is_env_credential(path)
+    """A credential name on the path, any last-component symlink hop or its
+    realpath; an unfollowable link refuses too. What agent read tools ask.
+    `is_env_credential` keeps the owner's env-only editor distinction.
+    """
+    return _reaches(path, is_credential_name)
 
 
 # --- credential env files (2026-10-11) ---------------------------------------
@@ -142,7 +163,8 @@ def is_credential(path: str | Path) -> bool:
 #
 # Case-insensitive, because Windows drives are (`/mnt/c/…/.ENV.Production` is
 # the same file as `.env.production` there), and stricter that way everywhere
-# else. A name Windows would trim (trailing dots or spaces: `.env ` is `.env`
+# else. Fixed credential names use the same case/trim policy above. A name
+# Windows would trim (trailing dots or spaces: `.env ` is `.env`
 # on NTFS) is judged both as written and as trimmed, and is credential if
 # either is.
 _ENV_NAME = re.compile(r"\.env(?:\..*)?", re.IGNORECASE | re.DOTALL)
@@ -175,31 +197,47 @@ def is_env_credential(path: str | Path) -> bool:
     named `.env` is credential whatever it points at (it is read as `.env`).
     A path that does not exist is judged by its name. A symlink that cannot
     be followed (unreadable, a loop past 40 hops) is credential: a guard that
-    cannot tell refuses."""
+    cannot tell refuses. Env-only: fixed bundle/login names do not count."""
+    return _reaches(path, is_env_credential_name)
+
+
+def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
+    """Judge each name in one shared symlink walk, failing closed on errors."""
     try:
         raw = Path(os.fspath(path))
     except TypeError:
         return False
-    if is_env_credential_name(raw.name):
+    if judge(raw.name):
         return True
     try:
         current = Path(os.path.abspath(raw))
-        for _ in range(_SYMLINK_HOPS):
-            if not current.is_symlink():
+        for hop in range(_SYMLINK_HOPS):
+            try:
+                mode = current.lstat().st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                break  # a missing path is judged by name, like a dangling link
+            except OSError as exc:
+                # An oversized ordinary path cannot name a file here. Keep
+                # its name-only verdict, as `Path.is_symlink` did; once a
+                # link was followed, this is an unfollowable chain instead.
+                if exc.errno == errno.ENAMETOOLONG and hop == 0:
+                    break
+                raise
+            if not _stat.S_ISLNK(mode):
                 break
             target = Path(os.readlink(current))
             current = target if target.is_absolute() else current.parent / target
-            if is_env_credential_name(current.name):
+            if judge(current.name):
                 return True
         else:
             return True  # still a symlink after 40 hops: cannot tell
-        return is_env_credential_name(Path(os.path.realpath(raw)).name)
+        return judge(Path(os.path.realpath(raw)).name)
     except (OSError, RuntimeError, ValueError):
         return True
 
 
-# Each protected name as it appears in a raw command line, bounded so it is a
-# filename rather than a fragment of a longer one.
+# Each protected name, case-insensitive in a raw command line, bounded so it
+# is a filename rather than a fragment of a longer one.
 #
 # The token loop below treats every shlex token as a path and takes its
 # basename, which misses every shape where the filename is not a token of its
@@ -224,7 +262,8 @@ def is_env_credential(path: str | Path) -> bool:
 # credential in the transcript, which is only fixable by rotating the key.
 _NAME_CHAR = r"A-Za-z0-9_.\-"
 _RAW_NAMES = [
-    (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])"))
+    (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])",
+                      re.IGNORECASE))
     for name in sorted(PROTECTED_NAMES | EXACT_NAMES)
 ]
 
@@ -811,8 +850,8 @@ def _judge_line(command: str, dotglob: bool, depth: int) -> str | None:
 
 def raw_names_in(text: str) -> str | None:
     """A protected name anywhere in `text`, by the raw-line rules alone: a
-    bundle or `.env`/`.env.local` as a whole name (main's `_RAW_NAMES`), or a
-    credential env file named from `.env` on. The last step of
+    fixed credential name, case-insensitive with whole-name boundaries
+    (`_RAW_NAMES`), or a credential env file named from `.env` on. The last step of
     `protected_in_command`; v2 asks it of Claude's Grep `glob` and `path` too,
     so the two layers agree (`--include='*.env*'` and `glob: "*.env*"`)."""
     for name, pattern in _RAW_NAMES:
@@ -822,8 +861,8 @@ def raw_names_in(text: str) -> str | None:
 
 
 def protected_in_command(command: str) -> str | None:
-    """The protected filename a shell command references, if any: a bundle,
-    `.env`/`.env.local`, or any credential env file by the owner's rule
+    """The protected filename a shell command references, if any: a fixed
+    credential name or any credential env file by the owner's rule
     (ENV-1) — as a word of its own, a glob that could expand onto one, a
     pattern a program expands, a string another shell runs, or anywhere in
     the raw line.

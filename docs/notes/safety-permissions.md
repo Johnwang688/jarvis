@@ -3841,3 +3841,16 @@ offered (79), the rule missing from the defaults (229).
   | xargs file readers allowed | 12 |
   | git env ignored | 18 |
   | `-f` symlink unresolved | 3 |
+
+**Name-only credential hardening (2026-11-15).** `secrets.is_credential_name`
+judges `PROTECTED_NAMES`, `EXACT_NAMES` and the owner's env-name rule as whole
+names, case-folded both as written and with Windows' trailing dots/spaces
+trimmed. `is_protected` asks that name rule; `is_credential` uses the same
+walker as the env-only `is_env_credential` to judge every last-component
+symlink hop and the realpath, refusing unfollowable links. Agent reads,
+`grep_files` and v2 `denied_read` inherit it; `run_readonly` also judges each
+placed, expanded/globbed operand by `is_credential`, alongside its existing
+credential-folder and recursion checks. Raw command names ignore case with
+the same name-character boundaries. A plain recursive `grep -r`/`rg` over an
+ordinary folder holding a credential *file* remains the stated limit, the
+class of `grep -r foo .`; this adds no recursive file-name scan.
