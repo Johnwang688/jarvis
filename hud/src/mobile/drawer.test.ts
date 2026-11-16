@@ -112,6 +112,26 @@ describe("modal drawer", () => {
     const s = base(); s.projects = null; s.threads = []; const h = fixture(s); h.drawer.open();
     expect(h.q("m-drawer").textContent).toContain("Open Chats to read projects.");
   });
+  it("names project counts as phrases, including zero and plural counts on refresh", () => {
+    const h = fixture(); h.drawer.open();
+    expect(h.q("m-drawer-project").getAttribute("aria-label")).toBe("Jarvis project, 1 needs you, 1 chat");
+    h.state.threads.push(thread("bbbbbbbb")); h.state.needs = new Set(["aaaaaaaa", "bbbbbbbb"]); h.drawer.refresh();
+    expect(h.q("m-drawer-project").getAttribute("aria-label")).toBe("Jarvis project, 2 need you, 2 chats");
+    h.state.threads = []; h.state.needs = new Set(); h.drawer.refresh();
+    expect(h.q("m-drawer-project").getAttribute("aria-label")).toBe("Jarvis project, 0 need you, 0 chats");
+  });
+  it("names status in both chat lists, with needs-you taking priority over running", () => {
+    const h = fixture(); h.state.threads[0].running = true; h.drawer.open();
+    for (const key of ["project-chat-", "recent-"]) {
+      expect(h.q("m-drawer-" + key + "aaaaaaaa").getAttribute("aria-label")).toBe("Chat aaaaaaaa, needs you");
+    }
+    h.state.needs = new Set(); h.drawer.refresh();
+    expect(h.q("m-drawer-recent-aaaaaaaa").getAttribute("aria-label")).toBe("Chat aaaaaaaa, running");
+    h.state.threads[0].running = false; h.state.running = new Set(["aaaaaaaa"]); h.drawer.refresh();
+    expect(h.q("m-drawer-recent-aaaaaaaa").getAttribute("aria-label")).toBe("Chat aaaaaaaa, running");
+    h.state.running = new Set(); h.drawer.refresh();
+    expect(h.q("m-drawer-recent-aaaaaaaa").getAttribute("aria-label")).toBe("Chat aaaaaaaa, idle");
+  });
   it("follows the finger without inline style and skips motion when reduced", () => {
     const h = fixture(); h.drawer.open();
     const animation = { pause: vi.fn(), cancel: vi.fn(), currentTime: 0 };
@@ -186,6 +206,16 @@ async function appFixture() {
   return { app, root, q, gets, posts, settle, setRows: (next: unknown[]) => { rows = next; } };
 }
 describe("app wiring", () => {
+  it("replaces navigation with an approval and returns focus to the brand when it closes", async () => {
+    const h = await appFixture(); h.q("m-brand").click();
+    h.app.openCard(mkRow("appr:test", 1, { kind: "approval" })); await h.settle();
+    expect(h.q("m-drawer")).toBeNull(); expect(h.q("m-main").hasAttribute("inert")).toBe(true);
+    expect(document.activeElement).toBe(h.q("m-card-heading"));
+    h.q("m-brand").focus(); expect(document.activeElement).toBe(h.q("m-card-heading"));
+    key("Escape"); await h.settle();
+    expect(h.q("m-sheet")).toBeNull(); expect(h.q("m-main").hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(h.q("m-brand"));
+  });
   it("opening/folding/closing adds no reads; existing refreshes keep counts live and background inert", async () => {
     const h = await appFixture(); await h.app.loadChats(); const before = [...h.gets];
     h.q("m-brand").click(); h.q("m-drawer-project").click(); expect(h.gets).toEqual(before);

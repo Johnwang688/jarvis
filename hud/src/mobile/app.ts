@@ -63,6 +63,7 @@ import { brandButton, orbState, renderOrb } from "./orb";
 import { inboxIcon, chatsIcon, settingsIcon, lockIcon, unlockIcon } from "./icons";
 import { createProjectFolds } from "./folds";
 import { Drawer, drawerSwipe } from "./drawer";
+import { openOverlay, refreshOverlays, type Overlay } from "./overlays";
 import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
@@ -301,9 +302,9 @@ export class PhoneApp {
   private menuWrap: HTMLElement;
   private drawer: Drawer | null = null;
   private unbindEdge: (() => void) | null = null;
+  private cardOverlay: Overlay | null = null;
   private signOutOverlay: { close: () => void } | null = null;
   private lockNote = "";
-  private readonly topBar: HTMLElement;
   private readonly tabBar: HTMLElement;
   private readonly sheetHost: HTMLElement;
   /** The view the main area last drew, and (while the approval sheet is open) the one it keeps under the sheet. */
@@ -402,7 +403,6 @@ export class PhoneApp {
       settings: make("settings", "Settings", settingsIcon) };
     this.sheetHost = el("div", "m-sheet-host");
     frame.append(top, this.banner, this.main, nav, this.sheetHost);
-    this.topBar = top;
     this.tabBar = nav;
     // A tap outside an open ⋯ menu closes it.
     frame.addEventListener("click", (e) => {
@@ -491,6 +491,7 @@ export class PhoneApp {
     this.unbindEdge = null;
     this.drawer?.stop();
     this.signOutOverlay?.close();
+    this.cardOverlay?.close(); this.cardOverlay = null;
     this.stopped = true;
     this.unsubscribeFolds();
     this.rowScroll.stop();
@@ -915,9 +916,12 @@ export class PhoneApp {
   }
 
   openCard(row: InboxRow): void {
+    // Navigation finishes before the detail opens; closing it returns to the brand.
+    const fromDrawer = !!this.drawer?.isOpen;
+    this.drawer?.close();
     this.flash = "";
     this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
-    this.invoker = this.tab === "review" ? "m-review-open-card" : "m-item-review";
+    this.invoker = fromDrawer ? "m-brand" : this.tab === "review" ? "m-review-open-card" : "m-item-review";
     // PX-4: the sheet opens over whatever the owner is looking at (the list, a chat, the review), its scroll kept.
     if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     this.render();
@@ -2121,10 +2125,10 @@ export class PhoneApp {
   }
 
   private menuInert(): void {
-    const open = this.menuOpen === "app" || !!this.signOutOverlay;
-    if (this.signOutOverlay) this.topBar.setAttribute("inert", "");
+    if (refreshOverlays(this.frame)) return;
+    const open = this.menuOpen === "app";
     for (const node of [this.brand, this.main, this.tabBar, this.banner]) {
-      if (open || this.card) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+      if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
     }
   }
 
@@ -2350,6 +2354,7 @@ export class PhoneApp {
         && n.querySelector(`[data-testid="${this.invoker}"]`));
       const row = holder?.querySelector<HTMLElement>(`[data-testid="${this.invoker}"]`);
       if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
+      else if (this.invoker === "m-brand") this.brand.focus({ preventScroll: true });
       else row?.focus({ preventScroll: true });
     }
   }
@@ -2472,8 +2477,14 @@ export class PhoneApp {
   /** The approval sheet over the view (§3.3): `cardView`, unchanged, in a bottom sheet; nothing behind it takes a tap or Tab. */
   private drawSheet(): void {
     const open = !!this.card;
-    for (const node of [this.topBar, this.banner, this.main, this.tabBar]) {
-      if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+    if (open && !this.cardOverlay) {
+      this.cardOverlay = openOverlay(this.frame, this.sheetHost, {
+        focus: () => this.sheetHost.querySelector<HTMLElement>('[data-testid="m-card-heading"]'),
+        restore: () => null, // moveFocus resolves the redrawn row or answer receipt.
+        dismiss: () => { if (this.card && !this.card.busy) this.goBack(); },
+      });
+    } else if (!open && this.cardOverlay) {
+      this.cardOverlay.close(); this.cardOverlay = null;
     }
     this.menuInert();
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;

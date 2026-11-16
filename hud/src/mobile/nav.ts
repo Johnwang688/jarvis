@@ -11,14 +11,12 @@
 
 import { el } from "./views";
 import { oneLine } from "../lib/inbox";
+import { openOverlay } from "./overlays";
 import "./nav.css";
 
 /** A destructive confirmation. Focus starts on the dialog, never on its destructive choice. */
 export function signOutSheet(host: HTMLElement, confirm: () => void, closed: () => void,
   opener: HTMLElement | null): { close: () => void } {
-  const background = [...host.children].filter((n): n is HTMLElement => n instanceof HTMLElement);
-  const inert = background.map((node) => node.hasAttribute("inert"));
-  background.forEach((node) => node.setAttribute("inert", ""));
   const overlay = el("div", "m-actsheet-host");
   const dim = el("div", "m-sheet-dim");
   dim.dataset.testid = "m-signout-dim";
@@ -47,25 +45,10 @@ export function signOutSheet(host: HTMLElement, confirm: () => void, closed: () 
   const close = () => {
     if (!open) return;
     open = false;
-    document.removeEventListener("keydown", keys, true);
-    document.removeEventListener("focusin", focus, true);
     overlay.remove();
-    background.forEach((node, i) => { if (!inert[i]) node.removeAttribute("inert"); });
+    modal.close();
     closed();
-    const target = opener?.isConnected ? opener : host.querySelector<HTMLElement>('[data-testid="m-signout"]');
-    target?.focus({ preventScroll: true });
   };
-  const keys = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); close(); }
-    if (event.key === "Tab") {
-      if (event.shiftKey && (document.activeElement === accept || document.activeElement === sheet)) {
-        event.preventDefault(); cancel.focus();
-      } else if (!event.shiftKey && (document.activeElement === cancel || document.activeElement === sheet)) {
-        event.preventDefault(); accept.focus();
-      }
-    }
-  };
-  const focus = (event: FocusEvent) => { if (!sheet.contains(event.target as Node)) sheet.focus(); };
   dim.addEventListener("click", close);
   cancel.addEventListener("click", close);
   accept.addEventListener("click", () => { close(); confirm(); });
@@ -74,8 +57,10 @@ export function signOutSheet(host: HTMLElement, confirm: () => void, closed: () 
   sheet.append(group, cancelGroup);
   overlay.append(dim, sheet);
   host.append(overlay);
-  document.addEventListener("keydown", keys, true);
-  document.addEventListener("focusin", focus, true);
+  const modal = openOverlay(host, overlay, {
+    focus: () => sheet, dismiss: close,
+    restore: () => opener?.isConnected ? opener : host.querySelector<HTMLElement>('[data-testid="m-signout"]'),
+  });
   sheet.focus();
   return { close };
 }

@@ -103,6 +103,11 @@ def run(browser, check):
               and tid("m-drawer-inbox").evaluate("e => e === document.activeElement"))
         check(f"RD-6 inert behind drawer {width}", page.locator(".app > :not(.m-drawer-host)").evaluate_all("es => es.every(e => e.inert)"))
         check(f"RD-6 open adds no reads {width}", len(state["gets"]) == before)
+        check(f"RD-6 project count accessible phrase {width}", tid("m-drawer-project").first.get_attribute("aria-label")
+              == "Jarvis project, 1 needs you, 3 chats")
+        check(f"RD-6 chat status accessible words {width}",
+              tid("m-drawer-recent-aaaaaaaa").get_attribute("aria-label") == "Phone redesign mockups, needs you"
+              and tid("m-drawer-recent-bbbbbbbb").get_attribute("aria-label") == "Phone unlock window review, idle")
         # Capture the requested expanded project lists; folds still use the same owner controls.
         if shots:
             for head in tid("m-drawer-project").all():

@@ -4,6 +4,7 @@ import { brandButton, renderOrb, type PhoneOrbState } from "./orb";
 import { inboxIcon, chatsIcon, settingsIcon, sunIcon, terminalIcon, chevronIcon, lockIcon, unlockIcon } from "./icons";
 import type { ProjectFolds } from "./folds";
 import type { ChatThread, Project } from "./model";
+import { openOverlay, refreshOverlays, type Overlay } from "./overlays";
 import "./nav.css";
 
 export type DrawerSection = "inbox" | "chats" | "review" | "tasks" | "settings";
@@ -86,11 +87,10 @@ export function drawerSwipe(host: HTMLElement, direction: "open" | "close", enab
 export class Drawer {
   private overlay: HTMLElement | null = null;
   private panel: HTMLElement | null = null;
-  private background: { node: HTMLElement; inert: boolean }[] = [];
+  private modal: Overlay | null = null;
   private unsubscribe: () => void;
   private unswipe: (() => void) | null = null;
   private animation: Animation | null = null;
-  private drawing = false;
   constructor(private host: HTMLElement, private opener: HTMLButtonElement, private folds: ProjectFolds,
     private state: () => DrawerState, private actions: DrawerActions) {
     this.unsubscribe = folds.subscribe(() => this.refresh());
@@ -101,8 +101,6 @@ export class Drawer {
   get isOpen(): boolean { return !!this.overlay; }
   open(): void {
     if (this.overlay) return;
-    this.background = Array.from(this.host.children).filter((n): n is HTMLElement => n instanceof HTMLElement)
-      .map((node) => ({ node, inert: node.hasAttribute("inert") }));
     this.overlay = el("div", "m-drawer-host");
     const dim = el("div", "m-drawer-dim");
     dim.dataset.testid = "m-drawer-dim";
@@ -118,8 +116,9 @@ export class Drawer {
     this.opener.setAttribute("aria-expanded", "true");
     this.host.dataset.drawer = "open";
     this.refresh();
-    document.addEventListener("keydown", this.keys, true);
-    document.addEventListener("focusin", this.focus, true);
+    this.modal = openOverlay(this.host, this.overlay, {
+      focus: this.first, restore: () => this.opener, dismiss: () => this.close(),
+    });
     this.unswipe = drawerSwipe(this.panel, "close", () => true, {
       begin: () => {}, move: (dx) => this.follow(dx, false), end: (commit) => {
         this.animation?.cancel(); this.animation = null;
@@ -145,40 +144,24 @@ export class Drawer {
   }
   close(): void {
     if (!this.overlay) return;
-    document.removeEventListener("keydown", this.keys, true);
-    document.removeEventListener("focusin", this.focus, true);
     this.unswipe?.(); this.unswipe = null;
     this.animation?.cancel(); this.animation = null;
     this.overlay.remove(); this.overlay = null; this.panel = null;
-    this.background.forEach(({ node, inert }) => { if (!inert) node.removeAttribute("inert"); });
-    this.background = [];
     delete this.host.dataset.drawer;
     this.opener.setAttribute("aria-expanded", "false");
-    this.opener.focus({ preventScroll: true });
+    this.modal?.close(); this.modal = null;
   }
   stop(): void { this.close(); this.unsubscribe(); }
   private buttons = () => Array.from(this.panel?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])
     .filter((b) => !b.closest("[hidden]"));
   private first = () => this.panel?.querySelector<HTMLButtonElement>('[data-testid="m-drawer-inbox"]');
-  private keys = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); this.close(); }
-    if (event.key !== "Tab") return;
-    const buttons = this.buttons(), first = buttons[0], last = buttons.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-  };
-  private focus = (event: FocusEvent) => {
-    if (!this.drawing && this.panel && !this.panel.contains(event.target as Node)) this.first()?.focus({ preventScroll: true });
-  };
   refresh(): void {
     if (!this.panel) return;
-    // App redraws may remove inert: reassert it on the same refresh, including the header and sheet host.
-    this.background.forEach(({ node }) => node.setAttribute("inert", ""));
+    refreshOverlays(this.host);
     const oldFocus = document.activeElement as HTMLElement | null;
     const key = this.panel.contains(oldFocus) ? oldFocus?.dataset.drawerKey : null;
     const top = this.panel.querySelector(".m-drawer-body")?.scrollTop ?? 0;
     const s = this.state();
-    this.drawing = true;
     const head = el("div", "m-drawer-head");
     const brand = brandButton();
     renderOrb(brand, s.connection);
@@ -216,6 +199,8 @@ export class Drawer {
       b.classList.add("m-drawer-chat");
       b.dataset.id = t.id;
       b.dataset.status = s.needs.has(t.id) ? "needs" : t.running || s.running.has(t.id) ? "running" : "idle";
+      const status = b.dataset.status === "needs" ? "needs you" : b.dataset.status === "running" ? "running" : "idle";
+      b.setAttribute("aria-label", `${t.title || "(untitled)"}, ${status}`);
       const dot = el("span", "m-drawer-dot"); dot.setAttribute("aria-hidden", "true"); b.prepend(dot);
       return b;
     };
@@ -231,6 +216,7 @@ export class Drawer {
       const b = row(p.name, "project-" + p.id, () => this.folds.set(p.id, !folded), chevronIcon);
       b.dataset.testid = "m-drawer-project";
       b.dataset.id = p.id;
+      b.setAttribute("aria-label", `${p.name} project, ${needs} ${needs === 1 ? "needs" : "need"} you, ${threads.length} ${threads.length === 1 ? "chat" : "chats"}`);
       const sub = el("div", "m-drawer-project-body");
       sub.id = "m-drawer-project-" + encodeURIComponent(p.id);
       sub.hidden = folded;
@@ -254,7 +240,6 @@ export class Drawer {
     if (s.lockNote) { const note = el("p", "m-notice", s.lockNote); note.setAttribute("role", "status"); foot.append(note); }
     this.panel.replaceChildren(head, body, foot);
     body.scrollTop = top;
-    this.drawing = false;
     if (key) (this.buttons().find((b) => b.dataset.drawerKey === key) ?? this.first())?.focus({ preventScroll: true });
   }
 }
