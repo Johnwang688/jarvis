@@ -37,6 +37,13 @@ def _silenced():
         with open(os.devnull, 'w') as stream, redirect_stdout(stream), redirect_stderr(stream):
             yield
     finally:
+        # C-level stdio buffers (printf without a newline flush) drain into the
+        # sink, not onto the terminal after restore (Sol delta review of #392).
+        try:
+            import ctypes
+            ctypes.CDLL(None).fflush(None)
+        except (OSError, AttributeError):
+            pass
         os.dup2(saved[0], 1)
         os.dup2(saved[1], 2)
         for fd in (*saved, sink):

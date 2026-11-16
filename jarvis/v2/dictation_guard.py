@@ -6,45 +6,43 @@ answers turns a sentence into keystrokes the owner never said. So a model never
 decides what is typed: this module does
 (docs/plans/2026-11-16-voice-anywhere-va3-local-cleanup.md, "Hard rule").
 
-`check(raw, cleaned)` accepts a cleanup only if it **deletes** from what the owner
-said and changes nothing else that matters:
+`check(raw, cleaned)` is an **allow-list of edits**, not a normaliser. Split
+both texts on spaces. Every typed word must be produced, in order, from the
+owner's words by exactly one of these, and anything else is refused:
 
-- **Words.** After normalisation, the cleaned words are an order-preserving
-  subsequence of the raw words. Normalisation lower-cases (`str.lower`, not
-  `casefold`: "Maße" is not "Masse"), expands a fixed contraction table and maps
-  `%` to `percent`. Spoken punctuation (`comma`, `question mark`, ...) is an
-  ordinary word for matching, so turning it into a symbol is a deletion.
-- **Numbers.** A digit string is one token, decimals and separators included
-  (`1.05` is not `1.5`; `10:00` is one token; only a grouping comma as in
-  `1,000` is dropped). A run of number words becomes digits only when the
-  **whole run** reads as exactly one number from 0 to 999,999 ("two thousand
-  twenty six" -> `2026`) or as a clock time ("four forty five" -> `4:45`). Any
-  other run ("twenty twenty six", "one two", "one thousand one thousand") stays
-  words, so no digit form of it is accepted. Runs never cross punctuation, and
-  "and" never joins numbers.
-- **Characters.** No newline (line breaks are VA-2's "new line" command), no
-  control, format, private-use or unassigned character (bidi and zero-width
-  included), no compatibility character such as a ligature unless the raw text
-  has it, and no symbol outside a small safe set unless the raw text has it.
-- **Where punctuation goes.** Between words, a cleanup may add only prose
-  punctuation: a comma, semicolon or colon before a space, sentence punctuation
-  with optional quotes or brackets around a space, a hyphen joining two words
-  with no spaces, an opening quote or bracket at the start, closing punctuation
-  at the end. Any other gap must appear as a gap in the raw text. So "ls la"
-  cannot become "ls -la", "five" cannot become "-5", "echo hello" cannot become
-  "!!; echo hello".
-- At most `MAX_DELETION` of the raw words removed, fillers and spoken
-  punctuation not counted, and never empty when the owner said something. Not
-  much longer than the raw text. Identical text always passes: it is what the
-  raw fallback types anyway.
+1. **Keep** a raw word, letters' case changed only for ASCII letters. The
+   word's own characters stay as said: a sign, a decimal point, a `%` or a
+   bracket is part of the word and cannot be dropped or changed.
+2. **Merge a contraction** from two raw words, or **split** one into two, from a
+   fixed table ("do not" <-> "don't").
+3. **Write a number run as digits**: a maximal run of number words becomes one
+   digit string only when the whole run reads as one number from 0 to 999,999
+   or a clock time ("two thousand twenty six" -> `2026`, "four forty five" ->
+   `4:45`), optionally with a following "percent" as `%`, and a grouping comma
+   (`1,000`) allowed.
+4. **Join two raw words with one hyphen**, letters only ("re enable" ->
+   `re-enable`).
+
+Raw words not used are deleted. After its word, a typed word may end with one
+of `, . ? ! ?! ...`, or with the raw word's own trailing punctuation. Nothing
+else may be added anywhere: no leading symbols, no quotes or brackets the owner
+did not say, no gap reused from elsewhere. At most `MAX_DELETION` of the raw
+words may be deleted (fillers and spoken punctuation not counted), and the
+result is never empty when the owner said something. Only plain spaces separate
+words: no newline (VA-2's "new line" command does that), tab, control, format,
+bidi or zero-width character. Identical text always passes, because it is what
+the raw fallback types anyway.
 
 `choose(raw, rules_text, model_text)` is the single decision point the
 dictation path uses: the model's text when it passes, otherwise the rules text
 when *it* passes, otherwise the raw transcript.
 
+`tokens()` is a looser normaliser kept for the offline data tool (ids, dedupe,
+word error rate). It is not used to decide what is typed.
+
 Pure standard library. Importing this module must not import `jarvis.config` or
-anything else: the offline data tool (`voiceclean`) calls it as its pair check,
-and `tests/v2/dictation_guard_check.py` holds it to that.
+anything else: `voiceclean` calls it as its pair check, and
+`tests/v2/dictation_guard_check.py` holds it to that.
 
 This file is in `SELF_PROTECTED` (VA3-D2): it is authorization code, as
 `voice_link.py` is.
@@ -65,9 +63,6 @@ MAX_DELETION = 0.6
 # those are real words in other sentences, so they count as words here.
 FILLERS = frozenset({"um", "umm", "uh", "uhh", "er", "erm", "ah", "hmm", "mm", "mhm"})
 
-# Characters a cleanup may add although the owner did not say them. Where they
-# may go is judged separately (`_gap_ok`).
-SAFE_SYMBOLS = frozenset(".,?!'\"-:;()%’‘“”")
 
 # Line and paragraph breaks, judged before the general category test so the
 # reason says what happened.
@@ -105,14 +100,6 @@ SPOKEN_PUNCTUATION = re.compile(r"\b(?:full stop|question mark|exclamation point
 _ITEM = re.compile(r"\d+(?:[.,:/]\d+)*(?![^\W_])%?|[^\W_]+(?:'[^\W_]+)*")
 _GROUPED = re.compile(r"\d{1,3}(?:,\d{3})+")
 
-_OPEN = "\"'“‘("
-_CLOSE = "\"'”’)"
-# Prose punctuation after a word: commas, stops and closing quotes/brackets in
-# either order ("word.)" or "word).").
-_AFTER = r"[,;:.?!]{0,3}[" + re.escape(_CLOSE) + r"]?[,;:.?!]{0,3}"
-_INNER_GAP = re.compile(_AFTER + r"\s+[" + re.escape(_OPEN) + r"]?|-")
-_LEAD_GAP = re.compile(r"\s*[" + re.escape(_OPEN) + r"]?")
-_TRAIL_GAP = re.compile(_AFTER + r"\s*")
 
 
 @dataclass(frozen=True)
@@ -214,40 +201,121 @@ def tokens(text: str, *, raw: bool = False) -> list[str]:
     return out
 
 
-def _gaps(text: str) -> tuple[str, list[str], str] | None:
-    items = _items(text)
-    if not items:
-        return None
-    inner = [text[a.end():b.start()] for a, b in zip(items, items[1:])]
-    return text[:items[0].start()], inner, text[items[-1].end():]
+_END = frozenset({"", ",", ".", "?", "!", "?!", "..."})
+_STRIP = ",.?!"
+_SPOKEN_PHRASES = (("full", "stop"), ("question", "mark"), ("exclamation", "point"),
+                   ("exclamation", "mark"), ("comma",), ("period",), ("colon",), ("semicolon",))
+_MAX_WORDS = 300
 
 
-def _gap_ok(raw: str, cleaned: str) -> bool:
-    """Punctuation may be added only where prose puts it; any other gap must
-    already be a gap the owner's text has."""
-    parts = _gaps(cleaned)
-    if parts is None:
-        return not cleaned.strip()
-    raw_parts = _gaps(raw)
-    said = set()
-    if raw_parts is not None:
-        lead, inner, trail = raw_parts
-        said = {g.strip() for g in (lead, *inner, trail) if g.strip()}
-    lead, inner, trail = parts
-
-    def known(gap):
-        return gap.strip() in said
-
-    if not (_LEAD_GAP.fullmatch(lead) or known(lead)):
-        return False
-    if not (_TRAIL_GAP.fullmatch(trail) or known(trail)):
-        return False
-    return all(_INNER_GAP.fullmatch(g) or known(g) for g in inner)
+def _same(a: str, b: str) -> bool:
+    """Equal, except that ASCII letters may differ in case."""
+    return len(a) == len(b) and all(
+        x == y or (x.isascii() and y.isascii() and x.isalpha() and y.isalpha() and x.lower() == y.lower())
+        for x, y in zip(a, b))
 
 
-def _subsequence(said: list[str], typed: list[str]) -> bool:
-    remaining = iter(said)
-    return all(any(word == candidate for candidate in remaining) for word in typed)
+def _split_word(word: str) -> tuple[str, str]:
+    core = word.rstrip(_STRIP)
+    if not core:
+        return word, ""
+    return core, word[len(core):]
+
+
+def _key(core: str) -> str:
+    return core.replace("\u2019", "'").replace("\u2018", "'").lower()
+
+
+def _uncounted(words: list[str]) -> list[bool]:
+    """Raw words that do not count toward the deletion cap: fillers and spoken
+    punctuation phrases."""
+    keys = [_key(_split_word(w)[0]) for w in words]
+    out = [k in FILLERS for k in keys]
+    for i in range(len(keys)):
+        for phrase in _SPOKEN_PHRASES:
+            if tuple(keys[i:i + len(phrase)]) == phrase:
+                for k in range(i, i + len(phrase)):
+                    out[k] = True
+    return out
+
+
+class _Aligner:
+    def __init__(self, raw_words: list[str], typed_words: list[str]):
+        self.raw = [_split_word(w) for w in raw_words]
+        self.keys = [_key(c) for c, _ in self.raw]
+        self.typed = [_split_word(w) for w in typed_words]
+        self.free = _uncounted(raw_words)
+        self.memo: dict[tuple[int, int], int | None] = {}
+
+    def _tail_ok(self, tail: str, raw_tail: str) -> bool:
+        return tail in _END or tail == raw_tail
+
+    def _forms(self, j: int, k: int):
+        """(raw words consumed, typed words consumed) for typed[j] at raw k."""
+        core, tail = self.typed[j]
+        n = len(self.raw)
+        raw_core, raw_tail = self.raw[k]
+        # 1. keep
+        if _same(core, raw_core) and self._tail_ok(tail, raw_tail):
+            yield 1, 1
+        plain = core.isascii()
+        # 2a. merge a contraction from two raw words
+        if plain and k + 1 < n and not raw_tail and _key(core) in CONTRACTIONS:
+            if CONTRACTIONS[_key(core)].split() == [self.keys[k], self.keys[k + 1]] \
+                    and all(c.isascii() for c in self.raw[k][0] + self.raw[k + 1][0]) \
+                    and self._tail_ok(tail, self.raw[k + 1][1]):
+                yield 2, 1
+        # 2b. split a raw contraction into two typed words
+        if self.keys[k] in CONTRACTIONS and j + 1 < len(self.typed) and plain and not tail:
+            first, second = CONTRACTIONS[self.keys[k]].split()
+            core2, tail2 = self.typed[j + 1]
+            if core2.isascii() and _key(core) == first and _key(core2) == second \
+                    and self._tail_ok(tail2, raw_tail):
+                yield 1, 2
+        # 3. a whole number-word run as digits
+        if self.keys[k] in _NUMBER_WORDS and core[:1].isdigit():
+            end = k
+            while end < n and self.keys[end] in _NUMBER_WORDS:
+                end += 1
+                if self.raw[end - 1][1]:
+                    break  # punctuation ends a run
+            if all(not t for _, t in self.raw[k:end - 1]):
+                form = _number_run(self.keys[k:end])
+                if len(form) == 1 and form[0][:1].isdigit():
+                    digits = core.replace(",", "") if _GROUPED.fullmatch(core) else core
+                    last_tail = self.raw[end - 1][1]
+                    if digits == form[0] and self._tail_ok(tail, last_tail):
+                        yield end - k, 1
+                    if (digits == form[0] + "%" and end < n and self.keys[end] == "percent"
+                            and not last_tail and self._tail_ok(tail, self.raw[end][1])):
+                        yield end - k + 1, 1
+        # 4. two raw words joined by one hyphen, letters only
+        if plain and core.count("-") == 1 and k + 1 < n and not raw_tail:
+            left, right = core.split("-")
+            if left.isalpha() and right.isalpha() and _same(left, raw_core) \
+                    and _same(right, self.raw[k + 1][0]) and self._tail_ok(tail, self.raw[k + 1][1]):
+                yield 2, 1
+
+    def best(self, i: int, j: int) -> int | None:
+        """Most counted raw words kept aligning typed[j:] into raw[i:], or None."""
+        if j == len(self.typed):
+            return 0
+        key = (i, j)
+        if key in self.memo:
+            return self.memo[key]
+        result = None
+        for k in range(i, len(self.raw)):
+            for used, typed_used in self._forms(j, k):
+                rest = self.best(k + used, j + typed_used)
+                if rest is not None:
+                    kept = rest + sum(1 for x in range(k, k + used) if not self.free[x])
+                    if result is None or kept > result:
+                        result = kept
+        self.memo[key] = result
+        return result
+
+    def matchable(self, j: int) -> bool:
+        return any(True for k in range(len(self.raw)) for _ in self._forms(j, k))
 
 
 def check(raw: str, cleaned: str) -> Verdict:
@@ -258,30 +326,30 @@ def check(raw: str, cleaned: str) -> Verdict:
         return Verdict(True)  # what the raw fallback types anyway
     if any(c in _BREAKS for c in cleaned):
         return Verdict(False, "newline")
-    if any(unicodedata.category(c)[0] == "C" for c in cleaned):
+    if any(unicodedata.category(c)[0] == "C" or (c.isspace() and c != " ") for c in cleaned):
         return Verdict(False, "control_char")
-    for c in cleaned:
-        if c in raw:
-            continue
-        if unicodedata.normalize("NFKC", c) != c:
-            return Verdict(False, "new_symbol")  # ligatures, full-width forms, ...
-        if not (c.isalnum() or c == " " or c in SAFE_SYMBOLS):
-            return Verdict(False, "new_symbol")
     if len(cleaned) > len(raw) + 16 + len(raw) // 10:
         return Verdict(False, "too_long")
-    said, typed = tokens(raw), tokens(cleaned)
-    content = [w for w in tokens(raw, raw=True) if w not in FILLERS]
-    if not typed:
-        if content:
-            return Verdict(False, "empty")
-        return Verdict(True) if _gap_ok(raw, cleaned) else Verdict(False, "new_symbol")
-    if not _subsequence(said, typed):
-        extra = Counter(typed) - Counter(said)  # a repeated word counts as added
-        return Verdict(False, "added_word" if extra else "reordered")
-    if not _gap_ok(raw, cleaned):
-        return Verdict(False, "new_symbol")
-    kept = sum(1 for w in typed if w not in FILLERS)
-    if content and kept < len(content) * (1 - MAX_DELETION):
+    raw_words, typed_words = raw.split(), cleaned.split(" ")
+    typed_words = [w for w in typed_words if w]
+    if len(raw_words) > _MAX_WORDS or len(typed_words) > _MAX_WORDS:
+        return Verdict(False, "too_long")
+    counted = sum(1 for free in _uncounted(raw_words) if not free)
+    if not typed_words:
+        return Verdict(False, "empty") if counted else Verdict(True)
+    aligner = _Aligner(raw_words, typed_words)
+    kept = aligner.best(0, 0)
+    if kept is None:
+        for j, (core, _tail) in enumerate(aligner.typed):
+            if not aligner.matchable(j):
+                odd = (any(not (c.isalnum() or c in "'\u2019-") and c not in raw for c in core)
+                       or (_tail not in _END and any(c not in raw for c in _tail)))
+                return Verdict(False, "new_symbol" if odd else "added_word")
+        said = Counter(aligner.keys)
+        if Counter(_key(c) for c, _ in aligner.typed) - said:
+            return Verdict(False, "added_word")
+        return Verdict(False, "reordered")
+    if counted and kept < counted * (1 - MAX_DELETION):
         return Verdict(False, "over_deletion")
     return Verdict(True)
 

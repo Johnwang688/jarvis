@@ -40,6 +40,9 @@ def clean(raw: str, app: str = 'other') -> str:
                 break
             text = shorter
         text = re.sub(r'\s+([,?.!])', r'\1', text)
+        # The guard allows one of , . ? ! ?! ... after a word: a run the owner
+        # spoke as two marks ("exclamation mark full stop") keeps the first.
+        text = re.sub(r'[,?.!]{2,}', lambda m: m[0] if m[0] in ('?!', '...') else m[0][0], text)
         text = re.sub(r"\bi(?:['’](?:m|ve|ll|d))?\b", lambda m: 'I' + m[0][1:], text)
         text = re.sub(r"(^|[.!?])(\s*['\"(“‘]*)([^\W\d_])",
                       lambda m: m[1] + m[2] + m[3].upper(), text)

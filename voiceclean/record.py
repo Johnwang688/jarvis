@@ -149,11 +149,12 @@ def history_loop(io, data_dir, threads_dir=None):
 class ParecordRecorder:
     """The child inherits umask 077; a watchdog also enforces the hard cap."""
     def __init__(self):
-        self.process = self.timer = None
+        self.process = self.timer = self.path = None
         self.lock = threading.Lock()
 
     def start(self, path):
         with self.lock:
+            self.path = path
             self.process = subprocess.Popen(
                 ['parecord', '--channels=1', '--rate=16000', '--format=s16le',
                  '--file-format=wav', str(path)], umask=0o077,
@@ -175,10 +176,32 @@ class ParecordRecorder:
                     except ProcessLookupError:
                         pass  # It exited between poll() and terminate().
                 try:
-                    process.wait(timeout=1)  # the cap is 30 s, not 35 (Sol review of #392)
+                    process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            if self.path is not None:
+                path, self.path = self.path, None
+                truncate_wav(path, MAX_SECONDS)
+
+
+def truncate_wav(path, seconds):
+    """Keep at most `seconds` of a saved WAV, so the hard cap holds for the
+    file on disk too, even when a recorder outlived its stop (Sol delta review
+    of #392). Rewritten in place: the file keeps its 0600 mode."""
+    try:
+        with wave.open(str(path), 'rb') as wav:
+            params = wav.getparams()
+            limit = seconds * wav.getframerate()
+            if wav.getnframes() <= limit:
+                return
+            frames = wav.readframes(limit)
+    except (OSError, EOFError, wave.Error):
+        return
+    with open(path, 'r+b') as fh, wave.open(fh, 'wb') as out:
+        fh.truncate(0)
+        out.setparams(params)
+        out.writeframes(frames)
 
 
 def parakeet_transcriber(model_dir=None, threads=2):

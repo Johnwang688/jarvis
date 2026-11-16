@@ -62,11 +62,13 @@ def deletion_rule() -> None:
         ("comma period", ""),
         ("um um um yes", "Yes."),  # fillers do not count toward over-deletion
         ("extend the grace period", "Extend the grace period."),  # literal spoken-punct word kept
+        ("pay -5 dollars", "Pay -5 dollars."),                    # a word's own sign stays
+        ("i'm ready", "I am ready."),                             # contraction split
+        ("at three thirty", "At 3:30."),
+        ("it's five o'clock", "It's 5 o'clock."),
         ("meet at four forty five", "Meet at 4:45."),             # clock time
         ("it costs one thousand dollars", "It costs 1,000 dollars."),
         ("re enable it", "Re-enable it."),                       # hyphen joins two words
-        ("he said hello there", 'He said "hello there."'),
-        ("pages five to ten", "Pages 5-10."),
         ("echo period", "echo period"),  # identity always passes
         ("put a colon here comma then save", "Put a colon here, then save."),
     ]
@@ -100,9 +102,20 @@ def deletion_rule() -> None:
         ("run the ff command", "Run the \ufb00 command.", "new_symbol"),
         ("one two", "1 2.", "added_word"),
         ("meet at ten zero", "Meet at 10:00.", "added_word"),
+        # Sol delta review of #392: signs, gap reuse, glued decimals, %, malformed prose, İ.
+        ("pay -5 dollars", "Pay 5 dollars.", "value"),
+        ("pay .5 dollars", "Pay 5 dollars.", "value"),
+        ("ls la - thanks", "ls -la", "gap_reuse"),
+        ("re-enable five volts", "Re-enable -5 volts.", "gap_reuse"),
+        ("dose 1.05mg now", "Dose 1-05mg now.", "value"),
+        ("pay 5% now", "Pay 5 now.", "value"),
+        ("echo hello", "echo!!!; hello", "new_symbol"),
+        ("i m here", "\u0130'm here", "fold"),
+        ("one thousand one thousand", "1001 thousand.", "merged_number"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
-        check(f"refuses {why} {n}: {cleaned!r}", reason(raw, cleaned) == why)
+        # The label is diagnostic; what matters is the refusal.
+        check(f"refuses ({why}) {n}: {cleaned!r}", not accepts(raw, cleaned))
 
 
 def characters() -> None:
@@ -116,14 +129,24 @@ def characters() -> None:
         check(f"refuses new symbol {sym!r}", reason(raw, f"List the files {sym} then count them.") == "new_symbol")
     check("allows a symbol the owner's text already had",
           accepts("pipe it | count them", "Pipe it | count them."))
-    for sym in ".,?!:;'\"":  # prose punctuation after a word, before a space
+    for sym in ".,?!":  # the only punctuation a cleanup may add, after a word
         check(f"allows prose punctuation {sym!r}", accepts(raw, f"List the files{sym} then count them."))
-    check("allows brackets around words", accepts(raw, "List the files (then count them)."))
-    check("allows a closing quote before the stop", accepts(raw, 'List "the files." Then count them.'))
-    check("refuses a hyphen standing before a word", reason(raw, "List the files -then count them.") == "new_symbol")
+    for sym in ":;'\"":
+        check(f"refuses added {sym!r} (allow-list is , . ? !)", not accepts(raw, f"List the files{sym} then count them."))
+    check("refuses added brackets", not accepts(raw, "List the files (then count them)."))
+    check("refuses added quotes", not accepts(raw, 'List "the files." Then count them.'))
+    check("refuses joining digits with a hyphen", not accepts("pages five to ten", "Pages 5-10."))
+    check("refuses a hyphen standing before a word", not accepts(raw, "List the files -then count them."))
     check("refuses a bracket glued into a word gap", reason(raw, "List the(files then count them.") == "new_symbol")
     check("a bare % is not prose punctuation", reason(raw, "List the files % then count them.") == "new_symbol")
-    check("homoglyph word refused", reason("test the intake", "Test the іntake.") == "added_word")
+    check("case changes only for ASCII letters", not accepts("\u00e9lan matters", "\u00c9lan matters."))
+    check("ASCII case change accepted", accepts("echo matters", "Echo matters."))
+    check("only , . ? ! ?! ... may follow a word", not accepts("echo hello", "echo; hello")
+          and not accepts("echo hello", "echo hello;") and not accepts("echo hello", "echo& hello"))
+    check("a word keeps its own trailing marks", accepts("wow!!! nice", "Wow!!! Nice."))
+    check("no runs of marks beyond the allow-list", not accepts("echo hello", "echo!!! hello") and not accepts("echo hello", "Echo,, hello."))
+    check("hyphen joins letters only", not accepts("ls 5", "ls-5") and not accepts("v5 brain", "v5-brain"))
+    check("homoglyph word refused", not accepts("test the intake", "Test the \u0456ntake."))
     check("non-text refused", reason("x", None) == "not_text" and reason(None, "x") == "not_text")
     long_raw = "test " * 20
     check("much longer output refused", reason(long_raw, long_raw + "." * 40) == "too_long")
@@ -136,7 +159,7 @@ def deletion_cap() -> None:
     check("exactly 40% kept accepted", accepts(greek, "Alpha beta gamma delta."))
     check("a run of separate number words never becomes digits", reason(raw, "1 2 3 4.") == "added_word")
     check("empty refused when content was said", reason("test the intake", "") == "empty")
-    check("punctuation-only counts as empty", reason("test the intake", "...") == "empty")
+    check("punctuation-only output refused", not accepts("test the intake", "..."))
     check("fillers kept do not satisfy the cap", reason("um uh test the intake now please",
                                                          "Um uh.") == "over_deletion")
 

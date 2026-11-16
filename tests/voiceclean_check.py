@@ -112,7 +112,7 @@ def main():
                 ('we do not know if i am ready', "We don't know if I'm ready."),
                 ("i'm ready and don't need help", 'I am ready and do not need help.'),
                 ('use twenty five percent power', 'Use 25% power.'),
-                ('we have 999,999 parts', 'We have 999999 parts.'),
+                ('we have 999,999 parts', 'We have 999,999 parts.'),  # a said digit string stays as said
             ]
             for n, (messy, target) in enumerate(accepted):
                 check(f'pair accepts equivalence {n}', pair_check.pair_check(messy, target)[0])
@@ -128,7 +128,7 @@ def main():
                 ('test the intake', 'Test\u200bthe intake.', 'control_char'),
                 ('one two three four five six seven eight nine ten', 'One two three.', 'over_deletion'),
                 ('test the intake', '', 'empty'),
-                ('test the intake', '.', 'empty'),
+                ('test the intake', '.', 'new_symbol'),  # punctuation alone is not a word
                 ('test period the intake', 'Test comma the intake.', 'added_word'),
             ]
             for n, (messy, target, reason) in enumerate(rejected):

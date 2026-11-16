@@ -38,7 +38,7 @@ def hand_cases():
         ('aluminum album hum', 'other', 'Aluminum album hum.'),
         ('send this comma then ask question mark is it ready exclamation point', 'other',
          'Send this, then ask? Is it ready!'),
-        ('well done exclamation mark full stop', 'other', 'Well done!.'),
+        ('well done exclamation mark full stop', 'other', 'Well done!'),
         ('this is done period', 'other', 'This is done.'),
         ('the period is over', 'other', 'The period is over.'),
         ('it costs a grace period period', 'other', 'It costs a grace period.'),

@@ -375,6 +375,8 @@ def fd_leak_checks(home):
         '    os.write(1, ("FDLEAK1 " + raw + "\\n").encode())\n'
         '    os.write(2, ("FDLEAK2 " + raw + "\\n").encode())\n'
         '    print("FDLEAK3 " + raw)\n'
+        '    import ctypes\n'
+        '    ctypes.CDLL(None).printf(b"FDLEAK4 buffered c output")\n'
         '    return raw\n')
     data_root = home / 'fd-leak-data'
     data_root.mkdir(mode=0o700)
@@ -389,6 +391,24 @@ def fd_leak_checks(home):
                          capture_output=True, text=True, cwd=ROOT, env=env)
     check('adapter fd-level output silenced', out.returncode == 0 and 'FDLEAK' not in out.stdout + out.stderr
           and 'private marker' not in out.stdout + out.stderr)
+
+def wav_cap_checks(home):
+    """A WAV longer than the cap is cut to 30 s on disk and keeps mode 0600."""
+    import wave
+    from voiceclean import record
+    path = home / 'long.wav'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as fh, wave.open(fh, 'wb') as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        out.writeframes(b'\x01\x00' * (35 * 16000))
+    record.truncate_wav(path, 30)
+    with wave.open(str(path), 'rb') as wav:
+        frames = wav.getnframes()
+    check('saved WAV cut to the 30 s cap', frames == 30 * 16000)
+    check('cut WAV keeps 0600', stat.S_IMODE(path.stat().st_mode) == 0o600)
+
 
 def main():
     real_home = Path.home()
@@ -409,7 +429,7 @@ def main():
                     raise AssertionError('owner files accessed')
         sys.addaudithook(audit)
         with patch.object(Path, 'exists', fixture_exists), patch.dict(os.environ, {'HOME': str(home), 'VOICECLEAN_DATA_DIR': str(home / 'default')}):
-            for fn in (eval_checks, record_checks, history_checks, fd_leak_checks, isolation):
+            for fn in (eval_checks, record_checks, history_checks, fd_leak_checks, wav_cap_checks, isolation):
                 try:
                     fn(home)
                 except Exception as exc:
