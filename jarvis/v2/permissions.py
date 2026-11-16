@@ -1543,48 +1543,53 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     return False, "", ""
 
 
-# Programs a here-document's body may be fed to and still be data to the
-# shell (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md): none of them
-# hands its input to a shell. A closed list of what is safe, so a missing
-# entry costs a prompt, never a hole. A Python or `node` counts only when the
-# body *is* its program (`python3 -`): inline source is not read by layer 2
-# in any spelling, `python3 -c` included; a `-c`/`-e` that reads stdin would
-# hand the body to whatever that source does, so those are not data.
-HEREDOC_DATA_CONSUMERS = frozenset({"cat", "tee", "wc", "grep"})
+# The data reading (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md) is
+# taken only on a line where **every** program is on these lists, so nothing
+# on it can run a body: a list of what is safe, never of what is dangerous
+# (the review of #396 found executors no deny-list held: `make`, `awk
+# system()`, `at -f`, `taskset dash`, `$l` read from a file). A missing entry
+# costs a prompt, never a hole. None of these runs its input or arguments.
+HEREDOC_INERT_PROGRAMS = frozenset({"cat", "tee", "wc", "grep", "head", "tail", "ls", "echo",
+                                    "cd", "pwd", "mkdir", "true"})
+# Programs a body may be fed to only when the body *is* the program: inline
+# source is not read by layer 2 in any spelling (`python3 -c` included), so a
+# Python body is no less read than before. Without a body on their segment,
+# or with `-c`/`-e`/a script, they are not on the list.
 _HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
 _HEREDOC_NODE_ARGS = frozenset({"-"})
-# Shell syntax that can route a body's output into a program not judged here,
-# or change which program a name runs: a group, subshell, function body or
-# substitution (`{ cat <<E; } | sh`, `cat() { sh; }`, `> >(sh)`, `tee >(sh)`).
+# Shell syntax that can route a body's output into a program not judged
+# here, or change which program a name runs: a group, subshell, function
+# body or process substitution (`{ cat <<E; } | sh`, `cat() { sh; }`,
+# `> >(sh)`).
 _HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
-# Programs that, anywhere on the line, run text as shell commands later or
-# change what a name means for the rest of it (a body written to a file and
-# then `sh file`; `alias cat=sh`; `exec 3> >(sh)`).
-_HEREDOC_LINE_RUNNERS = frozenset({"source", ".", "eval", "exec", "coproc", "alias", "unalias",
-                                   "shopt", "enable", "builtin", "command", "hash", "trap",
-                                   "xargs", "ssh", "declare", "typeset", "export", "set",
-                                   "readonly", "local", "unset", "function", "env",
-                                   "parallel", "watch", "script", "nohup", "setsid"})
 _HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
-# Redirections a data body's own segment may also carry: plain reads and
-# writes of a path (`cat > notes.txt <<'EOF'`), never an fd duplication.
+# Redirections a segment may carry: plain reads and writes of a path
+# (`cat > notes.txt <<'EOF'`), never an fd duplication.
 _HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
+_HEREDOC_SPECIAL_PATHS = ("/dev/fd", "/proc", "/dev/tcp", "/dev/udp")
+# `grep` may be ugrep (Claude Code's shell wraps it), whose filter, pager,
+# viewer, opener and config options run commands; refused in any spelling,
+# with `-Q`/`--query` (its TUI can open an editor) and rg's `--pre`.
+_HEREDOC_GREP_RUNS = re.compile(
+    r"---|-@|--[a-z-]*(?:filter|pager|view|open|config|pre|query)|-[A-Za-z]*Q")
 
 
-def _heredoc_consumer_ok(segment: str) -> bool:
-    """The segment's program, as written (no wrapper, no path, no
-    assignment), takes a here-document body as data, and its redirections
-    only read or write plain paths."""
+def _heredoc_segment_ok(segment: str, here: bool) -> bool:
+    """The segment runs only an inert program (`HEREDOC_INERT_PROGRAMS`),
+    or, when it is fed a body (`here`), a `python3 -`/`node -` whose program
+    the body is; named as written (no wrapper, no path, no expansion), with
+    only plain path redirections and no `/dev/fd`/`/proc` argument."""
     words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
     if not words:
-        return False
+        return False                # a compound command's closing word (`fi | sh`)
     program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
-    if program in HEREDOC_DATA_CONSUMERS:
-        pass
-    elif rules._PYTHON.fullmatch(program):
+    if program in HEREDOC_INERT_PROGRAMS:
+        if program == "grep" and any(_HEREDOC_GREP_RUNS.match(a) for a in args):
+            return False
+    elif here and rules._PYTHON.fullmatch(program):
         if not set(args) <= _HEREDOC_PYTHON_ARGS:
             return False
-    elif program == "node":
+    elif here and program == "node":
         if not set(args) <= _HEREDOC_NODE_ARGS:
             return False
     else:
@@ -1594,27 +1599,23 @@ def _heredoc_consumer_ok(segment: str) -> bool:
             return False
         if redirect.op != "<<<":
             word = redirect.word.strip("'\"")
-            if not word or word[0] in "(&" or word.startswith(("/dev/fd", "/proc", "/dev/tcp",
-                                                                "/dev/udp")):
+            if not word or word[0] in "(&" or word.startswith(_HEREDOC_SPECIAL_PATHS):
                 return False
-    return all(not str(a).startswith(("/dev/fd", "/proc")) for a in args)
+    return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
 
 
 def _heredoc_data_reading(text: str) -> str | None:
     """`text` with its here-document bodies moved into their operators as
-    here-strings (`rules._inline_heredocs`), when every here-string on the
-    line is data: fed straight to a data program (`_heredoc_consumer_ok`),
-    not piped on, with nothing live (`$(…)`, backticks) outside single
-    quotes anywhere on the line, on a plain line — no group, subshell,
-    function, process substitution or compound command, no shell or
-    name-changer anywhere on it (`_HEREDOC_LINE_RUNNERS`), no program run by
-    path, no `PATH=`. None
-    otherwise (the inlining raised or flagged itself unsure too), and the
-    caller keeps the raw line, every body line a command, as before HD-0.
-    Only `credentials-read` reads it: a sub-agent's line had a Python body
-    whose `pass` was judged as the password store. The review of #396 found
-    each of these routes for a body to reach a shell; every one keeps the
-    raw reading."""
+    here-strings (`rules._inline_heredocs`), when nothing on the line can
+    run a body: every segment passes `_heredoc_segment_ok` (only inert
+    programs, and a body fed only to one of them or to `python3 -`/`node -`),
+    with no group, subshell, function or process substitution, nothing live
+    (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
+    assignment. None otherwise (the inlining raised or flagged itself
+    unsure, a segment or here-string could not be placed), and the caller
+    keeps the raw line, every body line a command, as before HD-0. Only
+    `credentials-read` reads it: a sub-agent's line had a Python body whose
+    `pass` was judged as the password store."""
     if "<<" not in text:
         return None
     flagged: list = []
@@ -1639,28 +1640,11 @@ def _heredoc_data_reading(text: str) -> str | None:
             if at < 0:
                 return None
             cursor = at + len(segment)
-            raw = rules._tokens(segment)
-            if any(_HEREDOC_NAME_ENV.match(word) for word in raw):
+            if any(_HEREDOC_NAME_ENV.match(word) for word in rules._tokens(segment)):
                 return None
-            # No program: a compound command's closing word (`fi`, `done`,
-            # `esac`), whose output can be piped on (`if …; fi | sh`). A
-            # program run by path: what it is cannot be told (`./cat`).
-            words = rules.command_start(raw)
-            if not words or "/" in words[0]:
-                return None
-            programs = [_tokens_of(segment)] + rules.started_commands(segment)
-            for program in programs:
-                name = program[0].rsplit("/", 1)[-1].lower() if program else ""
-                if name in rules.SHELLS or name in _HEREDOC_LINE_RUNNERS:
-                    return None
             heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
-            if not heres:
-                continue
             found += len(heres)
-            after = joined[cursor:].lstrip(" \t")
-            if after.startswith("|") and not after.startswith("||"):
-                return None         # its output goes on to a program not judged here
-            if not _heredoc_consumer_ok(segment):
+            if not _heredoc_segment_ok(segment, bool(heres)):
                 return None
     except Exception:       # noqa: BLE001 — unreadable: the raw reading
         return None

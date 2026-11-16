@@ -5,10 +5,11 @@ A Claude sub-agent's read-only log check was carded `always-ask rule
 credentials-read`: its `python3 - <<'EOF'` body held the Python line `pass`,
 and layer 2 split the raw line, so `pass` was judged as the password store
 (`_CREDENTIAL_READ_STEMS`). Now `credentials-read` reads a line with its data
-bodies set aside (`permissions._heredoc_data_reading`): a body fed to a
-`HEREDOC_DATA_CONSUMERS` program or a Python, not piped on, nothing live in
-it. Anything else keeps the raw reading, so every line asked on main is
-still asked. The owner deferred the same change for the other layer-2 rules
+bodies set aside (`permissions._heredoc_data_reading`), but only on a line
+where every program is inert (`HEREDOC_INERT_PROGRAMS`) or is the
+`python3 -`/`node -` a body is the program of, and nothing live, grouped or
+renamed is on it. Anything else keeps the raw reading, so every line asked
+on main is still asked. The owner deferred the same change for the other layer-2 rules
 (docs/plans/2026-11-16-heredoc-bodies-plan.md §10).
 """
 from __future__ import annotations
@@ -54,6 +55,9 @@ DATA = [
     "cat > a.txt <<'A'\npass\nA\ncat > b.txt <<'B'\npass\nB",   # two, both data
     "cat <<'EOF' > x.sh\necho $(pass show x) `pass`\nEOF",    # quoted: literal text
     "cat <<'EOF' || true\npass\nEOF",                         # `||` is not a pipe
+    "cat <<'EOF' | tee out.txt | wc -l\npass\nEOF",           # piped to inert programs
+    "mkdir -p d && cd d && cat > n.txt <<'EOF'\npass\nEOF\nls; pwd",
+    "grep -rn --include='*.py' -E 'a|b' . <<'EOF'\npass\nEOF",  # ordinary grep options
 ]
 
 # Asked on main and still asked, by the same rule.
@@ -119,6 +123,25 @@ STILL_ASKED = {
         "credentials-read",
     "node -e 'require(\"child_process\").execSync(require(\"fs\").readFileSync(0))' <<'EOF'\n"
     "pass show github\nEOF": "credentials-read",
+    # The second review of #396: executors no deny-list held. W writes the
+    # body to a file; the line then runs it without naming a shell.
+    "cat > Makefile <<'EOF'\nall:\n\tpass show github\nEOF\nmake": "credentials-read",
+    "tee /tmp/mk >/dev/null <<'EOF'\nall:\n\tpass show github\nEOF\nmake -f /tmp/mk":
+        "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\ntaskset 1 dash /tmp/x.sh": "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\nstrace -f sh /tmp/x.sh": "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\nunshare -r sh /tmp/x.sh": "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\ndocker exec c sh /tmp/x.sh": "credentials-read",
+    "cat <<'EOF' > /tmp/l\npass show github\nEOF\nwhile read -r l; do $l; done < /tmp/l":
+        "credentials-read",
+    "cat <<'EOF' > /tmp/l\npass show github\nEOF\nread -r x < /tmp/l; $x": "credentials-read",
+    "cat <<'EOF' > /tmp/l\npass show github\nEOF\nprintf -v c sh; $c /tmp/l": "credentials-read",
+    "cat <<'EOF' > /tmp/l\npass show github\nEOF\n$'\\x73h' /tmp/l": "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\n"
+    "awk 'BEGIN{while((getline l < \"/tmp/x.sh\")>0) system(l)}'": "credentials-read",
+    "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\nat -f /tmp/x.sh now": "credentials-read",
+    "cat > .git/hooks/pre-commit <<'EOF'\npass show github\nEOF\ngit commit -m x": "credentials-read",
+    "python3 x.py <<'EOF'\npass show github\nEOF": "credentials-read",
     # other credential rules are untouched
     "eval \"$(cat <<'EOF'\npass show x\nEOF\n)\"": "credentials-inner",
     "bash <<'EOF'\ncat ~/.ssh/id_rsa\nEOF": "credentials-path",
@@ -180,18 +203,23 @@ class HeredocCredentialsRead(unittest.TestCase):
         for guard, command in (
                 ("syntax", "cat <<'EOF' > a.txt; { true; }\nhi\nEOF"),
                 ("live in double quotes", "cat <<'EOF' \"$(true)\"\nhi\nEOF"),
-                ("compound closer", "if true; then cat <<'EOF'; fi | tee out\nhi\nEOF"),
                 ("PATH=", "PATH=/tmp/evil cat <<'EOF'\nhi\nEOF"),
+                ("compound closer", "if true; then cat <<'EOF'; fi\nhi\nEOF"),
+                ("program not inert", "cat <<'EOF' > a.txt\nhi\nEOF\nsort a.txt"),
                 ("program by path", "cat <<'EOF' > a.txt\nhi\nEOF\n./a.txt"),
-                ("shell on the line", "cat > x.sh <<'EOF'\nhi\nEOF\nsh x.sh"),
-                ("runner on the line", "cat > x.sh <<'EOF'\nhi\nEOF\nsource x.sh"),
-                ("pipe onward", "cat <<'EOF' | tee out\nhi\nEOF"),
-                ("consumer", "sed -n p <<'EOF'\nhi\nEOF"),
-                ("fd duplication", "cat <<'EOF' >&2\nhi\nEOF"),
-                ("fd path", "cat <<'EOF' >/dev/fd/4\nhi\nEOF"),
+                ("python without a body", "cat <<'EOF' > a.txt\nhi\nEOF\npython3 -"),
                 ("python -c", "python3 -c 'print(1)' <<'EOF'\nhi\nEOF"),
                 ("node -e", "node -e '1' <<'EOF'\nhi\nEOF"),
-                ("unplaced here-string", "cat > n <<'EOF'\nhi\nEOF\necho 'a <<< b'")):
+                ("fd duplication", "cat <<'EOF' >&2\nhi\nEOF"),
+                ("fd path redirect", "cat <<'EOF' >/dev/fd/4\nhi\nEOF"),
+                ("fd path argument", "tee /dev/fd/4 <<'EOF'\nhi\nEOF"),
+                ("unplaced here-string", "cat > n <<'EOF'\nhi\nEOF\necho 'a <<< b'"),
+                ("ugrep filter", "grep --filter='*:sh' x <<'EOF'\nhi\nEOF"),
+                ("ugrep pager", "cat > a <<'EOF'\nhi\nEOF\ngrep --pager=sh x a"),
+                ("ugrep config", "grep --config=/tmp/c x <<'EOF'\nhi\nEOF"),
+                ("ugrep ---", "grep --- x <<'EOF'\nhi\nEOF"),
+                ("ugrep query", "grep -nQ x <<'EOF'\nhi\nEOF"),
+                ("rg-style pre", "grep --pre=sh x <<'EOF'\nhi\nEOF")):
             with self.subTest(guard=guard):
                 self.assertIsNone(permissions._heredoc_data_reading(command))
 
@@ -211,20 +239,20 @@ class HeredocCredentialsRead(unittest.TestCase):
                 self.assertIsNone(permissions._heredoc_data_reading(command))
 
     def test_the_table_lists_no_program_that_runs_its_input(self):
-        runners = rules.SHELLS | {"source", ".", "eval", "xargs", "ssh", "env", "uv", "npx",
-                                  "sudo", "su", "exec", "nohup", "timeout", "parallel"}
-        self.assertFalse(permissions.HEREDOC_DATA_CONSUMERS & runners)
+        runners = rules.SHELLS | {"source", ".", "eval", "exec", "xargs", "ssh", "env", "uv", "npx",
+                                  "sudo", "su", "nohup", "timeout", "parallel", "make", "awk",
+                                  "sed", "find", "sort", "at", "batch", "git", "taskset", "strace",
+                                  "python3", "node", "perl"}
+        self.assertFalse(permissions.HEREDOC_INERT_PROGRAMS & runners)
 
-    def test_a_shell_in_the_table_is_still_refused_by_the_line_check(self):
-        # Two layers: a table wrongly holding `bash` is still stopped by the
-        # line's shell check; with that check also emptied, the body passes.
-        wide = permissions.HEREDOC_DATA_CONSUMERS | {"bash", "sh"}
-        line = "bash <<'EOF'\npass show github\nEOF"
-        with patch.object(permissions, "HEREDOC_DATA_CONSUMERS", wide):
-            self.assertEqual(rule_of(line), "credentials-read")
-            with patch.object(rules, "SHELLS", frozenset()), \
-                    patch.object(permissions, "_heredoc_consumer_ok", lambda segment: True):
-                self.assertIsNone(rule_of(line))
+    def test_a_program_added_to_the_list_is_what_lets_a_line_through(self):
+        # The list is the only gate for the line's other programs: with
+        # `make` on it, the Makefile route opens (and without it, closes).
+        line = "cat > Makefile <<'EOF'\nall:\n\tpass show github\nEOF\nmake"
+        self.assertEqual(rule_of(line), "credentials-read")
+        wide = permissions.HEREDOC_INERT_PROGRAMS | {"make"}
+        with patch.object(permissions, "HEREDOC_INERT_PROGRAMS", wide):
+            self.assertIsNone(rule_of(line))
 
 
 if __name__ == "__main__":

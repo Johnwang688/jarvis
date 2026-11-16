@@ -211,23 +211,24 @@ the heredoc-aware reading. Every other rule, `_inner_segments` and
 `protected_state` are unchanged. Per judged text, all or nothing:
 
 - the line's bodies are inlined as here-strings (`rules._inline_heredocs`);
-- that reading is used only on a **plain line**, where **every** here-string
-  (a former body or one written as `<<<`) goes straight to `cat`, `tee`,
-  `wc`, `grep`, `python3 -` or `node -`, as a bare name with no wrapper; is
-  not piped on; and has no redirection beyond plain path reads and writes
-  (no `>&`, no `/dev/fd`, `/proc`);
-- a plain line has no unquoted `( ) { } <( >(`, nothing live (`$(`,
-  backticks) outside single quotes, no program run by path, no `PATH=`-style
-  assignment, and no shell or name-changer anywhere on it (`source`, `.`,
-  `eval`, `exec`, `coproc`, `alias`, `shopt`, `xargs`, `ssh`, `env` …);
+- that reading is used only when **nothing on the line can run a body**:
+  every segment's program, as written (no wrapper, no path, no expansion),
+  is on `HEREDOC_INERT_PROGRAMS` (`cat`, `tee`, `wc`, `grep`, `head`,
+  `tail`, `ls`, `echo`, `cd`, `pwd`, `mkdir`, `true`; `grep` without ugrep's
+  filter/pager/view/open/config/query options), or is the `python3 -`
+  / `node -` a body on that segment is the program of; redirections are
+  plain path reads and writes only (no `>&`, `/dev/fd`, `/proc`); the line
+  has no unquoted `( ) { } <( >(`, nothing live (`$(`, backticks) outside
+  single quotes, and no `PATH=`-style assignment;
 - otherwise, or when the inlining raises or flags itself unsure, or a segment
   or here-string cannot be placed: the raw line, as on main.
 
-The first version checked only the consumer's name and the text right after
-it; the Opus review of #396 found bodies reaching a shell through `{ …; } |
-sh`, `if …; fi | sh`, `> >(sh)`, `tee >(sh)`, `exec 3> >(sh)`, `coproc`, a
-`cat` function or alias, `./cat`, `PATH=`, write-then-`sh file`, and
-`python3 -c`/`node -e` reading stdin. Each now keeps the raw reading and is
+The list says what is safe, never what is dangerous. Two review rounds on
+#396 showed why: the first version checked only the consumer's name and
+missed `{ …; } | sh`, `> >(sh)`, `tee >(sh)`, a `cat` function or alias,
+`./cat`, `PATH=`, write-then-`sh file` and `python3 -c` reading stdin; the
+second (a deny-list of shells and runners) missed `make`, `awk system()`,
+`at -f`, launchers such as `taskset dash`, and `$l` read from a file. Each is
 a case in the regression test.
 
 So HD-0 only ever removes asks whose cause was a data body; it never reads

@@ -3906,18 +3906,19 @@ recursive file-name scan.
 `pass` line was judged as the password store and carded. Only the
 `credential_read` kind now reads a line through
 `permissions._heredoc_data_reading`: bodies inlined as here-strings
-(`rules._inline_heredocs`), used only on a plain line where every
-here-string goes straight to `cat`, `tee`, `wc`, `grep`, `python3 -` or
-`node -` (bare name, no wrapper), is not piped on and has only plain path
-redirections. A plain line has no unquoted `( ) { } <( >(`, nothing live
-outside single quotes, no program run by path, no `PATH=`, and no shell or
-name-changer anywhere (`_HEREDOC_LINE_RUNNERS`: `source`, `eval`, `exec`,
-`coproc`, `alias`, `shopt`, `xargs`, `ssh`, `env` …). Anything else keeps the
-raw reading, so nothing asked before stops being asked; the review of #396
-found each excluded route (`{ …; } | sh`, `> >(sh)`, `tee >(sh)`, a `cat`
-function or alias, `./cat`, write-then-`sh`, `python3 -c` reading stdin).
-The other layer-2 readings (always-ask stems and git rules, gate-state, the
-vex backstop) still read bodies as commands: the owner deferred them
+(`rules._inline_heredocs`), used only when nothing on the line can run a
+body. Every segment's program, as written, is on `HEREDOC_INERT_PROGRAMS`
+(`cat`, `tee`, `wc`, `grep`, `head`, `tail`, `ls`, `echo`, `cd`, `pwd`,
+`mkdir`, `true`; `grep` without ugrep's command-running options, since
+Claude Code's shell runs `grep` as ugrep) or is the `python3 -`/`node -` its
+own body is the program of; redirections are plain paths; the line has no unquoted `( ) { } <( >(`,
+nothing live outside single quotes and no `PATH=`. Anything else keeps the
+raw reading, so nothing asked before stops being asked. **The list names
+what is safe, never what is dangerous**: two review rounds on #396 broke a
+consumer-name check and then a deny-list of shells and runners (`make`,
+`awk system()`, `at -f`, `taskset dash`, `$l` read from a file). The other
+layer-2 readings (always-ask stems and git rules, gate-state, the vex
+backstop) still read bodies as commands: the owner deferred them
 (`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
 (layer 2 reads no `$(…)` or shell-fed here-string). Regression:
 `tests/v2/heredoc_credentials_read_check.py`.
