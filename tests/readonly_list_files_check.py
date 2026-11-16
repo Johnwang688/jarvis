@@ -9,7 +9,10 @@ verifier showed a program that takes its paths from another file: with
 `env -f VARS ls` (PATH from a file: ran any program), `env -C DIR cat rel`
 (relative operands judged in the wrong folder: printed the key), and
 `wc`/`du --files0-from`, `find -files0-from` (names, counts, sizes).
-The Sol verifier then added three: `file` loading a planted `~/.magic`
+The Sol verifier then added three, and an Opus review of 2026-11-16 eight
+more (patterns that become options, POSIX bracket classes, `-`-leading
+operands, literal `~`, home magic folders and MIME companions, `-m` as another
+option's value, `watch`). The Sol verifier's three: `file` loading a planted `~/.magic`
 symlink (or a `X.mgc` companion), a glued bare tail naming a relative
 symlink (`date -fkeylink`), and `ionice -p PID`, which changed a running
 process.
@@ -199,8 +202,14 @@ class ListFiles(unittest.TestCase):
         (self.home / ".magic").mkdir()
         (self.home / ".magic" / "magic.mgc").symlink_to(self.key)
         self.assertRefused("file -b magic.txt", "file loads ~/.magic/magic.mgc as magic")
-        # A magic file named on the line is loaded instead of the home ones.
-        self.assertRuns("file -m magic.txt magic.txt")
+        # Checked even with `-m`: the `-m` word may be another option's value
+        # (review of 2026-11-16: `file -F -m magic.txt x`, `-m` the separator).
+        for command in ("file -m magic.txt magic.txt", "file -F -m magic.txt magic.txt",
+                        "file --separator -m magic.txt magic.txt",
+                        "file -- -m magic.txt magic.txt",
+                        "file -F --magic-file=magic.txt magic.txt",
+                        "file -bF -mmagic.txt magic.txt"):
+            self.assertRefused(command, "file loads ~/.magic/magic.mgc as magic")
         (self.home / ".magic" / "magic.mgc").unlink()
         (self.home / ".magic").rmdir()
         (self.home / ".magic").write_text("0 string zz %s\n")
@@ -210,11 +219,134 @@ class ListFiles(unittest.TestCase):
         (self.project / "two.magic.mgc").symlink_to(self.key)
         for command in ("file -m two.magic magic.txt", "file -bmtwo.magic magic.txt",
                         "file --magic-file=two.magic magic.txt"):
-            self.assertRefused(command, "compiled .mgc companion")
+            self.assertRefused(command, ".mgc/.mime companion")
         # A magic file that is itself a symlink, glued or as a word.
         (self.project / "keylink").symlink_to(self.key)
         self.assertRefused("file -m keylink magic.txt", None)
         self.assertRefused("file -mkeylink magic.txt", None)
+
+    def test_home_magic_folders_and_mime(self):
+        # Review of 2026-11-16: libmagic reads every file in a folder named
+        # like its magic, links followed, and opens `.mime.mgc` under `-i`.
+        folder = self.home / ".magic.mgc"
+        folder.mkdir()
+        (folder / "link").symlink_to(self.key)
+        self.assertRefused("file -b magic.txt", "file loads ~/.magic.mgc as magic")
+        self.assertRefused("file -bL magic.txt", "file loads ~/.magic.mgc as magic")
+        (folder / "link").unlink()
+        folder.rmdir()
+        inner = self.home / ".magic" / "magic.mgc"
+        inner.mkdir(parents=True)
+        (inner / "link").symlink_to(self.key)
+        self.assertRefused("file -b magic.txt", "file loads ~/.magic/magic.mgc as magic")
+        (inner / "link").unlink()
+        inner.rmdir()
+        # A plain ~/.magic folder with nothing in it is harmless.
+        self.assertRuns("file -b magic.txt")
+        (self.home / ".magic").rmdir()
+        (self.home / ".magic.mime.mgc").symlink_to(self.key)
+        self.assertRefused("file -i magic.txt", "file loads ~/.magic.mime.mgc as magic")
+        (self.home / ".magic.mime.mgc").unlink()
+        (self.project / "one.magic").write_text("0 string x %s\n")
+        (self.project / "one.magic.mime.mgc").symlink_to(self.key)
+        self.assertRefused("file -i -m one.magic magic.txt", ".mgc/.mime companion")
+
+    def test_literal_tilde_is_judged_both_ways(self):
+        # Review of 2026-11-16: dash leaves `~` literal when quoted, escaped,
+        # glued or after `=`; shlex drops the quotes that would tell.
+        planted = self.project / "~"
+        planted.mkdir()
+        (planted / "keylink").symlink_to(self.key)
+        for command in ("cat '~/keylink'", "cat \\~/keylink", "date --file=~/keylink",
+                        "date -f~/keylink", "head -n1 '~/keylink'"):
+            self.assertRefused(command, None)
+        (self.home / ".profile").write_text("# ordinary\n")
+        (planted / ".profile").mkdir()
+        (planted / ".profile" / "link").symlink_to(self.key)
+        for command in ("file -m '~/.profile' magic.txt", "file --magic-file='~/.profile' magic.txt",
+                        "file -m\\~/.profile magic.txt"):
+            self.assertRefused(command, ".mgc/.mime companion")
+        self.assertRuns("cat ~/.profile")
+
+    def test_patterns_dash_does_not_share_with_python(self):
+        # Review of 2026-11-16 (older than that day): Python's glob has no
+        # `[[:class:]]`, so it matched nothing and nothing was judged.
+        for command in ("cat ~/.s[[:lower:]]h/id_rsa", "grep -r x ~/.s[[:alpha:]]h",
+                        "rg x ~/.s[[:alpha:]]h", "cat ~/.ssh/id_rs[[=a=]]",
+                        "head ~/.s[[:alpha:]]h/*", "ls ~/.s[[:lower:]]h"):
+            self.assertRefused(command, None)
+        # Credential names reached by a pattern are judged by name too.
+        (self.project / ".env").write_text("FAKE_TOKEN=" + SENTINEL + "\n")
+        for command in ("cat .e[[:lower:]]v", "cat .e?v", "head -- .[e]nv"):
+            self.assertRefused(command, None)
+        # The same classes as grep patterns are text, not files.
+        for command in ("grep '[[:space:]]' magic.txt", "grep -c '[[:alpha:]]' magic.txt",
+                        "rg '[[:digit:]]+' magic.txt", "grep -E '^[^#]' magic.txt"):
+            self.assertRuns(command)
+        # No match: the shell passes the word on as written, so it is judged
+        # as written.
+        self.assertRefused("cat ~/.ssh/nomatch*", None)
+        for command in ("ls *", "file *", "rg -g'*.py' x .", "grep -l string *.txt",
+                        "ls [lm]*"):
+            self.assertRuns(command)
+
+    def test_patterns_never_become_options(self):
+        # Review of 2026-11-16: a planted file named like an option, reached
+        # by a pattern, is an option nobody wrote.
+        (self.project / "-f").write_text("")
+        for command in ("file -m magic.txt -? list.txt", "file -m magic.txt *",
+                        "cat *", "ls -- *"):
+            self.assertRefused(command, "which the program reads as an option")
+        (self.project / "-f").unlink()
+        (self.project / "--files0-from").write_text("")
+        for command in ("du --files0-fro? list0", "wc --files0-fro[m] list0"):
+            self.assertRefused(command, "which the program reads as an option")
+        (self.project / "--files0-from").unlink()
+        (self.project / "-files0-from").write_text("")
+        self.assertRefused("find -files0-fro? list0", "which the program reads as an option")
+        (self.project / "-files0-from").unlink()
+        (self.project / "--files0-from=list0").write_text("")
+        self.assertRefused("du -sh *", "which the program reads as an option")
+        (self.project / "--files0-from=list0").unlink()
+        (self.project / "-p1").write_text("")
+        self.assertRefused("ionice -c3 -* ls", "which the program reads as an option")
+        (self.project / "-p1").unlink()
+        # A writer's own option, reached the same way, is refused before it
+        # could run (`find -delete`), and nothing is deleted.
+        (self.project / "-delete").write_text("")
+        self.assertRefused("find . -name pats -de?ete", "which the program reads as an option")
+        self.assertTrue((self.project / "pats").exists())
+
+    def test_patterns_never_choose_the_program(self):
+        for command in ("timeout * ls", "env LANG=C l?", "nice -n * ls", "l? -la",
+                        "timeout 5 [l]s"):
+            self.assertRefused(command, None)
+
+    def test_dash_operands_are_judged_whole(self):
+        # Review of 2026-11-16 (older than that day): a word starting with
+        # `-` had only its glued tails judged.
+        (self.project / "-keylink").symlink_to(self.key)
+        (self.project / "--keylink2").symlink_to(self.key)
+        (self.project / "-sshdir").symlink_to(self.home / ".ssh", target_is_directory=True)
+        (self.project / "-homedir").symlink_to(self.home, target_is_directory=True)
+        for command in ("cat -- -keylink", "head -- -keylink", "tail -- -keylink",
+                        "cat -- --keylink2", "grep -a x -- -keylink", "wc -l -- -keylink",
+                        "grep -r x -- -sshdir", "rg x -- -sshdir", "ls -- -sshdir",
+                        "grep -r x -- -homedir", "rg x -- -homedir"):
+            self.assertRefused(command, None)
+
+    def test_watch_never_runs_a_shell_string(self):
+        os.environ["TERM"] = "xterm"
+        for command in ("timeout 3 watch -n1 echo 'x;touch PWNED'",
+                        "timeout 3 watch -n 1 -g ls 'x;touch PWNED'", "watch -x ls"):
+            self.assertRefused(command, None)
+
+    def test_pattern_operands_naming_the_options_still_run(self):
+        # Review of 2026-11-16: grep/rg/echo words are patterns or text.
+        (self.project / "src.txt").write_text("--files-from --files0-from\n")
+        for command in ("rg -F -e '--files-from' src.txt", "grep -F -- --files0-from src.txt",
+                        "echo --files0-from", "grep -e --files-from src.txt"):
+            self.assertRuns(command)
 
     def test_glued_bare_tail_symlink(self):
         # Sol verifier, 2026-11-16 (older than this change): a value glued to

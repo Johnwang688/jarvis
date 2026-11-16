@@ -96,6 +96,36 @@ readonly_verifier_03bf04d5/initial.json`) showed three more, all fixed here:
    acts on processes already running — `ionice -c 3 -p PID cat x` set PID's
    I/O class to idle, then failed on `cat`.
 
+## Review round 2 (Opus, adversarial, 2026-11-16)
+
+Findings and what was done (probes in `~/.cache/jarvis-lead/listfiles/review/`):
+
+| # | Finding | Sev | Done |
+|---|---|---|---|
+| 1 | `[[:class:]]` patterns: Python's glob matched nothing, so nothing was judged; dash expanded `~/.s[[:lower:]]h/id_ed25519` (older) | HIGH | fixed by 9 |
+| 2 | A pattern expanding to a planted `-f`/`--files0-from`/`-p<pid>` file became an option none of the checks saw; also `find -de?ete` with a planted `-delete` | HIGH | fixed by 9 |
+| 3 | A word starting with `-` was never judged whole: `cat -- -keylink` (older) | HIGH | fixed by 9 |
+| 4 | A literal (quoted, escaped, glued, after `=`) `~` judged as if expanded (older; and in `_magic_value`) | HIGH | fixed: both readings judged |
+| 5 | Any `-m` word, even another option's value (`file -F -m m x`), skipped the home-magic check | HIGH | fixed: always checked |
+| 6 | Home magic as a folder (`~/.magic.mgc/link`) read every file in it | HIGH | fixed: anything but a plain regular file refused |
+| 7 | procps `watch` (no `-x`) runs its words through `sh -c` (older) | HIGH | fixed: refused like xargs |
+| 8 | rg reads `.ignore`/`.rgignore` from searched folders, links followed; invalid glob lines quoted (older) | MED | **deferred**, own task |
+| 9 | Other processes' environments: `ps eww`, `/proc/PID/environ` (older, another class) | MED | **deferred**, own task |
+| 10 | The any-program `--files-from` net refused `rg -F -e --files-from src` | LOW | fixed: not for grep/rg/echo |
+| 11 | `.mime.mgc`/`.mime` companions under `-i` | LOW | fixed: judged with `.mgc` |
+
+**9. dash expands the words itself.** Python's glob and shlex only guess at
+what dash makes of a line. Once the line holds no operator, substitution or
+`$`, `/bin/sh -c 'printf "%s\0" LINE'` can only expand quotes, `~` and
+patterns into its printf builtin, which runs nothing. `run_readonly` then:
+judges every resulting word as a path, as it stands; runs the name check over
+them (`cat .e[[:lower:]]v`); refuses an option word that only a pattern
+produced; and refuses any pattern among the wrappers' words or as the program
+(`timeout * ls` beside files `5` and `rm` runs `rm`). Too slow (5 s), too
+many words (2,000) or a syntax error: refused. The shell runs in the same
+folder and environment as `_run`, so locale and HOME agree. grep patterns
+such as `'[[:space:]]'` keep working.
+
 Accepted false refusals, deliberately: a literal file named like a refused
 option after `--` (`file -- -foo`, `wc -- --files0-from`) and a refused
 letter as another option's value (`file -F -f x`). Honouring `--` needs exact
@@ -115,4 +145,4 @@ and leaks nothing, the sentinel never appears and the fake program never
 runs; negatives that must still run (`file -m one.magic x`, `file -bmone.magic
 x`, `wc -l`, `du -sh .`, `grep -n env -C 2 f`, `grep -f pats f`, `date -f
 dates`, `env LANG=C ls`, `timeout 5 ls`, `env`, `find . -name x`). Mutation:
-each refusal removed in turn makes the suite fail (28 of 28).
+each refusal removed in turn makes the suite fail (41 of 41).

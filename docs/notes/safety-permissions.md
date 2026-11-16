@@ -2266,7 +2266,18 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   symlink or in a credential folder; glued bare tails (`date -fkeylink`, a
   relative symlink to the key), now judged like path-like ones; and
   `ionice -p/-P/-u`, which changed a running process.
-  `tests/readonly_list_files_check.py`, 28 of 28 mutations biting.
+  An Opus review the same day found older holes in the operand judge, closed
+  by letting **dash expand the words**: once a line holds no operator,
+  substitution or `$`, `sh -c 'printf "%s\0" LINE'` can only expand quotes,
+  `~` and patterns. Every resulting word is judged as it stands and by name
+  (`~/.s[[:lower:]]h/id_ed25519`, `cat -- -keylink`, `cat .e[[:lower:]]v`); an
+  option word only a pattern produced is refused (a planted `-f` reached by
+  `-?`, `find -de?ete`); so is a pattern before or as the program. Also
+  refused: procps `watch` (runs `sh -c`), home magic folders, `.mime.mgc`
+  companions. **Open:** rg's `.ignore`/`.rgignore` read from searched
+  folders, links followed (invalid glob lines are quoted); other processes'
+  environments through `ps eww` and `/proc/PID/environ`.
+  `tests/readonly_list_files_check.py`, 41 of 41 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.

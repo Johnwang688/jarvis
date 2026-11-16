@@ -8,9 +8,11 @@ one catch-all `run_command` would leave the harness nothing to reason about.
 
 from __future__ import annotations
 
+import glob
 import re
 import shlex
 import subprocess
+from collections import Counter
 from typing import Annotated
 
 from .. import protected_state, rules
@@ -132,6 +134,29 @@ def run_readonly(
         return ("Error: `$` expands to text this check cannot see. Single-quote a literal "
                 "`$` (e.g. grep 'foo$' file), or use run_command.")
 
+    # The words the program will get, as dash makes them (2026-11-16 review):
+    # patterns, `~` and quotes, which shlex and Python's glob only guess at.
+    argv = _shell_words(command)
+    if argv is None:
+        return ("Error: what the shell makes of these words cannot be told (a pattern too "
+                "broad or slow, or a syntax error). Use run_command.")
+    # The name check above read the line as written; `cat .e[[:lower:]]v`
+    # names `.env` only once dash has expanded it.
+    protected = protected_in_command(shlex.join(argv))
+    if protected:
+        return refusal(protected)
+    # A pattern that expands to a name starting with `-` hands the program an
+    # option nobody wrote, which none of the option checks below saw: with a
+    # planted file `-f`, `file -m m -? list` ran as `file -m m -f list`, and
+    # `du -sh *` beside a file `--files0-from=L` read the paths in L.
+    produced = (Counter(w for w in argv if w.startswith("-"))
+                - Counter(t for t in tokens if t.startswith("-")))
+    if produced:
+        word = next(iter(produced))
+        return (f"Error: a pattern expands to {word[:80]}, which the program reads as an "
+                "option this check cannot judge. Use run_command, or name the files "
+                "without a pattern.")
+
     # Judge the command that actually runs, not the costume it arrived in.
     # `env` is on the allowlist because printing the environment is a read, and
     # that made `env -C /tmp sh -c 'cat .env'` a read-only call: the wrapper was
@@ -160,6 +185,12 @@ def run_readonly(
     if "xargs" in peeled:
         return ("Error: xargs passes its program arguments this check cannot see. "
                 "Use run_command.")
+    # procps watch without -x joins its words into a `sh -c` string, so a
+    # quoted `;` the operator scan rightly passed becomes a separator
+    # (review of 2026-11-16: `timeout 3 watch -n1 echo 'x;touch F'` wrote F).
+    if "watch" in peeled:
+        return ("Error: watch runs its words through a shell this check does not see. "
+                "Use run_command.")
     # An assignment before the program — the shell's (`X=1 ls`) or env's
     # (`env X=1 ls`) — sets what it runs with, and some names make any
     # program load code: `LD_PRELOAD=./x.so ls` ran here, with nobody asked
@@ -177,6 +208,12 @@ def run_readonly(
                                       and _SAFE_ENV_VALUE.fullmatch(parts[3])):
             return (f"Error: setting {parts[0]} changes what the program runs with, so it is "
                     "not a read. Use run_command.")
+    # A pattern among the wrappers' words or as the program: one that matches
+    # several names shifts which word is the program (`timeout * ls` beside
+    # files `5` and `rm` runs `rm`).
+    if any(glob.has_magic(word) for word in tokens[:tail + 1]):
+        return ("Error: a pattern before or as the program can change which program runs. "
+                "Use run_command.")
     line = tokens
     tokens = sure
     if not tokens:
@@ -230,7 +267,7 @@ def run_readonly(
     _recursive, follows = _search_modes(binary, tokens)
     if follows:
         return f"Error: {follows}. Symlinks named on the line are judged; nested ones are not."
-    reached = _credential_operand(binary, tokens)
+    reached = _credential_operand(binary, tokens, argv)
     if reached:
         return (f"Error: {reached} is in a credential folder, or holds one this search would "
                 "read (SSH, cloud and Git logins, "
@@ -340,15 +377,24 @@ def _wrapper_elsewhere(line: list[str], tail: int) -> str | None:
 
 
 def _unsafe_magic(path: str) -> bool:
-    """A magic file libmagic would load that is a symlink, or lies in a
-    credential folder. A planted `~/.magic -> ~/.ssh/id_rsa` was read by a
-    plain `file x`, its first line quoted in a parse warning (Sol verifier,
-    2026-11-16)."""
+    """A magic file libmagic may load that exists and is anything but a plain
+    regular file outside every credential folder: a symlink (a planted
+    `~/.magic -> ~/.ssh/id_rsa` was quoted in a parse warning by a plain `file
+    x`, Sol verifier 2026-11-16) or a folder (libmagic reads every file in
+    it, links followed: `~/.magic.mgc/link`, review of 2026-11-16)."""
     import os
 
     from .files import credential_folder_judge
 
-    return os.path.islink(path) or (os.path.isfile(path) and credential_folder_judge()(path))
+    if not os.path.lexists(path):
+        return False
+    return (os.path.islink(path) or not os.path.isfile(path)
+            or credential_folder_judge()(path))
+
+
+# What libmagic opens beside a magic file `X`: its compiled form, and in MIME
+# mode (`-i`) the MIME ones (review of 2026-11-16).
+_MAGIC_COMPANIONS = ("", ".mgc", ".mime.mgc", ".mime")
 
 
 def _implicit_magic() -> str | None:
@@ -358,10 +404,14 @@ def _implicit_magic() -> str | None:
     import os
 
     home = os.path.expanduser("~")
-    for name in (".magic.mgc", ".magic", os.path.join(".magic", "magic.mgc")):
-        if _unsafe_magic(os.path.join(home, name)):
-            return (f"file loads ~/{name} as magic, and it is a symlink or in a credential "
-                    "folder")
+    for name in [".magic" + c for c in _MAGIC_COMPANIONS] + [
+            os.path.join(".magic", "magic" + c) for c in _MAGIC_COMPANIONS[1:]]:
+        path = os.path.join(home, name)
+        if name == ".magic" and os.path.isdir(path) and not os.path.islink(path):
+            continue                        # its magic.mgc is checked instead
+        if _unsafe_magic(path):
+            return (f"file loads ~/{name} as magic, and it is a symlink, a folder or in a "
+                    "credential folder")
     return None
 
 
@@ -376,16 +426,20 @@ def _magic_value(value: str) -> str | None:
 
     if ":" in value:
         return "file -m/--magic-file with a colon-separated list reads files not on the line"
+    base = runtime.working_dir() or os.getcwd()
     place = os.path.expanduser(value)
-    if not os.path.isabs(place):
-        place = os.path.join(runtime.working_dir() or os.getcwd(), place)
-    if not value or not os.path.isfile(place):
+    readings = [place if os.path.isabs(place) else os.path.join(base, place)]
+    if value.startswith("~"):
+        # Quoted, glued or after `=`, dash leaves the `~` literal (review of
+        # 2026-11-16: `file -m '~/.profile'` loaded a planted folder `~`).
+        readings.append(os.path.join(base, value))
+    if not value or not any(os.path.isfile(r) for r in readings):
         return ("file -m/--magic-file reads every file in a folder (or names no file), "
                 "not only what is on the line")
-    # libmagic tries the compiled companion first.
-    if _unsafe_magic(place) or _unsafe_magic(place + ".mgc"):
-        return ("file -m/--magic-file names a symlink or a file in a credential folder "
-                "(or its compiled .mgc companion is one)")
+    # libmagic tries the compiled and MIME companions too.
+    if any(_unsafe_magic(r + c) for r in readings for c in _MAGIC_COMPANIONS):
+        return ("file -m/--magic-file names a symlink, a folder or a file in a credential "
+                "folder (or a .mgc/.mime companion is one)")
     return None
 
 
@@ -394,7 +448,6 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
     or None. Every word is scanned as a possible option — a value is not
     skipped — so a word that could be either errs toward refusing."""
     words = tokens[1:]
-    magic_named = False
     for i, word in enumerate(words):
         nxt = words[i + 1] if i + 1 < len(words) else ""
         if word.startswith("--"):
@@ -405,12 +458,12 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
                 if _long_prefix(name, "--files-from"):
                     return _FILE_FILES_FROM
                 if _long_prefix(name, "--magic-file"):
-                    magic_named = True
                     why = _magic_value(value if eq else nxt)
                     if why:
                         return why
-            # Any program that grows GNU's spelling of it.
-            if name in ("--files0-from", "--files-from"):
+            # Any program that grows GNU's spelling of it — not the ones whose
+            # words are patterns or text (`rg -F -e --files-from src`).
+            if name in ("--files0-from", "--files-from") and binary not in ("grep", "rg", "echo"):
                 return f"{binary} {name} opens the paths listed in a file"
             continue
         if binary == "find" and word == "-files0-from":
@@ -422,12 +475,13 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
                     return _FILE_FILES_FROM
                 if char in _FILE_VALUED_SHORT:
                     if char == "m":
-                        magic_named = True
                         why = _magic_value(cluster[k + 1:] or nxt)
                         if why:
                             return why
                     break
-    if binary == "file" and not magic_named:
+    # Always: a `-m` word the scan saw may be another option's value (`file
+    # -F -m m x`, `-m` the separator), and then the home magic still loads.
+    if binary == "file":
         return _implicit_magic()
     return None
 
@@ -435,6 +489,32 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
 # How many files one operand's glob may name before the line is refused as
 # too broad to judge, rather than judged in part.
 _GLOB_CAP = 2000
+
+
+def _shell_words(command: str) -> list[str] | None:
+    """Every word of `command` as dash expands it, the program's included, or
+    None when that cannot be told (a syntax error, too slow, too much).
+
+    Only called once the line holds no operator, substitution or `$`, so the
+    shell has nothing left to do but quotes, `~` and patterns, and the words
+    go to its `printf` builtin: nothing is executed. Run where `_run` runs it,
+    with the same environment, so the locale and HOME agree. Python's glob
+    has no `[[:class:]]` (`~/.s[[:lower:]]h/id_ed25519` matched nothing there
+    and the key here), and shlex has dropped the quotes that decide whether
+    a `~` expands (review of 2026-11-16)."""
+    from .. import runtime
+
+    try:
+        proc = subprocess.run(["/bin/sh", "-c", 'printf "%s\\0" ' + command],
+                              capture_output=True, timeout=5, cwd=runtime.working_dir(),
+                              stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or len(proc.stdout) > 1_000_000 or not proc.stdout.endswith(b"\0"):
+        return None
+    words = [w.decode("utf-8", "surrogateescape") for w in proc.stdout[:-1].split(b"\0")]
+    return None if len(words) > _GLOB_CAP else words
+
 
 # Short options that take a value (the rest of their cluster, or the next
 # word), per searcher: the value is never read as more options.
@@ -514,7 +594,8 @@ def _grep_dir_action_harmless(value: str) -> bool:
                             or "skip".startswith(value))
 
 
-def _credential_operand(binary: str, tokens: list[str]) -> str | None:
+def _credential_operand(binary: str, tokens: list[str],
+                        argv: list[str] | None = None) -> str | None:
     """The first operand of a `run_readonly` line that is, or reaches into, a
     credential folder (`config.credential_dirs()`), or None.
 
@@ -541,13 +622,35 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         text = os.path.expanduser(text)
         return text if os.path.isabs(text) else os.path.join(base, text)
 
+    def places(text: str) -> list[str]:
+        # dash leaves a `~` literal when it was quoted or escaped, after
+        # `--opt=` and glued to an option, and shlex has dropped the quotes
+        # that would tell: judge both readings (review of 2026-11-16: `cat
+        # '~/keylink'` with a planted folder `~` printed the key).
+        found = [place(text)]
+        if text.startswith("~"):
+            found.append(os.path.join(base, text))
+        return found
+
+    def reaches(candidate: str, path_like: bool) -> bool:
+        if judge(candidate):
+            return True
+        if recursive and path_like:
+            # The shared reading (`files.credential_folder_holds`): the
+            # stores, case, kernel-order `..` and the Windows profiles
+            # too (cred-dir reads, 2026-10-29).
+            real = os.path.realpath(candidate)
+            return (any(root == real or root.startswith(real.rstrip(os.sep) + os.sep)
+                        for root in roots) or credential_folder_holds(candidate))
+        return False
+
     words = []      # (as written, placed path) for an operand or a long option's value
     attached = []   # the same for every tail of a short-option cluster, and
     #                 whether it looks like a path
     for word in tokens[1:]:
         if word.startswith("--"):
             if "=" in word and word.split("=", 1)[1]:
-                words.append((word, place(word.split("=", 1)[1])))
+                words.extend((word, path) for path in places(word.split("=", 1)[1]))
             continue
         if word.startswith("-") and len(word) > 1:
             # A value glued to a short option (`-f/abs`, `-nf/abs`) is never
@@ -562,9 +665,9 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
             for k in range(2, len(word)):
                 tail = word[k:]
                 path_like = tail.startswith(("/", "~", ".")) or "/" in tail
-                attached.append((word, place(tail), path_like))
+                attached.extend((word, path, path_like) for path in places(tail))
             continue
-        words.append((word, place(word)))
+        words.extend((word, path) for path in places(word))
     if recursive and not any(os.path.exists(path) for _word, path in words):
         # `rg session`, `grep -r x`: no folder named, so the one they search
         # is the one they run in.
@@ -579,16 +682,15 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         else:
             found = [path]
         for candidate in found:
-            if judge(candidate):
+            if reaches(candidate, path_like):
                 return word
-            if recursive and path_like:
-                # The shared reading (`files.credential_folder_holds`): the
-                # stores, case, kernel-order `..` and the Windows profiles
-                # too (cred-dir reads, 2026-10-29).
-                real = os.path.realpath(candidate)
-                if any(root == real or root.startswith(real.rstrip(os.sep) + os.sep)
-                       for root in roots) or credential_folder_holds(candidate):
-                    return word
+    # Every word as the shell hands it over (`_shell_words`), judged as it
+    # stands, with no `~` or pattern left in it to guess at: `[[:class:]]`
+    # patterns, a quoted `~`, and the whole of a word starting with `-`
+    # (`cat -- -keylink` printed the key it links to; review of 2026-11-16).
+    for word in argv or ():
+        if reaches(word if os.path.isabs(word) else os.path.join(base, word), True):
+            return word
     return None
 
 
