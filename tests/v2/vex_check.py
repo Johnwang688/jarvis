@@ -58,6 +58,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1060,6 +1061,84 @@ class VexBuildCli(Base):
         self.assertEqual(self.world.calls("make"), [])
 
 
+class HeadCommit(unittest.TestCase):
+    """`vex.head_commit`, the download's commit label (PR #398 review)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(os.path.realpath(tmp.name))
+        env = patch.dict(os.environ, {"HOME": str(self.root), "GIT_CONFIG_GLOBAL": os.devnull})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                               "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def repo(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        self.git(path, "init", "-q")
+        return path
+
+    def commit(self, path):
+        self.git(path, "add", "-A")
+        self.git(path, "commit", "-q", "-m", "c")
+        return self.git(path, "rev-parse", "HEAD")
+
+    def test_a_project_in_a_subfolder_counts_only_its_own_changes(self):
+        top = self.repo(self.root / "robotics")
+        (top / "override" / "src").mkdir(parents=True)
+        (top / "override" / "src" / "main.cpp").write_text("int main() {}\n")
+        (top / "other.txt").write_text("a\n")
+        sha = self.commit(top)
+        (top / "other.txt").write_text("b\n")                 # outside the project
+        self.assertEqual(vex.head_commit(top / "override"), (sha, False))
+        (top / "override" / "src" / "main.cpp").write_text("int main() { return 1; }\n")
+        self.assertEqual(vex.head_commit(top / "override"), (sha, True))
+
+    def test_a_tracked_build_link_still_counts_and_build_output_does_not(self):
+        top = self.repo(self.root / "p")
+        (top / "src").mkdir()
+        (top / "src" / "main.cpp").write_text("x\n")
+        os.symlink("src", top / "build")
+        sha = self.commit(top)
+        (top / "build").unlink()
+        (top / "build").mkdir()
+        (top / "build" / "p.bin").write_bytes(b"\0")
+        self.assertEqual(vex.head_commit(top), (sha, True))     # the tracked link is gone
+        self.git(top, "rm", "-q", "--cached", "build")
+        sha = self.commit(top)
+        self.assertEqual(vex.head_commit(top), (sha, False))    # build output alone is no change
+
+    def test_the_config_judged_is_the_config_obeyed(self):
+        # A nested repository whose `core.worktree` names its parent: git
+        # reports the parent as the toplevel, but runs from the project obey
+        # the nested config, here a clean filter on a file it tracks. It is
+        # judged, and nothing runs.
+        outer = self.repo(self.root / "outer")
+        (outer / "a.txt").write_text("a\n")
+        self.commit(outer)
+        project = self.repo(outer / "override")
+        self.git(project, "config", "core.worktree", str(outer))
+        (project / "main.cpp").write_text("x\n")
+        self.git(project, "add", "main.cpp")             # tracked as override/main.cpp
+        self.git(project, "commit", "-q", "-m", "c")
+        marker = self.root / "ran"
+        self.git(project, "config", "filter.x.clean", f"touch {marker}; cat")
+        (project / ".gitattributes").write_text("* filter=x\n")
+        (project / "main.cpp").write_text("y\n")     # a change: status runs the filter on it
+        self.assertEqual(vex.head_commit(project), (None, None))
+        self.assertFalse(marker.exists(), "a program the repository's config names ran")
+
+    def test_no_repository_or_no_commit_names_nothing(self):
+        bare = self.root / "plain"
+        bare.mkdir()
+        self.assertEqual(vex.head_commit(bare), (None, None))
+        self.assertEqual(vex.head_commit(self.repo(self.root / "fresh")), (None, None))
+
+
 # -- device actions ---------------------------------------------------------------------------------------
 
 class Device(DaemonBase):
@@ -1077,6 +1156,57 @@ class Device(DaemonBase):
                                         "--timer", "--progress"])
         self.assertEqual(Path(call["cwd"]).resolve(), self.folder.resolve())
         self.assertEqual(call["wslenv"], "")
+
+    def test_the_download_names_its_commit_and_start_time(self):
+        # The owner, 2026-11-16: the Download tab and the download terminal
+        # say which commit was sent and when the download started.
+        def sent():
+            body = self.download()
+            self.ended(body["terminal_id"])
+            record = self.owner("GET", f"/vex/downloads/{body['download_id']}")
+            return record, self.daemon.terminals.get(body["terminal_id"]).title
+
+        self.build()
+        record, title = sent()
+        self.assertEqual((record["commit"], record["dirty"]), (None, None))   # no repository
+        self.assertRegex(title, r"^vex download · override → slot 3 · started \d\d:\d\d:\d\d$")
+        self.assertTrue(record["started"])
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                 "-c", "core.hooksPath=/dev/null", *args], cwd=self.folder, check=True,
+                capture_output=True, text=True,
+                env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull}).stdout.strip()
+        (self.folder / "readme.txt").write_text("robot\n")
+        git("init", "-q")
+        git("add", "-A", "--", ".", ":(exclude)build")
+        git("commit", "-q", "-m", "first")
+        sha = git("rev-parse", "HEAD")
+        record, title = sent()
+        # An untracked build/ is not a change: it is what is being sent.
+        self.assertEqual((record["commit"], record["dirty"]), (sha, False))
+        self.assertRegex(title, rf"^vex download · override → slot 3 · {sha[:7]} · started \d\d:\d\d:\d\d$")
+        index = (self.folder / ".git" / "index").stat().st_mtime_ns
+        # A tracked file with new stat data and the same text: a plain
+        # `git status` would refresh (rewrite) the index for it.
+        when = time.time() - 30
+        os.utime(self.folder / "readme.txt", (when, when))
+        # A change HEAD does not hold says so (the binary was built from it).
+        (self.folder / "notes.txt").write_text("x\n")
+        record, title = sent()
+        self.assertEqual((record["commit"], record["dirty"]), (sha, True))
+        self.assertIn(f" · {sha[:7]}+ · started ", title)
+        self.assertEqual((self.folder / ".git" / "index").stat().st_mtime_ns, index,
+                         "the read never writes the index")
+        # A repository whose own config names a program for git to run, or
+        # whose config cannot be listed, is not read past that.
+        git("config", "core.sshCommand", "true")
+        self.assertEqual(vex.head_commit(self.folder), (None, None))
+        git("config", "--unset", "core.sshCommand")
+        self.assertEqual(vex.head_commit(self.folder), (sha, True))
+        with patch("jarvis.gitops._config_risk", return_value=None):
+            self.assertEqual(vex.head_commit(self.folder), (None, None))
 
     def test_no_binary_or_a_stale_one_is_refused(self):
         self.assertIn("Build first", self.download(status=409)["error"])

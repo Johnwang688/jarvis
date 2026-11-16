@@ -716,7 +716,8 @@ export class VexStore {
           void this.stopProgram(sent.terminal);
         } else void terminals.showProgram(sent.terminal);
         const seeded: DownloadView = {id: sent.id, project_id: projectId, slot, state: "running",
-          terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null};
+          terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null,
+          commit: null, dirty: null};
         this.patchRun(projectId, {download: seeded});
         const end = await this.followDownload(projectId, sent.id);
         if (chain.cancelled) droppedBy = "the download was stopped";

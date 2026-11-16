@@ -77,6 +77,7 @@ Run (after `cd hud && npm ci --ignore-scripts && npm run build`):
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -1678,6 +1679,40 @@ def _connect_off(page) -> str:
     return _described(page, _brain(page, V, _tid("vex-brain-connect"))) if btn.is_disabled() else ""
 
 
+def _download_origin_checks(page, mock, check, until, fake):
+    """The owner, 2026-11-16: the Download tab says which commit was sent
+    (`+`: uncommitted changes) and when the download started; with no
+    repository it says only the time."""
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    for label, commit, said in (("a commit with changes", (sha, True), "0123456+"),
+                                ("no repository", (None, None), None)):
+        _reset(page, mock, until)
+        check(f"download origin, {label}: setup: the view draws", _ready(page, until))
+        v = mock_vex.state(mock)
+        v["download_commit"] = commit
+        _auto(mock)
+        page.locator(_view(V, _tid("vex-download-btn"))).click()
+        assert until(lambda: v["download_records"], timeout=10), "the download did not start"
+        assert until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=8), "the chain did not end"
+        _tab(page, "download")
+        bar = page.locator(_view(V, _tid("vex-download-state")))
+        started = page.locator(_view(V, _tid("vex-download-started")))
+        check(f"download origin, {label}: the bar says when the download started",
+              bool(until(lambda: started.count() and started.inner_text().startswith("started "), timeout=4)),
+              bar.inner_text() if bar.count() else "")
+        mark = page.locator(_view(V, _tid("vex-download-commit")))
+        if said:
+            check(f"download origin, {label}: the bar names the commit, short, + for changes",
+                  bool(until(lambda: mark.count() and mark.inner_text() == said, timeout=4)),
+                  bar.inner_text() if bar.count() else "")
+            check(f"download origin, {label}: its tooltip holds the full id and says why the +",
+                  sha in (mark.get_attribute("title") or "") and "uncommitted" in (mark.get_attribute("title") or ""))
+            if os.environ.get("VEX_ORIGIN_SHOT"):
+                page.locator(_view(V, ".vexopanel")).first.screenshot(path=os.environ["VEX_ORIGIN_SHOT"])
+        else:
+            check(f"download origin, {label}: no commit is shown", mark.count() == 0)
+
+
 def _download_end_checks(page, mock, check, until, fake):
     """The owner, live, 2026-10-17: a download ended ("Downloaded to slot 1"),
     but the Brain tab's Connect stayed off — "A download holds the robot's
@@ -2104,7 +2139,8 @@ SECTIONS = (
     _chain_checks, _card_checks, _brain_checks, _info_checks, _notice_checks, _one_chain_checks,
     _header_rebuild_checks, _still_stale_checks, _answer_card_checks, _passing_card_checks, _first_click_checks,
     _detect_again_checks, _lone_pane_checks, _gone_project_checks, _ed7_beside_checks, _stop_checks, _tabs_checks,
-    _marks_checks, _help_checks, _download_end_checks, _skip_build_checks)
+    _marks_checks, _help_checks, _download_end_checks, _skip_build_checks,
+    _download_origin_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):

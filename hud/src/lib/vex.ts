@@ -181,7 +181,13 @@ export interface DownloadView {
   id: string; project_id: string; slot: number; state: BuildState;
   terminal_id: string | null; exit_code: number | null; output: string;
   started: string; ended: string | null;
+  /** HEAD when the download started (full id), or null: no repository, no commit, or git refused. */
+  commit?: string | null;
+  /** The project folder had changes HEAD does not hold; null when unknown. */
+  dirty?: boolean | null;
 }
+
+const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export function parseDownload(raw: unknown): DownloadView | null {
   if (!isObj(raw) || !isVexId(raw.id) || typeof raw.project_id !== "string" || raw.project_id.length > 200
@@ -190,7 +196,22 @@ export function parseDownload(raw: unknown): DownloadView | null {
   return { id: raw.id, project_id: raw.project_id, slot: raw.slot, state: raw.state as BuildState,
     terminal_id: isVexId(raw.terminal_id) ? raw.terminal_id : null, exit_code: int(raw.exit_code),
     output: typeof raw.output === "string" ? raw.output.slice(-16 * 1024) : "",
-    started: str(raw.started, 64), ended: strOrNull(raw.ended, 64) };
+    started: str(raw.started, 64), ended: strOrNull(raw.ended, 64),
+    commit: typeof raw.commit === "string" && COMMIT.test(raw.commit) ? raw.commit : null,
+    dirty: typeof raw.dirty === "boolean" ? raw.dirty : null };
+}
+
+/**
+ * The Download tab's line for which commit was sent and when the download
+ * started: `a1b2c3d+ · started 5:23:51 PM` (`+`: uncommitted changes), on this
+ * browser's clock. Empty parts are left out.
+ */
+export function downloadOrigin(d: Pick<DownloadView, "commit" | "dirty" | "started">): { commit: string; started: string } {
+  const commit = d.commit ? d.commit.slice(0, 7) + (d.dirty ? "+" : "") : "";
+  const at = d.started ? new Date(d.started) : null;
+  const started = at && !Number.isNaN(at.getTime())
+    ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "";
+  return { commit, started };
 }
 
 export interface ConnectionView {

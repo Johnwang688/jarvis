@@ -1986,6 +1986,7 @@ button.vextab:hover:not(:disabled) { background: var(--hover); color: var(--text
 .vexopanel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .vexobar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 10px; min-height: 28px; border-bottom: 1px solid var(--border); background: var(--bg-1); font-size: 11px; color: var(--text-muted); }
 .vexobar-r { margin-left: auto; display: inline-flex; gap: 2px; }
+.vexobar .vexmono { font-family: var(--mono); word-spacing: normal; color: var(--text); }
 .vexobody { padding: 8px 10px; }
 .vexoutput { flex: 1 1 auto; margin: 0; padding: 8px 10px; min-height: 60px; overflow: auto; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); word-spacing: normal; }
 .vexdev { display: flex; flex-direction: column; gap: 7px; overflow: auto; font-size: 12px; }
