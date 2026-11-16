@@ -13,8 +13,10 @@
 // route it names again. When a read cannot reach Jarvis, or the stream
 // drops and a check finds no way through, the app turns offline: a banner
 // says so and when the shown data was last read, and the view is marked
-// stale (dimmed, `data-stale`). Coming back reads everything shown again
-// before the banner goes. A 401 anywhere means the session ended (logout,
+// stale (dimmed, `data-stale`). Coming back reads everything shown again.
+// Each list also keeps its own failed-refresh warning until its read succeeds,
+// even when other routes recover and the connection orb says Live.
+// A 401 anywhere means the session ended (logout,
 // a revoke at the desk, expiry): the app stops and asks for a sign-in.
 // There is no offline queue.
 //
@@ -56,7 +58,7 @@
 // draft and the box drawn again; Send is still the owner's tap. No inbox
 // row, card, question or decision has a mic.
 
-import { parseInbox, waitingCount, type InboxRow } from "../lib/inbox";
+import { waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
 import { lockIcon, unlockIcon } from "./icons";
 import { createProjectFolds } from "./folds";
@@ -66,11 +68,12 @@ import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecur
 import { credentialJSON, prepareRequest } from "./webauthn";
 import { NOT_READY, pillLabel, pillWords, realTimer, Unlock, UNLOCK_AND_SEND, type FrozenOp, type Outcome, type Stage, type Timer } from "./unlock";
 import {
-  RUNNING_STATES, parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads, parseWorkingList,
+  RUNNING_STATES, parseDiff, parseEvent, parseProjects, parseTask, parseThreads,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView, type WorkingItem,
 } from "./model";
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
+import { decodeInbox, decodeLog, decodeReview, decodeTasks, decodeWorking, readVerdict, type Decoded } from "./reads";
 import { answerKey, waiting } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
@@ -81,7 +84,7 @@ import {
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
-import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
+import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
 import { deferralsOpen, reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
 import { ScrollMemory, byAttr, menuView, sheetView, trayView, type MenuItem } from "./nav";
@@ -161,9 +164,9 @@ const TIME_TICK_MS = 60_000;
 /** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
 interface ThreadDone { id: string; busy: boolean; note: string; token: string | null; until: number }
 
-/** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
+/** `loaded`: the initial read finished (including a refusal); `hasRead`: a valid log was applied. */
 interface OpenThread {
-  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean;
+  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean; hasRead: boolean;
 }
 interface OpenTask {
   id: string;
@@ -299,6 +302,9 @@ export class PhoneApp {
   /** The view the main area last drew, and (while the approval sheet is open) the one it keeps under the sheet. */
   private drawnKey: string | null = null;
   private held: string | null = null;
+  /** Connection health and list freshness are independent: only this route's valid read clears it
+   * (`applyRead`). "failed": nothing new was read; "partial": a read applied, but some records were dropped. */
+  private readonly failedReads = new Map<string, "failed" | "partial">();
 
   constructor(private readonly deps: AppDeps) {
     // EVERY request this app makes goes through these two (and the push and clip wrappers below), so each
@@ -307,7 +313,13 @@ export class PhoneApp {
     const rawPost = deps.postJson ?? postJson;
     this.fetchJson = async (path) => {
       const got = await rawGet(path);
+      const resource = path.split("?")[0];
+      if (!this.stopped && /^\/m\/api\/(inbox|working|tasks|review|threads\/[^/]+\/log)$/.test(resource)) {
+        // HTTP success proves reachability only. The loader clears freshness after applying valid data.
+        if (!got.ok) this.failedReads.set(resource, "failed");
+      }
       this.report(reachOfGot(got), got.ok ? 200 : got.status);
+      if (!this.stopped) this.renderReadWarnings();
       return got;
     };
     this.postJson = async (path, value) => {
@@ -525,6 +537,30 @@ export class PhoneApp {
 
   // -- reading ---------------------------------------------------------------------
 
+  /**
+   * PR 381: the ONE step every list read's 200 goes through (the Inbox, In progress, Tasks, the
+   * review, a chat log's first page and its "load more" pages). `readVerdict` (./reads.ts) judges the
+   * decoded body. Malformed (wrong shape, or a non-empty record list with no valid record): nothing
+   * is applied, no cursor moves, the warning stays or is raised. Otherwise `apply` runs first, and
+   * only then is the warning cleared (valid) or kept as "incomplete" (partial). Returns the applied
+   * value, or null when nothing was applied. A failed request never gets here: `fetchJson` marked it.
+   */
+  private applyRead<T>(resource: string, decoded: Decoded<T> | null, apply: (value: T, partial: boolean) => void): T | null {
+    if (this.stopped) return null;
+    const path = `/m/api/${resource}`;
+    const verdict = readVerdict(decoded ? decoded.lists : null);
+    if (!decoded || verdict === "malformed") {
+      this.failedReads.set(path, "failed");
+      this.renderReadWarnings();
+      return null;
+    }
+    apply(decoded.value, verdict === "partial");
+    if (verdict === "valid") this.failedReads.delete(path);
+    else this.failedReads.set(path, "partial");
+    this.renderReadWarnings();
+    return decoded.value;
+  }
+
   /** One read: the body, or null when offline or signed out (`report` has already said which). */
   private async read(path: string): Promise<{ body: unknown } | { error: string; status: number } | null> {
     const got = await this.fetchJson(path);
@@ -550,16 +586,19 @@ export class PhoneApp {
       if (this.tab === "inbox") this.renderInbox();
       return;
     }
-    this.listError = null;
-    const body = r.body as { rows?: unknown; more?: unknown };
-    this.inbox = parseInbox(body?.rows) ?? [];
-    this.inboxMore = body?.more === true;
-    this.renderBadge();
-    const card = this.card;
-    if (card && !card.busy && !this.inbox.some((row) => row.id === card.rowId)) {
-      card.refused = "This card is no longer waiting: it was answered, or it timed out.";
-      card.rule = null;
-    }
+    const applied = this.applyRead("inbox", decodeInbox(r.body), ({ rows, more }, partial) => {
+      this.listError = null;
+      this.inbox = rows;
+      this.inboxMore = more;
+      this.renderBadge();
+      // An incomplete read may have dropped the open card's own row: its absence proves nothing.
+      const card = this.card;
+      if (!partial && card && !card.busy && !rows.some((row) => row.id === card.rowId)) {
+        card.refused = "This card is no longer waiting: it was answered, or it timed out.";
+        card.rule = null;
+      }
+    });
+    if (!applied) return;
     if (this.tab === "inbox") this.renderInbox();
     else if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
     // M5: the row a task's "Answer it in the Inbox" asked for, once the read redrew it.
@@ -588,16 +627,16 @@ export class PhoneApp {
 
   private applyWorking(got: Got): void {
     if (this.stopped) return;
-    const parsed = got.ok ? parseWorkingList(got.body) : null;
-    if (parsed) {
-      this.entries = parsed.entries;
+    // A failed request was marked by `fetchJson`; a 200 is judged by `applyRead`.
+    const applied = got.ok ? this.applyRead("working", decodeWorking(got.body), (list) => {
+      this.entries = list.entries;
       this.workingState = "ok";
-      this.workingCut = { more: parsed.more, total: parsed.total };
+      this.workingCut = { more: list.more, total: list.total };
       if (this.workingRetry !== null) { this.clearSlow(this.workingRetry); this.workingRetry = null; }
-    } else {
-      this.entries = null;
+    }) : null;
+    if (!applied) {
+      // A failed refresh keeps the last entries (and their cutoff) visible, with its own warning.
       this.workingState = "unavailable";
-      this.workingCut = { more: false, total: 0 };
       if (this.workingRetry === null) {
         this.workingRetry = this.setSlow(() => { this.workingRetry = null; void this.loadWorking(true); }, WORKING_RETRY_MS);
       }
@@ -628,15 +667,17 @@ export class PhoneApp {
   async loadReview(): Promise<void> {
     const r = await this.read("/m/api/review");
     if (!r || !("body" in r)) return;
-    const report = parseReview(r.body);
+    const report = this.applyRead("review", decodeReview(r.body), (value) => {
+      this.review = value;
+      // Under an open confirmation, a re-read that drops or changes any
+      // confirmed item closes it: nothing is approved but the set the owner
+      // confirmed (review of #329, MED 1). On an incomplete read that is the
+      // safe direction too: a dropped item is unticked, never approved.
+      this.checkConfirmed(value);
+      // A re-read unticks whatever left the review.
+      this.reviewSel = keptSelection(value, this.reviewSel);
+    });
     if (!report) return;
-    this.review = report;
-    // Under an open confirmation, a re-read that drops or changes any
-    // confirmed item closes it: nothing is approved but the set the owner
-    // confirmed (review of #329, MED 1).
-    this.checkConfirmed(report);
-    // A re-read unticks whatever left the review.
-    this.reviewSel = keptSelection(report, this.reviewSel);
     const first = this.reviewFirst;
     this.reviewFirst = false;
     this.renderTabs();
@@ -654,9 +695,8 @@ export class PhoneApp {
   async openFromNotification(): Promise<void> {
     this.card = null;
     const r = await this.read("/m/api/review");
-    const report = r && "body" in r ? parseReview(r.body) : null;
     if (this.stopped) return;
-    if (report) this.review = report;
+    const report = r && "body" in r ? this.applyRead("review", decodeReview(r.body), (value) => { this.review = value; }) : null;
     // Opened from a notification: nothing is ticked (review of #329, MED 2).
     this.resetReviewSelection();
     this.renderTabs();
@@ -1642,23 +1682,27 @@ export class PhoneApp {
     this.tab = "chats";
     this.sheet = null;
     this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null,
-      loaded: false };
+      loaded: false, hasRead: false };
     this.render();
     const r = await this.read(`/m/api/threads/${id}/log`);
     if (!r || this.thread?.id !== id) return;
     if (!("body" in r)) { this.threadGone(r.error); return; }
-    const page = parseLog(r.body);
-    if (!page) return;
-    this.thread = { id, meta: page.thread ?? this.thread.meta, rows: page.rows, next: page.next, older: page.older, list: null,
-      loaded: true };
+    const opened = this.thread;
+    const page = this.applyRead(`threads/${id}/log`, decodeLog(r.body), (value) => {
+      this.thread = { id, meta: value.thread ?? opened.meta, rows: value.rows, next: value.next, older: value.older, list: null,
+        loaded: true, hasRead: true };
+    });
+    // Malformed: the read finished but nothing was read ("Not read yet.", never "No messages yet.").
+    if (!page) opened.loaded = true;
     this.render();
-    this.scrollToEnd();
+    if (page) this.scrollToEnd();
   }
 
   private threadGone(why: string): void {
     if (!this.thread) return;
     this.thread.rows = [];
     this.thread.loaded = true;
+    this.thread.hasRead = false;
     this.render();
     this.main.append(el("p", "muted center", why === "not found" ? "This chat is not open any more." : why));
   }
@@ -1677,15 +1721,20 @@ export class PhoneApp {
         while (more && this.thread === open) {
           const r = await this.read(`/m/api/threads/${open.id}/log?after=${open.next}`);
           if (!r || !("body" in r) || this.thread !== open) return;
-          const page = parseLog(r.body);
+          // decodeLog cuts a partial page before its first invalid line, so `next` never passes a line not applied.
+          const page = this.applyRead(`threads/${open.id}/log`, decodeLog(r.body), (value) => {
+            const firstRead = !open.hasRead;
+            open.loaded = true;
+            open.hasRead = true;
+            const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
+            const fresh = value.rows.filter((row) => row.seq > last);
+            open.next = Math.max(open.next, value.next);
+            if (value.thread) { open.meta = value.thread; this.renderOrb(); }
+            more = value.more;
+            if (firstRead) { open.rows.push(...fresh); this.render(); }   // "Not read yet." becomes the log
+            else if (fresh.length) this.appendRows(open, fresh);
+          });
           if (!page) return;
-          open.loaded = true;
-          const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
-          const fresh = page.rows.filter((row) => row.seq > last);
-          open.next = Math.max(open.next, page.next);
-          if (page.thread) { open.meta = page.thread; this.renderOrb(); }
-          more = page.more;
-          if (fresh.length) this.appendRows(open, fresh);
         }
       } while (this.logAgain);
     } finally {
@@ -1708,9 +1757,12 @@ export class PhoneApp {
 
   private applyTasks(r: { body: unknown } | { error: string; status: number } | null): void {
     if (this.stopped || !r || !("body" in r)) return;
-    this.tasks = parseTasks(r.body);
+    const applied = this.applyRead("tasks", decodeTasks(r.body), ({ tasks, more }) => {
+      this.tasks = tasks;
+      this.tasksMore = more;
+    });
+    if (!applied) return;
     this.renderOrb();
-    this.tasksMore = (r.body as { more?: unknown } | null)?.more === true;
     if (this.tab === "inbox" && !this.card) this.renderInbox();
     else if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
   }
@@ -1918,6 +1970,39 @@ export class PhoneApp {
       ? `Offline. Nothing here is current: it was last read ${ago}.`
       : "Offline. Nothing here could be read yet.";
     this.banner.title = this.lastRead !== null ? `Last read at ${absoluteWords(this.lastRead, this.now())}` : "";
+  }
+
+  /** List-header warnings survive unrelated successes, reconnects and every surface redraw. */
+  private renderReadWarnings(): void {
+    this.main.querySelectorAll(".m-resource-warning").forEach((node) => node.remove());
+    const resources: [string, string, boolean][] = [];
+    if (this.tab === "inbox") resources.push(
+      ["inbox", "Inbox", this.inbox !== null], ["working", "Running", this.entries !== null],
+      ["tasks", "Tasks", this.tasks !== null], ["review", "Morning review", this.review !== null]);
+    if (this.tab === "review") resources.push(["review", "Morning review", this.review !== null]);
+    if (this.tab === "tasks" && !this.task && !this.sheet) resources.push(["tasks", "Tasks", this.tasks !== null]);
+    if (this.tab === "chats" && this.thread) resources.push(
+      [`threads/${this.thread.id}/log`, "Chat log", this.thread.hasRead], ["inbox", "Inbox", this.inbox !== null]);
+    const warnings = resources.filter(([resource]) => this.failedReads.has(`/m/api/${resource}`))
+      .map(([resource, label, loaded]) => {
+        const state = this.failedReads.get(`/m/api/${resource}`);
+        const note = el("p", "m-error m-resource-warning", state === "partial"
+          ? `${label} is incomplete: some items couldn't be read.`
+          : `${label} couldn't refresh: ${loaded ? "showing the last read" : "not read yet"}.`);
+        note.dataset.resource = resource;
+        note.dataset.read = state === "partial" ? "partial" : "failed";
+        note.dataset.stale = "true";
+        note.dataset.testid = resource === "inbox" && !this.main.querySelector('[data-testid="m-list-error"]')
+          ? "m-list-error" : "m-resource-stale";
+        note.setAttribute("role", "status");
+        return note;
+      });
+    // Under the filter strip, at the list header; transcript updates keep the same log and scroll.
+    const surface = this.main.firstElementChild;
+    if (surface?.classList.contains("view")) {
+      const strip = surface.querySelector(":scope > .m-strip");
+      if (strip) strip.after(...warnings); else surface.prepend(...warnings);
+    } else this.main.prepend(...warnings);
   }
 
   // -- navigation (PX-4) -----------------------------------------------------------------------
@@ -2404,7 +2489,7 @@ export class PhoneApp {
         if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const thread = this.thread;
         const built = transcriptView(thread.meta, thread.rows, thread.older, () => this.goBack(),
-          this.composer(thread.id), { loaded: thread.loaded, online: this.online });
+          this.composer(thread.id), { loaded: thread.loaded, online: this.online, read: thread.hasRead });
         const back = built.view.querySelector('[data-testid="m-back"]');
         if (back) back.textContent = this.threadBack === "inbox" ? "‹ Inbox" : this.threadBack === "review" ? "‹ Review" : "‹ Chats";
         thread.list = built.list;
@@ -2479,6 +2564,7 @@ export class PhoneApp {
       view = this.tasksPanel();
     }
     this.main.replaceChildren(view);
+    this.renderReadWarnings();
     this.rowScroll.sync();
     const keep = this.keepScroll;
     this.keepScroll = null;

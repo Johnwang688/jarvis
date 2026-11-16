@@ -87,19 +87,21 @@ export function parseThreads(raw: unknown): ChatThread[] {
   return list.map(parseThread).filter((t): t is ChatThread => t !== null);
 }
 
+/** One log line, or null when it is not one (no object, no numeric `seq`). */
+export function parseLogRow(r: unknown): LogRow | null {
+  if (!isObj(r) || typeof r.seq !== "number") return null;
+  return {
+    // The text as sent (already scrubbed at the source, invisible
+    // characters out): its spacing is Markdown's, so it is not collapsed.
+    seq: r.seq, role: oneLine(r.role, 120) || "system", text: str(r.text).slice(0, 40000),
+    at: strOrNull(r.at), marks: Array.isArray(r.marks) ? r.marks.map((m) => oneLine(m, 80)).filter(Boolean) : [],
+    cut: typeof r.cut === "number",
+  };
+}
+
 export function parseLog(raw: unknown): LogPage | null {
   if (!isObj(raw) || !Array.isArray(raw.rows) || typeof raw.next !== "number") return null;
-  const rows: LogRow[] = [];
-  for (const r of raw.rows) {
-    if (!isObj(r) || typeof r.seq !== "number") continue;
-    rows.push({
-      // The text as sent (already scrubbed at the source, invisible
-      // characters out): its spacing is Markdown's, so it is not collapsed.
-      seq: r.seq, role: oneLine(r.role, 120) || "system", text: str(r.text).slice(0, 40000),
-      at: strOrNull(r.at), marks: Array.isArray(r.marks) ? r.marks.map((m) => oneLine(m, 80)).filter(Boolean) : [],
-      cut: typeof r.cut === "number",
-    });
-  }
+  const rows = raw.rows.map(parseLogRow).filter((r): r is LogRow => r !== null);
   return { rows, next: raw.next, more: raw.more === true, older: raw.older === true, thread: parseThread(raw.thread) };
 }
 
@@ -162,19 +164,26 @@ export interface WorkingItem {
 export interface WorkingList { entries: WorkingItem[]; more: boolean; total: number }
 
 /** The route's answer, or null when it is not one (a shape error is "unavailable", never an empty list). */
+/** One In progress entry, or null when it is not one (no object, no thread id). */
+export function parseWorkingItem(e: unknown): WorkingItem | null {
+  if (!isObj(e)) return null;
+  const id = idOrNull(e.thread_id);
+  if (!id) return null;
+  const status = (WORKING_STATUSES as readonly string[]).includes(str(e.status)) ? (e.status as WorkingStatus) : "idle";
+  return { thread_id: id, project_id: idOrNull(e.project_id), project: oneLine(e.project, 80),
+    title: oneLine(e.title, 120), status, last: str(e.last),
+    seq: typeof e.seq === "number" && Number.isInteger(e.seq) && e.seq >= 0 ? e.seq : null };
+}
+
 export function parseWorkingList(raw: unknown): WorkingList | null {
   if (!isObj(raw) || !Array.isArray(raw.entries)) return null;
   const entries: WorkingItem[] = [];
   const seen = new Set<string>();
   for (const e of raw.entries) {
-    if (!isObj(e)) continue;
-    const id = idOrNull(e.thread_id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const status = (WORKING_STATUSES as readonly string[]).includes(str(e.status)) ? (e.status as WorkingStatus) : "idle";
-    entries.push({ thread_id: id, project_id: idOrNull(e.project_id), project: oneLine(e.project, 80),
-      title: oneLine(e.title, 120), status, last: str(e.last),
-      seq: typeof e.seq === "number" && Number.isInteger(e.seq) && e.seq >= 0 ? e.seq : null });
+    const item = parseWorkingItem(e);
+    if (!item || seen.has(item.thread_id)) continue;
+    seen.add(item.thread_id);
+    entries.push(item);
   }
   return { entries, more: raw.more === true, total: Math.max(num(raw.total), entries.length) };
 }
