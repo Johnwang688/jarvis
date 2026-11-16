@@ -126,7 +126,7 @@ def main():
                 ('test the intake', 'Test\tthe intake.', 'control_char'),
                 ('test the intake', 'Test\x00the intake.', 'control_char'),
                 ('test the intake', 'Test\u200bthe intake.', 'control_char'),
-                ('one two three four five six seven eight nine ten', 'One two three.', 'over_deletion'),
+                ('alpha beta gamma delta epsilon zeta eta theta iota kappa', 'Alpha beta gamma.', 'over_deletion'),
                 ('test the intake', '', 'empty'),
                 ('test the intake', '.', 'new_symbol'),  # punctuation alone is not a word
                 ('test period the intake', 'Test comma the intake.', 'added_word'),

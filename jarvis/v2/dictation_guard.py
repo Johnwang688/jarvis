@@ -206,12 +206,25 @@ _STRIP = ",.?!"
 _SPOKEN_PHRASES = (("full", "stop"), ("question", "mark"), ("exclamation", "point"),
                    ("exclamation", "mark"), ("comma",), ("period",), ("colon",), ("semicolon",))
 _MAX_WORDS = 300
+# A word that may take added punctuation after it: letters/digits with internal
+# apostrophes, or a number. "$", "/tmp/" and other syntax may not ("$" -> "$?").
+_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d+(?:[.,:]\d+)*%?")
+# Words that belong to a spoken number and go with it: kept whole or deleted
+# whole, so "minus five" cannot become "5" and "twenty five" cannot become "5".
+_SIGNS = frozenset({"minus", "negative"})
+_APOSTROPHES = frozenset({"'", "\u2019"})
+
+
+def _ascii(text: str) -> bool:
+    return text.replace("\u2019", "'").isascii()
 
 
 def _same(a: str, b: str) -> bool:
-    """Equal, except that ASCII letters may differ in case."""
+    """Equal, except that ASCII letters may differ in case and a straight and a
+    curly apostrophe count as the same."""
     return len(a) == len(b) and all(
-        x == y or (x.isascii() and y.isascii() and x.isalpha() and y.isalpha() and x.lower() == y.lower())
+        x == y or (x in _APOSTROPHES and y in _APOSTROPHES)
+        or (x.isascii() and y.isascii() and x.isalpha() and y.isalpha() and x.lower() == y.lower())
         for x, y in zip(a, b))
 
 
@@ -246,9 +259,51 @@ class _Aligner:
         self.typed = [_split_word(w) for w in typed_words]
         self.free = _uncounted(raw_words)
         self.memo: dict[tuple[int, int], int | None] = {}
+        self.atom_start, self.atom_end = self._atoms()
 
-    def _tail_ok(self, tail: str, raw_tail: str) -> bool:
-        return tail in _END or tail == raw_tail
+    def _member(self, x: int) -> bool:
+        return self.keys[x] in _NUMBER_WORDS or self.raw[x][0][:1].isdigit()
+
+    def _atoms(self) -> tuple[list[int], list[int]]:
+        """For each raw word, the first and one-past-last index of the number
+        unit it belongs to (itself alone when it is in none). A unit is a run of
+        number words or digit words, with a sign before it, "point" inside it
+        and "percent" after it; punctuation after a word ends it."""
+        n = len(self.raw)
+        start, end = list(range(n)), [x + 1 for x in range(n)]
+        x = 0
+        while x < n:
+            first = x
+            if self.keys[x] in _SIGNS and x + 1 < n and not self.raw[x][1] and self._member(x + 1):
+                x += 1
+            if not self._member(x):
+                x = first + 1
+                continue
+            last = x
+            while not self.raw[last][1] and last + 1 < n:
+                nxt = last + 1
+                if self._member(nxt):
+                    last = nxt
+                elif (self.keys[nxt] == "point" and nxt + 1 < n and not self.raw[nxt][1]
+                        and self._member(nxt + 1)):
+                    last = nxt + 1
+                elif self.keys[nxt] == "percent":
+                    last = nxt
+                    break
+                else:
+                    break
+            for y in range(first, last + 1):
+                start[y], end[y] = first, last + 1
+            x = last + 1
+        return start, end
+
+    def _inside(self, x: int) -> bool:
+        return x < len(self.raw) and self.atom_start[x] < x
+
+    def _tail_ok(self, tail: str, raw_tail: str, core: str = "") -> bool:
+        if tail == raw_tail:
+            return True
+        return tail in _END and bool(_PLAIN.fullmatch(core))
 
     def _forms(self, j: int, k: int):
         """(raw words consumed, typed words consumed) for typed[j] at raw k."""
@@ -256,24 +311,25 @@ class _Aligner:
         n = len(self.raw)
         raw_core, raw_tail = self.raw[k]
         # 1. keep
-        if _same(core, raw_core) and self._tail_ok(tail, raw_tail):
+        if _same(core, raw_core) and self._tail_ok(tail, raw_tail, raw_core):
             yield 1, 1
-        plain = core.isascii()
+        plain = _ascii(core)
         # 2a. merge a contraction from two raw words
         if plain and k + 1 < n and not raw_tail and _key(core) in CONTRACTIONS:
             if CONTRACTIONS[_key(core)].split() == [self.keys[k], self.keys[k + 1]] \
-                    and all(c.isascii() for c in self.raw[k][0] + self.raw[k + 1][0]) \
-                    and self._tail_ok(tail, self.raw[k + 1][1]):
+                    and _ascii(self.raw[k][0] + self.raw[k + 1][0]) \
+                    and self._tail_ok(tail, self.raw[k + 1][1], core):
                 yield 2, 1
         # 2b. split a raw contraction into two typed words
         if self.keys[k] in CONTRACTIONS and j + 1 < len(self.typed) and plain and not tail:
             first, second = CONTRACTIONS[self.keys[k]].split()
             core2, tail2 = self.typed[j + 1]
-            if core2.isascii() and _key(core) == first and _key(core2) == second \
-                    and self._tail_ok(tail2, raw_tail):
+            if _ascii(core2) and _key(core) == first and _key(core2) == second \
+                    and self._tail_ok(tail2, raw_tail, core2):
                 yield 1, 2
         # 3. a whole number-word run as digits
-        if self.keys[k] in _NUMBER_WORDS and core[:1].isdigit():
+        # Only from the start of its number unit, and only covering all of it.
+        if self.keys[k] in _NUMBER_WORDS and core[:1].isdigit() and not self._inside(k):
             end = k
             while end < n and self.keys[end] in _NUMBER_WORDS:
                 end += 1
@@ -282,29 +338,37 @@ class _Aligner:
             if all(not t for _, t in self.raw[k:end - 1]):
                 form = _number_run(self.keys[k:end])
                 if len(form) == 1 and form[0][:1].isdigit():
-                    digits = core.replace(",", "") if _GROUPED.fullmatch(core) else core
+                    pct = core.endswith("%")
+                    body = core[:-1] if pct else core
+                    digits = (body.replace(",", "") if _GROUPED.fullmatch(body) else body) + ("%" if pct else "")
                     last_tail = self.raw[end - 1][1]
-                    if digits == form[0] and self._tail_ok(tail, last_tail):
+                    unit_end = self.atom_end[k]
+                    if digits == form[0] and end == unit_end and self._tail_ok(tail, last_tail, core):
                         yield end - k, 1
                     if (digits == form[0] + "%" and end < n and self.keys[end] == "percent"
-                            and not last_tail and self._tail_ok(tail, self.raw[end][1])):
+                            and end + 1 == unit_end and not last_tail
+                            and self._tail_ok(tail, self.raw[end][1], core)):
                         yield end - k + 1, 1
         # 4. two raw words joined by one hyphen, letters only
         if plain and core.count("-") == 1 and k + 1 < n and not raw_tail:
             left, right = core.split("-")
             if left.isalpha() and right.isalpha() and _same(left, raw_core) \
-                    and _same(right, self.raw[k + 1][0]) and self._tail_ok(tail, self.raw[k + 1][1]):
+                    and _same(right, self.raw[k + 1][0]) and self._tail_ok(tail, self.raw[k + 1][1], core):
                 yield 2, 1
 
     def best(self, i: int, j: int) -> int | None:
         """Most counted raw words kept aligning typed[j:] into raw[i:], or None."""
         if j == len(self.typed):
-            return 0
+            # The rest of the raw words are deleted: never half a number unit.
+            return None if self._inside(i) else 0
         key = (i, j)
         if key in self.memo:
             return self.memo[key]
         result = None
         for k in range(i, len(self.raw)):
+            # Deleting raw[i:k] may not cut a number unit at either end.
+            if k > i and (self._inside(i) or self._inside(k)):
+                continue
             for used, typed_used in self._forms(j, k):
                 rest = self.best(k + used, j + typed_used)
                 if rest is not None:

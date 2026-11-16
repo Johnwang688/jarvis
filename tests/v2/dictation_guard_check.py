@@ -63,6 +63,12 @@ def deletion_rule() -> None:
         ("um um um yes", "Yes."),  # fillers do not count toward over-deletion
         ("extend the grace period", "Extend the grace period."),  # literal spoken-punct word kept
         ("pay -5 dollars", "Pay -5 dollars."),                    # a word's own sign stays
+        ("two hundred eleven no wait two hundred eight runs", "208 runs."),  # whole units deleted/kept
+        ("pay minus five dollars", "Pay minus five dollars."),
+        ("set rate fifty percent", "Set rate 50%."),
+        ("one thousand percent", "1,000%"),
+        ("we do not know", "We don\u2019t know."),             # curly apostrophe
+        ("we don\u2019t know", "We don't know."),
         ("i'm ready", "I am ready."),                             # contraction split
         ("at three thirty", "At 3:30."),
         ("it's five o'clock", "It's 5 o'clock."),
@@ -112,6 +118,17 @@ def deletion_rule() -> None:
         ("echo hello", "echo!!!; hello", "new_symbol"),
         ("i m here", "\u0130'm here", "fold"),
         ("one thousand one thousand", "1001 thousand.", "merged_number"),
+        # Final Sol review of #392: number units and syntax tails.
+        ("pay twenty five dollars", "Pay 5 dollars.", "partial_number"),
+        ("pay twenty five dollars", "Pay five dollars.", "partial_number"),
+        ("pay twenty five", "Pay twenty.", "unit_tail_deleted"),
+        ("pay twenty five dollars", "Pay twenty 5 dollars.", "digits_mid_unit"),
+        ("twelve fifty nine", "59.", "partial_number"),
+        ("pay minus five dollars", "Pay 5 dollars.", "dropped_sign"),
+        ("pay zero point five dollars", "Pay 5 dollars.", "dropped_decimal"),
+        ("set rate fifty percent", "Set rate 50.", "dropped_percent"),
+        ("echo $ foo", "echo $? foo", "syntax_tail"),
+        ("cat /tmp/..", "cat /tmp/", "syntax_tail"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
         # The label is diagnostic; what matters is the refusal.
@@ -154,7 +171,9 @@ def characters() -> None:
 
 def deletion_cap() -> None:
     raw = "one two three four five six seven eight nine ten"
-    check("over-deletion refused", reason(raw, "One two three.") == "over_deletion")
+    check("over-deletion refused", reason("alpha beta gamma delta epsilon zeta eta theta iota kappa",
+                                          "Alpha beta gamma.") == "over_deletion")
+    check("part of a number unit refused", not accepts(raw, "One two three."))
     greek = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
     check("exactly 40% kept accepted", accepts(greek, "Alpha beta gamma delta."))
     check("a run of separate number words never becomes digits", reason(raw, "1 2 3 4.") == "added_word")
