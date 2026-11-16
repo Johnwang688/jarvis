@@ -208,9 +208,12 @@ _SPOKEN_PHRASES = (("full", "stop"), ("question", "mark"), ("exclamation", "poin
 _MAX_WORDS = 300
 # A word that may take added punctuation after it: letters/digits with internal
 # apostrophes, or a number. "$", "/tmp/" and other syntax may not ("$" -> "$?").
-# A number here has at most one decimal point or clock colon, or grouping
-# commas: "127.0.0.1" is not one, so "?" cannot be added after it.
-_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d{1,3}(?:,\d{3})+%?|\d+(?:[.:]\d+)?%?")
+# A number here is an integer, one decimal, grouping commas or a clock time
+# (H:MM): "127.0.0.1" and "123:456" are not, so "?" cannot be added after them.
+_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d{1,3}(?:,\d{3})+%?|\d+(?:\.\d+)?%?|\d{1,2}:\d{2}")
+# A raw word that is a number however it is signed or dotted: "5", "-5", ".5",
+# "-.5", "+0.5".
+_NUMERIC_START = re.compile(r"[-+]?\.?\d")
 # Words that belong to a spoken number and go with it: kept whole or deleted
 # whole, so "minus five" cannot become "5" and "twenty five" cannot become "5".
 _SIGNS = frozenset({"minus", "negative"})
@@ -256,6 +259,7 @@ def _uncounted(words: list[str]) -> list[bool]:
 
 class _Aligner:
     def __init__(self, raw_words: list[str], typed_words: list[str]):
+        raw_words = self._drop_inner_fillers(raw_words)
         self.raw = [_split_word(w) for w in raw_words]
         self.keys = [_key(c) for c, _ in self.raw]
         self.typed = [_split_word(w) for w in typed_words]
@@ -263,42 +267,75 @@ class _Aligner:
         self.memo: dict[tuple[int, int], int | None] = {}
         self.atom_start, self.atom_end = self._atoms()
 
+    @classmethod
+    def _drop_inner_fillers(cls, raw_words: list[str]) -> list[str]:
+        """Fillers inside a number unit ("minus um five") are removed before
+        alignment: they never count, and keeping them inside the unit would make
+        them undeletable. The unit itself stays whole."""
+        probe = cls.__new__(cls)
+        probe.raw = [_split_word(w) for w in raw_words]
+        probe.keys = [_key(c) for c, _ in probe.raw]
+        start, end = probe._atoms()
+        return [w for x, w in enumerate(raw_words)
+                if not (probe.keys[x] in FILLERS and start[x] < x < end[x] - 1)]
+
     def _member(self, x: int) -> bool:
         core = self.raw[x][0]
-        return (self.keys[x] in _NUMBER_WORDS or core[:1].isdigit()
-                or (core[:1] in ".-+" and core[1:2].isdigit()))
+        return self.keys[x] in _NUMBER_WORDS or bool(_NUMERIC_START.match(core))
+
+    def _past_fillers(self, x: int) -> int:
+        """The first index at or after x that is not a filler. A filler with
+        punctuation after it is not skipped (the punctuation ends a unit)."""
+        n = len(self.raw)
+        while x < n and self.keys[x] in FILLERS and not self.raw[x][1]:
+            x += 1
+        return x
 
     def _opens(self, x: int) -> bool:
         """A unit can begin here: a number word, a digit word, or "point"
         before one ("point five", "minus point five")."""
-        n = len(self.raw)
-        return self._member(x) or (self.keys[x] == "point" and x + 1 < n
-                                   and not self.raw[x][1] and self._member(x + 1))
+        if x >= len(self.raw):
+            return False
+        if self._member(x):
+            return True
+        if self.keys[x] == "point" and not self.raw[x][1]:
+            y = self._past_fillers(x + 1)
+            return y < len(self.raw) and self._member(y)
+        return False
 
     def _atoms(self) -> tuple[list[int], list[int]]:
         """For each raw word, the first and one-past-last index of the number
         unit it belongs to (itself alone when it is in none). A unit is a run of
-        number words or digit words, with a sign before it, "point" inside it
-        and "percent" after it; punctuation after a word ends it."""
+        number words or digit words, with a sign before it, "point" inside it,
+        "and" after "hundred"/"thousand", and "percent" after it. Fillers between
+        those belong to the unit ("minus um five"); punctuation after a word
+        ends it."""
         n = len(self.raw)
         start, end = list(range(n)), [x + 1 for x in range(n)]
         x = 0
         while x < n:
             first = x
-            if self.keys[x] in _SIGNS and x + 1 < n and not self.raw[x][1] and self._opens(x + 1):
-                x += 1
+            if self.keys[x] in _SIGNS and not self.raw[x][1]:
+                y = self._past_fillers(x + 1)
+                if self._opens(y):
+                    x = y
             if not self._opens(x):
                 x = first + 1
                 continue
-            last = x + 1 if self.keys[x] == "point" else x
+            last = self._past_fillers(x + 1) if self.keys[x] == "point" else x
             while not self.raw[last][1] and last + 1 < n:
-                nxt = last + 1
+                nxt = self._past_fillers(last + 1)
+                if nxt >= n:
+                    break
                 if self._member(nxt):
                     last = nxt
-                elif (self.keys[nxt] in ("point", "and") and nxt + 1 < n and not self.raw[nxt][1]
-                        and self._member(nxt + 1)
+                elif (self.keys[nxt] in ("point", "and") and not self.raw[nxt][1]
                         and (self.keys[nxt] == "point" or self.keys[last] in ("hundred", "thousand"))):
-                    last = nxt + 1  # "zero point five", "one hundred and five"
+                    after = self._past_fillers(nxt + 1)
+                    if after < n and self._member(after):
+                        last = after  # "zero point five", "one hundred and five"
+                    else:
+                        break
                 elif self.keys[nxt] == "percent":
                     last = nxt
                     break

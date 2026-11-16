@@ -70,6 +70,9 @@ def deletion_rule() -> None:
         ("pay one hundred and five dollars", "Pay one hundred and five dollars."),
         ("it costs 1.5 dollars", "It costs 1.5 dollars."),
         ("pick one and two please", "Pick one and two please."),
+        ("pay minus um five dollars", "Pay minus five dollars."),   # filler inside a unit deleted
+        ("um so twenty uh five parts", "25 parts."),
+        ("meet at 4:45 ok", "Meet at 4:45, ok."),
         ("we do not know", "We don\u2019t know."),             # curly apostrophe
         ("we don\u2019t know", "We don't know."),
         ("i'm ready", "I am ready."),                             # contraction split
@@ -137,6 +140,12 @@ def deletion_rule() -> None:
         ("pay negative .5 dollars", "Pay .5 dollars.", "dropped_sign"),
         ("pay one hundred and five dollars", "Pay 5 dollars.", "and_in_number"),
         ("pay zero point five dollars", "Pay zero dollars.", "decimal_tail_deleted"),
+        # Short re-review of #392: signed decimals, fillers inside units, colons.
+        ("set rate -.5 percent now", "Set rate -.5 now", "dropped_percent"),
+        ("pay minus um five dollars", "Pay five dollars.", "filler_split_sign"),
+        ("pay zero point um five dollars", "Pay five dollars.", "filler_split_decimal"),
+        ("set rate five um percent now", "Set rate five now.", "filler_split_percent"),
+        ("scp 123:456 target", "scp 123:456? target", "syntax_tail"),
         ("ping 127.0.0.1", "ping 127.0.0.1?", "syntax_tail"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
