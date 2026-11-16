@@ -6,9 +6,18 @@ export const REPLY_TIMING_TTL_MS = 120_000;
 
 /** One pending voice send per chat; no text, titles, persistence, or pipeline control. */
 export class VoiceTimingsLink {
-  private pending = new Map<string, { ids: readonly number[]; at: number; tokenAt?: number }>();
-  /** An explicit turn spans tool calls; otherwise text/text_delta delimit a message. */
-  private replies = new Map<string, { at: number; turn: boolean }>();
+  private pending = new Map<string, { ids: readonly number[]; at: number; seq: number; tokenAt?: number }>();
+  /**
+   * An explicit turn spans tool calls and lasts until `turn_finished` (or a fatal
+   * error): a user message or steer inside it does not start a new reply. Without a
+   * turn, text/text_delta delimit one message.
+   */
+  private replies = new Map<string, { seq: number; turn: boolean }>();
+  /**
+   * Order, not time: two observations can share a `performance.now()` tick, so
+   * "the reply began after the send" compares this counter, never the clock.
+   */
+  private seq = 0;
   constructor(
     private diagnostics: VoiceDiagnostics,
     private now: () => number = () => performance.now(),
@@ -30,7 +39,7 @@ export class VoiceTimingsLink {
       const at = this.now();
       this.expire(at);
       if (!ids.length) return;
-      this.pending.set(chat, { ids: [...ids], at });
+      this.pending.set(chat, { ids: [...ids], at, seq: ++this.seq });
       for (const id of ids) observeVoiceTiming(() => this.diagnostics.mark(id, "sent", at));
     });
   }
@@ -43,18 +52,24 @@ export class VoiceTimingsLink {
       const chat = e.thread_id;
       if (!chat) return;
       if (e.self_started || e.compaction || (e.relayed !== null && typeof e.relayed === "object")) return;
-      if (e.kind === "turn_started") { this.replies.set(chat, { at, turn: true }); return; }
-      if (e.kind === "user_message" || e.kind === "turn_finished" || e.kind === "error") {
+      if (e.kind === "turn_started") { this.replies.set(chat, { seq: ++this.seq, turn: true }); return; }
+      if (e.kind === "turn_finished" || (e.kind === "error" && (e.data as { fatal?: unknown } | undefined)?.fatal !== false)) {
         this.replies.delete(chat);
+        return;
+      }
+      if (e.kind === "user_message" || e.kind === "error") {
+        // Queued, steering or refused-steer messages and nonfatal errors leave a live
+        // turn running; they only close a turn-less message.
+        if (!this.replies.get(chat)?.turn) this.replies.delete(chat);
         return;
       }
       if (e.kind !== "text_delta" && e.kind !== "text") return;
       const text = (e.data ?? e).text;
       if (typeof text !== "string" || !text.length) return;
       let reply = this.replies.get(chat);
-      if (!reply) this.replies.set(chat, (reply = { at, turn: false }));
+      if (!reply) this.replies.set(chat, (reply = { seq: ++this.seq, turn: false }));
       const link = this.pending.get(chat);
-      if (link && reply.at >= link.at && link.tokenAt === undefined) {
+      if (link && reply.seq > link.seq && link.tokenAt === undefined) {
         for (const id of link.ids) observeVoiceTiming(() => this.diagnostics.mark(id, "firstToken", at));
         link.tokenAt = at;
       }
