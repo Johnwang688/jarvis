@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -300,6 +301,41 @@ class Concurrency(Base):
         self.assertTrue(done.wait(3))
         self.assertEqual(result, ["Hello"])
         self.assertEqual(seen, ["Hel", "lo"])
+
+    def test_refusal_in_the_gap_between_turns_is_retried(self):
+        # The thread looks idle (no turn running, nothing queued) for a moment
+        # while send still refuses, between a turn finishing and a queued
+        # message's turn starting. That refusal is retried, not ASK_FAILED.
+        from jarvis.v2.daemon import DaemonError
+        self.start()
+        c = self.client()
+        c.ask("create chat")
+        real = self.d.send
+        calls = []
+
+        def send(thread_id, message):
+            calls.append(message.text)
+            if len(calls) == 1:
+                raise DaemonError("a turn is starting")
+            return real(thread_id, message)
+
+        with patch.object(self.d, "send", side_effect=send):
+            self.assertEqual(c.ask("in the gap"), "Hello")
+        self.assertEqual(calls, ["in the gap", "in the gap"])
+
+    def test_refusal_that_stays_idle_still_fails(self):
+        from jarvis.v2.daemon import DaemonError
+        from jarvis.v2 import voice_chat
+        self.start()
+        c = self.client()
+        c.ask("create chat")
+        with patch.object(self.d, "send", side_effect=DaemonError("broken session")), \
+                patch.object(voice_chat, "IDLE_REFUSAL_S", 0.2):
+            started = time.monotonic()
+            with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_FAILED):
+                c.ask("never")
+            self.assertLess(time.monotonic() - started, 3.0)
+        self.assertEqual(c.ask("link still usable"), "Hello")
 
     def test_replaced_ask_stops_stream_and_new_ask_gets_its_own_turn(self):
         self.start()

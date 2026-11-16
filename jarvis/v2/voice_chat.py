@@ -14,6 +14,9 @@ from .provider import UserMessage
 from .stores import _write_bytes
 
 
+IDLE_REFUSAL_S = 0.5
+
+
 class VoiceChat:
     def __init__(self, daemon):
         self.daemon = daemon
@@ -78,6 +81,7 @@ class VoiceChat:
             check()
             q = self.daemon.bus.subscribe({"thread_id": thread.id})
             message = UserMessage(text, origin="owner", via="voice", desk=False, spoken=True)
+            idle_since = None
             while True:
                 check()
                 try:
@@ -87,9 +91,18 @@ class VoiceChat:
                     # `send` never steers; wait behind an existing turn, including
                     # one held for an approval on the HUD/phone. Other conflicts
                     # fail instead of hiding a broken session for three minutes.
+                    # Between one turn finishing and a queued message's turn
+                    # starting the thread can look idle for a moment while
+                    # `send` still refuses: only a refusal that stays idle for
+                    # IDLE_REFUSAL_S is a real conflict.
                     state = self.daemon.thread_json(thread)
-                    if not (state.get("running") or state.get("queued")):
-                        raise
+                    if state.get("running") or state.get("queued"):
+                        idle_since = None
+                    else:
+                        now = time.monotonic()
+                        idle_since = now if idle_since is None else idle_since
+                        if now - idle_since >= IDLE_REFUSAL_S:
+                            raise
                     try:
                         q.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
                     except queue.Empty:
