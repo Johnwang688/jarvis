@@ -3850,7 +3850,12 @@ walker as the env-only `is_env_credential` to judge every last-component
 symlink hop and the realpath, refusing unfollowable links. Agent reads,
 `grep_files` and v2 `denied_read` inherit it; `run_readonly` also judges each
 placed, expanded/globbed operand by `is_credential`, alongside its existing
-credential-folder and recursion checks. Raw command names ignore case with
-the same name-character boundaries. A plain recursive `grep -r`/`rg` over an
-ordinary folder holding a credential *file* remains the stated limit, the
-class of `grep -r foo .`; this adds no recursive file-name scan.
+credential-folder and recursion checks. Short-option tails also judge bare
+relative aliases by name; folder checks still require path-like tails.
+Parent directories resolve in kernel order before walking the final name,
+and an initial lookup error keeps the name verdict; errors after following
+a link refuse. `grep_files` judges its root before resolving it. Raw command
+names ignore ASCII case with the same name-character boundaries. A plain
+recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
+remains the stated limit, the class of `grep -r foo .`; this adds no
+recursive file-name scan.

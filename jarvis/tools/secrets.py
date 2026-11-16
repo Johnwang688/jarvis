@@ -35,7 +35,6 @@ env files Jarvis may write (ENV-1, 2026-10-12).
 from __future__ import annotations
 
 import contextvars
-import errno
 import json
 import os
 import re
@@ -202,7 +201,11 @@ def is_env_credential(path: str | Path) -> bool:
 
 
 def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
-    """Judge each name in one shared symlink walk, failing closed on errors."""
+    """Judge each name, failing closed if a followed link cannot be read.
+
+    Before following a link, an inaccessible path keeps its name verdict:
+    callers may hand us non-path words such as a grep pattern.
+    """
     try:
         raw = Path(os.fspath(path))
     except TypeError:
@@ -210,17 +213,19 @@ def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
     if judge(raw.name):
         return True
     try:
-        current = Path(os.path.abspath(raw))
+        # Resolve parents in kernel order (a directory symlink before `..`),
+        # leaving the last component's own symlink hops visible to the judge.
+        current = Path(os.path.realpath(raw.parent)) / raw.name
         for hop in range(_SYMLINK_HOPS):
             try:
                 mode = current.lstat().st_mode
             except (FileNotFoundError, NotADirectoryError):
                 break  # a missing path is judged by name, like a dangling link
-            except OSError as exc:
-                # An oversized ordinary path cannot name a file here. Keep
-                # its name-only verdict, as `Path.is_symlink` did; once a
-                # link was followed, this is an unfollowable chain instead.
-                if exc.errno == errno.ENAMETOOLONG and hop == 0:
+            except OSError:
+                # As with Path.is_symlink(), an initial lookup error says
+                # nothing about the name; after a link it is an unfollowable
+                # chain and must refuse.
+                if hop == 0:
                     break
                 raise
             if not _stat.S_ISLNK(mode):
@@ -229,6 +234,7 @@ def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
             current = target if target.is_absolute() else current.parent / target
             if judge(current.name):
                 return True
+            current = Path(os.path.realpath(current.parent)) / current.name
         else:
             return True  # still a symlink after 40 hops: cannot tell
         return judge(Path(os.path.realpath(raw)).name)
@@ -263,7 +269,7 @@ def _reaches(path: str | Path, judge: Callable[[str], bool]) -> bool:
 _NAME_CHAR = r"A-Za-z0-9_.\-"
 _RAW_NAMES = [
     (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])",
-                      re.IGNORECASE))
+                      re.IGNORECASE | re.ASCII))
     for name in sorted(PROTECTED_NAMES | EXACT_NAMES)
 ]
 

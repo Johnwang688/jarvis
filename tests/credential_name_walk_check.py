@@ -52,8 +52,24 @@ class CredentialWalk(unittest.TestCase):
             with self.subTest(walker=walk.__name__, error="readlink"):
                 with patch.object(os, "readlink", side_effect=PermissionError):
                     self.assertTrue(walk(alias))
-            with self.subTest(walker=walk.__name__, error="lstat"):
+            # Orchestrator rewrite (verifier round 1, regression 2): an lstat error
+            # before any link is followed keeps the name verdict, as main's
+            # Path.is_symlink() did (a grep pattern word can coincide with an
+            # unreadable path); once a link was followed it is an unfollowable
+            # chain and refuses.
+            with self.subTest(walker=walk.__name__, error="lstat at the first hop"):
                 with patch.object(Path, "lstat", side_effect=PermissionError):
+                    self.assertFalse(walk(alias))
+                    self.assertTrue(walk(self.root / ".env.production"))
+            with self.subTest(walker=walk.__name__, error="lstat after a followed link"):
+                real_lstat = Path.lstat
+                calls = []
+                def lstat_then_fail(path_self, *a, **k):
+                    calls.append(path_self)
+                    if len(calls) > 1:
+                        raise PermissionError
+                    return real_lstat(path_self, *a, **k)
+                with patch.object(Path, "lstat", lstat_then_fail):
                     self.assertTrue(walk(alias))
 
     def test_both_walkers_judge_realpath_and_fail_closed_if_it_errors(self):

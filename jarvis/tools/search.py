@@ -558,7 +558,12 @@ def grep_files(
         return f"Error: mode must be one of {', '.join(MODES)}."
     # A relative path is the run's working folder's (the v2 fast path's
     # project, decision F-6); with nothing bound, the process's, as before.
-    root = Path(in_working_dir(path)).expanduser().resolve()
+    root = Path(in_working_dir(path)).expanduser()
+    # Keep a protected root's own name and intermediate symlink names before
+    # resolving it for either backend, including files/count search modes.
+    if refused(root):
+        return f"No matches for {pattern!r} under {root}."
+    root = root.resolve()
     if not root.exists():
         return f"Error: {root} does not exist."
     try:
