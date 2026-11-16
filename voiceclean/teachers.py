@@ -44,7 +44,7 @@ def openrouter_client():
             # Never inspect reasoning fields or expose the response in errors.
             text = result['choices'][0]['message']['content']
             cost = result['usage']['cost']
-            if not isinstance(text, str) or not isinstance(cost, (int, float)):
+            if not isinstance(text, str) or isinstance(cost, bool) or not isinstance(cost, (int, float)):
                 raise ValueError('invalid response')
             if not math.isfinite(cost) or cost < 0:
                 raise ValueError('invalid cost')
@@ -104,7 +104,8 @@ def run(rows, model, task, client=None, *, limit=100, max_usd=.02, rng=None):
         result, cost = client(model, [{'role': 'system', 'content': instruction},
                                      {'role': 'user', 'content': text}], temperature)
         stats['requests'] += 1
-        if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+        if (isinstance(cost, bool) or not isinstance(cost, (int, float))
+                or not math.isfinite(cost) or cost < 0):
             raise ValueError('teacher client returned invalid cost; refusing further requests')
         stats['spend_usd'] += cost
         if not isinstance(result, str):

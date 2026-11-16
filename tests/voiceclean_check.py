@@ -142,6 +142,26 @@ def main():
             check('number words inverse sampled', all(normalize.tokens(normalize.number_words(n)) == [str(n)]
                   for n in [0, 1, 20, 25, 101, 999, 1000, 2026, 999999, *range(0, 999999, 997)]))
             check('leading zero time equivalence', pair_check.pair_check('meet at ten zero', 'Meet at 10:00.')[0])
+            bool_rows = [{'text': 'Please test the intake.', 'origin': 'public'}] * 3
+            try:
+                teachers.run(bool_rows, 'openai/gpt-oss-20b', 'messify',
+                             lambda m, msgs, t: ('um please test the intake', False), limit=3, max_usd=.02)
+                bool_refused = False
+            except ValueError:
+                bool_refused = True
+            check('boolean cost refused, not counted as zero', bool_refused)
+            with tempfile.TemporaryDirectory() as bd:
+                bdir = Path(bd) / 'data'
+                bdir.mkdir(mode=0o700)
+                rows = [{'messy': f'{f} please check the private intake', 'target': 'Please check the private intake.',
+                         'text': 'Please check the private intake.', 'origin': 'public', 'source_id': f'id{i}'}
+                        for i, f in enumerate(['um'] * 5 + ['uh'] * 5)]
+                storage.write_json(bdir / 'pairs-synth-9.jsonl', rows, lines=True)
+                build.build(bdir)
+                splits = {name for name in ('train', 'dev', 'test')
+                          if (bdir / 'dataset' / f'{name}.jsonl').exists()
+                          and (bdir / 'dataset' / f'{name}.jsonl').read_text().strip()}
+                check('supplied source ids cannot split one source', len(splits) == 1)
             check('source ids ignore presentation', storage.source_id('We need twenty five parts.') == storage.source_id('we need 25 parts'))
 
         def prose_checks():

@@ -37,7 +37,9 @@ def build(directory=None):
             if row.get('origin') not in ('owner', 'public', 'template'):
                 raise ValueError('pair row has missing or invalid origin')
             row = dict(row)
-            row['source_id'] = row.get('source_id') or source_id(row.get('text', row['target']))
+            # Always the text's own identity: a supplied id could split one source
+            # sentence across train and test (Sol review of #391, MED 2).
+            row['source_id'] = source_id(row.get('text', row['target']))
             if 'seed' in row:
                 seeds.add(row['seed'])
             if 'source_seed' in row:
