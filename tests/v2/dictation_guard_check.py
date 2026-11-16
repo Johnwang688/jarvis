@@ -61,6 +61,9 @@ def deletion_rule() -> None:
         ("", ""),
         ("comma period", ""),
         ("um um um yes", "Yes."),  # fillers do not count toward over-deletion
+        ("extend the grace period", "Extend the grace period."),  # literal spoken-punct word kept
+        ("echo period", "echo period"),  # identity always passes
+        ("put a colon here comma then save", "Put a colon here, then save."),
     ]
     for n, (raw, cleaned) in enumerate(good):
         check(f"accepts deletion/equivalence {n}: {cleaned!r}", accepts(raw, cleaned))
@@ -76,7 +79,7 @@ def deletion_rule() -> None:
         ("twenty twenty six", "2026.", "added_word"),
         ("it's done", "It has done.", "added_word"),                   # contraction is one reading
         ("its done", "It's done.", "added_word"),
-        ("test the period", "Test the period.", "added_word"),         # spoken punct is raw-side only
+        ("test the period", "Test the comma.", "added_word"),          # spoken punct is still a word
         ("list files", "ls -la.", "added_word"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
@@ -144,6 +147,11 @@ def property_sweep() -> None:
             bad_pass += 1
     check("3000 random deletions accepted", good_fail == 0)
     check("3000 random insertions of an unseen word refused", bad_pass == 0)
+    extra = vocab + ["comma", "period", "question", "mark", "colon", "um", "uh", "twenty", "five",
+                     "hundred", "don't", "it's", "percent"]
+    identity_fail = sum(1 for _ in range(3000)
+                        if not accepts(r := " ".join(rng.choice(extra) for _ in range(rng.randint(1, 16))), r))
+    check("3000 identity pairs (words, numbers, spoken punctuation, fillers) accepted", identity_fail == 0)
 
 
 def isolation() -> None:

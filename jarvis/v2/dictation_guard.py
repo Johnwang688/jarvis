@@ -11,9 +11,10 @@ said and changes nothing else that matters:
 
 - After normalisation, the cleaned words are an order-preserving subsequence of
   the raw words. Normalisation case-folds, drops punctuation, expands a fixed
-  contraction table, parses English number words (0-999,999) to digits, maps
-  `percent` to `%`, and, on the raw side only, drops spoken punctuation
-  (`comma`, `question mark`, ...). Nothing else counts as the same word.
+  contraction table, parses English number words (0-999,999) to digits and maps
+  `percent` to `%`. Nothing else counts as the same word. Spoken punctuation
+  (`comma`, `question mark`, ...) is an ordinary word for matching, so turning
+  it into a symbol is a deletion; it is left out of the deletion cap.
 - No newline (line breaks are VA-2's "new line" command) and no control, format,
   private-use or unassigned character, bidi controls and zero-width characters
   included.
@@ -170,8 +171,12 @@ def check(raw: str, cleaned: str) -> Verdict:
         return Verdict(False, "new_symbol")
     if len(cleaned) > len(raw) + 16 + len(raw) // 10:
         return Verdict(False, "too_long")
-    said, typed = tokens(raw, raw=True), tokens(cleaned)
-    content = [w for w in said if w not in FILLERS]
+    # Matching uses every word the owner said, spoken punctuation included: a
+    # cleanup that turns "comma" into "," simply deletes it, and one that keeps
+    # a literal "grace period" keeps it. Only the deletion cap and the empty
+    # test leave spoken punctuation out, as they leave out fillers.
+    said, typed = tokens(raw), tokens(cleaned)
+    content = [w for w in tokens(raw, raw=True) if w not in FILLERS]
     if not typed:
         return Verdict(False, "empty") if content else Verdict(True)
     if not _subsequence(said, typed):

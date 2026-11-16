@@ -129,7 +129,7 @@ def main():
                 ('one two three four five six seven eight nine ten', 'One two three.', 'over_deletion'),
                 ('test the intake', '', 'empty'),
                 ('test the intake', '.', 'empty'),
-                ('test period the intake', 'Test period the intake.', 'added_word'),
+                ('test period the intake', 'Test comma the intake.', 'added_word'),
             ]
             for n, (messy, target, reason) in enumerate(rejected):
                 check(f'pair rejects {reason} {n}', pair_check.pair_check(messy, target) == (False, reason))
@@ -451,9 +451,9 @@ def main():
             storage.write_json(literal / 'public_text.jsonl', [
                 {'text': 'Please put a comma in the sentence.', 'origin': 'public'}], lines=True)
             skipped = {'sources': 0, 'skipped_sources': 0}
-            check('unsynthesizable literal punctuation skipped and counted',
-                  list(data.synthetic(literal, 1, 1, 0, skipped)) == [] and
-                  skipped == {'sources': 1, 'skipped_sources': 1})
+            check('literal punctuation words are synthesizable',
+                  len(list(data.synthetic(literal, 1, 1, 0, skipped))) == 1 and
+                  skipped == {'sources': 1, 'skipped_sources': 0})
 
             cli_dir = home / 'cli-data'
             output = io.StringIO()

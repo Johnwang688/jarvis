@@ -24,9 +24,16 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--data-dir', default=argparse.SUPPRESS)
     steps = p.add_subparsers(dest='step', required=True)
-    for name in ('owner-text', 'public', 'synth', 'roundtrip', 'teach', 'build'):
+    for name in ('owner-text', 'public', 'synth', 'roundtrip', 'teach', 'build', 'eval', 'record'):
         sub = steps.add_parser(name)
         sub.add_argument('--data-dir', default=argparse.SUPPRESS)
+        if name == 'eval':
+            sub.add_argument('--split', choices=['dev', 'test'], default='dev')
+            sub.add_argument('--system', default='b1')
+            sub.add_argument('--limit', type=nonnegative)
+        if name == 'record':
+            sub.add_argument('--parakeet-dir')
+            sub.add_argument('--threads', type=int, default=2)
         if name == 'public':
             sub.add_argument('--oasst2', required=True)
         if name in ('synth', 'roundtrip', 'teach'):
@@ -62,8 +69,8 @@ def synthetic(directory, seed, per_source=5, template_count=200, counts=None):
     for source in sources(directory, seed, template_count):
         if counts is not None:
             counts['sources'] += 1
-        # With asymmetric spoken-punctuation normalization, a literal word
-        # such as "comma" in the target cannot pass even the identity pair.
+        # Defensive: a source whose own tidy target fails the guard (none known
+        # since spoken punctuation matches as a word) is skipped and counted.
         if not pair_check(source['text'], tidy_target(source['text']))[0]:
             if counts is not None:
                 counts['skipped_sources'] += 1
@@ -89,8 +96,20 @@ def main(argv=None):
     try:
         if args.step == 'teach':
             teachers.validate_model(args.model)
+        if args.step == 'record':
+            from .record import TerminalIO, ParecordRecorder, parakeet_transcriber, record_loop, require_tty
+            terminal = TerminalIO()
+            require_tty(terminal)
+            record_loop(terminal, ParecordRecorder(),
+                        parakeet_transcriber(args.parakeet_dir, args.threads),
+                        getattr(args, 'data_dir', None))
+            return 0
         directory = data_dir(getattr(args, 'data_dir', None))
-        if args.step == 'owner-text':
+        if args.step == 'eval':
+            from .eval import evaluate, print_table
+            print_table(evaluate(directory, split=args.split, system=args.system, limit=args.limit))
+            return 0
+        elif args.step == 'owner-text':
             counts = owner_text.write(directory)
         elif args.step == 'public':
             rows = list(public_text.read(args.oasst2))
@@ -123,10 +142,17 @@ def main(argv=None):
             counts = {'total': card['total'], **card['counts']}
         print(json.dumps(counts, sort_keys=True))
         return 0
-    except (ValueError, OSError, RuntimeError, ImportError) as exc:
+    except (ValueError, OSError, RuntimeError, ImportError, AttributeError) as exc:
         # These errors have deliberately text-free messages in the pipeline.
         # OSErrors/ImportErrors may identify a missing input, but never row text.
-        print(f'voiceclean: {exc}', file=__import__('sys').stderr)
+        if args.step in ('eval', 'record'):
+            # Arbitrary model/transcriber errors can include private row text.
+            message = ('record requires both stdin and stdout to be TTYs; run it interactively yourself'
+                       if args.step == 'record' and 'requires both stdin' in str(exc)
+                       else f'{args.step} failed ({type(exc).__name__})')
+        else:
+            message = str(exc)
+        print(f'voiceclean: {message}', file=__import__('sys').stderr)
         return 1
 
 

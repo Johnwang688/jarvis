@@ -214,7 +214,7 @@ Only if B2 misses the bar.
 
 | Pkg | What | Notes |
 |---|---|---|
-| **VA-3a** | Rules pass, the guard (added to `SELF_PROTECTED`), the eval harness (B0, B1) and the owner-run gold-set recorder. No model. | Guard has negative tests: added word, substitution, newline, control character, over-deletion. Mutation check: a guard that skips the subset test must fail them. Recorder: owner-run only, owner-only folder (0700/0600), outside the repo. |
+| **VA-3a** | Rules pass, the guard (added to `SELF_PROTECTED`), the eval harness (B0, B1) and the owner-run gold-set recorder. No model. | Guard has negative tests: added word, substitution, newline, control character, over-deletion. Mutation check: a guard that skips the subset test must fail them. Recorder: owner-run only, owner-only folder (0700/0600), outside the repo. **Built 2026-11-16** as `jarvis.v2.dictation_guard`, `jarvis.v2.dictation_rules`, `voiceclean.eval` and `voiceclean.record`. |
 | **VA-3b** | llama.cpp runtime in the daemon, prompted Qwen3.5 (B2), behind a Settings → Voice switch, default off. Terminals rules-only. | Needs VA-2's foreground category. Latency into VA-0's Diagnostics. |
 | **VA-3c** | Data generator: synthetic pairs, Kokoro→Parakeet round trip, provenance per example. | Offline tool, not in the daemon. **Built 2026-11-16** as `voiceclean/` (`python -m voiceclean.data`); first-run numbers under *Data*. |
 | **VA-3d** | SFT run and report against B0–B3. | Only if B2 misses the bar. |
