@@ -771,6 +771,63 @@ def download_port(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+COMMIT_TIMEOUT_S = 3.0
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}", re.ASCII)
+
+
+def head_commit(root) -> tuple[str | None, bool | None]:
+    """The commit a download is sent from, for the owner to read beside it:
+    `(sha, dirty)`, HEAD of the repository holding `root`, and whether the
+    project folder has changes HEAD does not hold (tracked or untracked,
+    `build/` aside). `(None, None)` when there is no repository or no commit,
+    when the repository's own config names a program for git to run
+    (`gitops._config_risk`, as the editor's gutter refuses it; config
+    that cannot be listed counts) and when git fails or is slow; `dirty` is None when only that check failed. Only
+    `gitops`' hardened git (hooks and fsmonitor off, scrubbed environment)
+    and never anything that writes. It decides nothing: a label."""
+    from jarvis import gitops
+    cwd = Path(root)
+    try:
+        code, out, _ = gitops._git(cwd, ["rev-parse", "--show-toplevel"], timeout=COMMIT_TIMEOUT_S)
+        if code != 0 or not out.strip():
+            return None, None
+        risk = gitops._config_risk(Path(out.rstrip("\n")), timeout=COMMIT_TIMEOUT_S)
+        if risk is None or risk:            # unlisted config is not a clean one
+            return None, None
+        code, out, _ = gitops._git(cwd, ["rev-parse", "-q", "--verify", "HEAD^{commit}"],
+                                   timeout=COMMIT_TIMEOUT_S)
+        sha = out.strip()
+        if code != 0 or not COMMIT_SHA.fullmatch(sha):
+            return None, None
+        # No optional locks (gitops pins GIT_OPTIONAL_LOCKS=0 too): never an index write.
+        code, out, _ = gitops._git(cwd, ["--no-optional-locks", "status", "--porcelain",
+                                         "--untracked-files=normal", "--", ".", ":(exclude)build"],
+                                   timeout=COMMIT_TIMEOUT_S)
+    except Exception:
+        return None, None
+    return sha, (bool(out.strip()) if code == 0 else None)
+
+
+def local_clock(iso: str) -> str:
+    """`HH:MM:SS` on this machine's clock for one of `_utcnow()`'s stamps."""
+    try:
+        return datetime.datetime.fromisoformat(iso).astimezone().strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+
+
+def download_title(project: str, slot: int, sha: str | None, dirty: bool | None, started: str) -> str:
+    """The download terminal's title: what is sent where, from which commit
+    (`+` when the folder had uncommitted changes), started when."""
+    parts = [f"vex download · {project} → slot {slot}"]
+    if sha:
+        parts.append(sha[:7] + ("+" if dirty else ""))
+    clock = local_clock(started)
+    if clock:
+        parts.append(f"started {clock}")
+    return " · ".join(parts)
+
+
 def escaped(data: bytes) -> str:
     r"""Bytes as text a person can read, every control and invisible character
     (and the backslash) escaped: `\x1b[6n`, `\r\n`. For the brain record."""
@@ -1517,10 +1574,14 @@ class Download:
     ended: str | None = None
     timed_out: bool = False
     timer: threading.Timer | None = None
+    # HEAD when the download started, and whether the project folder had
+    # changes it does not hold (`head_commit`): a label for the owner.
+    commit: str | None = None
+    dirty: bool | None = None
 
     def view(self):
         return {key: getattr(self, key) for key in ("id", "project_id", "slot", "started",
-                "terminal_id", "state", "exit_code", "output", "ended")}
+                "terminal_id", "state", "exit_code", "output", "ended", "commit", "dirty")}
 
 
 @dataclass
@@ -1947,6 +2008,9 @@ class Vex:
                            "download here; rename it in .vscode/vex_project_settings.json")
         cfg = load_config()
         root = project.root
+        # Which commit is sent, for the owner to read beside the download: read
+        # before anything is held, so a slow git never keeps the device.
+        commit, dirty = head_commit(root)
         # The device first (one device action at a time, said as such), then
         # the project's build lock, held for the download so no build rewrites
         # the binary while it is being sent — and the binary judged under it,
@@ -1968,7 +2032,8 @@ class Vex:
             raise
         with self._lock:
             self._held.add(lock)
-            record = Download(self._id(self._downloads), project.id, slot, _utcnow())
+            record = Download(self._id(self._downloads), project.id, slot, _utcnow(),
+                              commit=commit, dirty=dirty)
             self._keep(self._downloads, record.id, record)
 
         def ended(terminal):
@@ -2011,7 +2076,8 @@ class Vex:
         try:
             terminal = self._start(argv, cfg=cfg, tool="vexcom", folder=root, label=project.name,
                                    program="vex-download",
-                                   title=f"vex download · {project.name} → slot {slot}",
+                                   title=download_title(project.name, slot, commit, dirty,
+                                                        record.started),
                                    project_id=project.id, on_exit=ended,
                                    key=("vex-download", project.id))
         except BaseException:

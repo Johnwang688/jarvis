@@ -58,6 +58,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1077,6 +1078,57 @@ class Device(DaemonBase):
                                         "--timer", "--progress"])
         self.assertEqual(Path(call["cwd"]).resolve(), self.folder.resolve())
         self.assertEqual(call["wslenv"], "")
+
+    def test_the_download_names_its_commit_and_start_time(self):
+        # The owner, 2026-11-16: the Download tab and the download terminal
+        # say which commit was sent and when the download started.
+        def sent():
+            body = self.download()
+            self.ended(body["terminal_id"])
+            record = self.owner("GET", f"/vex/downloads/{body['download_id']}")
+            return record, self.daemon.terminals.get(body["terminal_id"]).title
+
+        self.build()
+        record, title = sent()
+        self.assertEqual((record["commit"], record["dirty"]), (None, None))   # no repository
+        self.assertRegex(title, r"^vex download · override → slot 3 · started \d\d:\d\d:\d\d$")
+        self.assertTrue(record["started"])
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                 "-c", "core.hooksPath=/dev/null", *args], cwd=self.folder, check=True,
+                capture_output=True, text=True,
+                env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull}).stdout.strip()
+        (self.folder / "readme.txt").write_text("robot\n")
+        git("init", "-q")
+        git("add", "-A", "--", ".", ":(exclude)build")
+        git("commit", "-q", "-m", "first")
+        sha = git("rev-parse", "HEAD")
+        record, title = sent()
+        # An untracked build/ is not a change: it is what is being sent.
+        self.assertEqual((record["commit"], record["dirty"]), (sha, False))
+        self.assertRegex(title, rf"^vex download · override → slot 3 · {sha[:7]} · started \d\d:\d\d:\d\d$")
+        index = (self.folder / ".git" / "index").stat().st_mtime_ns
+        # A tracked file with new stat data and the same text: a plain
+        # `git status` would refresh (rewrite) the index for it.
+        when = time.time() - 30
+        os.utime(self.folder / "readme.txt", (when, when))
+        # A change HEAD does not hold says so (the binary was built from it).
+        (self.folder / "notes.txt").write_text("x\n")
+        record, title = sent()
+        self.assertEqual((record["commit"], record["dirty"]), (sha, True))
+        self.assertIn(f" · {sha[:7]}+ · started ", title)
+        self.assertEqual((self.folder / ".git" / "index").stat().st_mtime_ns, index,
+                         "the read never writes the index")
+        # A repository whose own config names a program for git to run, or
+        # whose config cannot be listed, is not read past that.
+        git("config", "core.sshCommand", "true")
+        self.assertEqual(vex.head_commit(self.folder), (None, None))
+        git("config", "--unset", "core.sshCommand")
+        self.assertEqual(vex.head_commit(self.folder), (sha, True))
+        with patch("jarvis.gitops._config_risk", return_value=None):
+            self.assertEqual(vex.head_commit(self.folder), (None, None))
 
     def test_no_binary_or_a_stale_one_is_refused(self):
         self.assertIn("Build first", self.download(status=409)["error"])

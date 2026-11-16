@@ -4,7 +4,7 @@ import {
   chainStepOf, chainSteps, chainStoppable, downloadButtonLabel, downloadMark, helpText, isSourcePath, isTrustedPress,
   markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote, retriesDownload, DOWNLOAD_RETRY_EXIT, DOWNLOAD_TRIES,
   defaultName, downloadLabel, downloadProgress, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
-  parseStatus, parseDownload, parseConnection, setupNote, slotRefusal, type BuildError, type BuildView,
+  parseStatus, parseDownload, downloadOrigin, parseConnection, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
 
 const err = (over: Partial<BuildError> = {}): BuildError => ({
@@ -522,6 +522,22 @@ describe("bounded VEX feedback records", () => {
     expect(parseDownload(d)?.output.length).toBe(16384);
     expect(parseDownload({...d, slot: 9})).toBeNull();
     expect(parseDownload({...d, state: "done"})).toBeNull();
+  });
+  it("keeps the download's commit only as a full id, and says when it started", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const d = {id: "a0000001", project_id: "p3", slot: 3, state: "succeeded", terminal_id: "b0000001",
+      exit_code: 0, output: "", started: "2026-11-16T23:23:51+00:00", ended: null, commit: sha, dirty: true};
+    expect(parseDownload(d)).toMatchObject({ commit: sha, dirty: true });
+    for (const commit of ["0123456", sha.toUpperCase(), sha + "\n", 7, null]) {
+      expect(parseDownload({...d, commit})?.commit).toBeNull();
+    }
+    expect(parseDownload({...d, dirty: "yes"})?.dirty).toBeNull();
+    const origin = downloadOrigin(parseDownload(d)!);
+    expect(origin.commit).toBe("0123456+");
+    expect(origin.started).toBe(new Date("2026-11-16T23:23:51Z").toLocaleTimeString([],
+      { hour: "numeric", minute: "2-digit", second: "2-digit" }));
+    expect(downloadOrigin({ commit: sha, dirty: false, started: "" })).toEqual({ commit: "0123456", started: "" });
+    expect(downloadOrigin({ commit: null, dirty: null, started: "not a time" })).toEqual({ commit: "", started: "" });
   });
   it("USB unknown is distinct from disconnected and history has a strict bound", () => {
     const c = {brain: null, controller: false, state: "busy", checked_at: null, message: "busy", events: []};
