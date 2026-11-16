@@ -10,8 +10,8 @@ Data defaults to `~/.local/share/jarvis/va3-data`. Set `VOICECLEAN_DATA_DIR` or 
 any git work tree (including linked worktrees with a `.git` file). Directories
 are 0700 and all output files are opened with mode 0600, including replacements.
 Only the deliberate owner-run `record` step saves audio. Other steps print
-counts and metrics only; `record` also shows suggestions, prompts and the owner's
-transcript for review. No step reads `.env` files.
+counts and metrics only; `record` and `gold-from-history` also show suggestions,
+prompts and the owner's transcript for review. No step reads `.env` files.
 
 Run from this checkout so another installed Jarvis cannot be imported:
 
@@ -32,6 +32,8 @@ PY=/home/johnw/projects/Jarvis/.venv/bin/python
 "$PY" -m voiceclean.data eval --split test --system b1 --limit 100
 # Interactive owner-run command only; requires stdin AND stdout TTYs.
 "$PY" -m voiceclean.data record
+# Review existing spoken owner messages instead of recording new audio.
+"$PY" -m voiceclean.data gold-from-history
 ```
 
 Obtain the messages export from the official
@@ -145,6 +147,18 @@ Parakeet/numpy installation as `roundtrip`; use `--parakeet-dir` and `--threads`
 to override its defaults. Backends load only after an interactive recording.
 Tests inject IO, recorder and transcriber; they never open a microphone or load
 real models.
+
+`gold-from-history` requires both stdin and stdout TTYs and reads only spoken
+owner turns from `~/.local/share/jarvis/v2/threads/*/log.jsonl`; override the root
+with `--threads-dir PATH`. It uses `text`, falling back to `typed`, and drops
+empty transcripts and rows containing credential shapes or labelled credentials.
+Each transcript appears with its rules cleanup: Enter accepts, `s` skips, `q`
+quits, and any other input supplies the desired target. Reviewed rows save as
+`gold/hist-<raw SHA-256 prefix>.json` with `source: history` and `wav: null`;
+reruns skip transcripts already present in any gold JSON. Corrections rejected
+by the guard are still saved with `guard_compatible: false` and a reason is shown.
+The final line contains counts only. These rows join the eval `gold` suite,
+including without a dataset or audio files. No microphone or model is used.
 
 Free, fake-HOME checks (network and real model imports are blocked):
 

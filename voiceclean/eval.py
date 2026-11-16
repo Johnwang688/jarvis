@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 import importlib
 from itertools import islice
@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 import time
 
 from jarvis.v2 import dictation_guard as guard, dictation_rules as rules
@@ -19,6 +20,27 @@ from .storage import data_dir, read_jsonl, safe_input, write_json
 SUITES = ('all', 'self_correction', 'numbers', 'questions', 'template', 'owner',
           'public', 'roundtrip', 'gold')
 
+
+
+@contextmanager
+def _silenced():
+    """Adapter output goes nowhere, Python streams and file descriptors 1 and 2
+    alike: an adapter calling os.write(1, ...) or a C library printing must not
+    put row text on the terminal either (Sol review of #392)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = [os.dup(1), os.dup(2)]
+    sink = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(sink, 1)
+        os.dup2(sink, 2)
+        with open(os.devnull, 'w') as stream, redirect_stdout(stream), redirect_stderr(stream):
+            yield
+    finally:
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for fd in (*saved, sink):
+            os.close(fd)
 
 def distance(reference: list[str], hypothesis: list[str]) -> int:
     """Levenshtein edit count using one row of working memory."""
@@ -75,7 +97,7 @@ def evaluate(directory, *, split='dev', system='b1', limit=None):
             raise ValueError('system must be b0, b1 or MODULE:FUNC')
         # Optional baseline adapters may print their inputs or loader output.
         # The CLI's only output is the aggregate table, even for those adapters.
-        with open(os.devnull, 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
+        with _silenced():
             model = getattr(importlib.import_module(module), name)
         if not callable(model):
             raise ValueError('evaluation system must be callable')
@@ -93,7 +115,7 @@ def evaluate(directory, *, split='dev', system='b1', limit=None):
                 fallback = rules.clean(raw)
                 candidate = None
                 if model is not None:
-                    with open(os.devnull, 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
+                    with _silenced():
                         candidate = model(raw)
                     verdict = guard.check(raw, candidate)
                     rejected = verdict.reason if not verdict.ok else ''

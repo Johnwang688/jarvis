@@ -106,7 +106,7 @@ def main():
                 ('in two thousand twenty six we will compete', 'In 2026 we will compete.'),
                 ('we used nine hundred ninety nine thousand nine hundred ninety nine parts',
                  'We used 999999 parts.'),
-                ('we need one hundred and five parts', 'We need 105 parts.'),
+                ('we need one hundred and five parts', 'We need 100 and 5 parts.'),  # "and" never joins
                 ('please check comma then test period', 'Please check, then test.'),
                 ('is it ready question mark', 'Is it ready?'),
                 ('we do not know if i am ready', "We don't know if I'm ready."),
@@ -136,11 +136,11 @@ def main():
             check('pair rejects reorder specifically', not pair_check.pair_check('red blue green', 'Blue red green.')[0])
             check('duplicate word addition rejected', pair_check.pair_check('we can test', 'We can can test.')[1] == 'added_word')
             check('exact sixty percent deletion allowed', pair_check.pair_check('a b c d e', 'D e.')[0])
-            check('number grammar does not sum adjacent words', normalize.tokens('one two twenty five six') == ['1', '2', '25', '6'])
-            check('number full range endpoints', normalize.tokens('zero nine hundred ninety nine thousand nine hundred ninety nine') == ['0', '999999'])
+            check('a run of several numbers stays words', normalize.tokens('one two twenty five six') == ['one', 'two', 'twenty', 'five', 'six'])
+            check('number full range endpoints', normalize.tokens('zero') == ['0'] and normalize.tokens('nine hundred ninety nine thousand nine hundred ninety nine') == ['999999'])
             check('number words inverse sampled', all(normalize.tokens(normalize.number_words(n)) == [str(n)]
                   for n in [0, 1, 20, 25, 101, 999, 1000, 2026, 999999, *range(0, 999999, 997)]))
-            check('leading zero time equivalence', pair_check.pair_check('meet at ten zero', 'Meet at 10:00.')[0])
+            check('clock time from words', pair_check.pair_check('meet at four forty five', 'Meet at 4:45.')[0] and not pair_check.pair_check('meet at ten zero', 'Meet at 10:00.')[0])
             bool_rows = [{'text': 'Please test the intake.', 'origin': 'public'}] * 3
             try:
                 teachers.run(bool_rows, 'openai/gpt-oss-20b', 'messify',

@@ -57,7 +57,7 @@ def hand_cases():
     for i, (raw, app, expected) in enumerate(cases):
         check(f'hand case {i}', rules.clean(raw, app) == expected)
     check('spoken-punctuation words pass as themselves', guard.check('echo period', 'echo period').ok)
-    check('guard identity conflict: control characters', not guard.check('a\x00b', 'a\x00b').ok)
+    check('identical text always passes the guard', guard.check('a\x00b', 'a\x00b').ok)
 
 
 def sweep(label, inputs):

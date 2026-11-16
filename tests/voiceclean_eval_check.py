@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.abc
 import io
 import json
@@ -137,7 +138,8 @@ def eval_checks(home):
               all(row[key] not in output.getvalue() + errors.getvalue() for row in fixture for key in ('messy', 'target')))
     storage.write_json(directory / 'gold/example.json', {'raw': 'Ready?', 'target': 'Ready?'})
     with_gold = ev.evaluate(directory, system='b0')
-    check('gold included with dataset', with_gold['suites']['all']['n'] == 4 and with_gold['suites']['gold']['n'] == 1)
+    check('gold without WAV field included with dataset',
+          with_gold['suites']['all']['n'] == 4 and with_gold['suites']['gold']['n'] == 1)
     check('gold exact rate and aggregate WER', with_gold['suites']['all']['exact_match_rate'] == .25 and
           with_gold['suites']['all']['wer_words'] == .1 and with_gold['suites']['all']['wer_format'] == .8)
     check('test split plus every gold row', ev.evaluate(directory, split='test')['suites']['all']['n'] == 2)
@@ -243,6 +245,116 @@ def record_checks(home):
           and factory.call_count == 1 and factory.call_args.args == ('fake-model-dir', 3))
 
 
+def history_checks(home):
+    from voiceclean import data, eval as ev, record, storage
+    from jarvis.v2 import dictation_guard as guard, dictation_rules as rules
+
+    directory = home / 'history'
+    threads = home / '.local/share/jarvis/v2/threads'
+    no_tty_path = home / 'history-no-tty'
+    with patch.object(storage, 'data_dir', side_effect=AssertionError('storage accessed')), \
+            patch.object(storage, 'safe_input', side_effect=AssertionError('source accessed')):
+        check('history refuses no TTY before filesystem access', raises(
+              lambda: record.history_loop(FakeIO(tty=False), no_tty_path, threads), RuntimeError))
+    for stdin_tty, stdout_tty in ((False, True), (True, False), (False, False)):
+        stdin, stdout = Mock(), Mock()
+        stdin.isatty.return_value, stdout.isatty.return_value = stdin_tty, stdout_tty
+        errors = io.StringIO()
+        # Python 3.14's argparse probes the terminal for colour through
+        # sys.stdout.fileno(); a Mock has none, so colour is pinned off here.
+        with patch.object(sys, 'stdin', stdin), patch.object(sys, 'stdout', stdout), \
+                patch.dict(os.environ, {'PYTHON_COLORS': '0', 'NO_COLOR': '1'}), \
+                contextlib.redirect_stderr(errors):
+            status = data.main(['gold-from-history', '--data-dir', str(no_tty_path)])
+        check(f'history CLI TTY pair {int(stdin_tty)} {int(stdout_tty)} refused',
+              status == 1 and 'gold-from-history requires both stdin and stdout' in errors.getvalue()
+              and not no_tty_path.exists())
+
+    first, second = 'um test the intake', 'test the lift'
+    typed_only, nonowner = 'owner typed message', 'someone else spoke'
+    credential = 'use jmcp_abcdefgh12345678'
+    def turn(text=None, *, origin='owner', spoken=True, **extra):
+        return {'kind': 'user', 'data': {'origin': origin, 'spoken': spoken, **extra,
+                                       **({'text': text} if text is not None else {})}}
+    # Three spoken owner turns include one credential-shaped turn.
+    fixture = [turn(first, typed='wrong fallback text'), turn(typed=second),
+               turn(typed_only, spoken=False), turn(nonowner, origin='agent'), turn(credential)]
+    storage.write_json(threads / 'one/log.jsonl', fixture, lines=True)
+    terminal = FakeIO(['', 'Test the elevator.'])
+    counts = record.history_loop(terminal, directory)
+    check('history offers only two clean spoken owner turns from fake HOME',
+          len(terminal.reads) == 2 and terminal.output[:3] == ['1/2', first, rules.clean(first)]
+          and terminal.output[3:6] == ['2/2', second, rules.clean(second)]
+          and all(text not in '\n'.join(terminal.output) for text in (typed_only, nonowner, credential,
+                                                                    'wrong fallback text')))
+    check('history accepts suggestion and saves incompatible correction counts', counts == {
+          'saved': 2, 'accepted_as_suggested': 1, 'corrected': 1, 'skipped': 0, 'guard_incompatible': 1})
+    gold = directory / 'gold'
+    rows = {row['raw']: row for row in (json.loads(p.read_text()) for p in gold.glob('*.json'))}
+    check('history accepted and corrected targets retained', rows[first]['target'] == rules.clean(first)
+          and rows[first]['suggestion_accepted'] is True and rows[first]['guard_compatible'] is True
+          and rows[second]['target'] == 'Test the elevator.' and rows[second]['suggestion_accepted'] is False
+          and rows[second]['guard_compatible'] is False)
+    check('history incompatible note includes guard reason on one line',
+          terminal.output[-2] == 'Saved guard-incompatible target: ' + guard.check(second, rows[second]['target']).reason
+          and '\n' not in terminal.output[-2])
+    check('history deterministic filenames and JSON schema', len(rows) == 2 and all(
+          row['id'] == 'hist-' + hashlib.sha256(raw.encode()).hexdigest()[:16]
+          and (gold / (row['id'] + '.json')).is_file()
+          and set(row) == {'id', 'raw', 'target', 'source', 'wav', 'suggestion_accepted', 'created', 'guard_compatible'}
+          and row['source'] == 'history' and row['wav'] is None and row['created'].endswith('+00:00')
+          for raw, row in rows.items()))
+    check('history files 0600 and directories 0700',
+          all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in gold.iterdir())
+          and all(stat.S_IMODE(p.stat().st_mode) == 0o700 for p in (directory, gold)))
+    check('history final line has counts only and no row text', json.loads(terminal.output[-1]) == counts
+          and all(type(n) is int for n in json.loads(terminal.output[-1]).values())
+          and all(row[key] not in terminal.output[-1] for row in rows.values() for key in ('raw', 'target')))
+    before = {p.name: p.read_bytes() for p in gold.iterdir()}
+    resumed = FakeIO()
+    resume_counts = record.history_loop(resumed, directory, threads)
+    check('history resume offers no saved rows and preserves files', not resumed.reads
+          and resume_counts['saved'] == 0 and before == {p.name: p.read_bytes() for p in gold.iterdir()})
+    report = ev.evaluate(directory, system='b1')
+    check('history gold-only eval counts null-WAV rows including incompatible target',
+          report['suites']['gold']['n'] == report['suites']['all']['n'] == 2
+          and report['suites']['gold']['exact_match_rate'] == .5)
+
+    skipped_dir = home / 'history-skip'
+    skipping = FakeIO(['s', 'q'])
+    skip_counts = record.history_loop(skipping, skipped_dir, threads)
+    check('history skip and quit save no files', skip_counts == {
+          'saved': 0, 'accepted_as_suggested': 0, 'corrected': 0, 'skipped': 1, 'guard_incompatible': 0}
+          and not list((skipped_dir / 'gold').iterdir()))
+    for ending in (EOFError(), KeyboardInterrupt()):
+        interrupted = FakeIO(['', ending])
+        end_dir = home / ('history-' + type(ending).__name__)
+        ended = record.history_loop(interrupted, end_dir, threads)
+        check('history preserves reviewed rows on ' + type(ending).__name__, ended['saved'] == 1
+              and len(list((end_dir / 'gold').glob('*.json'))) == 1
+              and json.loads(interrupted.output[-1]) == ended)
+
+    # A separate source exercises both scrubber entry points and resuming any gold raw.
+    custom_threads = home / 'custom-threads'
+    custom_dir = home / 'custom-history'
+    storage.write_json(custom_dir / 'gold/recorded.json', {'raw': first, 'target': rules.clean(first)})
+    storage.write_json(custom_threads / 'a/log.jsonl', [turn(first), turn('password: hunter2'),
+          turn('connect http://user:hunter2@localhost/path'), turn('   '), turn(typed=second),
+          turn(second), {'kind': 'assistant', 'data': {'origin': 'owner', 'spoken': True, 'text': nonowner}},
+          {'kind': 'user', 'data': None}], lines=True)
+    # Historical logs can contain interrupted writes and non-object lines.
+    with (custom_threads / 'a/log.jsonl').open('a') as fh:
+        fh.write('{broken\n[]\n')
+    cli_terminal = FakeIO([''])
+    with patch.object(record, 'TerminalIO', return_value=cli_terminal):
+        status = data.main(['--data-dir', str(custom_dir), 'gold-from-history',
+                            '--threads-dir', str(custom_threads)])
+    check('history CLI custom threads filters credentials empties duplicates and existing recording',
+          status == 0 and cli_terminal.output == ['1/1', second, rules.clean(second), json.dumps({
+              'saved': 1, 'accepted_as_suggested': 1, 'corrected': 0, 'skipped': 0, 'guard_incompatible': 0},
+              sort_keys=True)])
+
+
 def isolation(home):
     code = ("import sys; import voiceclean.data, voiceclean.eval, voiceclean.record; "
             "print(sorted(m for m in sys.modules if m.startswith('jarvis')))")
@@ -251,6 +363,32 @@ def isolation(home):
     check('subprocess config isolation', out.returncode == 0 and 'jarvis.config' not in out.stdout and
           'jarvis.v2.dictation_guard' in out.stdout and 'jarvis.v2.dictation_rules' in out.stdout)
 
+
+
+def fd_leak_checks(home):
+    """An adapter writing straight to fds 1 and 2 must print no row text."""
+    adapters = home / 'adapters'
+    adapters.mkdir()
+    (adapters / 'leaky_adapter.py').write_text(
+        'import os\n'
+        'def f(raw):\n'
+        '    os.write(1, ("FDLEAK1 " + raw + "\\n").encode())\n'
+        '    os.write(2, ("FDLEAK2 " + raw + "\\n").encode())\n'
+        '    print("FDLEAK3 " + raw)\n'
+        '    return raw\n')
+    data_root = home / 'fd-leak-data'
+    data_root.mkdir(mode=0o700)
+    (data_root / 'dataset').mkdir(mode=0o700)
+    (data_root / 'dataset' / 'dev.jsonl').write_text(json.dumps(
+        {'messy': 'um private marker words', 'target': 'Private marker words.',
+         'origin': 'public', 'source_id': 'a'}) + '\n')
+    env = {'PYTHONPATH': os.pathsep.join([str(ROOT), str(adapters)]), 'HOME': str(home),
+           'PATH': '/usr/bin:/bin', 'PYTHON_COLORS': '0'}
+    out = subprocess.run([sys.executable, '-m', 'voiceclean.data', 'eval', '--data-dir', str(data_root),
+                          '--split', 'dev', '--system', 'leaky_adapter:f'],
+                         capture_output=True, text=True, cwd=ROOT, env=env)
+    check('adapter fd-level output silenced', out.returncode == 0 and 'FDLEAK' not in out.stdout + out.stderr
+          and 'private marker' not in out.stdout + out.stderr)
 
 def main():
     real_home = Path.home()
@@ -271,7 +409,7 @@ def main():
                     raise AssertionError('owner files accessed')
         sys.addaudithook(audit)
         with patch.object(Path, 'exists', fixture_exists), patch.dict(os.environ, {'HOME': str(home), 'VOICECLEAN_DATA_DIR': str(home / 'default')}):
-            for fn in (eval_checks, record_checks, isolation):
+            for fn in (eval_checks, record_checks, history_checks, fd_leak_checks, isolation):
                 try:
                     fn(home)
                 except Exception as exc:

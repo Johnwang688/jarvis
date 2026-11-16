@@ -62,6 +62,11 @@ def deletion_rule() -> None:
         ("comma period", ""),
         ("um um um yes", "Yes."),  # fillers do not count toward over-deletion
         ("extend the grace period", "Extend the grace period."),  # literal spoken-punct word kept
+        ("meet at four forty five", "Meet at 4:45."),             # clock time
+        ("it costs one thousand dollars", "It costs 1,000 dollars."),
+        ("re enable it", "Re-enable it."),                       # hyphen joins two words
+        ("he said hello there", 'He said "hello there."'),
+        ("pages five to ten", "Pages 5-10."),
         ("echo period", "echo period"),  # identity always passes
         ("put a colon here comma then save", "Put a colon here, then save."),
     ]
@@ -81,6 +86,20 @@ def deletion_rule() -> None:
         ("its done", "It's done.", "added_word"),
         ("test the period", "Test the comma.", "added_word"),          # spoken punct is still a word
         ("list files", "ls -la.", "added_word"),
+        # Sol review of #392: values, merged numbers, command syntax, folding.
+        ("pay 1.05 dollars", "Pay 1.5 dollars.", "added_word"),
+        ("pay five dollars", "Pay -5 dollars.", "new_symbol"),
+        ("the rate is five percent", "The rate is .5%.", "new_symbol"),
+        ("choose twenty, one, or five", "Choose 21 or 5.", "added_word"),
+        ("buy one thousand and one thousand parts", "Buy 1001 thousand parts.", "added_word"),
+        ("echo hello", "!!; echo hello", "new_symbol"),
+        ("ls la", "ls -la", "new_symbol"),
+        ("um", "!!", "new_symbol"),
+        ("Masse", "Maße", "added_word"),
+        ("run the ss command", "Run the \u00df command.", "added_word"),
+        ("run the ff command", "Run the \ufb00 command.", "new_symbol"),
+        ("one two", "1 2.", "added_word"),
+        ("meet at ten zero", "Meet at 10:00.", "added_word"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
         check(f"refuses {why} {n}: {cleaned!r}", reason(raw, cleaned) == why)
@@ -97,9 +116,13 @@ def characters() -> None:
         check(f"refuses new symbol {sym!r}", reason(raw, f"List the files {sym} then count them.") == "new_symbol")
     check("allows a symbol the owner's text already had",
           accepts("pipe it | count them", "Pipe it | count them."))
-    for sym in ".,?!'\"-:;()":  # '%' is a word (percent), judged as one
-        check(f"allows safe punctuation {sym!r}", accepts(raw, f"List the files{sym} then count them."))
-    check("a bare % is the word percent, so it is added", reason(raw, "List the files % then count them.") == "added_word")
+    for sym in ".,?!:;'\"":  # prose punctuation after a word, before a space
+        check(f"allows prose punctuation {sym!r}", accepts(raw, f"List the files{sym} then count them."))
+    check("allows brackets around words", accepts(raw, "List the files (then count them)."))
+    check("allows a closing quote before the stop", accepts(raw, 'List "the files." Then count them.'))
+    check("refuses a hyphen standing before a word", reason(raw, "List the files -then count them.") == "new_symbol")
+    check("refuses a bracket glued into a word gap", reason(raw, "List the(files then count them.") == "new_symbol")
+    check("a bare % is not prose punctuation", reason(raw, "List the files % then count them.") == "new_symbol")
     check("homoglyph word refused", reason("test the intake", "Test the іntake.") == "added_word")
     check("non-text refused", reason("x", None) == "not_text" and reason(None, "x") == "not_text")
     long_raw = "test " * 20
@@ -109,7 +132,9 @@ def characters() -> None:
 def deletion_cap() -> None:
     raw = "one two three four five six seven eight nine ten"
     check("over-deletion refused", reason(raw, "One two three.") == "over_deletion")
-    check("exactly 40% kept accepted", accepts(raw, "1 2 3 4."))
+    greek = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    check("exactly 40% kept accepted", accepts(greek, "Alpha beta gamma delta."))
+    check("a run of separate number words never becomes digits", reason(raw, "1 2 3 4.") == "added_word")
     check("empty refused when content was said", reason("test the intake", "") == "empty")
     check("punctuation-only counts as empty", reason("test the intake", "...") == "empty")
     check("fillers kept do not satisfy the cap", reason("um uh test the intake now please",

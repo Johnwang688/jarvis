@@ -1,4 +1,4 @@
-"""Deliberate, interactive owner-only gold recording; no backend loads on import.
+"""Interactive owner-only gold recording and history review; no backend loads on import.
 
 Injected IO supplies isatty(), read(prompt, timeout=None), write(text); read
 returns None on timeout and raises EOFError on EOF. A recorder supplies
@@ -7,8 +7,10 @@ start(path) and stop(); a transcriber is callable with a WAV Path.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
+from pathlib import Path
 import select
 import subprocess
 import sys
@@ -17,6 +19,7 @@ import uuid
 import wave
 
 from jarvis.v2 import dictation_guard as guard
+from jarvis.v2 import dictation_rules as rules, redact
 from . import storage
 
 MAX_SECONDS = 30
@@ -71,9 +74,76 @@ class TerminalIO:
         return line.rstrip('\r\n')
 
 
-def require_tty(io):
+def require_tty(io, step='record'):
     if not io.isatty():
-        raise RuntimeError('record requires both stdin and stdout to be TTYs; run it interactively yourself')
+        raise RuntimeError(f'{step} requires both stdin and stdout to be TTYs; run it interactively yourself')
+
+
+def history_loop(io, data_dir, threads_dir=None):
+    """Review unique, credential-free spoken owner turns, resuming saved gold."""
+    require_tty(io, 'gold-from-history')
+    from .owner_text import jsonl
+
+    directory = storage.data_dir(data_dir) / 'gold'
+    storage.data_dir(directory)
+    seen = set()
+    for path in sorted(directory.glob('*.json')):
+        with storage.safe_input(path).open(encoding='utf-8') as fh:
+            raw = json.load(fh).get('raw')
+            if isinstance(raw, str):
+                seen.add(raw)
+    threads = storage.safe_input(threads_dir or Path.home() / '.local/share/jarvis/v2/threads')
+    items = []
+    for path in sorted(threads.glob('*/log.jsonl')):
+        for row in jsonl(path):
+            data = row.get('data')
+            if (row.get('kind') != 'user' or not isinstance(data, dict)
+                    or data.get('origin') != 'owner' or data.get('spoken') is not True):
+                continue
+            raw = data.get('text') or data.get('typed')
+            if not isinstance(raw, str) or not raw.strip() or raw in seen:
+                continue
+            try:
+                scrubbed = redact.labelled_values(redact.shapes(raw, mode=redact.DISPLAY))
+            except Exception:
+                continue  # Fail closed, as owner_text does, without displaying the row.
+            if scrubbed != raw:
+                continue
+            seen.add(raw)
+            items.append(raw)
+
+    counts = {'saved': 0, 'accepted_as_suggested': 0, 'corrected': 0,
+              'skipped': 0, 'guard_incompatible': 0}
+    try:
+        for index, raw in enumerate(items, 1):
+            suggestion = rules.clean(raw)
+            io.write(f'{index}/{len(items)}')
+            io.write(raw)
+            io.write(suggestion)
+            answer = io.read('Target (Enter = suggestion, s = skip, q = quit): ')
+            if answer == 'q':
+                break
+            if answer == 's':
+                counts['skipped'] += 1
+                continue
+            accepted = answer == ''
+            target = suggestion if accepted else answer
+            verdict = guard.check(raw, target)
+            ident = 'hist-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+            storage.write_json(directory / f'{ident}.json', {
+                'id': ident, 'raw': raw, 'target': target, 'source': 'history',
+                'wav': None, 'suggestion_accepted': accepted,
+                'created': datetime.now(timezone.utc).isoformat(),
+                'guard_compatible': verdict.ok})
+            counts['saved'] += 1
+            counts['accepted_as_suggested' if accepted else 'corrected'] += 1
+            if not verdict.ok:
+                counts['guard_incompatible'] += 1
+                io.write(f'Saved guard-incompatible target: {verdict.reason}')
+    except (EOFError, KeyboardInterrupt):
+        pass
+    io.write(json.dumps(counts, sort_keys=True))
+    return counts
 
 
 class ParecordRecorder:
@@ -105,7 +175,7 @@ class ParecordRecorder:
                     except ProcessLookupError:
                         pass  # It exited between poll() and terminate().
                 try:
-                    process.wait(timeout=5)
+                    process.wait(timeout=1)  # the cap is 30 s, not 35 (Sol review of #392)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
@@ -122,7 +192,9 @@ def parakeet_transcriber(model_dir=None, threads=2):
         with wave.open(str(path), 'rb') as wav:
             if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 16000:
                 raise ValueError('recording must be mono 16-bit PCM at 16000 Hz')
-            samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32) / 32768.0
+            # Never more than the cap, even if a recorder outlived its stop.
+            frames = min(wav.getnframes(), MAX_SECONDS * 16000)
+            samples = np.frombuffer(wav.readframes(frames), dtype='<i2').astype(np.float32) / 32768.0
             rate = wav.getframerate()
         if backend is None:
             backend = parakeet_backend(model_dir, threads)

@@ -24,9 +24,12 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--data-dir', default=argparse.SUPPRESS)
     steps = p.add_subparsers(dest='step', required=True)
-    for name in ('owner-text', 'public', 'synth', 'roundtrip', 'teach', 'build', 'eval', 'record'):
+    for name in ('owner-text', 'public', 'synth', 'roundtrip', 'teach', 'build', 'eval', 'record',
+                 'gold-from-history'):
         sub = steps.add_parser(name)
         sub.add_argument('--data-dir', default=argparse.SUPPRESS)
+        if name == 'gold-from-history':
+            sub.add_argument('--threads-dir')
         if name == 'eval':
             sub.add_argument('--split', choices=['dev', 'test'], default='dev')
             sub.add_argument('--system', default='b1')
@@ -96,6 +99,10 @@ def main(argv=None):
     try:
         if args.step == 'teach':
             teachers.validate_model(args.model)
+        if args.step == 'gold-from-history':
+            from .record import TerminalIO, history_loop
+            history_loop(TerminalIO(), getattr(args, 'data_dir', None), args.threads_dir)
+            return 0
         if args.step == 'record':
             from .record import TerminalIO, ParecordRecorder, parakeet_transcriber, record_loop, require_tty
             terminal = TerminalIO()
@@ -145,10 +152,10 @@ def main(argv=None):
     except (ValueError, OSError, RuntimeError, ImportError, AttributeError) as exc:
         # These errors have deliberately text-free messages in the pipeline.
         # OSErrors/ImportErrors may identify a missing input, but never row text.
-        if args.step in ('eval', 'record'):
+        if args.step in ('eval', 'record', 'gold-from-history'):
             # Arbitrary model/transcriber errors can include private row text.
-            message = ('record requires both stdin and stdout to be TTYs; run it interactively yourself'
-                       if args.step == 'record' and 'requires both stdin' in str(exc)
+            message = (f'{args.step} requires both stdin and stdout to be TTYs; run it interactively yourself'
+                       if args.step in ('record', 'gold-from-history') and 'requires both stdin' in str(exc)
                        else f'{args.step} failed ({type(exc).__name__})')
         else:
             message = str(exc)
