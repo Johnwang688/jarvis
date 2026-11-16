@@ -235,9 +235,13 @@ def run(browser, check, until):
         # icon. No SVG, of any class, may sit inside a region that shows server text.
         header = 'html > body > main#app.app-root > .app > header.top'
         chats = 'html > body > main#app.app-root > .app > main.main > section.view[data-testid="m-chats"]'
+        tabs = 'html > body > main#app.app-root > .app > nav.tabs'
         icon_slots = (f'{header} > button[data-testid="m-brand"] > .m-orb > svg, '
                       f'{header} > .m-menu > button[data-testid="m-lock-pill"] > svg.m-icon:first-child, '
-                      f'{chats} > section.project > h2.m-project-heading > button[data-testid="m-project-head"] > svg.m-icon:first-child')
+                      f'{chats} > section.project > h2.m-project-heading > button[data-testid="m-project-head"] > svg.m-icon:first-child, '
+                      f'{tabs} > button[data-testid="m-tab-inbox"] > span.m-tab-icon > svg.m-icon, '
+                      f'{tabs} > button[data-testid="m-tab-chats"] > span.m-tab-icon > svg.m-icon, '
+                      f'{tabs} > button[data-testid="m-tab-settings"] > span.m-tab-icon > svg.m-icon')
         server_text = (".plain-text, .chat-title, .m-project-name, .group, .subtitle, .brief, .m-notice, .headline, .m-why, "
                        ".reason, .pr-note, .pr-why, .pr-title, .pr-fixline, .m-error, .offline, .as-text, "
                        ".as-line, .m-review-text, .m-review-receipt, .card-line, .m-band-note, .m-deadline, "

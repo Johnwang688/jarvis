@@ -486,8 +486,8 @@ def run(browser, check, until, shots=None):
             until(lambda: tid("m-menu-panel").count() == 1)
             box = tid("m-menu-panel").bounding_box()
             rows = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-menu-panel] > *')).map(e => [e.getBoundingClientRect().height, e.dataset.testid || e.dataset.menuItem])")
-            check(f"PX-4 the ⋯ menu is inside the screen, with 48 px rows, Sign out last {tag}",
-                  box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5 and all(h >= 47.5 for h, _ in rows) and rows[-1][1] == "m-signout", f"{box} {rows}")
+            check(f"PX-4 the pill popover is inside the screen, with 48 px rows, Settings last {tag}",
+                  box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5 and all(h >= 47.5 for h, _ in rows) and [testid for _, testid in rows] == ["m-lock-now", "m-menu-settings"], f"{box} {rows}")
             shot4(page, f"menu-{width}")
             page.keyboard.press("Escape")
             until(lambda: tid("m-menu-panel").count() == 0)

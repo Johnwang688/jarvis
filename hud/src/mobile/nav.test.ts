@@ -395,7 +395,7 @@ describe("the Needs-you tray", () => {
 });
 
 describe("the ⋯ menu", () => {
-  it("is closed until tapped, then lists Lock now (first), Notifications, when Jarvis last answered, and Sign out last", async () => {
+  it("is closed until tapped, then lists Lock now first and Settings", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness();
     h.app.start();
@@ -407,9 +407,10 @@ describe("the ⋯ menu", () => {
     expect(h.q("m-lock-pill")!.getAttribute("aria-expanded")).toBe("true");
     const panel = h.q("m-menu-panel")!;
     const order = Array.from(panel.children).map((n) => (n as HTMLElement).dataset.testid || (n as HTMLElement).dataset.menuItem);
-    expect(order).toEqual(["m-lock-now", "m-notify", "m-menu-lastread", "m-signout"]);
+    expect(order).toEqual(["m-lock-now", "m-menu-settings"]);
+    await h.click("m-menu-settings");
     expect(h.q("m-notify")).not.toBeNull();
-    expect(h.q("m-menu-lastread")!.textContent).toMatch(/^Last read (just now|\d+ min ago)$/);
+    expect(h.q("m-menu-lastread")!.textContent).not.toBe("");
     expect(h.q("m-signout")!.textContent).toBe("Sign out");
     h.app.stop();
   });
@@ -429,12 +430,14 @@ describe("the ⋯ menu", () => {
     h.app.stop();
   });
 
-  it("Sign out signs out, and a row has the 48 px floor", async () => {
+  it("Sign out requires confirmation, and a row has the 48 px floor", async () => {
     const h = harness();
     h.app.start();
     await h.settle();
-    await h.click("m-lock-pill");
+    await h.click("m-tab-settings");
     await h.click("m-signout");
+    expect(h.signedOut).toBe(false);
+    await h.click("m-signout-confirm");
     expect(h.signedOut).toBe(true);
     const menu = menuView({ id: "x", label: "X", open: true, toggle: () => {}, items: [{ id: "a", label: "A" }] });
     expect(menu.querySelectorAll("button").length).toBe(2);
@@ -459,27 +462,27 @@ describe("the ⋯ menu", () => {
   });
 });
 
-describe("the morning review is a line in the Inbox; its tab shows only for deferrals", () => {
-  it("draws the line with the count, opens the review from it, and hides the tab with no deferral", async () => {
+describe("the morning review is a line in the Inbox, with three stable tabs", () => {
+  it("draws the line with the count, opens the review from it, and keeps three tabs with no deferral", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness({ review: reviewBody(false) });
     h.app.start();
     await h.settle();
     expect(h.q("m-review-open")!.textContent).toBe("Morning review · 1 left overnightOpen");
-    expect(h.q("m-tab-review")!.hidden).toBe(true);
+    expect(h.q("m-tab-review")).toBeNull();
     await h.click("m-review-open");
     expect(h.app.tab).toBe("review");
-    // Open, the tab is there to stand on.
-    expect(h.q("m-tab-review")!.hidden).toBe(false);
+    // Open review remains under Inbox.
+    expect(h.q("m-tab-review")).toBeNull();
     h.app.stop();
   });
 
-  it("shows the tab, and still the line, while a deferred approval waits", async () => {
+  it("shows the line while a deferred approval waits", async () => {
     history.replaceState(null, "", "/m/");
     const h = harness({ review: reviewBody(true) });
     h.app.start();
     await h.settle();
-    expect(h.q("m-tab-review")!.hidden).toBe(false);
+    expect(h.q("m-tab-review")).toBeNull();
     expect(h.q("m-review-open")!.textContent).toContain("2 left overnight");
     h.app.stop();
   });
@@ -583,14 +586,14 @@ describe("PX-4 fix round", () => {
     h.app.stop();
   });
 
-  it("quiet hours with one deferral: the review is reachable from the line and the tab, both enabled", async () => {
+  it("quiet hours with one deferral: the review is reachable from the enabled line", async () => {
     history.replaceState(null, "", "/m/");
     const night = { ...reviewBody(true), quiet: { enabled: true, now: true, start: null, end: null } };
     const h = harness({ review: night });
     h.app.start();
     await h.settle();
-    expect(h.q("m-tab-review")!.hidden).toBe(false);
-    expect((h.q("m-tab-review") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.q("m-tab-review")).toBeNull();
+    expect((h.q("m-review-open") as HTMLButtonElement).disabled).toBe(false);
     await h.click("m-review-open");
     expect(h.app.tab).toBe("review");
     expect(h.q("m-review")).not.toBeNull();
@@ -604,7 +607,7 @@ describe("PX-4 fix round", () => {
     h.app.start();
     await h.settle();
     expect(h.q("m-review-open")).toBeNull();
-    expect(h.q("m-tab-review")!.hidden).toBe(true);
+    expect(h.q("m-tab-review")).toBeNull();
     h.app.stop();
   });
 });
@@ -621,8 +624,8 @@ describe("PX-4 fix round 2: a capped review", () => {
     h.app.start();
     await h.settle();
     expect(h.q("m-review-open")).not.toBeNull();
-    expect(h.q("m-tab-review")!.hidden).toBe(false);
-    expect((h.q("m-tab-review") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.q("m-tab-review")).toBeNull();
+    expect((h.q("m-review-open") as HTMLButtonElement).disabled).toBe(false);
     await h.click("m-review-open");
     expect(h.app.tab).toBe("review");
     expect(h.q("m-review")).not.toBeNull();

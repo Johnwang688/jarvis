@@ -264,7 +264,7 @@ describe("task seeding (Sol, finding 4)", () => {
     h.root.querySelector<HTMLElement>(`[data-testid="m-task"][data-id="${K1}"]`)!.click();
     await h.settle();
     expect(h.q("m-task-view")).not.toBeNull();
-    expect(h.q("m-tab-inbox")!.getAttribute("aria-selected")).toBe("true");
+    expect(h.q("m-tab-inbox")!.getAttribute("aria-current")).toBe("page");
     h.app.show("tasks");
     await h.settle();
     expect(h.root.querySelectorAll('[data-testid="m-task"]').length).toBe(2);
@@ -436,7 +436,7 @@ describe("D6: an answered row leaves at once", () => {
     const ids = Array.from(h.root.querySelectorAll<HTMLElement>('[data-testid="m-inbox-row"]')).map((r) => r.dataset.id);
     expect(ids).toEqual(["q:other:1"]);
     expect(h.q("m-chip-needs")!.textContent).toBe("Needs you · 1");
-    expect(h.q("m-tab-inbox")!.textContent).toBe("Inbox · 1");
+    expect(h.q("m-tab-inbox")!.getAttribute("aria-label")).toBe("Inbox, 1 need you");
     expect(count).toBeGreaterThan(0);                 // the afterWrite re-read was still asked for
   });
 
