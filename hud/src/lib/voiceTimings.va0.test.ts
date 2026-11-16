@@ -43,7 +43,7 @@ describe("summarize", () => {
   });
   it("counts only rows that have the stage", () => {
     const s = summarize([{ speechEnd: 0, sent: 10 }, { speechEnd: 0 }, {}, { speechEnd: 0, sent: 30, firstToken: 530 }]);
-    expect(s.sent).toEqual({ n: 2, p50: 10, p90: 20 });
+    expect(s.sent).toEqual({ n: 2, p50: 10, p90: 30 });
     expect(s.firstToken).toEqual({ n: 1, p50: 500, p90: 500 });
   });
   it("is empty for no rows", () => {
