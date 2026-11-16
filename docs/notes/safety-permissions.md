@@ -2249,6 +2249,19 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   `ss -F<key>`, `-nf/abs`) is judged too — every tail of a short-option
   cluster that looks like a path (starts with `/`, `~`, `.` or holds a `/`),
   for every program, with no table of which letters take a value.
+  Paths or settings read from **another file** are refused (2026-11-16,
+  `docs/plans/2026-11-16-run-readonly-list-files.md`; PR #388's Sol verifier
+  had `file -m magic -f list` print a file named only inside `list`). The
+  audit of the installed allowlist found: `file -f`/`--files-from`, `file -m`
+  naming a colon list or a folder (parse warnings quote each file read,
+  nested symlinks followed), `wc`/`du --files0-from`, `find -files0-from`,
+  and env in any position before the program with `-f`/`--file` (variables
+  from a file: PATH ran a planted `ls`, unasked), `-C`/`--chdir` (relative
+  operands judged in the project but opened in `~/.ssh`: printed the key)
+  or `-S`/`--split-string` (`env -S'-f V' ls` ran). Long options by any
+  prefix. Options whose named file *is* the input stay allowed: `grep -f`,
+  `rg -f`, `date -f`, `ss -F`, `du -X`, `--exclude-from`, `file -m ONE`.
+  `tests/readonly_list_files_check.py`, 19 of 19 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.

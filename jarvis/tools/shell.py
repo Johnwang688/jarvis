@@ -177,6 +177,7 @@ def run_readonly(
                                       and _SAFE_ENV_VALUE.fullmatch(parts[3])):
             return (f"Error: setting {parts[0]} changes what the program runs with, so it is "
                     "not a read. Use run_command.")
+    line = tokens
     tokens = sure
     if not tokens:
         return "Error: empty command."
@@ -215,6 +216,13 @@ def run_readonly(
             f"Error: {binary} {writing}, so it is not a read. Use run_command if "
             "this really needs to change things."
         )
+    # Paths or settings read from another file are never on the line to be
+    # judged below (2026-11-16): `file -f list`, `env -f vars ls`, `env -C
+    # ~/.ssh cat id_rsa`. docs/plans/2026-11-16-run-readonly-list-files.md.
+    elsewhere = _env_elsewhere(line, tail) or _reads_elsewhere(binary, tokens)
+    if elsewhere:
+        return (f"Error: {elsewhere}, which this check cannot judge. Use run_command "
+                "(it asks), or name the files on the line.")
     # What it reads, judged as `read_file` judges it (review of PR #182, H1):
     # the allowlist above says which *program* runs, never which files, so
     # `cat ~/.config/gh/hosts.yml`, a grep of the Browser profile and `cat`
@@ -230,6 +238,151 @@ def run_readonly(
                 "not read. Ask the owner for what you need instead.")
 
     return _run(command)
+
+
+# --- what a line reads from somewhere other than the line (2026-11-16) ---------
+#
+# `_credential_operand` judges every word as a path. A program that takes the
+# paths it opens from another file opens files that are never words: PR #388's
+# verifier had `file -f list.txt` print a protected file named only inside
+# list.txt. The audit that followed (installed binaries, plan of 2026-11-16)
+# found the same class in five more forms, two of them worse: `env -f vars
+# ls` loads PATH or LD_PRELOAD from a file, which ran any program here, and
+# `env -C ~/.ssh cat id_rsa` moves the folder its relative operands resolve
+# in, which printed the key. Options whose file *is* the input (`grep -f`
+# patterns, `date -f` dates, `ss -F` filters, `du -X` patterns) are not this
+# class: the file named on the line is the whole read, and it is judged.
+#
+# Long options are matched by any unambiguous prefix (GNU getopt and uutils'
+# clap both take one); a prefix that is ambiguous is refused too, which only
+# errs toward refusing.
+
+# env's short options that take a value (uutils env 0.10.0), and the ones
+# that read a file, move the folder, or splice more options in.
+_ENV_VALUED_SHORT = "uCSaf"
+_ENV_VALUED_LONG = ("--unset", "--chdir", "--split-string", "--argv0", "--file")
+_ENV_REFUSED = {
+    "f": ("--file", "env -f/--file sets variables (PATH, LD_PRELOAD …) read from a file"),
+    "C": ("--chdir", "env -C/--chdir runs the program in another folder, where its relative "
+                     "paths resolve differently from where they were judged"),
+    "S": ("--split-string", "env -S/--split-string splits its argument into more options"),
+}
+
+# file 5.46: the short options that take a value.
+_FILE_VALUED_SHORT = "efFmP"
+_FILE_FILES_FROM = "file -f/--files-from opens the paths listed in a file"
+
+
+def _long_prefix(name: str, full: str) -> bool:
+    """`name` (an option as written, without `=value`) is `full` or a prefix
+    of it that getopt or clap would take for it."""
+    return len(name) > 2 and full.startswith(name)
+
+
+def _env_options(words: list[str]) -> str | None:
+    """Why one env's options (the words after the `env`) read something off
+    the line, or None. Stops at env's program."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            return None
+        # A bare `-` is env's old spelling of `-i`, and an assignment ends
+        # nothing: options after either are still scanned.
+        if word == "-" or rules.assignment(word) is not None:
+            continue
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            for _letter, (full, why) in _ENV_REFUSED.items():
+                if _long_prefix(name, full):
+                    return why
+            if "=" not in word and any(_long_prefix(name, full) for full in _ENV_VALUED_LONG):
+                i += 1
+            continue
+        if word.startswith("-") and len(word) > 1:
+            cluster = word[1:]
+            for k, char in enumerate(cluster):
+                if char in _ENV_REFUSED:
+                    return _ENV_REFUSED[char][1]
+                if char in _ENV_VALUED_SHORT:
+                    if k == len(cluster) - 1:
+                        i += 1
+                    break
+            continue
+        return None                         # the program
+    return None
+
+
+def _env_elsewhere(line: list[str], tail: int) -> str | None:
+    """Why an `env` on this line, as a wrapper or as the program (any word up
+    to and including the program word), reads its variables from a file,
+    moves the folder, or splices more options in; or None. `line` is the
+    command's words as written; `line[tail]` is the program."""
+    for i in range(min(tail + 1, len(line))):
+        if line[i].rsplit("/", 1)[-1] == "env":
+            why = _env_options(line[i + 1:])
+            if why:
+                return why
+    return None
+
+
+def _magic_value(value: str) -> str | None:
+    """Why `file -m VALUE` reads files that are not judged, or None. A colon
+    list's later members are not words of their own, and a folder is read
+    file by file, symlinks followed (`DIR/link -> ~/.ssh/id_rsa` printed the
+    key in a parse warning), so the value must be one existing regular file."""
+    import os
+
+    from .. import runtime
+
+    if ":" in value:
+        return "file -m/--magic-file with a colon-separated list reads files not on the line"
+    place = os.path.expanduser(value)
+    if not os.path.isabs(place):
+        place = os.path.join(runtime.working_dir() or os.getcwd(), place)
+    if not value or not os.path.isfile(place):
+        return ("file -m/--magic-file reads every file in a folder (or names no file), "
+                "not only what is on the line")
+    return None
+
+
+def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
+    """Why this program, in this form, opens paths written in another file;
+    or None. Every word is scanned as a possible option — a value is not
+    skipped — so a word that could be either errs toward refusing."""
+    words = tokens[1:]
+    for i, word in enumerate(words):
+        nxt = words[i + 1] if i + 1 < len(words) else ""
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if binary in ("wc", "du") and _long_prefix(name, "--files0-from"):
+                return f"{binary} --files0-from opens the paths listed in a file"
+            if binary == "file":
+                if _long_prefix(name, "--files-from"):
+                    return _FILE_FILES_FROM
+                if _long_prefix(name, "--magic-file"):
+                    why = _magic_value(value if eq else nxt)
+                    if why:
+                        return why
+            # Any program that grows GNU's spelling of it.
+            if name in ("--files0-from", "--files-from"):
+                return f"{binary} {name} opens the paths listed in a file"
+            continue
+        if binary == "find" and word == "-files0-from":
+            return "find -files0-from searches from the paths listed in a file"
+        if binary == "file" and word.startswith("-") and len(word) > 1:
+            cluster = word[1:]
+            for k, char in enumerate(cluster):
+                if char == "f":
+                    return _FILE_FILES_FROM
+                if char in _FILE_VALUED_SHORT:
+                    if char == "m":
+                        why = _magic_value(cluster[k + 1:] or nxt)
+                        if why:
+                            return why
+                    break
+    return None
 
 
 # How many files one operand's glob may name before the line is refused as
