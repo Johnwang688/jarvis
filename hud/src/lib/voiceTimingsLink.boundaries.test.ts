@@ -140,3 +140,102 @@ describe("VoiceTimingsLink: steering", () => {
     expect(h.marks(id)).toMatchObject({ firstToken: 10, firstAudio: 20 });
   });
 });
+
+// The production path: App issues the send through `issue`, the daemon answers
+// with the turn that replies (`SendResult`), and every turn event carries its id.
+describe("VoiceTimingsLink: matched by the send's answer", () => {
+  function idHarness() {
+    const h = harness();
+    const ev = (kind: string, turn: string, data?: SpeechEventLike["data"]) =>
+      h.link.event({ kind, thread_id: "A", turn_id: turn, ...(data === undefined ? {} : { data }) } as SpeechEventLike);
+    const send = (answer: unknown) => {
+      const id = h.row();
+      let settle!: (v: unknown) => void, fail!: (e: unknown) => void;
+      const p = new Promise((ok, no) => { settle = ok; fail = no; });
+      const back = h.link.issue("A", [{ diag: id, meta: { mode: "auto" } }], () => p);
+      return { id, back, p, answer: async () => { settle(answer); await p; await Promise.resolve(); }, fail };
+    };
+    return { ...h, ev, send };
+  }
+
+  it("a queued send's mark comes from its queued turn, not the running turn's later text", async () => {
+    const h = idHarness();
+    h.ev("turn_started", "old");
+    const s = h.send({ status: "queued", turn_id: "old", queued_turn_id: "q1", message_id: "m" });
+    await s.answer();
+    h.advance(10); h.ev("text", "old", { text: "Old turn keeps talking." });
+    h.ev("turn_finished", "old");
+    h.advance(10); h.ev("turn_started", "q1"); h.ev("text_delta", "q1", { text: "Reply." });
+    expect(h.marks(s.id).firstToken).toBe(20);
+  });
+
+  it("text that arrives before the answer is credited once the answer names its turn", async () => {
+    const h = idHarness();
+    const s = h.send({ status: "started", turn_id: "t1" });
+    h.ev("turn_started", "t1"); h.advance(5); h.ev("text_delta", "t1", { text: "Fast reply" });
+    h.advance(5);
+    await s.answer();
+    expect(h.marks(s.id).firstToken).toBe(5);
+  });
+
+  it("an answer naming another turn leaves earlier text uncredited", async () => {
+    const h = idHarness();
+    const s = h.send({ status: "queued", turn_id: "x", queued_turn_id: "q1" });
+    h.ev("turn_started", "x"); h.advance(5); h.ev("text", "x", { text: "Someone else's reply." });
+    await s.answer();
+    expect(h.marks(s.id).firstToken).toBeUndefined();
+  });
+
+  it("a native steer answer marks nothing until a steer_queued for its own message names a turn", async () => {
+    const h = idHarness();
+    h.ev("turn_started", "old");
+    const s = h.send({ status: "steered", mode: "native", turn_id: "old", message_id: "mine" });
+    await s.answer();
+    h.ev("user_message", "old", { steer: true, message_id: "mine" });
+    h.advance(10); h.ev("text", "old", { text: "Steer answered in the old turn." });
+    h.ev("turn_finished", "old");
+    h.ev("steer_queued", "other-turn", { message_id: "other", turn_id: "other-turn" });
+    h.ev("turn_started", "other-turn"); h.ev("text", "other-turn", { text: "Not mine." });
+    expect(h.marks(s.id).firstToken).toBeUndefined();
+  });
+
+  it("a native steer requeued under its own message id is credited from that turn", async () => {
+    const h = idHarness();
+    h.ev("turn_started", "old");
+    const s = h.send({ status: "steered", mode: "native", turn_id: "old", message_id: "mine" });
+    await s.answer();
+    h.ev("turn_finished", "old");
+    h.ev("steer_queued", "t-mine", { message_id: "mine", turn_id: "t-mine" });
+    h.ev("steer_queued", "t-other", { message_id: "other", turn_id: "t-other" });
+    h.ev("turn_started", "t-other"); h.advance(10); h.ev("text", "t-other", { text: "Other runs first." });
+    h.ev("turn_finished", "t-other");
+    h.ev("turn_started", "t-mine"); h.advance(10); h.ev("text", "t-mine", { text: "Mine." });
+    expect(h.marks(s.id).firstToken).toBe(20);
+  });
+
+  it("an interrupting send is matched by its queued turn", async () => {
+    const h = idHarness();
+    h.ev("turn_started", "old");
+    const s = h.send({ status: "steered", mode: "interrupt", turn_id: "old", queued_turn_id: "q2" });
+    await s.answer();
+    h.advance(10); h.ev("text", "old", { text: "Old tail." });
+    h.ev("turn_finished", "old"); h.ev("turn_started", "q2"); h.ev("text", "q2", { text: "Reply." });
+    expect(h.marks(s.id).firstToken).toBe(10);
+  });
+
+  it("a dropped send is forgotten", async () => {
+    const h = idHarness();
+    const s = h.send({ status: "dropped", reason: "stopped", turn_id: "old" });
+    await s.answer();
+    h.ev("turn_started", "t9"); h.ev("text", "t9", { text: "Later." });
+    expect(h.marks(s.id).firstToken).toBeUndefined();
+  });
+
+  it("issue returns the send's own promise, and a rejection still reaches the caller", async () => {
+    const h = idHarness();
+    const s = h.send(undefined);
+    expect(s.back).toBe(s.p);
+    s.fail(new Error("409"));
+    await expect(s.back).rejects.toThrow("409");
+  });
+});
