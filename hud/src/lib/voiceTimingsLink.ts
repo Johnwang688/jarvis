@@ -241,6 +241,12 @@ export class VoiceTimingsLink {
         this.replies.delete(chat);
         return;
       }
+      if (e.kind === "user_message" && data?.steer === true && link) {
+        // The steered turn's text after this point may answer the steer, not
+        // the message it was answering: as far as audio goes, that reply ends.
+        const steered = turn ? link.spans.get(turn) : link.span;
+        if (steered && steered.end === undefined) steered.end = at;
+      }
       if (e.kind === "user_message" && data?.steer === true && link && link.tokenAt === undefined) {
         // A steer is answered inside the running turn, whose text cannot be told
         // apart from what the turn was already saying: nothing is marked until a
