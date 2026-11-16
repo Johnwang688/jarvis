@@ -35,8 +35,9 @@
 
 import { parseInbox, parseRow, type InboxRow } from "../lib/inbox";
 import { parseItem, parseReview, type ReviewReport } from "../lib/review";
-import { parseLog, parseLogRow, parseTask, parseTasks, parseWorkingItem, parseWorkingList,
-  type LogPage, type TaskView, type WorkingList } from "./model";
+import { parseDiff, parseLog, parseLogRow, parseProjects, parseTask, parseTasks, parseThreads,
+  parseWorkingItem, parseWorkingList, type ChatThread, type DiffView, type LogPage, type Project,
+  type TaskView, type WorkingList } from "./model";
 
 /** One record list of a read: how many records came, and how many of them parsed. */
 export interface Tally { sent: number; valid: number }
@@ -80,7 +81,37 @@ export function decodeTasks(body: unknown): Decoded<{ tasks: TaskView[]; more: b
     lists: [tally(body.tasks, (t) => parseTask(t) !== null)] };
 }
 
+/** A single parsed record uses the same malformed/valid apply rule as a list. */
+export function decodeValue<T>(value: T | null): Decoded<T> | null {
+  return value === null ? null : { value, lists: [] };
+}
+
+export function decodeTask(body: unknown, id: string): Decoded<TaskView> | null {
+  const task = isObj(body) ? parseTask(body.task) : null;
+  return decodeValue(task?.id === id ? task : null);
+}
+
+export function decodeProjects(body: unknown): Decoded<Project[]> | null {
+  if (!isObj(body) || !Array.isArray(body.projects)) return null;
+  const value = parseProjects(body);
+  return { value, lists: [{ sent: body.projects.length, valid: value.length }] };
+}
+
+export function decodeThreads(body: unknown): Decoded<ChatThread[]> | null {
+  if (!isObj(body) || !Array.isArray(body.threads)) return null;
+  const value = parseThreads(body);
+  return { value, lists: [{ sent: body.threads.length, valid: value.length }] };
+}
+
+export function decodeDiff(body: unknown): Decoded<DiffView> | null {
+  const value = parseDiff(body);
+  if (!value || !isObj(body) || !Array.isArray(body.files)) return null;
+  return { value, lists: [{ sent: body.files.length, valid: value.files.length }] };
+}
+
 export function decodeReview(body: unknown): Decoded<ReviewReport> | null {
+  // Optional means absent, not present with an unreadable list (including null).
+  if (!isObj(body) || ["since", "live"].some((key) => key in body && !Array.isArray(body[key]))) return null;
   const report = parseReview(body);
   if (!report || !isObj(body)) return null;
   // Every list of records the review shows; `projects` and `places` are lookups, not records.
