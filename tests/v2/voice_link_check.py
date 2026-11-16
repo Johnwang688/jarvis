@@ -334,7 +334,7 @@ class Lifecycle(Base):
                 patch.object(voice_link_setup.subprocess, "run", run), \
                 patch.object(desktop_setup.console, "print"):
             self.assertEqual(cmd_voice_link(args), 0)
-        self.assertEqual(commands[1], [str(exe), "-m", "pip", "install", "--upgrade", "sounddevice", "numpy"])
+        self.assertEqual(commands[1], [str(exe), "-m", "pip", "install", "--upgrade", "sounddevice", "numpy", "sherpa-onnx"])  # VA-4 wake word (orchestrator, 2026-11-16)
         self.assertEqual(wire.load_key(self.key), wire.load_key(bridge / "voice-link.key"))
         launcher = (bridge / "run-voice.cmd").read_text()
         self.assertIn("127.0.0.1 0", launcher)
