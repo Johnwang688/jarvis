@@ -208,7 +208,9 @@ _SPOKEN_PHRASES = (("full", "stop"), ("question", "mark"), ("exclamation", "poin
 _MAX_WORDS = 300
 # A word that may take added punctuation after it: letters/digits with internal
 # apostrophes, or a number. "$", "/tmp/" and other syntax may not ("$" -> "$?").
-_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d+(?:[.,:]\d+)*%?")
+# A number here has at most one decimal point or clock colon, or grouping
+# commas: "127.0.0.1" is not one, so "?" cannot be added after it.
+_PLAIN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*|\d{1,3}(?:,\d{3})+%?|\d+(?:[.:]\d+)?%?")
 # Words that belong to a spoken number and go with it: kept whole or deleted
 # whole, so "minus five" cannot become "5" and "twenty five" cannot become "5".
 _SIGNS = frozenset({"minus", "negative"})
@@ -262,7 +264,16 @@ class _Aligner:
         self.atom_start, self.atom_end = self._atoms()
 
     def _member(self, x: int) -> bool:
-        return self.keys[x] in _NUMBER_WORDS or self.raw[x][0][:1].isdigit()
+        core = self.raw[x][0]
+        return (self.keys[x] in _NUMBER_WORDS or core[:1].isdigit()
+                or (core[:1] in ".-+" and core[1:2].isdigit()))
+
+    def _opens(self, x: int) -> bool:
+        """A unit can begin here: a number word, a digit word, or "point"
+        before one ("point five", "minus point five")."""
+        n = len(self.raw)
+        return self._member(x) or (self.keys[x] == "point" and x + 1 < n
+                                   and not self.raw[x][1] and self._member(x + 1))
 
     def _atoms(self) -> tuple[list[int], list[int]]:
         """For each raw word, the first and one-past-last index of the number
@@ -274,19 +285,20 @@ class _Aligner:
         x = 0
         while x < n:
             first = x
-            if self.keys[x] in _SIGNS and x + 1 < n and not self.raw[x][1] and self._member(x + 1):
+            if self.keys[x] in _SIGNS and x + 1 < n and not self.raw[x][1] and self._opens(x + 1):
                 x += 1
-            if not self._member(x):
+            if not self._opens(x):
                 x = first + 1
                 continue
-            last = x
+            last = x + 1 if self.keys[x] == "point" else x
             while not self.raw[last][1] and last + 1 < n:
                 nxt = last + 1
                 if self._member(nxt):
                     last = nxt
-                elif (self.keys[nxt] == "point" and nxt + 1 < n and not self.raw[nxt][1]
-                        and self._member(nxt + 1)):
-                    last = nxt + 1
+                elif (self.keys[nxt] in ("point", "and") and nxt + 1 < n and not self.raw[nxt][1]
+                        and self._member(nxt + 1)
+                        and (self.keys[nxt] == "point" or self.keys[last] in ("hundred", "thousand"))):
+                    last = nxt + 1  # "zero point five", "one hundred and five"
                 elif self.keys[nxt] == "percent":
                     last = nxt
                     break

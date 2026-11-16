@@ -67,6 +67,9 @@ def deletion_rule() -> None:
         ("pay minus five dollars", "Pay minus five dollars."),
         ("set rate fifty percent", "Set rate 50%."),
         ("one thousand percent", "1,000%"),
+        ("pay one hundred and five dollars", "Pay one hundred and five dollars."),
+        ("it costs 1.5 dollars", "It costs 1.5 dollars."),
+        ("pick one and two please", "Pick one and two please."),
         ("we do not know", "We don\u2019t know."),             # curly apostrophe
         ("we don\u2019t know", "We don't know."),
         ("i'm ready", "I am ready."),                             # contraction split
@@ -129,6 +132,12 @@ def deletion_rule() -> None:
         ("set rate fifty percent", "Set rate 50.", "dropped_percent"),
         ("echo $ foo", "echo $? foo", "syntax_tail"),
         ("cat /tmp/..", "cat /tmp/", "syntax_tail"),
+        # Focused delta review of #392.
+        ("set rate minus point five percent", "Set rate 5%.", "leading_point"),
+        ("pay negative .5 dollars", "Pay .5 dollars.", "dropped_sign"),
+        ("pay one hundred and five dollars", "Pay 5 dollars.", "and_in_number"),
+        ("pay zero point five dollars", "Pay zero dollars.", "decimal_tail_deleted"),
+        ("ping 127.0.0.1", "ping 127.0.0.1?", "syntax_tail"),
     ]
     for n, (raw, cleaned, why) in enumerate(bad):
         # The label is diagnostic; what matters is the refusal.

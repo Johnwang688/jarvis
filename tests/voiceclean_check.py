@@ -106,7 +106,7 @@ def main():
                 ('in two thousand twenty six we will compete', 'In 2026 we will compete.'),
                 ('we used nine hundred ninety nine thousand nine hundred ninety nine parts',
                  'We used 999999 parts.'),
-                ('we need one hundred and five parts', 'We need 100 and 5 parts.'),  # "and" never joins
+                ('we need one hundred and five parts', 'We need one hundred and five parts.'),  # one unit, kept whole
                 ('please check comma then test period', 'Please check, then test.'),
                 ('is it ready question mark', 'Is it ready?'),
                 ('we do not know if i am ready', "We don't know if I'm ready."),
