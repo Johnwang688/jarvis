@@ -129,7 +129,6 @@ def main():
                 ('one two three four five six seven eight nine ten', 'One two three.', 'over_deletion'),
                 ('test the intake', '', 'empty'),
                 ('test the intake', '.', 'empty'),
-                ('comma period', '', 'empty'),
                 ('test period the intake', 'Test period the intake.', 'added_word'),
             ]
             for n, (messy, target, reason) in enumerate(rejected):

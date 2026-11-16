@@ -56,6 +56,8 @@ SELF_PROTECTED = frozenset(
         "windows/voicewire.py",
         "windows/voice_agent.py",
         "jarvis/voice_link_setup.py",
+        # VA3-D2: decides what a dictation cleanup may type into any app.
+        "jarvis/v2/dictation_guard.py",
         "jarvis/tools/secrets.py",
         "jarvis/tools/files.py",
         "jarvis/tools/__init__.py",
