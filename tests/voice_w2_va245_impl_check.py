@@ -57,7 +57,23 @@ class EndpointAdaptation(unittest.TestCase):
         self.assertTrue(ep.spoken)
         self.assertEqual(self.feed(ep, 0.008, 8)[-1], "end")
 
-    def test_speech_never_teaches_floor_and_quiet_adapts_down(self):
+    def test_floor_tracks_minimum_including_initial_loud_room(self):
+        ep = voicewake.Endpointer()
+        self.assertIsNone(ep.feed(0.02, 1600))
+        self.assertEqual(ep.noise_floor, 0.02)
+        self.assertFalse(ep.spoken)
+        self.assertEqual(self.feed(ep, 0.02, 39)[-1], "timeout")
+
+    def test_speech_in_loud_room_ends_on_room_noise(self):
+        ep = voicewake.Endpointer()
+        self.feed(ep, 0.02, 5)
+        self.feed(ep, 0.1, 10)
+        self.assertTrue(ep.spoken)
+        self.assertEqual(ep.noise_floor, 0.02)
+        self.assertIsNone(self.feed(ep, 0.02, 7)[-1])
+        self.assertEqual(ep.feed(0.02, 1600), "end")
+
+    def test_louder_speech_does_not_raise_floor_and_quiet_lowers_it(self):
         ep = voicewake.Endpointer(silence_ms=2000)
         self.feed(ep, 0.008, 10)
         floor = ep.noise_floor
@@ -67,6 +83,17 @@ class EndpointAdaptation(unittest.TestCase):
         self.assertLess(ep.noise_floor, 0.003)
         self.assertIsNone(ep.feed(0.012, 1600))
         self.assertEqual(ep.quiet_frames, 0)
+
+    def test_grace_uses_sample_counts_and_preserves_timeout_deadline(self):
+        ep = voicewake.Endpointer(grace_ms=250)
+        self.assertIsNone(ep.feed(0.2, 4000))
+        self.assertFalse(ep.spoken)
+        self.assertIsNone(ep.feed(0.2, 1))
+        self.assertTrue(ep.spoken, "speech continuing past grace counts immediately")
+        ep = voicewake.Endpointer(grace_ms=250)
+        ep.feed(0.2, 4000)
+        self.assertIsNone(ep.feed(0, 59999))
+        self.assertEqual(ep.feed(0, 1), "timeout")
 
     def test_exact_boundaries_sample_counts_and_terminal_result(self):
         ep = voicewake.Endpointer()
@@ -218,8 +245,8 @@ class Worker(unittest.TestCase):
         self.listener._np = np
         self.spotter = self.listener._spotter = FakeSpotter()
 
-    def chunk(self, value=0, epoch=0, captured=100):
-        pcm = self.np.full((1600, 1), value, dtype="<i2").tobytes()
+    def chunk(self, value=0, epoch=0, captured=100, frames=1600):
+        pcm = self.np.full((frames, 1), value, dtype="<i2").tobytes()
         return epoch, captured, pcm
 
     def run_script(self, items):
@@ -228,15 +255,15 @@ class Worker(unittest.TestCase):
             self.listener._listen()
 
     def test_hit_records_levels_and_delivers_an_in_memory_wav(self):
-        self.run_script([self.chunk(20000), self.chunk(5000), self.chunk(5000)] + [self.chunk()] * 8)
+        self.run_script([self.chunk(20000)] + [self.chunk(5000)] * 3 + [self.chunk()] * 8)
         self.assertEqual(self.states, ["listening"])
-        self.assertEqual(len(self.levels), 10)
+        self.assertEqual(len(self.levels), 11)
         self.assertAlmostEqual(self.levels[0], 5000 / 32768)
         self.assertEqual(len(self.clips), 1)
         with wave.open(io.BytesIO(self.clips[0])) as wav:
             self.assertEqual((wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()),
-                             (1, 2, 16000, 16000))
-            self.assertEqual(wav.readframes(3200), self.chunk(5000)[2] * 2)
+                             (1, 2, 16000, 17600))
+            self.assertEqual(wav.readframes(4800), self.chunk(5000)[2] * 3)
         self.assertGreaterEqual(self.spotter.resets, 1)
         self.assertGreaterEqual(len(self.spotter.streams), 2)
 
@@ -244,6 +271,40 @@ class Worker(unittest.TestCase):
         self.run_script([self.chunk(20000)] + [self.chunk()] * 40)
         self.assertEqual(self.states, ["listening", "hidden"])
         self.assertEqual(self.clips, [])
+
+    def test_loud_wake_tail_in_grace_times_out_without_a_question(self):
+        self.run_script([self.chunk(20000)] + [self.chunk(28000)] * 2 + [self.chunk()] * 38)
+        self.assertEqual(self.states, ["listening", "hidden"])
+        self.assertEqual(self.clips, [])
+        self.assertEqual(len(self.levels), 40)
+        self.assertAlmostEqual(self.levels[0], 28000 / 32768, places=6)
+
+    def test_question_starting_immediately_after_grace_is_recorded(self):
+        grace = [self.chunk(28000), self.chunk(), self.chunk(frames=800)]
+        question = self.chunk(5000)
+        self.run_script([self.chunk(20000)] + grace + [question] + [self.chunk()] * 8)
+        self.assertEqual(self.states, ["listening"])
+        self.assertEqual(len(self.clips), 1)
+        with wave.open(io.BytesIO(self.clips[0])) as wav:
+            self.assertEqual(wav.getnframes(), 4000 + 1600 + 12800)
+            self.assertEqual(wav.readframes(wav.getnframes()),
+                             b"".join(item[2] for item in grace + [question] + [self.chunk()] * 8))
+
+    def test_wake_tail_ending_inside_a_chunk_at_grace_does_not_count(self):
+        boundary = (0, 100, self.chunk(28000, frames=800)[2] + self.chunk(frames=800)[2])
+        self.run_script([self.chunk(20000)] + [self.chunk(28000)] * 2 + [boundary]
+                        + [self.chunk()] * 37)
+        self.assertEqual(self.states, ["listening", "hidden"])
+        self.assertEqual(self.clips, [])
+
+    def test_question_starting_inside_a_chunk_at_grace_counts(self):
+        boundary = (0, 100, self.chunk(frames=800)[2] + self.chunk(5000, frames=800)[2])
+        self.run_script([self.chunk(20000)] + [self.chunk()] * 2 + [boundary]
+                        + [self.chunk()] * 8)
+        self.assertEqual(self.states, ["listening"])
+        self.assertEqual(len(self.clips), 1)
+        with wave.open(io.BytesIO(self.clips[0])) as wav:
+            self.assertEqual(wav.getnframes(), 17600)
 
     def test_long_question_is_capped_at_fifteen_seconds(self):
         self.run_script([self.chunk(20000)] + [self.chunk(5000)] * 150)

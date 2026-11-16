@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from pathlib import Path
 import queue
 import tempfile
@@ -45,14 +44,15 @@ def verify_model(directory):
 
 
 class Endpointer:
-    def __init__(self, rate=16000, silence_ms=800, max_ms=15000):
-        if rate <= 0 or silence_ms <= 0 or max_ms <= 0:
+    def __init__(self, rate=16000, silence_ms=800, max_ms=15000, *, grace_ms=0):
+        if rate <= 0 or silence_ms <= 0 or max_ms <= 0 or grace_ms < 0:
             raise ValueError("Endpoint durations and rate must be positive")
         self.rate = rate
         self.silence_frames = round(rate * silence_ms / 1000)
         self.max_frames = round(rate * max_ms / 1000)
+        self.grace_frames = round(rate * grace_ms / 1000)
         self.frames = self.quiet_frames = 0
-        self.noise_floor = 0.003
+        self.noise_floor = float("inf")
         self.spoken = False
         self.result = None
 
@@ -63,14 +63,15 @@ class Endpointer:
             return None
         level = max(0.0, float(rms))
         self.frames += n
-        if level > max(0.01, 3 * self.noise_floor):
+        # Learn even when the room starts above the absolute gate. Cap the
+        # floor used by the gate so continuous loud speech cannot gate itself out.
+        self.noise_floor = min(self.noise_floor, level)
+        threshold = max(0.01, 3 * min(self.noise_floor, 0.03))
+        if self.frames > self.grace_frames and level > threshold:
             self.spoken = True
             self.quiet_frames = 0
         else:
             self.quiet_frames += n
-            # Only quiet frames teach the floor; speech cannot raise its own gate.
-            alpha = 1 - math.exp(-n / (self.rate * 0.5))
-            self.noise_floor += alpha * (level - self.noise_floor)
         if self.frames >= self.max_frames:
             self.result = "max"
         elif self.spoken and self.quiet_frames >= self.silence_frames:
@@ -220,12 +221,19 @@ class WakeListener:
                     stream = spotter.create_stream()
                     continue
                 self.on_state("listening")
-                endpoint, chunks = Endpointer(), []
-                # Start after the hit, so the wake word's tail cannot count as
-                # question speech and defeat the no-speech timeout.
+                endpoint, chunks = Endpointer(grace_ms=250), []
+                # Retain audio after the hit, including any wake tail. The grace
+                # counts toward timeout but cannot alone establish question speech.
                 continue
             chunks.append(pcm)
             self.on_level(rms)
+            # A chunk may straddle the grace boundary: classify only its suffix
+            # so a loud tail confined to the grace cannot supply its RMS.
+            grace = endpoint.grace_frames - endpoint.frames
+            if 0 < grace < len(samples):
+                endpoint.feed(rms, grace)
+                samples = np.frombuffer(pcm[grace * 2:], dtype="<i2").astype(np.float32) / 32768.0
+                rms = float(np.sqrt(np.mean(samples * samples)))
             result = endpoint.feed(rms, len(samples))
             if result:
                 clip = wav_bytes(b"".join(chunks), RATE) if result != "timeout" else None
