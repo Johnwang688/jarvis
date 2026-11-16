@@ -120,6 +120,7 @@ class Agent:
         self.generation = 0
         self.generation_lock = threading.Lock()
         self.capture_lock = threading.Lock()
+        self.capture_online = False
         self.capture = None
         self.chunks = []
         self.frames = 0
@@ -196,6 +197,7 @@ class Agent:
         self.recording.set()
         with self.capture_lock:
             self.chunks, self.frames, self.audio_bad = [], 0, False
+            self.capture_online = not hasattr(self, "online") or self.online.is_set()
         wasapi = next((api for api in sd.query_hostapis() if "WASAPI" in api["name"]), None)
         if wasapi is None or wasapi["default_input_device"] < 0:
             raise RuntimeError("Microphone unavailable")
@@ -219,22 +221,31 @@ class Agent:
         with self.capture_lock:
             chunks, self.chunks = self.chunks, []
             bad = self.audio_bad
-        if cancel:
-            self.show(self.generation, None)
-        elif bad:
-            self.show(self.generation, "Microphone capture failed", True)
-        elif chunks:
-            self.show(self.generation, "Transcribing…")
-            wav = wav_bytes(b"".join(chunks))
-            if hasattr(self, "overlay"):
-                self.enqueue(wav, "hotkey", self.generation)
+        wav = wav_bytes(b"".join(chunks)) if chunks and not cancel and not bad else None
+        with self.capture_lock:
+            # discard_clips invalidates a capture even if the link recovers
+            # before release. Keep the check and enqueue atomic with discard.
+            online = not hasattr(self, "online") or self.online.is_set()
+            valid = (not hasattr(self, "online")
+                     or (getattr(self, "capture_online", False) and online))
+            self.capture_online = False
+            if cancel:
+                self.show(self.generation, None)
+            elif not valid:
+                self.show(self.generation, "Jarvis isn't running", True)
+            elif bad:
+                self.show(self.generation, "Microphone capture failed", True)
+            elif wav:
+                self.show(self.generation, "Transcribing…")
+                if hasattr(self, "overlay"):
+                    self.enqueue(wav, "hotkey", self.generation)
+                else:
+                    try:
+                        self.clips.put_nowait((self.generation, wav))
+                    except queue.Full:
+                        self.show(self.generation, "Jarvis is busy — try again", True)
             else:
-                try:
-                    self.clips.put_nowait((self.generation, wav))
-                except queue.Full:
-                    self.show(self.generation, "Jarvis is busy — try again", True)
-        else:
-            self.show(self.generation, "No speech heard", True)
+                self.show(self.generation, "No speech heard", True)
 
     def poll(self):
         machine = HotkeyMachine()
@@ -266,12 +277,14 @@ class Agent:
             self.finish_capture(cancel=True)
 
     def discard_clips(self, message):
-        try:
-            while True:
-                item = self.clips.get_nowait()
-                self.show(item[0], message, True)
-        except queue.Empty:
-            pass
+        with self.capture_lock:
+            self.capture_online = False
+            try:
+                while True:
+                    item = self.clips.get_nowait()
+                    self.show(item[0], message, True)
+            except queue.Empty:
+                pass
 
     def network(self):
         client = None

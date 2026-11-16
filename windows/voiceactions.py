@@ -32,6 +32,9 @@ def match_app(name, apps):
     for app, label in entries:
         if label == name:
             return app
+    # Short names need an exact indexed match (or an explicit alias above).
+    if len(name.replace(" ", "")) < 3:
+        return None
     for app, label in entries:
         if label.startswith(name) or f" {name} " in f" {label} ":
             return app

@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
+import numpy  # Keep audio's import outside patch.dict(sys.modules) capture fakes.
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from windows import voiceactions as actions, voiceflow, voicetype, voice_agent as agentmod
 from windows.voicewire import LinkError, NotJarvis, wav_bytes
@@ -69,6 +71,23 @@ class Typing(unittest.TestCase):
         self.typer.run([("text", "first"), ("text", "hi")])
         self.typer.run([("scratch",)])
         self.assertEqual(self.input.calls[-2:], [("key", "backspace")] * 2)
+
+    def test_enter_clears_scratch_until_more_text_is_typed(self):
+        for key in ("enter", "shift+enter"):
+            with self.subTest(key=key):
+                self.typer.run([("text", "old"), ("key", key), ("scratch",)])
+                self.assertEqual(self.input.calls[-2:], [("text", "old"), ("key", key)])
+                self.typer.run([("text", "new"), ("scratch",)])
+                self.assertEqual(self.input.calls[-4:],
+                                 [("text", "new")] + [("key", "backspace")] * 3)
+
+    def test_failed_enter_also_invalidates_scratch(self):
+        self.typer.run([("text", "old")])
+        self.input.key = Mock(side_effect=OSError("Partial input"))
+        with self.assertRaises(OSError):
+            self.typer.run([("key", "enter")])
+        self.typer.run([("scratch",)])
+        self.input.key.assert_called_once_with("enter")
 
     def test_scratch_stops_when_focus_changes_mid_delete(self):
         self.typer.run([("text", "abc")])
@@ -136,6 +155,24 @@ class Typing(unittest.TestCase):
             self.assertTrue(voicetype.might_be_command(word.upper() + ": do it"))
             self.assertFalse(voicetype.might_be_command(word + "ish do it"))
 
+    def test_all_unicode_line_boundaries_become_spaces(self):
+        for separator in ("\r", "\n", "\t", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                          "\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=ascii(separator)):
+                self.assertEqual(voicetype.plan("alpha" + separator + "beta"),
+                                 [("text", "alpha beta")])
+
+    def test_command_marks_and_symbols_remain_dictation(self):
+        for command in ("send it", "hello send it", "new line", "scratch that"):
+            for suffix in ("\u0301", "\u0338", "\u20dd", "\u0301!", "😀", "+"):
+                text = command + suffix
+                with self.subTest(text=ascii(text)):
+                    self.assertEqual(voicetype.plan(text), [("text", text)])
+        for text in ("new\u0301 line", "scratch\u20dd that", "send\u0301 it",
+                     "resend it", "hello😀send it"):
+            with self.subTest(text=ascii(text)):
+                self.assertEqual(voicetype.plan(text), [("text", text)])
+
 
 APPS = [{"name": "Visual Studio Code", "id": "code-id"},
         {"name": "Google Chrome", "id": "chrome-id"},
@@ -161,6 +198,16 @@ class Matching(unittest.TestCase):
         self.assertEqual(actions.match_app("abce", [{"name": "abcd", "id": "x"}])["id"], "x")
         for target in ("abxy", "!!!", "", "rundll32.exe && do anything"):
             self.assertIsNone(actions.match_app(target, [{"name": "abcd", "id": "x"}]))
+
+    def test_short_targets_require_exact_names(self):
+        entries = [{"name": "Random Utility", "id": "r"},
+                   {"name": "An Editor", "id": "e"}]
+        for target in ("r", "ra", "R!", "a n", "an"):
+            with self.subTest(target=target):
+                self.assertIsNone(actions.match_app(target, entries))
+        for name in ("R", "An"):
+            exact = {"name": name, "id": "exact"}
+            self.assertEqual(actions.match_app(name, entries + [exact]), exact)
 
     def test_windows_match_exe_stem_first_and_title_whole_words(self):
         wins = [(1, "Chrome release notes", "editor.exe"),
@@ -232,6 +279,16 @@ class ActionGlue(unittest.TestCase):
         self.assertTrue(a.open_app("notepad"))
         self.assertEqual(self.runner.call_count, 2)
 
+    def test_short_target_never_launches_a_prefix_match(self):
+        a = self.make()
+        for target in ("v", "vi", "g", "m", "no"):
+            self.assertFalse(a.open_app(target))
+        self.launcher.assert_not_called()
+        self.assertTrue(a.open_app("edge"))
+        self.launcher.assert_called_once_with(
+            ["explorer.exe", "shell:AppsFolder\\edge-id"],
+            creationflags=getattr(actions.subprocess, "CREATE_NO_WINDOW", 0))
+
     def test_singleton_and_malformed_index(self):
         for payload, count in (({"Name": "Solo", "AppID": "s"}, 1), (None, 0),
                                ([{}, {"Name": 123, "AppID": "x"}], 0)):
@@ -282,8 +339,8 @@ class FlowErrors(unittest.TestCase):
         self.typer, self.actions, self.ui, self.player = Mock(), Mock(), Mock(), Mock()
         return voiceflow.Flow(self.client, self.typer, self.actions, self.ui, self.player)
 
-    def test_linkerror_at_every_stage_surfaces_exact_text(self):
-        for stage in ("dictate", "route", "ask", "say"):
+    def test_linkerror_outside_routing_surfaces_exact_text(self):
+        for stage in ("dictate", "ask", "say"):
             with self.subTest(stage=stage):
                 f = self.make()
                 error = LinkError("Link failure " + stage)
@@ -293,6 +350,39 @@ class FlowErrors(unittest.TestCase):
                 self.assertIs(f.link_error, error)
                 self.typer.run.assert_not_called()
                 self.player.play.assert_not_called()
+
+    def test_route_errors_use_original_words_and_source_fallback(self):
+        for error_type in (LinkError, OSError, RuntimeError, ValueError):
+            for source in ("hotkey", "wake"):
+                with self.subTest(error=error_type.__name__, source=source):
+                    f = self.make("open_app")
+                    text = "open the report,\nsend it!"
+                    self.client.dictate.return_value = {"text": text}
+                    error = error_type("Route failed")
+                    self.client.route.side_effect = error
+                    f.on_clip(b"wav", source)
+                    self.client.route.assert_called_once_with(text, source)
+                    self.actions.open_app.assert_not_called()
+                    if source == "hotkey":
+                        self.typer.run.assert_called_once_with(
+                            [("text", "open the report"), ("key", "enter")])
+                        self.client.ask.assert_not_called()
+                        self.player.play.assert_not_called()
+                    else:
+                        self.typer.run.assert_not_called()
+                        self.client.ask.assert_called_once_with(text, on_delta=unittest.mock.ANY)
+                        self.player.play.assert_called_once_with(b"audio")
+                    self.assertIs(f.link_error, error if error_type is LinkError else None)
+                    self.ui.set_state.assert_called_with("done")
+
+    def test_route_link_error_is_cleared_before_next_clip(self):
+        f = self.make()
+        self.client.route.side_effect = LinkError("Route failed")
+        f.on_clip(b"wav", "hotkey")
+        self.client.dictate.return_value = {"text": "plain dictation"}
+        f.on_clip(b"wav", "hotkey")
+        self.assertIsNone(f.link_error)
+        self.typer.run.assert_called_with([("text", "plain dictation")])
 
     def test_selection_missing_and_switch_failure(self):
         f = self.make("read_selection")
@@ -380,6 +470,56 @@ class AgentGlue(unittest.TestCase):
         a.finish_capture()
         self.assertTrue(a.clips.empty())
         self.assertFalse(a.recording.is_set())
+
+    def test_capture_remembers_offline_interval_and_next_capture_recovers(self):
+        from array import array
+        for starts_online, disconnect in ((False, False), (True, True), (True, False)):
+            with self.subTest(starts_online=starts_online, disconnect=disconnect):
+                a = self.bare()
+                if starts_online:
+                    a.online.set()
+                stream = Mock()
+                sd = SimpleNamespace(
+                    query_hostapis=lambda: [{"name": "WASAPI", "default_input_device": 0}],
+                    WasapiSettings=Mock(), InputStream=Mock(return_value=stream))
+                with patch.dict(sys.modules, {"sounddevice": sd}):
+                    a.start_capture()
+                    a.audio(array("h", [100] * 160), 160, None, False)
+                    if disconnect:
+                        a.online.clear()
+                        a.discard_clips("Jarvis isn't running")
+                    a.online.set()
+                    a.finish_capture()
+                    if not starts_online or disconnect:
+                        self.assertTrue(a.clips.empty())
+                        a.overlay.set_state.assert_called_with("error", "Jarvis isn't running")
+                    else:
+                        self.assertEqual(a.clips.get_nowait()[2], "hotkey")
+                    # Invalidation belongs to one capture, not every future clip.
+                    a.start_capture()
+                    a.audio(array("h", [100] * 160), 160, None, False)
+                    a.finish_capture()
+                generation, wav, source = a.clips.get_nowait()
+                self.assertEqual((generation, source), (1, "hotkey"))
+                self.assertEqual(wav, wav_bytes(array("h", [100] * 160).tobytes()))
+                self.assertFalse(a.recording.is_set())
+                self.assertEqual(stream.stop.call_count, 2)
+                self.assertEqual(stream.close.call_count, 2)
+
+    def test_capture_invalidated_while_packaging_wav_is_discarded(self):
+        a = self.bare()
+        a.online.set()
+        a.capture_online = True
+        a.chunks = [b"\0\0" * 100]
+        def encode(pcm):
+            a.online.clear()
+            a.discard_clips("Jarvis isn't running")
+            a.online.set()
+            return wav_bytes(pcm)
+        with patch.object(agentmod, "wav_bytes", side_effect=encode):
+            a.finish_capture()
+        self.assertTrue(a.clips.empty())
+        a.overlay.set_state.assert_called_with("error", "Jarvis isn't running")
 
     def test_network_runs_both_sources_sequentially_on_same_client(self):
         a = self.bare()

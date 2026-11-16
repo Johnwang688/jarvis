@@ -29,7 +29,15 @@ class Flow:
                 self.typer.run(plan(text))
             else:
                 self.ui.set_state("thinking")
-                intent = self.client.route(text, source)
+                try:
+                    intent = self.client.route(text, source)
+                except Exception as exc:
+                    # Routing is optional: preserve the utterance on failure.
+                    # Retain transport failures so the agent still reconnects.
+                    if isinstance(exc, LinkError):
+                        self.link_error = exc
+                    intent = {"kind": "dictate" if source == "hotkey" else "ask",
+                              "text": text, "target": ""}
                 kind = intent["kind"]
                 words, target = intent.get("text", text), intent.get("target", "")
                 if kind == "dictate" and source == "hotkey":

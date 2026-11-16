@@ -7,8 +7,9 @@ import unicodedata
 
 
 def sanitize(text):
-    text = "".join(" " if c in "\r\n\t" else c for c in text
-                   if c in "\r\n\t" or unicodedata.category(c) not in {"Cc", "Cf"})
+    boundaries = "\r\n\t\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+    text = "".join(" " if c in boundaries else c for c in text
+                   if c in boundaries or unicodedata.category(c) not in {"Cc", "Cf"})
     return re.sub(" +", " ", text).strip()
 
 
@@ -16,17 +17,27 @@ def _words(text):
     return [(m.group().casefold(), m.start()) for m in re.finditer(r"[^\W_]+", text)]
 
 
+def _command_matches(text, expected):
+    if [word for word, _ in _words(text)] != expected:
+        return False
+    # Word extraction alone loses combining marks and symbols. Only spaces
+    # and punctuation may surround or separate the exact command words.
+    remainder = re.sub(r"[^\W_]+", "", text)
+    return all(c.isspace() or unicodedata.category(c).startswith("P") for c in remainder)
+
+
 def plan(text):
     text = sanitize(text)
     if not text:
         return []
     words = _words(text)
-    command = [word for word, _ in words]
-    if command == ["new", "line"]:
+    if _command_matches(text, ["new", "line"]):
         return [("key", "shift+enter")]
-    if command == ["scratch", "that"]:
+    if _command_matches(text, ["scratch", "that"]):
         return [("scratch",)]
-    if command[-2:] == ["send", "it"]:
+    if (len(words) >= 2 and _command_matches(text[words[-2][1]:], ["send", "it"])
+            and (words[-2][1] == 0 or text[words[-2][1] - 1].isspace()
+                 or unicodedata.category(text[words[-2][1] - 1]).startswith("P"))):
         rest = re.sub(r"[,\s]+$", "", text[:words[-2][1]])
         return ([("text", rest)] if rest else []) + [("key", "enter")]
     return [("text", text)]
@@ -124,6 +135,7 @@ class Typer:
                     self.backend.text(text)
                     self.last = (text, hwnd, self.clock())
             elif step[0] == "key":
+                self.last = None  # Enter can move to a different line or field.
                 self.backend.key(step[1])
             elif step[0] == "scratch":
                 last, self.last = self.last, None
