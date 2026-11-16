@@ -739,7 +739,12 @@ class OwnerOnly(Base):
     """B11: only the owner, in the HUD, can archive or delete. No tool can."""
 
     FORBIDDEN_NAME = re.compile(r"archive|restore|trash|purge|(delete|remove|drop)_?(project|thread)", re.I)
-    FORBIDDEN_SOURCE = ("/archive", "/restore", "/trash", "archive_project", "archive_thread",
+    # The routes as URLs ("/archive", "/archive?", "/projects/{id}/restore",
+    # "/trash/empty"), never a longer name that starts the same way: a
+    # docstring naming "tests/v2/archive_check.py" is not a route. Like
+    # INBOX_SOURCE below, which spares "jarvis/v2/inbox.py" for the same reason.
+    FORBIDDEN_ROUTE = re.compile(r"/(?:archive|restore|trash)(?!\w)")
+    FORBIDDEN_SOURCE = ("archive_project", "archive_thread",
                         "restore_project", "restore_thread", "delete_project", "delete_thread",
                         "projects.route", "trash.put", ".empty(")
 
@@ -769,6 +774,26 @@ class OwnerOnly(Base):
             text = inspect.getsource(module)
             for needle in self.FORBIDDEN_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
+            route = self.FORBIDDEN_ROUTE.search(text)
+            self.assertIsNone(route, f"{module.__name__} names {route and route.group()}")
+
+    def test_route_pattern_catches_routes_not_file_names(self):
+        for text in ('"/archive"', "'/archive'", '`/archive`', "/archive?expect=x", "/archive",
+                     'f"/projects/{pid}/archive"', "/threads/t1/restore", '"/trash/empty"',
+                     "/trash", "url + '/restore'"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(self.FORBIDDEN_ROUTE.search(text))
+        for text in ("tests/v2/archive_check.py", "/archived", "/restored_at", "/trashcan_x",
+                     "archive_check", "the archive"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.FORBIDDEN_ROUTE.search(text))
+
+    def test_tool_order_does_not_matter(self):
+        # owner_post's docstring names tests/v2/archive_check.py; once another
+        # suite in the same process has registered it, the audit reads that
+        # module too, and it must still pass (it failed only in that order).
+        import jarvis.v2.tools.owner_post  # noqa: F401
+        self.test_no_tool_reaches_archive_or_delete()
 
     # The owner inbox (inbox design IN-2, §8): the same rule, extended. No
     # tool, MCP catalog entry or session tool names it, and nothing a tool
