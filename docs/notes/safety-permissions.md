@@ -2261,7 +2261,12 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   or `-S`/`--split-string` (`env -S'-f V' ls` ran). Long options by any
   prefix. Options whose named file *is* the input stay allowed: `grep -f`,
   `rg -f`, `date -f`, `ss -F`, `du -X`, `--exclude-from`, `file -m ONE`.
-  `tests/readonly_list_files_check.py`, 19 of 19 mutations biting.
+  The Sol verifier added three: a plain `file x` loading a planted
+  `~/.magic` symlink (and `-m X` loading `X.mgc`), refused when either is a
+  symlink or in a credential folder; glued bare tails (`date -fkeylink`, a
+  relative symlink to the key), now judged like path-like ones; and
+  `ionice -p/-P/-u`, which changed a running process.
+  `tests/readonly_list_files_check.py`, 28 of 28 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.

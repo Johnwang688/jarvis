@@ -9,6 +9,10 @@ verifier showed a program that takes its paths from another file: with
 `env -f VARS ls` (PATH from a file: ran any program), `env -C DIR cat rel`
 (relative operands judged in the wrong folder: printed the key), and
 `wc`/`du --files0-from`, `find -files0-from` (names, counts, sizes).
+The Sol verifier then added three: `file` loading a planted `~/.magic`
+symlink (or a `X.mgc` companion), a glued bare tail naming a relative
+symlink (`date -fkeylink`), and `ionice -p PID`, which changed a running
+process.
 
 Options whose named file is itself the input stay allowed and are pinned
 here as negatives: `grep -f`, `date -f`, `du -X`, `file -m ONE_FILE`.
@@ -173,6 +177,82 @@ class ListFiles(unittest.TestCase):
                         "env LANG=C ls", "env -u FOO ls", "env -i ls", "env",
                         "timeout 5 ls", "find . -name x", "cat list.txt", "ls bin"):
             self.assertRuns(command)
+
+    def test_home_magic_and_companions(self):
+        # Sol verifier, 2026-11-16: with no `-m`, file loads ~/.magic.mgc,
+        # ~/.magic or ~/.magic/magic.mgc; a planted symlink printed the key.
+        for name in (".magic", ".magic.mgc"):
+            link = self.home / name
+            link.symlink_to(self.key)
+            self.assertRefused("file -b magic.txt", f"file loads ~/{name} as magic")
+            self.assertRefused("file magic.txt pats", f"file loads ~/{name} as magic")
+            link.unlink()
+        # A link to a name-protected file outside every credential folder:
+        # only the "never a symlink" rule sees it.
+        # (A fake `.env` in the temporary project.)
+        named = self.project / ".env"
+        named.write_text(SENTINEL + "\n")
+        (self.home / ".magic").symlink_to(named)
+        self.assertRefused("file -b magic.txt", "file loads ~/.magic as magic")
+        (self.home / ".magic").unlink()
+        named.unlink()
+        (self.home / ".magic").mkdir()
+        (self.home / ".magic" / "magic.mgc").symlink_to(self.key)
+        self.assertRefused("file -b magic.txt", "file loads ~/.magic/magic.mgc as magic")
+        # A magic file named on the line is loaded instead of the home ones.
+        self.assertRuns("file -m magic.txt magic.txt")
+        (self.home / ".magic" / "magic.mgc").unlink()
+        (self.home / ".magic").rmdir()
+        (self.home / ".magic").write_text("0 string zz %s\n")
+        self.assertRuns("file -b magic.txt")
+        # libmagic tries `X.mgc` before `X`.
+        (self.project / "two.magic").write_text("0 string x %s\n")
+        (self.project / "two.magic.mgc").symlink_to(self.key)
+        for command in ("file -m two.magic magic.txt", "file -bmtwo.magic magic.txt",
+                        "file --magic-file=two.magic magic.txt"):
+            self.assertRefused(command, "compiled .mgc companion")
+        # A magic file that is itself a symlink, glued or as a word.
+        (self.project / "keylink").symlink_to(self.key)
+        self.assertRefused("file -m keylink magic.txt", None)
+        self.assertRefused("file -mkeylink magic.txt", None)
+
+    def test_glued_bare_tail_symlink(self):
+        # Sol verifier, 2026-11-16 (older than this change): a value glued to
+        # a short option was judged only when it looked like a path.
+        (self.project / "keylink").symlink_to(self.key)
+        for command in ("date -fkeylink", "grep -fkeylink magic.txt", "ss -Fkeylink",
+                        "file -bmkeylink magic.txt", "du -Xkeylink .", "head -n1 -ckeylink"):
+            self.assertRefused(command, None)
+        for command in ("head -n1 magic.txt", "grep -rn string .", "ls -la", "du -sh .",
+                        "tail -n5 magic.txt", "ps -ef", "df -h ."):
+            self.assertRuns(command)
+
+    def test_ionice_never_changes_running_processes(self):
+        import subprocess
+        child = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        pid = child.pid
+
+        def io_class():
+            return subprocess.run(["ionice", "-p", str(pid)], capture_output=True,
+                                  text=True).stdout.strip()
+
+        before = io_class()
+        for command in (f"ionice -c 3 -p {pid} cat magic.txt", f"ionice -c3 -p{pid} ls",
+                        f"ionice -tp {pid} ls", f"ionice --pid={pid} ls",
+                        f"ionice -P {pid} ls", f"ionice -u 0 ls",
+                        f"ionice --uid=0 ls", f"nice ionice -c 3 -p {pid} ls",
+                        f"ionice -n 7 -c 3 -p {pid} ls"):
+            self.assertRefused(command, "changes processes already running")
+            self.assertEqual(io_class(), before, command)
+        # A long prefix with its value in the next word: unwrap_sure refuses.
+        self.assertRefused(f"ionice --pi {pid} ls", None)
+        self.assertRefused(f"ionice --pi={pid} ls", "changes processes already running")
+        self.assertEqual(io_class(), before)
+        self.assertRuns("ionice -c 3 ls")
+        self.assertRuns("ionice -c 2 -n 7 cat magic.txt")
 
     def test_fake_program_never_runs(self):
         self.assertRefused("env -f vars.env ls", "env -f/--file")

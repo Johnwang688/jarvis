@@ -219,7 +219,7 @@ def run_readonly(
     # Paths or settings read from another file are never on the line to be
     # judged below (2026-11-16): `file -f list`, `env -f vars ls`, `env -C
     # ~/.ssh cat id_rsa`. docs/plans/2026-11-16-run-readonly-list-files.md.
-    elsewhere = _env_elsewhere(line, tail) or _reads_elsewhere(binary, tokens)
+    elsewhere = _wrapper_elsewhere(line, tail) or _reads_elsewhere(binary, tokens)
     if elsewhere:
         return (f"Error: {elsewhere}, which this check cannot judge. Use run_command "
                 "(it asks), or name the files on the line.")
@@ -257,15 +257,25 @@ def run_readonly(
 # clap both take one); a prefix that is ambiguous is refused too, which only
 # errs toward refusing.
 
-# env's short options that take a value (uutils env 0.10.0), and the ones
-# that read a file, move the folder, or splice more options in.
-_ENV_VALUED_SHORT = "uCSaf"
-_ENV_VALUED_LONG = ("--unset", "--chdir", "--split-string", "--argv0", "--file")
-_ENV_REFUSED = {
-    "f": ("--file", "env -f/--file sets variables (PATH, LD_PRELOAD …) read from a file"),
-    "C": ("--chdir", "env -C/--chdir runs the program in another folder, where its relative "
-                     "paths resolve differently from where they were judged"),
-    "S": ("--split-string", "env -S/--split-string splits its argument into more options"),
+# The wrappers `run_readonly` peels whose own options are not a read: per
+# stem, (short options that take a value, long options that take one, the
+# refused ones as {letter: (long spelling, why)}). env (uutils 0.10.0): a
+# file of variables, another folder, more options spliced in. ionice
+# (util-linux): `-p/-P/-u` act on processes already running — `ionice -c 3
+# -p PID cat x` set PID's I/O class before failing on `cat` (Sol verifier,
+# 2026-11-16).
+_WRAPPER_REFUSED = {
+    "env": ("uCSaf", ("--unset", "--chdir", "--split-string", "--argv0", "--file"), {
+        "f": ("--file", "env -f/--file sets variables (PATH, LD_PRELOAD …) read from a file"),
+        "C": ("--chdir", "env -C/--chdir runs the program in another folder, where its "
+                         "relative paths resolve differently from where they were judged"),
+        "S": ("--split-string", "env -S/--split-string splits its argument into more options"),
+    }),
+    "ionice": ("cn", ("--class", "--classdata"), {
+        "p": ("--pid", "ionice -p/--pid changes processes already running"),
+        "P": ("--pgid", "ionice -P/--pgid changes processes already running"),
+        "u": ("--uid", "ionice -u/--uid changes processes already running"),
+    }),
 }
 
 # file 5.46: the short options that take a value.
@@ -279,9 +289,10 @@ def _long_prefix(name: str, full: str) -> bool:
     return len(name) > 2 and full.startswith(name)
 
 
-def _env_options(words: list[str]) -> str | None:
-    """Why one env's options (the words after the `env`) read something off
-    the line, or None. Stops at env's program."""
+def _wrapper_options(stem: str, words: list[str]) -> str | None:
+    """Why one wrapper's options (the words after it) are not a read, or None.
+    Stops at its program."""
+    valued_short, valued_long, refused = _WRAPPER_REFUSED[stem]
     i = 0
     while i < len(words):
         word = words[i]
@@ -294,18 +305,18 @@ def _env_options(words: list[str]) -> str | None:
             continue
         if word.startswith("--"):
             name = word.split("=", 1)[0]
-            for _letter, (full, why) in _ENV_REFUSED.items():
+            for _letter, (full, why) in refused.items():
                 if _long_prefix(name, full):
                     return why
-            if "=" not in word and any(_long_prefix(name, full) for full in _ENV_VALUED_LONG):
+            if "=" not in word and any(_long_prefix(name, full) for full in valued_long):
                 i += 1
             continue
         if word.startswith("-") and len(word) > 1:
             cluster = word[1:]
             for k, char in enumerate(cluster):
-                if char in _ENV_REFUSED:
-                    return _ENV_REFUSED[char][1]
-                if char in _ENV_VALUED_SHORT:
+                if char in refused:
+                    return refused[char][1]
+                if char in valued_short:
                     if k == len(cluster) - 1:
                         i += 1
                     break
@@ -314,16 +325,43 @@ def _env_options(words: list[str]) -> str | None:
     return None
 
 
-def _env_elsewhere(line: list[str], tail: int) -> str | None:
-    """Why an `env` on this line, as a wrapper or as the program (any word up
-    to and including the program word), reads its variables from a file,
-    moves the folder, or splices more options in; or None. `line` is the
-    command's words as written; `line[tail]` is the program."""
+def _wrapper_elsewhere(line: list[str], tail: int) -> str | None:
+    """Why an env or ionice on this line, as a wrapper or as the program (any
+    word up to and including the program word), is not a read: variables from
+    a file, another folder, spliced options, other processes changed; or None.
+    `line` is the command's words as written; `line[tail]` is the program."""
     for i in range(min(tail + 1, len(line))):
-        if line[i].rsplit("/", 1)[-1] == "env":
-            why = _env_options(line[i + 1:])
+        stem = line[i].rsplit("/", 1)[-1]
+        if stem in _WRAPPER_REFUSED:
+            why = _wrapper_options(stem, line[i + 1:])
             if why:
                 return why
+    return None
+
+
+def _unsafe_magic(path: str) -> bool:
+    """A magic file libmagic would load that is a symlink, or lies in a
+    credential folder. A planted `~/.magic -> ~/.ssh/id_rsa` was read by a
+    plain `file x`, its first line quoted in a parse warning (Sol verifier,
+    2026-11-16)."""
+    import os
+
+    from .files import credential_folder_judge
+
+    return os.path.islink(path) or (os.path.isfile(path) and credential_folder_judge()(path))
+
+
+def _implicit_magic() -> str | None:
+    """Why the magic `file` loads with no `-m` (libmagic 5.46: `$HOME/.magic.mgc`,
+    else `$HOME/.magic`, else `$HOME/.magic/magic.mgc`) is not safe to read, or
+    None."""
+    import os
+
+    home = os.path.expanduser("~")
+    for name in (".magic.mgc", ".magic", os.path.join(".magic", "magic.mgc")):
+        if _unsafe_magic(os.path.join(home, name)):
+            return (f"file loads ~/{name} as magic, and it is a symlink or in a credential "
+                    "folder")
     return None
 
 
@@ -344,6 +382,10 @@ def _magic_value(value: str) -> str | None:
     if not value or not os.path.isfile(place):
         return ("file -m/--magic-file reads every file in a folder (or names no file), "
                 "not only what is on the line")
+    # libmagic tries the compiled companion first.
+    if _unsafe_magic(place) or _unsafe_magic(place + ".mgc"):
+        return ("file -m/--magic-file names a symlink or a file in a credential folder "
+                "(or its compiled .mgc companion is one)")
     return None
 
 
@@ -352,6 +394,7 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
     or None. Every word is scanned as a possible option — a value is not
     skipped — so a word that could be either errs toward refusing."""
     words = tokens[1:]
+    magic_named = False
     for i, word in enumerate(words):
         nxt = words[i + 1] if i + 1 < len(words) else ""
         if word.startswith("--"):
@@ -362,6 +405,7 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
                 if _long_prefix(name, "--files-from"):
                     return _FILE_FILES_FROM
                 if _long_prefix(name, "--magic-file"):
+                    magic_named = True
                     why = _magic_value(value if eq else nxt)
                     if why:
                         return why
@@ -378,10 +422,13 @@ def _reads_elsewhere(binary: str, tokens: list[str]) -> str | None:
                     return _FILE_FILES_FROM
                 if char in _FILE_VALUED_SHORT:
                     if char == "m":
+                        magic_named = True
                         why = _magic_value(cluster[k + 1:] or nxt)
                         if why:
                             return why
                     break
+    if binary == "file" and not magic_named:
+        return _implicit_magic()
     return None
 
 
@@ -495,7 +542,8 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         return text if os.path.isabs(text) else os.path.join(base, text)
 
     words = []      # (as written, placed path) for an operand or a long option's value
-    attached = []   # the same for every path-like tail of a short-option cluster
+    attached = []   # the same for every tail of a short-option cluster, and
+    #                 whether it looks like a path
     for word in tokens[1:]:
         if word.startswith("--"):
             if "=" in word and word.split("=", 1)[1]:
@@ -505,20 +553,23 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
             # A value glued to a short option (`-f/abs`, `-nf/abs`) is never
             # a word of its own (review 3 of PR #182: `file -f<key>`, `date
             # -f<key>` and `ss -F<key>` printed it). No per-program table of
-            # which letters take a value: every tail of the cluster that
-            # looks like a path is judged. A `~` mid-word is literal to the
-            # shell, so judging it expanded only errs toward refusing.
+            # which letters take a value: every tail of the cluster is judged.
+            # A `~` mid-word is literal to the shell, so judging it expanded
+            # only errs toward refusing. Bare tails too (2026-11-16, Sol
+            # verifier): `date -fkeylink` and `file -mkeylink`, `keylink` a
+            # relative symlink to the key, printed it. Only path-like tails
+            # take the recursive holds-a-credential-folder check.
             for k in range(2, len(word)):
                 tail = word[k:]
-                if tail.startswith(("/", "~", ".")) or "/" in tail:
-                    attached.append((word, place(tail)))
+                path_like = tail.startswith(("/", "~", ".")) or "/" in tail
+                attached.append((word, place(tail), path_like))
             continue
         words.append((word, place(word)))
     if recursive and not any(os.path.exists(path) for _word, path in words):
         # `rg session`, `grep -r x`: no folder named, so the one they search
         # is the one they run in.
         words.append((".", base))
-    for word, path in words + attached:
+    for word, path, path_like in [(w, p, True) for w, p in words] + attached:
         if glob.has_magic(path):
             found = []
             for match in glob.iglob(path):
@@ -530,7 +581,7 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
         for candidate in found:
             if judge(candidate):
                 return word
-            if recursive:
+            if recursive and path_like:
                 # The shared reading (`files.credential_folder_holds`): the
                 # stores, case, kernel-order `..` and the Windows profiles
                 # too (cred-dir reads, 2026-10-29).

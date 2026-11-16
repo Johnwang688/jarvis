@@ -74,6 +74,39 @@ toward refusing. Clusters are walked as getopt walks them, so `file
 Not changed: the read-a-named-file options above; v2 shells (Claude/Codex
 layers judge their own commands; `run_command` asks).
 
+## Verifier round 1 (GPT-6.1 Sol, 2026-11-16)
+
+The run was stopped by OpenAI's cybersecurity filter partway through; its
+probe results (`~/.cache/jarvis-lead/listfiles/cx1/repo/tests/
+readonly_verifier_03bf04d5/initial.json`) showed three more, all fixed here:
+
+6. **`file` with no `-m` loads `~/.magic.mgc`, else `~/.magic`, else
+   `~/.magic/magic.mgc`.** A planted `~/.magic -> ~/.ssh/id_rsa` was quoted
+   in a parse warning by a plain `file x`. Refused when any of those is a
+   symlink or lies in a credential folder. `file -m X` also loads `X.mgc`
+   first: same rule for `X` and `X.mgc`.
+7. **Glued bare tails** (older than this change): `date -fkeylink`, `file
+   -mkeylink`, `keylink` a relative symlink to the key, printed it, because a
+   glued tail was judged only when it looked like a path. Every tail is now
+   judged by the folder judge; only path-like tails take the recursive
+   holds-a-credential-folder check (no new false refusals in `grep -rn`,
+   `head -n5`, `ps -ef`, `df -h`, `du -sh`). PR #388 judges bare tails by
+   name; whichever merges second keeps both judges.
+8. **`ionice -p/-P/-u`** (any position up to the program, long prefixes):
+   acts on processes already running — `ionice -c 3 -p PID cat x` set PID's
+   I/O class to idle, then failed on `cat`.
+
+Accepted false refusals, deliberately: a literal file named like a refused
+option after `--` (`file -- -foo`, `wc -- --files0-from`) and a refused
+letter as another option's value (`file -F -f x`). Honouring `--` needs exact
+value consumption (`file -F -- -f list` makes `--` the separator and `-f`
+live), so the scan stays fail-closed.
+
+Recorded, not changed (names and sizes, never content, and older than this
+change): `ls -Ra ~`, `find ~ -type f`, `du -ab ~` and `find -L`/`du -L`
+through a nested symlink list credential file names and sizes. The design
+refuses recursion only for the searchers that read content (`grep -r`, `rg`).
+
 ## Tests
 
 `tests/readonly_list_files_check.py`: hermetic (temp HOME/project, fake key,
@@ -82,4 +115,4 @@ and leaks nothing, the sentinel never appears and the fake program never
 runs; negatives that must still run (`file -m one.magic x`, `file -bmone.magic
 x`, `wc -l`, `du -sh .`, `grep -n env -C 2 f`, `grep -f pats f`, `date -f
 dates`, `env LANG=C ls`, `timeout 5 ls`, `env`, `find . -name x`). Mutation:
-each refusal removed in turn makes the suite fail.
+each refusal removed in turn makes the suite fail (28 of 28).
