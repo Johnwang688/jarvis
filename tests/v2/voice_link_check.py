@@ -317,7 +317,7 @@ class Lifecycle(Base):
         from jarvis import desktop_setup, voice_link_setup
         from jarvis.__main__ import build_parser, cmd_voice_link
         from jarvis.tools import secrets as secret_rules
-        bridge = self.root / "windows-bridge"
+        bridge = self.root / "Users" / "johnw" / ".jarvis-bridge"
         exe = bridge / "venv" / "Scripts" / "python.exe"
         exe.parent.mkdir(parents=True)
         exe.touch()
@@ -329,6 +329,7 @@ class Lifecycle(Base):
         args = parser.parse_args(["voice-link", "setup"])
         self.assertIs(args.func, cmd_voice_link)
         with patch.object(desktop_setup, "_find_python", return_value="python.exe"), \
+                patch.object(config, "windows_users_root", return_value=str(self.root / "Users")), \
                 patch.object(desktop_setup, "_win_path", return_value=r"\\wsl.localhost\Ubuntu\repo\windows\voice_agent.py"), \
                 patch.object(voice_link_setup.subprocess, "run", run), \
                 patch.object(desktop_setup.console, "print"):

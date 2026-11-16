@@ -1,4 +1,9 @@
-"""Human-only provisioning; never imported by a model tool or daemon startup."""
+"""Human-only provisioning; never imported by a model tool or daemon startup.
+
+The Windows key copy relies on a closed Windows profile folder: name-only
+protection has known gaps for copies elsewhere. DrvFS need not support Unix
+permission changes; only the WSL copy requires private Unix modes.
+"""
 from __future__ import annotations
 
 import os
@@ -10,13 +15,26 @@ import tempfile
 from . import config, desktop_setup
 
 
+def windows_folder_closed(path) -> bool:
+    """Whether the normalized folder is within a closed profile entry."""
+    try:
+        root = os.path.realpath(config.windows_users_root()).casefold()
+        normalized = os.path.realpath(path).casefold()
+        parts = Path(normalized).relative_to(root).parts
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return (len(parts) >= 2
+            and parts[0] not in {name.casefold() for name in config.WINDOWS_NOT_PROFILES}
+            and config.windows_closed_name(parts[1]))
+
+
 def _stage(path, data):
     # The temporary copy is credential-named too, including on /mnt/c.
     # A crash before replacement must not leave an agent-readable key file.
     fd, name = tempfile.mkstemp(prefix=".env.voice-link-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o600)
+            # mkstemp creates with mode 0600; do not chmod on Windows/DrvFS.
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -42,7 +60,10 @@ def write_keys(wsl_path, win_path):
     staged = []
     try:
         for dest in (wsl, win):
-            staged.append((_stage(dest, data), dest))
+            tmp = _stage(dest, data)
+            staged.append((tmp, dest))
+            if dest == wsl:
+                tmp.chmod(0o600)
         for tmp, dest in staged:
             os.replace(tmp, dest)
     finally:
@@ -62,6 +83,9 @@ def setup():
         console.print("Could not locate the Windows bridge folder.")
         return 1
     bridge = Path(converted.stdout.strip())
+    if not windows_folder_closed(bridge):
+        console.print("Windows bridge must be in a closed profile folder (a dot folder or AppData).")
+        return 1
     venv_python = bridge / "venv" / "Scripts" / "python.exe"
     if not venv_python.is_file():
         console.print("Bridge venv missing. Run jarvis desktop setup first.")
