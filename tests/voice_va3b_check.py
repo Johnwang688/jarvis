@@ -40,6 +40,31 @@ class CleanupFlow(unittest.TestCase):
         self.assertIsNone(self.flow.link_error)
         self.assertEqual(self.backend.events[0][0], 'text')
 
+    def test_text_holding_a_command_phrase_is_never_cleaned(self):
+        for text in ['please new line new line now', 'scratch that scratch that again', 'tell her send it send it later']:
+            with self.subTest(text=text):
+                self.make(text)
+                self.client.clean.assert_not_called()
+
+    def test_scratch_report_link_error_is_kept_for_reconnect(self):
+        self.make('hello there')
+        self.client.scratch.side_effect = LinkError('gone')
+        self.client.dictate.return_value = {'text': 'scratch that'}
+        self.flow.on_clip(b'wav', 'hotkey')
+        self.assertIsInstance(self.flow.link_error, LinkError)
+
+    def test_focus_change_during_cleanup_types_raw(self):
+        self.client, self.ui = Mock(), Mock()
+        self.client.dictate.return_value = {'text': 'um echo hello world'}
+        self.client.clean.side_effect = lambda t, app: {'text': 'Echo hello world.', 'pass': 'rules'}
+        self.backend = Backend()
+        self.typer = Typer(self.backend, clock=lambda: 10)
+        seen = iter(['other', 'terminal'])
+        self.typer.category = lambda: next(seen, 'terminal')
+        self.flow = Flow(self.client, self.typer, Mock(), self.ui, Mock())
+        self.flow.on_clip(b'wav', 'hotkey')
+        self.assertEqual(self.backend.events[0], ('text', 'um echo hello world'))
+
     def test_plain_and_routed_only_clean_text(self):
         for text, raw in [('hello there send it', 'hello there'), ('Jarvis type this', 'clean me')]:
             with self.subTest(text=text):

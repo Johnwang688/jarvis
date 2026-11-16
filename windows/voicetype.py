@@ -41,6 +41,18 @@ def _words(text):
     return [(m.group().casefold(), m.start()) for m in re.finditer(r"[^\W_]+", text)]
 
 
+COMMAND_PHRASES = (("new", "line"), ("scratch", "that"), ("send", "it"))
+
+
+def mentions_command(text):
+    """True when the text holds a command phrase anywhere ("please new line
+    now"). Cleanup skips such text: it may never alter command words, even
+    where plan() left them as words (Sol review of #399)."""
+    words = [word for word, _ in _words(text)]
+    return any(tuple(words[i:i + 2]) == phrase for phrase in COMMAND_PHRASES
+               for i in range(len(words) - 1))
+
+
 def _command_matches(text, expected):
     if [word for word, _ in _words(text)] != expected:
         return False
