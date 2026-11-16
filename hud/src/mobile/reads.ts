@@ -2,12 +2,14 @@
 //
 // Every resource the app keeps a stale warning for (the Inbox, In progress,
 // Tasks, the morning review and an open chat's log, its "load more" pages
-// included) is decoded here into the value the app applies plus a tally of
-// each record list: how many records the daemon sent and how many of them
-// parsed. The record parsers are the existing ones (lib/inbox `parseRow`,
-// lib/review `parseItem`, ./model's `parseTask`, `parseWorkingItem`,
-// `parseLogRow`), so a record is dropped here exactly when the list parsers
-// drop it.
+// included, and the details and lists added since: a task, its diff, the
+// projects, chats and the new-chat sheet's providers) is decoded here into
+// the value the app applies plus a tally of each record list: how many
+// records the daemon sent and how many of them parsed. The record parsers
+// are the existing ones (lib/inbox `parseRow`, lib/review `parseItem`,
+// ./model's `parseTask`, `parseWorkingItem`, `parseLogRow`, ./write's
+// `parseModels`), so a record is dropped here exactly when the list parsers
+// drop it. How an applied log page joins the transcript is ./chatLog.ts.
 //
 // `readVerdict` is the one rule (PhoneApp.applyRead is the one place it is
 // acted on):
@@ -38,6 +40,7 @@ import { parseItem, parseReview, type ReviewReport } from "../lib/review";
 import { parseDiff, parseLog, parseLogRow, parseProjects, parseTask, parseTasks, parseThreads,
   parseWorkingItem, parseWorkingList, type ChatThread, type DiffView, type LogPage, type Project,
   type TaskView, type WorkingList } from "./model";
+import { parseModels, PROVIDERS, type ProviderChoice } from "./write";
 
 /** One record list of a read: how many records came, and how many of them parsed. */
 export interface Tally { sent: number; valid: number }
@@ -136,4 +139,25 @@ export function decodeLog(body: unknown): Decoded<LogPage> | null {
   const last = rows[rows.length - 1];
   const next = last ? Math.min(page.next, last.seq + 1) : page.next;
   return { value: { ...page, rows, next, more: false }, lists: [{ sent, valid: firstBad }] };
+}
+
+/**
+ * The new-chat sheet's providers (`GET /m/api/thread-models`, remote_write.models). The daemon names every
+ * provider it knows (thread_model.describe), so a reply naming none of them is no reading of the roster: it
+ * is malformed like a wrong shape (`{providers: []}` included), and the last providers stay. Each named
+ * provider is a record, and so is each model row a provider lists.
+ */
+export function decodeModels(body: unknown): Decoded<ProviderChoice[]> | null {
+  if (!isObj(body) || !isObj(body.providers)) return null;
+  const providers = body.providers;
+  const named = PROVIDERS.filter((name) => name in providers);
+  if (!named.length) return null;
+  const rows = named.flatMap((name) => {
+    const p = providers[name];
+    return isObj(p) && Array.isArray(p.models) ? p.models : [];
+  });
+  return { value: parseModels(body), lists: [
+    tally(named.map((name) => providers[name]), isObj),
+    tally(rows, (m) => isObj(m) && typeof m.id === "string" && m.id !== ""),
+  ] };
 }

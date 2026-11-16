@@ -73,13 +73,14 @@ import {
 } from "./model";
 import { chatsView, el, inboxRow, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { serialRead, type SerialReader } from "./reader";
-import { decodeDiff, decodeInbox, decodeLog, decodeProjects, decodeReview, decodeTask, decodeTasks,
+import { decodeDiff, decodeInbox, decodeLog, decodeModels, decodeProjects, decodeReview, decodeTask, decodeTasks,
   decodeThreads, decodeValue, decodeWorking, readVerdict, type Decoded } from "./reads";
+import { ChatLogReads, mergeLog, type LogChange, type LogKind } from "./chatLog";
 import { answerKey, waiting } from "./threads";
 import { SlotCache, threadsView, type Filter } from "./threadsView";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
-  chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
+  chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, refusal, sentNote,
   taskControlsView, taskSheetView, updateComposer, verbsFor,
   type Composer, type ProviderChoice, type Sheet, type Verb,
 } from "./write";
@@ -165,9 +166,15 @@ const TIME_TICK_MS = 60_000;
 /** WS-5c §5.6: Done and Undo on the open chat: its words, and Done's undo token until its window ends. */
 interface ThreadDone { id: string; busy: boolean; note: string; token: string | null; until: number }
 
-/** `loaded`: the initial read finished (including a refusal); `hasRead`: a valid log was applied. */
+/**
+ * One opening of a chat. `loaded`: the initial read finished (including a refusal); `hasRead`: a valid log was
+ * applied. `base`, `next` and `rows` are its log window (./chatLog.ts: every seq in `[base, next)` is a row or
+ * provably absent; `base` null: no window yet); `older`: rows before `base` exist, at the desk. `reads`: this
+ * opening's own log requests (none shared with any other chat or opening).
+ */
 interface OpenThread {
-  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean; hasRead: boolean;
+  id: string; meta: ChatThread | null; rows: LogRow[]; base: number | null; next: number; older: boolean;
+  list: HTMLElement | null; loaded: boolean; hasRead: boolean; reads: ChatLogReads;
 }
 interface OpenTask {
   id: string;
@@ -276,12 +283,8 @@ export class PhoneApp {
   private workingRetry: unknown = null;
   private readonly setSlow: (fn: () => void, ms: number) => unknown;
   private readonly clearSlow: (handle: unknown) => void;
-  private logBusy = false;
-  /** First pages and incremental pages share a generation per chat. */
-  private readonly logRequests = new Map<string, number>();
   /** An open transcript drawn again: where its scroll was ("end": at the newest message). */
   private keepScroll: "end" | number | null = null;
-  private logAgain = false;
   /** PX-4: the scroll each view had, and what is open besides the list. There is no browser-history integration. */
   private readonly mem = new ScrollMemory();
   /** Which ⋯ menu is open: the header's, an open task page's, or an open chat's. */
@@ -319,7 +322,7 @@ export class PhoneApp {
       const got = await rawGet(path);
       // A project-filtered thread read cannot establish freshness for the whole Chats list.
       const resource = path.startsWith("/m/api/threads?project=") ? path : path.split("?")[0];
-      if (!this.stopped && (!current || current()) && /^\/m\/api\/(inbox|working|tasks(?:\/[^/]+(?:\/diff)?)?|review|projects|threads(?:\?project=[^&]+|\/[^/]+\/log)?)$/.test(resource)) {
+      if (!this.stopped && (!current || current()) && /^\/m\/api\/(inbox|working|tasks(?:\/[^/]+(?:\/diff)?)?|review|projects|thread-models|threads(?:\?project=[^&]+|\/[^/]+\/log)?)$/.test(resource)) {
         // HTTP success proves reachability only. The loader clears freshness after applying valid data.
         if (!got.ok) this.failedReads.set(resource, "failed");
       }
@@ -1412,11 +1415,14 @@ export class PhoneApp {
     const r = await this.read("/m/api/thread-models");
     if (!r || this.sheet !== sheet) return;
     if ("body" in r) {
-      this.models = parseModels(r.body);
-      const usable = this.models.filter((m) => m.available);
-      if (sheet && sheet.kind === "chat" && !usable.some((m) => m.name === sheet.provider) && usable.length) {
-        sheet.provider = usable[0].name;
-      }
+      // A resource read like any list: a malformed reply keeps the last providers, under a warning.
+      this.applyRead("thread-models", decodeModels(r.body), (models) => {
+        this.models = models;
+        const usable = models.filter((m) => m.available);
+        if (sheet && sheet.kind === "chat" && !usable.some((m) => m.name === sheet.provider) && usable.length) {
+          sheet.provider = usable[0].name;
+        }
+      });
     } else if (sheet) {
       sheet.note = r.error;
     }
@@ -1702,87 +1708,97 @@ export class PhoneApp {
     else if (!this.thread) this.threadBack = "chats";
     this.tab = "chats";
     this.sheet = null;
-    if (this.thread?.id !== id) this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null,
-      rows: [], next: 0, older: false, list: null, loaded: false, hasRead: false };
+    if (this.thread?.id !== id) this.thread = this.newOpening(id, meta ?? this.threads.find((t) => t.id === id) ?? null);
     const opened = this.thread;
-    const generation = this.beginLogRead(id);
+    // The same chat opened again: what its reads have in flight is stale (dropped, its owed re-read kept).
+    opened.reads.reopen();
     this.render();
-    const r = await this.read(`/m/api/threads/${id}/log`, () => this.currentLogRead(opened, generation));
-    if (!r || !this.currentLogRead(opened, generation)) return;
-    if (!("body" in r)) { this.threadGone(r.error); return; }
-    const page = this.applyRead(`threads/${id}/log`, decodeLog(r.body), (value) => {
-      const last = opened.rows.at(-1)?.seq ?? -1;
-      opened.rows.push(...value.rows.filter((row) => row.seq > last));
-      opened.next = Math.max(opened.next, value.next);
-      opened.meta = value.thread ?? opened.meta;
-      opened.older = value.older;
-      opened.loaded = opened.hasRead = true;
+    await opened.reads.refresh();
+  }
+
+  /** A chat opened: an empty window, and log reads of its own (./chatLog.ts). */
+  private newOpening(id: string, meta: ChatThread | null): OpenThread {
+    const open: OpenThread = { id, meta, rows: [], base: null, next: 0, older: false, list: null, loaded: false,
+      hasRead: false, reads: null as unknown as ChatLogReads };
+    open.reads = new ChatLogReads({
+      shown: () => !this.stopped && this.tab === "chats" && this.thread === open,
+      hasWindow: () => open.base !== null,
+      readPage: (kind, live) => this.readLogPage(open, kind, live),
     });
-    // Malformed: the read finished but nothing was read ("Not read yet.", never "No messages yet.").
-    if (!page) opened.loaded = true;
-    this.render();
-    if (page) this.scrollToEnd();
+    return open;
   }
 
-  private beginLogRead(id: string): number {
-    const generation = (this.logRequests.get(id) ?? 0) + 1;
-    this.logRequests.set(id, generation);
-    return generation;
-  }
-
-  private currentLogRead(open: OpenThread, generation: number): boolean {
-    return !this.stopped && this.tab === "chats" && this.thread === open
-      && this.logRequests.get(open.id) === generation;
+  /**
+   * One log request for an opening (./chatLog.ts runs them): the tail, or the page after the cursor. Its body
+   * goes through `applyRead` (malformed: nothing moves; partial: only the valid prefix), and what applied is
+   * joined to the window by seq, so the transcript never has a hole and the cursor never passes one.
+   * True when another forward page should follow.
+   */
+  private async readLogPage(open: OpenThread, kind: LogKind, live: () => boolean): Promise<boolean> {
+    const after = kind === "tail" ? null : open.next;
+    const r = await this.read(`/m/api/threads/${open.id}/log${after === null ? "" : `?after=${after}`}`, live);
+    if (!r || !live()) return false;
+    if (!("body" in r)) {
+      // The opening read's refusal is the chat's answer; a later page's failure keeps the log (fetchJson warned).
+      if (kind === "tail") this.threadGone(r.error);
+      return false;
+    }
+    const firstRead = !open.hasRead;
+    let change = "none" as LogChange, more = false, added: LogRow[] = [], fromEnd = 0;
+    const page = this.applyRead(`threads/${open.id}/log`, decodeLog(r.body), (value) => {
+      const joined = mergeLog(open.base === null ? null : { rows: open.rows, base: open.base, next: open.next },
+        kind, after, value);
+      ({ change, added } = joined);
+      fromEnd = this.main.scrollHeight - this.main.scrollTop;
+      open.rows = joined.win.rows;
+      open.base = joined.win.base;
+      open.next = joined.win.next;
+      open.older = joined.win.base > 0;
+      open.loaded = open.hasRead = true;
+      if (value.thread) { open.meta = value.thread; this.renderOrb(); }
+      // The next page starts at the window's cursor, which a newer tail may have moved past this page. A page
+      // dropped without `more` was read before that tail, which already holds everything it would have.
+      more = value.more;
+    });
+    if (!page) {
+      // Malformed: the read finished but nothing was read ("Not read yet.", never "No messages yet.").
+      if (kind === "tail") { open.loaded = true; this.render(); }
+      return false;
+    }
+    if (kind === "tail" || firstRead || change === "reset") {
+      // The opening read (or a newer tail that replaced the window): drawn, at the newest message.
+      this.render();
+      this.scrollToEnd();
+    } else if (change === "insert") {
+      // Rows came in above: drawn again, the owner's place kept by its distance from the bottom.
+      const atEnd = this.nearEnd();
+      this.render();
+      if (atEnd) this.scrollToEnd();
+      else this.main.scrollTop = Math.max(0, this.main.scrollHeight - fromEnd);
+    } else if (change === "append") this.appendRows(open, added);
+    return more;
   }
 
   private threadGone(why: string): void {
     if (!this.thread) return;
     this.thread.rows = [];
+    this.thread.base = null;
+    this.thread.next = 0;
+    this.thread.older = false;
     this.thread.loaded = true;
     this.thread.hasRead = false;
     this.render();
     this.main.append(el("p", "muted center", why === "not found" ? "This chat is not open any more." : why));
   }
 
-  /** The rows after the cursor; repeated while events keep coming. */
+  /** The rows after the open chat's cursor; asked again while a read is out, it runs once more after it. */
   async moreLog(): Promise<void> {
-    if (!this.thread) return;
-    if (this.logBusy) { this.logAgain = true; return; }
-    this.logBusy = true;
-    try {
-      do {
-        this.logAgain = false;
-        const open: OpenThread | null = this.thread;
-        if (!open) return;
-        let more = true;
-        while (more && this.thread === open) {
-          const generation = this.beginLogRead(open.id);
-          const r = await this.read(`/m/api/threads/${open.id}/log?after=${open.next}`, () => this.currentLogRead(open, generation));
-          if (!r || !("body" in r) || !this.currentLogRead(open, generation)) return;
-          // decodeLog cuts a partial page before its first invalid line, so `next` never passes a line not applied.
-          const page = this.applyRead(`threads/${open.id}/log`, decodeLog(r.body), (value) => {
-            const firstRead = !open.hasRead;
-            open.loaded = true;
-            open.hasRead = true;
-            const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
-            const fresh = value.rows.filter((row) => row.seq > last);
-            open.next = Math.max(open.next, value.next);
-            if (value.thread) { open.meta = value.thread; this.renderOrb(); }
-            more = value.more;
-            if (firstRead) { open.rows.push(...fresh); this.render(); }   // "Not read yet." becomes the log
-            else if (fresh.length) this.appendRows(open, fresh);
-          });
-          if (!page) return;
-        }
-      } while (this.logAgain);
-    } finally {
-      this.logBusy = false;
-    }
+    await this.thread?.reads.follow();
   }
 
+  /** Rows already joined to the window, after its old end: drawn at the bottom, followed only from the bottom. */
   private appendRows(open: OpenThread, rows: LogRow[]): void {
     const atEnd = this.nearEnd();
-    open.rows.push(...rows);
     if (this.tab !== "chats" || !open.list) return;
     open.list.querySelector('[data-testid="m-empty"]')?.remove();
     for (const row of rows) open.list.append(logRow(row, ownerChat(open.meta)));
@@ -2037,6 +2053,7 @@ export class PhoneApp {
         }
       }
     }
+    if (this.tab === "chats" && this.sheet?.kind === "chat") resources.push(["thread-models", "Providers", this.models !== null]);
     if (this.tab === "chats" && this.thread) resources.push(
       [`threads/${this.thread.id}/log`, "Chat log", this.thread.hasRead], ["inbox", "Inbox", this.inbox !== null]);
     const warnings = resources.filter(([resource]) => this.failedReads.has(`/m/api/${resource}`))
