@@ -1634,6 +1634,7 @@ def _heredoc_data_reading(text: str) -> str | None:
         return None
     found = 0
     cursor = 0
+    interpreted = False
     try:
         for segment in rules.segments(inlined):
             at = joined.find(segment, cursor)
@@ -1646,11 +1647,18 @@ def _heredoc_data_reading(text: str) -> str | None:
             found += len(heres)
             if not _heredoc_segment_ok(segment, bool(heres)):
                 return None
+            words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
+            interpreted = interpreted or bool(heres and words[0] not in HEREDOC_INERT_PROGRAMS)
     except Exception:       # noqa: BLE001 — unreadable: the raw reading
         return None
     # Every here-string the inlined text holds was placed above (one inside a
     # substitution or a quote was not): otherwise its program is unknown.
     if found != joined.count("<<<"):
+        return None
+    # A Python or node body beside another body could run what that one wrote
+    # (`cat > x.sh <<A … ; python3 - <<P os.system('sh x.sh')`): only alone
+    # (review round 3 of #396).
+    if interpreted and found > 1:
         return None
     return inlined
 

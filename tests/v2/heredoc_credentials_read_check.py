@@ -142,6 +142,8 @@ STILL_ASKED = {
     "cat > /tmp/x.sh <<'EOF'\npass show github\nEOF\nat -f /tmp/x.sh now": "credentials-read",
     "cat > .git/hooks/pre-commit <<'EOF'\npass show github\nEOF\ngit commit -m x": "credentials-read",
     "python3 x.py <<'EOF'\npass show github\nEOF": "credentials-read",
+    "cat > /tmp/x.sh <<'A'\npass show github\nA\npython3 - <<'P'\nimport os; os.system('sh /tmp/x.sh')\nP":
+        "credentials-read",
     # other credential rules are untouched
     "eval \"$(cat <<'EOF'\npass show x\nEOF\n)\"": "credentials-inner",
     "bash <<'EOF'\ncat ~/.ssh/id_rsa\nEOF": "credentials-path",
@@ -219,7 +221,9 @@ class HeredocCredentialsRead(unittest.TestCase):
                 ("ugrep config", "grep --config=/tmp/c x <<'EOF'\nhi\nEOF"),
                 ("ugrep ---", "grep --- x <<'EOF'\nhi\nEOF"),
                 ("ugrep query", "grep -nQ x <<'EOF'\nhi\nEOF"),
-                ("rg-style pre", "grep --pre=sh x <<'EOF'\nhi\nEOF")):
+                ("rg-style pre", "grep --pre=sh x <<'EOF'\nhi\nEOF"),
+                ("python beside another body",
+                 "cat > x.sh <<'A'\nhi\nA\npython3 - <<'P'\nprint(1)\nP")):
             with self.subTest(guard=guard):
                 self.assertIsNone(permissions._heredoc_data_reading(command))
 
