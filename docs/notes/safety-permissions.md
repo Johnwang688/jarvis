@@ -3900,3 +3900,25 @@ alias named exactly `a` or `la`; the refusal names the word. A plain
 recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
 remains the stated limit, the class of `grep -r foo .`; this adds no
 recursive file-name scan.
+
+**`credentials-read` sets data here-document bodies aside (HD-0,
+2026-11-16).** Layer 2 split the raw line, so a `python3 - <<'EOF'` body's
+`pass` line was judged as the password store and carded. Only the
+`credential_read` kind now reads a line through
+`permissions._heredoc_data_reading`: bodies inlined as here-strings
+(`rules._inline_heredocs`), used only when nothing on the line can run a
+body. Every segment's program, as written, is on `HEREDOC_INERT_PROGRAMS`
+(`cat`, `tee`, `wc`, `grep`, `head`, `tail`, `ls`, `echo`, `cd`, `pwd`,
+`mkdir`, `true`; `grep` without ugrep's command-running options, since
+Claude Code's shell runs `grep` as ugrep) or is the `python3 -`/`node -` its
+own body is the program of; redirections are plain paths; the line has no unquoted `( ) { } <( >(`,
+nothing live outside single quotes and no `PATH=`. Anything else keeps the
+raw reading, so nothing asked before stops being asked. **The list names
+what is safe, never what is dangerous**: two review rounds on #396 broke a
+consumer-name check and then a deny-list of shells and runners (`make`,
+`awk system()`, `at -f`, `taskset dash`, `$l` read from a file). The other
+layer-2 readings (always-ask stems and git rules, gate-state, the vex
+backstop) still read bodies as commands: the owner deferred them
+(`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
+(layer 2 reads no `$(…)` or shell-fed here-string). Regression:
+`tests/v2/heredoc_credentials_read_check.py`.
