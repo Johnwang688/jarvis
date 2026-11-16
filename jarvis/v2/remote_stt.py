@@ -118,12 +118,12 @@ class _Refused(Exception):
         self.word = word
 
 
-def check_wav(data: bytes) -> None:
-    """The clip is a mono 16-bit PCM WAV at RATE_HZ, with 1 to MAX_S
-    seconds of frames, and the file holds them all; `_Refused` otherwise."""
+def check_wav(data: bytes, max_s: int = MAX_S) -> None:
+    """Mono 16-bit PCM at RATE_HZ, 1 frame to max_s seconds, all present.
+    The phone keeps its default 60 s; VA-1 opts into 120 s. `_Refused` otherwise."""
     if not data:
         raise _Refused(400, EMPTY_WORD)
-    if len(data) > BODY_CAP:
+    if len(data) > HEADER + RATE_HZ * 2 * max_s + 4096:
         raise _Refused(413, "request body too large")
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise _Refused(400, BAD_WORD)
@@ -138,8 +138,8 @@ def check_wav(data: bytes) -> None:
         raise _Refused(400, BAD_WORD)
     if frames == 0:
         raise _Refused(400, EMPTY_WORD)
-    if frames > RATE_HZ * MAX_S:
-        raise _Refused(400, LONG_WORD)
+    if frames > RATE_HZ * max_s:
+        raise _Refused(400, f"the clip is longer than {max_s} seconds")
     if len(raw) != frames * 2:
         raise _Refused(400, BAD_WORD)
 
