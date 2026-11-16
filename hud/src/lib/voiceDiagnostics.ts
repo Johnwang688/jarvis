@@ -1,3 +1,5 @@
+import { STAGES, type Marks, type Stage } from "./voiceTimings";
+
 // Window-local metadata only. No audio, transcript, device identity or error text.
 export type SuppressionReason = "card" | "picker" | "settings" | "crash" | "speaking" | "no_chat";
 export type DropReason = "unclaimed" | "too_short" | "muted" | "self_voice" | "not_owner" | "cancelled" | "empty_transcript" | "stt_failed" | `suppressed:${SuppressionReason}`;
@@ -16,9 +18,8 @@ export interface DetectorChange { at: number; detector: DetectorKind; phase: Det
 /** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
 export type VerifyResult = "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech";
 const verifyResults: VerifyResult[] = ["matched", "skipped_guest", "skipped_unenrolled", "no_speech"];
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; marks?: Marks; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export type SttBackend = "local" | "cloud";
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
 const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", "command", "send_word", "cancel_word", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
@@ -92,6 +93,23 @@ export class VoiceDiagnostics {
     const id = ++this.next;
     this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: detector === "silero" || detector === "energy" ? detector : this.value.detector, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
     this.publish(); return id;
+  }
+  /** Observations may arrive after placement; first valid mark of each stage wins. */
+  mark(id: number, stage: "speechEnd" | Stage, at: number = this.now()) {
+    if ((stage !== "speechEnd" && !STAGES.includes(stage)) || !Number.isFinite(at)) return;
+    const row = this.rows.find(x => x.id === id);
+    if (!row || row.marks?.[stage] !== undefined) return;
+    // Keep sub-ms clock precision; round elapsed durations, not each endpoint.
+    const value = bounded(Math.min(at, Number.MAX_SAFE_INTEGER / 1000) * 1000, Number.MAX_SAFE_INTEGER) / 1000;
+    if (stage !== "speechEnd") {
+      if (row.marks?.speechEnd === undefined || value < row.marks.speechEnd) return;
+      for (const earlier of STAGES.slice(0, STAGES.indexOf(stage))) {
+        const before = row.marks[earlier];
+        if (before !== undefined && value < before) return;
+      }
+    }
+    this.rows = this.rows.map(x => x.id === id ? { ...x, marks: { ...x.marks, [stage]: value } } : x);
+    this.publish();
   }
   finish(id: number, outcome: VoiceOutcome, latencyMs: number) {
     if (!outcomes.includes(outcome) || outcome === "transcribing") return;

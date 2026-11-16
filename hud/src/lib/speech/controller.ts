@@ -47,6 +47,7 @@ import { Floor } from "./floor";
 import { NOTICE_STALE_MS, SubagentNotices } from "./notices";
 import { SpeechQueue, type Clock, type ItemKind, type Player, type QueueView, type SpeechItem } from "./queue";
 import { ProseStream, type SpokenChunk } from "./stream";
+import { observeVoiceTiming } from "../voiceTimings";
 import { SUMMARY_DEADLINE_MS, needsSummary, spokenText, summaryChunk, truncatedProse, type Summarize } from "./summary";
 
 export interface SpeechEventLike {
@@ -70,6 +71,8 @@ export interface SpeakerGateLike {
 }
 
 export interface ControllerDeps {
+  /** Receipt clock only; production uses performance.now, independently of speech's clock. */
+  timingNow?: () => number;
   /** Audio bytes for `text`, or a rejection (the chunk is then skipped). */
   say(text: string, opts: { voice: string | null; signal: AbortSignal }): Promise<ArrayBuffer>;
   player: Player;
@@ -109,6 +112,7 @@ export interface SpeechView extends QueueView {
 }
 
 interface Open {
+  firstTextAt?: number;
   stream: ProseStream;
   /** Message counter for keys. */
   n: number;
@@ -165,6 +169,9 @@ export class SpeechController {
   /** Notices handed to the queue and not yet stale, with the timer that drops one that never began to sound. */
   private noticeLive = new Map<string, unknown>();
   private ownerBusy: (() => boolean) | null = null;
+  private audioListeners = new Set<(thread: string) => void>();
+  private heardAudio = new Set<number>();
+  private audioTextTimes = new Map<string, number>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -193,7 +200,7 @@ export class SpeechController {
     });
     this.wasSpeaker = deps.gate.isSpeaker();
     this.unsubs.push(deps.gate.subscribe(() => this.gateChanged()));
-    const blocked = deps.player.subscribeBlocked?.(() => this.notify());
+    const blocked = deps.player.subscribeBlocked?.(() => { observeVoiceTiming(() => this.observeAudio()); this.notify(); });
     if (blocked) this.unsubs.push(blocked);
   }
 
@@ -219,6 +226,7 @@ export class SpeechController {
 
   /** The queue changed: keep the hangover that holds `active` just after the last chunk. */
   private settle(): void {
+    observeVoiceTiming(() => this.observeAudio());
     this.trackName();
     const state = this.queue.view().state;
     const live = state === "playing" || state === "buffering";
@@ -296,6 +304,38 @@ export class SpeechController {
     for (const cb of [...this.listeners]) {
       try { cb(); } catch { /* a subscriber never breaks speech */ }
     }
+  }
+
+  /** VA-0: observe a reply chunk only once it is playing and the platform lets audio out. */
+  onAudioStart(cb: (thread: string) => void): () => void {
+    this.audioListeners.add(cb);
+    return () => { this.audioListeners.delete(cb); };
+  }
+
+  outputEnabled(thread: string): boolean { return this.on && !this.micOff && !this.muted.has(thread); }
+
+  /** First text of the playing message, on the receipt clock, not its enqueue/play time. */
+  audioTextStartedAt(thread: string): number | undefined {
+    return observeVoiceTiming(() => {
+      const item = this.queue.items().find(item => item.thread === thread && item.state === "playing");
+      return item ? this.audioTextTimes.get(item.messageKey) : undefined;
+    });
+  }
+
+  private observeAudio(): void {
+    try {
+      const items = this.queue.items();
+      const live = new Set(items.map(item => item.id));
+      for (const id of this.heardAudio) if (!live.has(id)) this.heardAudio.delete(id);
+      const keys = new Set(items.map(item => item.messageKey));
+      for (const key of this.audioTextTimes.keys()) if (!keys.has(key)) this.audioTextTimes.delete(key);
+      if (this.deps.player.blocked()) return;
+      for (const item of items) {
+        if (item.state !== "playing" || item.kind === "notice" || item.kind === "note" || this.heardAudio.has(item.id)) continue;
+        this.heardAudio.add(item.id);
+        for (const cb of this.audioListeners) { try { cb(item.thread); } catch { /* diagnostics cannot change speech */ } }
+      }
+    } catch { /* observations cannot change playback */ }
   }
 
   // ---- who is read --------------------------------------------------------
@@ -448,9 +488,11 @@ export class SpeechController {
     const text = typeof data.text === "string" ? data.text : "";
     switch (kind) {
       case "text_delta":
+        observeVoiceTiming(() => this.observeText(thread, text));
         this.hold(thread, this.slot(thread).stream.feed(text));
         break;
       case "text":
+        observeVoiceTiming(() => this.observeText(thread, text));
         this.hold(thread, this.slot(thread).stream.settle(text));
         this.conclude(thread);
         break;
@@ -491,6 +533,14 @@ export class SpeechController {
     return s;
   }
 
+  private observeText(thread: string, text: string): void {
+    observeVoiceTiming(() => {
+      if (!text) return;
+      const s = this.slot(thread);
+      if (s.firstTextAt === undefined) s.firstTextAt = this.deps.timingNow ? this.deps.timingNow() : this.deps.clock.now();
+    });
+  }
+
   private finish(thread: string): void {
     const s = this.open.get(thread);
     if (!s || !s.stream.open) return;
@@ -518,6 +568,8 @@ export class SpeechController {
     const s = this.open.get(thread);
     if (!s) return;
     const held = s.held;
+    const firstTextAt = s.firstTextAt;
+    s.firstTextAt = undefined;
     const key = `${thread}:${s.n}`;
     const epoch = this.epoch(thread);
     s.held = [];
@@ -525,13 +577,13 @@ export class SpeechController {
     this.counters.set(thread, s.n);
     if (!held.length) return;
     if (!needsSummary(held)) {
-      this.sequence(thread, () => this.deliver(thread, key, held, epoch));
+      this.sequence(thread, () => this.deliver(thread, key, held, epoch, firstTextAt));
       return;
     }
     const wait = this.summary(thread, spokenText(held));
     this.sequence(thread, async () => {
       const got = await wait;
-      this.deliver(thread, key, got ?? truncatedProse(held), epoch);
+      this.deliver(thread, key, got ?? truncatedProse(held), epoch, firstTextAt);
     });
   }
 
@@ -544,13 +596,14 @@ export class SpeechController {
    * been silenced since the message closed (`epoch`). A barge-in that began
    * while a summary was awaited holds the delivery until it ends.
    */
-  private deliver(thread: string, key: string, chunks: readonly { text: string; kind: ItemKind }[], epoch: number): void {
+  private deliver(thread: string, key: string, chunks: readonly { text: string; kind: ItemKind }[], epoch: number, firstTextAt?: number): void {
     if (chunks[0]?.kind === "notice" && !this.noticeLive.has(key)) return;   // went stale while held
-    if (this.holdDelivery) { this.deferred.push(() => this.deliver(thread, key, chunks, epoch)); return; }
+    if (this.holdDelivery) { this.deferred.push(() => this.deliver(thread, key, chunks, epoch, firstTextAt)); return; }
     if (epoch !== this.epoch(thread) || !this.speaks(thread)) return;
     // The voice known now rides on the item; the queue asks `voiceFor` again when it synthesizes (V7).
     const known = this.deps.voiceFor?.(thread);
     const voice = typeof known === "string" ? known : null;
+    observeVoiceTiming(() => { if (firstTextAt !== undefined) this.audioTextTimes.set(key, firstTextAt); });
     chunks.forEach((chunk, seq) => {
       this.queue.enqueue({ thread, messageKey: key, seq, text: chunk.text, kind: chunk.kind, voice });
     });
@@ -760,6 +813,9 @@ export class SpeechController {
     if (this.hang !== null) this.deps.clock.clearTimeout(this.hang);
     this.hang = null;
     this.idleListeners.clear();
+    this.audioListeners.clear();
+    this.heardAudio.clear();
+    this.audioTextTimes.clear();
     this.notices.dispose();
     for (const h of this.noticeLive.values()) this.deps.clock.clearTimeout(h);
     this.noticeLive.clear();

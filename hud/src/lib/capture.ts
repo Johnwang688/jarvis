@@ -43,6 +43,7 @@ import {
 import { CLAIM_CAP_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk } from "./recorder";
 import { SEND_WORD_SILENCE_MS } from "./voiceWords";
 
+import { observeVoiceTiming, type Marks } from "./voiceTimings";
 import { CLEAR, type SelfFrame } from "./selfvoice";
 import type { ClaimSource, DetectorKind, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
@@ -55,6 +56,8 @@ export interface UtteranceChunk extends RecordedChunk {
 
 /** A claimed message is over: sent whole, truncated, or never uploaded at all. */
 export interface UtteranceEnd {
+  /** VA-0: observation on the page clock, independent of the recording sample clock. */
+  marks?: Marks;
   utterance: number;
   source: ClaimSource;
   /** Audio recorded, overlap counted once. */
@@ -302,9 +305,10 @@ export class Capture {
     return id;
   }
 
-  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean, discard = false, tailMs = 0) {
+  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean, discard = false, tailMs = 0, marks?: Marks) {
     try {
       this.hooks.onUtteranceEnd({
+        ...(marks ? { marks } : {}),
         utterance: rec.id, source: this.claimSource, ms: summary.ms, chunks: summary.chunks, continuation, truncated,
         tailMs: truncated || discard ? 0 : Math.max(0, Math.round(tailMs)),
         ...(discard ? { discard: true } : {}),
@@ -334,7 +338,7 @@ export class Capture {
    * `quietSamples` is the quiet run behind the last word (V10), read before
    * anything resets it.
    */
-  private finishRecording(trim: number, cutShort = false, quietSamples = this.vad.quiet) {
+  private finishRecording(trim: number, cutShort = false, quietSamples = this.vad.quiet, marks?: Marks) {
     const rec = this.rec;
     if (!rec) return;
     this.rec = null;
@@ -354,7 +358,7 @@ export class Capture {
     this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
     const summary = rec.end(trim);
     if (summary.chunks === 0) { this.closeContinuation(); this.announceEnd(rec, summary, null, false); return; }
-    this.announceEnd(rec, summary, arm ? this.continueToken : null, cutShort, false, tailMs);
+    this.announceEnd(rec, summary, arm ? this.continueToken : null, cutShort, false, tailMs, marks);
   }
 
   /** The ceiling: the message goes as it stands, and the window says so. */
@@ -514,7 +518,11 @@ export class Capture {
       return;
     }
     // The utterance ended a hangover ago: drop the silence that proved it.
-    this.finishRecording(Math.max(0, this.ring.written - to));
+    const marks = observeVoiceTiming(() => {
+      const endpoint = this.now();
+      return event === "close" ? { speechEnd: endpoint - samplesToMs(this.vad.quiet), endpoint } : undefined;
+    });
+    this.finishRecording(Math.max(0, this.ring.written - to), false, this.vad.quiet, marks);
   }
 
   /** Until when (ring clock) an unclaimed open utterance may still pass the weak gate. */
@@ -653,7 +661,7 @@ export class Capture {
     this.vad.run = 0;
     this.vad.open = false;
     this.segClaimed = false;
-    this.finishRecording(0, false, quiet);
+    this.finishRecording(0, false, quiet, observeVoiceTiming(() => ({ speechEnd: this.now() })));
     this.claimSource = "unclaimed";
   }
 

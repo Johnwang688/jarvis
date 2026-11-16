@@ -36,6 +36,7 @@
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
+import { observeVoiceTiming, type Marks } from "./voiceTimings";
 import type { ClaimSource, DetectorKind, DropReason, VoiceDiagnostics } from "./voiceDiagnostics";
 import { dropLeadingOverlap, dropTrailingOverlap, overlapMerge } from "./joinChunks";
 
@@ -161,6 +162,8 @@ interface Group<M> {
   parts: Map<number, { text: string; overlap: boolean }>;
   placed: Set<number>;
   lastAt: number;
+  /** VA-0: receipt of the last outstanding successful chunk, before any placement wait. */
+  transcribedAt?: number;
   hadFailure: boolean;
   /** V12: chunks the daemon refused as not the owner's voice (their audio was dropped, not kept for Retry). */
   rejected: number;
@@ -324,11 +327,16 @@ export class SttAssembler<M = undefined> {
    * owner finished (the mic went OFF, a card appeared) or part of it was refused,
    * so what is placed is marked late and AUTO boxes it instead of sending it.
    */
-  closeGroup(gid: number, opts: { late?: boolean } = {}) {
+  closeGroup(gid: number, opts: { late?: boolean; marks?: Marks } = {}) {
     const g = this.groups.get(gid);
     if (!g) return;
     if (opts.late) g.partial = true;
+    observeVoiceTiming(() => {
+      if (opts.marks?.speechEnd !== undefined) this.o.diagnostics.mark(g.diag, "speechEnd", opts.marks.speechEnd);
+      if (opts.marks?.endpoint !== undefined) this.o.diagnostics.mark(g.diag, "endpoint", opts.marks.endpoint);
+    });
     g.open = false;
+    observeVoiceTiming(() => this.markTranscribed(g));
     if (!g.members.length) { this.settleGroup(g); this.groups.delete(gid); return; }
     this.release();
     this.settleGroup(g);
@@ -447,6 +455,7 @@ export class SttAssembler<M = undefined> {
       this.fail(e, describe(failure, deadline));
       return;
     }
+    observeVoiceTiming(() => { if (g) g.transcribedAt = this.now(); });
     if (served) this.o.diagnostics.served(e.diag, served.backend, served.fellBack === true);
     // A blank text is a normal answer for a chunk of mostly silence: it is
     // settled with the rest of its message (release).
@@ -457,6 +466,7 @@ export class SttAssembler<M = undefined> {
     // until then would make its length a memory bound, so it is let go here.
     e.state = "ready"; e.error = ""; e.blob = null;
     this.syncKept(g);
+    observeVoiceTiming(() => { if (g) this.markTranscribed(g); });
     this.emit(); this.release();
   }
 
@@ -586,6 +596,15 @@ export class SttAssembler<M = undefined> {
     }
     // A mark alone says nothing; a message of only blanks and failures places nothing.
     return acc.some(w => w !== GAP_MARK) ? acc.join(" ") : "";
+  }
+
+  /** The whole message is final only after capture closes and every chunk answered. */
+  private markTranscribed(g: Group<M>) {
+    if (g.open || g.hadFailure || !g.members.length || g.transcribedAt === undefined) return;
+    // V5 may finish STT before endpoint. mark() deliberately omits that backwards
+    // stage; shifting its receipt to close time would invent a zero-duration STT.
+    if (g.members.every(id => this.entries.get(id)?.state === "ready" || g.placed.has(id)))
+      this.o.diagnostics.mark(g.diag, "transcribed", g.transcribedAt);
   }
 
   /** Place, in capture order, every message no earlier chunk is still waiting on. */
