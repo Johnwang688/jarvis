@@ -2,16 +2,93 @@
 from __future__ import annotations
 
 from collections import deque
+import ctypes
+from ctypes import wintypes
+import logging
 import math
 import os
 import queue
 import time
 
 STATES = ("hidden", "listening", "transcribing", "thinking", "answering", "done", "error")
-CYAN, AMBER, RED = "#67e8f9", "#fbbf24", "#fb7185"
-PANEL, INK = "#14232e", "#edf6fa"
+ACCENT, AMBER, RED = "#6fc3df", "#fbbf24", "#fb7185"
+PANEL, INK = "#16212a", "#edf6fa"
+# ABGR: HUD --glass-float RGB, with enough tint for text over bright windows.
+GLASS_TINT = 0xD92A2116
+# Close to the tint so antialiased glyph edges blend into the acrylic.
+GLASS_KEY, SHEEN = "#16212b", "#323c44"
+# --accent-line (45% accent over the floating tint); DWM takes opaque COLORREF.
+ACCENT_LINE = 0x007B6A3E
+log = logging.getLogger("jarvis.voice")
 WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
 SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE = 0x10, 0x40, 4
+
+
+class ACCENT_POLICY(ctypes.Structure):
+    _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int),
+                ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_int)]
+
+
+class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
+    _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.c_void_p),
+                ("SizeOfData", ctypes.c_size_t)]
+
+
+def _win32_function(library, name, argtypes, restype):
+    function = getattr(library, name)
+    try:
+        function.argtypes, function.restype = argtypes, restype
+    except AttributeError:
+        pass  # Python bound methods used by headless native-API fakes.
+    return function
+
+
+def transparency_on(reader=None):
+    """Windows' "Transparency effects" switch. Off, DWM paints acrylic as a solid
+    tint (found live 2026-11-17), so the pop-up uses its see-through fallback."""
+    try:
+        if reader is None:
+            import winreg
+
+            def reader():
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                    return winreg.QueryValueEx(key, "EnableTransparency")[0]
+        return bool(reader())
+    except Exception:
+        return True  # unknown: try acrylic; DWM falls back itself
+
+
+def acrylic(hwnd, tint, *, user32, dwmapi):
+    """Request acrylic; unsupported Windows builds simply use the tinted panel."""
+    try:
+        accent = ACCENT_POLICY(4, 0, tint, 0)  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+        data = WINDOWCOMPOSITIONATTRIBDATA(19, ctypes.addressof(accent),
+                                          ctypes.sizeof(accent))
+        compose = _win32_function(user32, "SetWindowCompositionAttribute",
+                                 [wintypes.HWND, ctypes.POINTER(WINDOWCOMPOSITIONATTRIBDATA)],
+                                 wintypes.BOOL)
+        applied = bool(compose(hwnd, ctypes.byref(data)))
+    except Exception:
+        return False
+    # Cosmetic DWM attributes must never turn successful acrylic into a failure.
+    for attribute, value in ((33, ctypes.c_int(2)), (34, ctypes.c_uint(ACCENT_LINE))):
+        try:
+            decorate = _win32_function(dwmapi, "DwmSetWindowAttribute",
+                                      [wintypes.HWND, ctypes.c_uint, ctypes.c_void_p,
+                                       ctypes.c_uint], ctypes.c_long)
+            decorate(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:
+            pass
+    return applied
+
+
+def state_colour(state):
+    if state == "error":
+        return RED
+    if state in ("transcribing", "thinking"):
+        return AMBER
+    return ACCENT
 
 
 def bars(levels, n=24):
@@ -50,7 +127,7 @@ class _DisplayState:
 
 
 class Overlay:
-    def __init__(self, root):
+    def __init__(self, root, *, user32=None, dwmapi=None):
         import tkinter as tk
 
         self.root = root
@@ -62,8 +139,8 @@ class Overlay:
         self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
-        # Transparent corners around the rounded Canvas panel on Windows.
-        key = "#010203"
+        # Acrylic shows through the keyed background; fallback keeps clear corners.
+        key = GLASS_KEY
         self.window.configure(bg=key)
         if os.name == "nt":
             self.window.attributes("-transparentcolor", key)
@@ -71,22 +148,27 @@ class Overlay:
                                 highlightthickness=0, takefocus=False)
         self.canvas.pack()
         self.panel = self.canvas.create_polygon(0, 0, 0, 0, fill=PANEL,
-                                                 outline="#294553", smooth=True, splinesteps=24)
-        self.bar_ids = [self.canvas.create_rectangle(0, 0, 0, 0, fill=CYAN, outline="")
+                                                 outline="#3a4a56", smooth=True, splinesteps=24)
+        self.sheen = self.canvas.create_line(18, 1, 422, 1, fill=SHEEN, width=1,
+                                              state="hidden")
+        self.bar_ids = [self.canvas.create_rectangle(0, 0, 0, 0, fill=ACCENT, outline="")
                         for _ in range(24)]
         self.label = self.canvas.create_text(220, 66, text="", anchor="n", width=400,
                                              fill=INK, font=("Segoe UI", 12))
         self.user32 = None
+        self.glass = False
         if os.name == "nt":
-            self._native_window()
+            self._native_window(user32=user32, dwmapi=dwmapi)
+        if self.glass:
+            self.canvas.itemconfigure(self.panel, state="hidden")
+            self.canvas.itemconfigure(self.sheen, state="normal")
+        self.window.attributes("-alpha", 1.0 if self.glass else 0.88)
+        log.info("pop-up glass: %s", "acrylic" if self.glass else "tinted fallback")
         self.width, self.height = 440, 96
         self.root.after(33, self._tick)
 
-    def _native_window(self):
-        import ctypes
-        from ctypes import wintypes
-
-        self.user32 = ctypes.windll.user32
+    def _native_window(self, *, user32=None, dwmapi=None):
+        self.user32 = user32 if user32 is not None else ctypes.windll.user32
         u = self.user32
         u.GetParent.argtypes, u.GetParent.restype = [wintypes.HWND], wintypes.HWND
         u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -102,6 +184,12 @@ class Overlay:
         self.hwnd = u.GetParent(self.window.winfo_id()) or self.window.winfo_id()
         style = u.GetWindowLongW(self.hwnd, -20)
         u.SetWindowLongW(self.hwnd, -20, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        if dwmapi is None:
+            try:
+                dwmapi = ctypes.windll.dwmapi
+            except (AttributeError, OSError):
+                pass
+        self.glass = transparency_on() and acrylic(self.hwnd, GLASS_TINT, user32=u, dwmapi=dwmapi)
 
     def set_state(self, state, text=None):
         if state not in STATES:
@@ -122,8 +210,9 @@ class Overlay:
             return
         self.width = 640 if state == "answering" else 440
         self.canvas.itemconfigure(self.label, text=self.display.text, width=self.width - 40,
-                                  fill=RED if state == "error" else
-                                  AMBER if state in ("transcribing", "thinking") else INK)
+                                  fill=RED if state == "error" else INK)
+        for ident in self.bar_ids:
+            self.canvas.itemconfigure(ident, fill=state_colour(state))
         self.canvas.coords(self.label, self.width / 2, 64)
         box = self.canvas.bbox(self.label)
         self.height = min(240, max(96, (box[3] if box else 80) + 18))
@@ -132,6 +221,7 @@ class Overlay:
         self.canvas.coords(self.panel, r, 1, w-r, 1, w-1, 1, w-1, r,
                            w-1, h-r, w-1, h-1, w-r, h-1, r, h-1,
                            1, h-1, 1, h-r, 1, r, 1, 1)
+        self.canvas.coords(self.sheen, r, 1, w-r, 1)
         x, y = place(self.window.winfo_screenwidth(), self.window.winfo_screenheight(), w, h)
         self.window.geometry(f"{w}x{h}{x:+d}{y:+d}")
         if self.user32:
