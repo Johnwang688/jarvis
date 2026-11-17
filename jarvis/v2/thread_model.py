@@ -35,7 +35,8 @@ Where the choice lives, and why there:
   explicit model choice pins a model to a thread.
 
 - `Thread.speed = None` is standard. Speeds come from the current model's
-  catalog. An unavailable saved speed degrades to standard with a note for
+  catalog and are bound to `Thread.speed_model`. A mismatched or unavailable
+  saved speed degrades to standard with a note for
   that turn; the saved choice is never rewritten. Only an owner's model
   change clears an incompatible speed, in that same write. Speed has no
   global default and changes no permissions.
@@ -150,9 +151,11 @@ def check_speed(provider: ProviderName, model: str | None, speed: Any) -> str | 
 
 def effective_speed(thread: Thread, model: str | None) -> str | None:
     """Degrade for this turn only; never rewrite a saved speed choice."""
-    if thread.speed and thread.speed not in {tier[0] for tier in speeds_of(thread.provider, model)}:
+    if thread.speed and (thread.speed_model != model or thread.speed_model is None
+                         or thread.speed not in {tier[0] for tier in speeds_of(thread.provider, model)}):
         from .router import warn_once
-        warn_once(f"{model} no longer offers speed {thread.speed!r}; using standard speed "
+        warn_once(f"{model} does not match saved speed {thread.speed!r} for {thread.speed_model!r} "
+                  "or no longer offers it; using standard speed "
                   "for this turn (the choice is kept)")
         return None
     return thread.speed

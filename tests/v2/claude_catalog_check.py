@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from jarvis import config, protected_state
 from jarvis.tools import files
+from jarvis.v2 import codex_catalog as X
 from jarvis.v2 import claude_catalog as C, daemon as D, router as R, thread_model as TM
 from jarvis.v2.model import ProviderName as P, Role, Thread
 from jarvis.v2.provider import Brief, Decision
@@ -146,8 +147,9 @@ class Parse(Fixture):
             name = C.parse([{"value": "claude-test", "displayName": display}])["claude-test"]["name"]
             self.assertEqual(len(name), C.MAX_NAME)
             self.assertTrue(name.startswith("Claude"))
-        self.assertEqual((C.MAX_ROWS, C.MAX_MODELS, C.MAX_NAME, C.MAX_EFFORTS, C.MAX_CACHE_BYTES),
-                         (2000, 100, 64, 16, 512 * 1024))
+        self.assertEqual((C.MAX_ROWS, C.MAX_MODELS, C.MAX_NAME, C.MAX_EFFORTS), (2000, 100, 64, 16))
+        self.assertEqual(C.MAX_CACHE_BYTES, X.MAX_CACHE_BYTES)
+        self.assertLessEqual(C.MAX_CACHE_BYTES, 4 * 1024 * 1024)
 
     def test_effort_requires_true_filters_words_and_preserves_order(self):
         row = {"value": "claude-test", "supportedEffortLevels": ["max", "high", "max", "ultra", {}, None, "low", "HIGH", "xhigh", "medium"]}

@@ -40,6 +40,23 @@ describe("per-chat speed chip", () => {
     expect(chip().title).toBe(description);
     expect(select().selectedOptions[0].text).toBe("Fast");
   });
+  it("describes quota cost when the catalog description is empty", () => {
+    const empty = { providers: { claude: { ...models.providers.claude!, models: [
+      { id: "claude-a", speeds: [["fast", "Fast", ""]] as [string, string, string][] },
+    ] } } };
+    act(() => root.render(createElement(SpeedChip, { models: empty, choice: { ...choice, speed: "fast" }, onChange: () => {} })));
+    const cost = "Faster responses; uses more of your plan's quota";
+    expect(chip().title).toBe(cost);
+    expect(select().selectedOptions[0].title).toBe(cost);
+  });
+  it("shows a pending change with a disabled chip", () => {
+    act(() => root.render(createElement(SpeedChip, { models, choice, pending: true, onChange: () => {} })));
+    expect(select().disabled).toBe(true);
+    expect(chip().dataset.pending).toBe("true");
+    expect(chip().getAttribute("aria-busy")).toBe("true");
+    expect(chip().title).toContain("pending");
+    expect(chip().classList.contains("err")).toBe(false);
+  });
   it("sets and resets speed directly, with no confirmation or auto-off", () => {
     draw();
     act(() => { select().value = "fast"; select().dispatchEvent(new Event("change", { bubbles: true })); });
@@ -76,13 +93,25 @@ describe("per-chat speed chip", () => {
     expect(select().value).toBe("old");
     expect(changes).toEqual([]);
   });
+  it("allows reselecting a dormant saved tier even when the current model offers the same id", () => {
+    draw({ ...choice, speed: "fast", speed_model: "claude-c" });
+    expect(chip().title).toContain("next message uses Standard");
+    expect(select().value).toBe("__saved_speed");
+    act(() => { select().value = "fast"; select().dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(changes).toEqual(["fast"]);
+  });
+  it("includes the default model precondition for speed and Standard", () => {
+    const before = { ...choice, model: null };
+    expect(patchBody(before, { ...before, speed: "fast" }, models)).toEqual({ speed: "fast", speed_model: "claude-a" });
+    expect(patchBody({ ...before, speed: "fast" }, before, models)).toEqual({ speed: null, speed_model: "claude-a" });
+  });
   it("clears an incompatible speed in the same model write and retains compatible tiers", () => {
     const before = { ...choice, speed: "fast" };
     const after = applyModel(before, "claude-b", models);
     expect(after.speed).toBeNull();
-    expect(patchBody(before, after)).toEqual({ model: "claude-b", speed: null });
+    expect(patchBody(before, after)).toEqual({ model: "claude-b" });
     expect(applyModel(before, "claude-c", models).speed).toBe("fast");
-    expect(patchBody(before, { ...before, speed: null })).toEqual({ speed: null });
+    expect(patchBody(before, { ...before, speed: null })).toEqual({ speed: null, speed_model: "claude-a" });
     expect(threadBody(before)).toEqual({ provider: "claude", brief: { model: "claude-a", speed: "fast" } });
   });
 });

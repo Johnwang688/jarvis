@@ -124,7 +124,7 @@ export const api = {
   }) => req<Thread>("/threads", json(body)),
   /** A chat thread's model and effort, from its next message; `model: null`
    * is the default. Never its provider. */
-  setThreadModel: (id: string, body: { model?: string | null; effort?: string | null; speed?: string | null }) =>
+  setThreadModel: (id: string, body: { model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null }) =>
     req<Thread>(`/threads/${id}`, patch(body)),
   /** What the provider / model / effort chips offer, per provider. */
   threadModels: () => req<ThreadModels>("/thread-models"),

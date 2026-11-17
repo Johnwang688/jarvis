@@ -513,10 +513,9 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   `strict`), `always_ask` must keep every one of the project's commands
   (adding more is fine), and `mcp_servers` must be empty. Anything else is a
   400 naming the field. The HUD sends none of these.
-- `PATCH /threads/{id}` `{model?, effort?}` → the thread record. This is one
+- `PATCH /threads/{id}` `{model?, effort?, speed?, speed_model?}` → the thread record. This is one
   of the route's three request shapes, and they are mutually exclusive: a
-  rename `{title}`, a move `{project_id}`, or a model change `{model?,
-  effort?}`. Fields from two shapes in one body are a 400 ("rename, move and
+  rename `{title}`, a move `{project_id}`, or a model/effort/speed change. Fields from two shapes in one body are a 400 ("rename, move and
   model change are separate requests"), and so is a body with none. `model: null` returns to the
   default and resets the effort — unpinning is a choice of model like any
   other, so it clears a stored effort too (`{model: null, effort}` keeps
@@ -530,13 +529,27 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   thread or one in an archived project ("restore the thread before changing
   its model"). There is no
   `provider` field: a session cannot change provider.
+- A speed PATCH is owner-only and must include `speed_model`, the current
+  effective model shown when the tier was chosen (also when resetting with
+  `speed: null`). A stale or missing model precondition returns 409 without
+  writing. Change model first, then choose speed after its response. A tier
+  must be offered by that model or the request returns 400. The thread stores
+  `speed` and `speed_model` together; Standard clears both. Model writes on a
+  thread with a saved speed also require the owner, checked under the write
+  lock. They rebind a compatible tier to the selected model or clear both
+  fields for an incompatible one. Effort writes leave the pair untouched.
+  At turn start a saved tier applies only if the effective model matches its
+  binding and still offers it. Otherwise that turn uses Standard and keeps
+  the saved pair. Legacy speeds without a binding stay dormant until the
+  owner selects speed again. Provider-default changes require no new owner
+  gate and cannot apply a tier saved for a different model.
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default
   thread (`effort → default · high (…)` when it is cleared); or
   `(follows the default)` when a default thread's turn starts on a new global
   model, naming the re-clamped effort) and publishes it, then `thread_updated {…thread, thread_id,
-  changed: ["model", "effort"], effective_model, effective_effort}`. A
+  changed: ["model", "effort", "speed", "speed_model"], effective_model, effective_effort}`. A
   rename's `thread_updated` carries `changed: ["title"]` and no record; the
   HUD patches in place when the record is there and refetches otherwise. `GET /threads/{id}/transcript` returns `model_set`
   records as `role: "system"`.

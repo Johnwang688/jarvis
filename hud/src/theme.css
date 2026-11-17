@@ -2636,3 +2636,5 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
 .speedchip select { min-width: 0; max-width: 100%; text-overflow: ellipsis; color: inherit; }
 .speedchip[data-on="true"] { color: var(--accent-hi); border-color: var(--accent); background: var(--accent-soft); }
 .speedchip[data-unavailable="true"] { color: var(--text-muted); opacity: .55; }
+
+.speedchip[data-pending="true"] { color: var(--text-muted); border-color: var(--border-strong); background: transparent; opacity: .65; }

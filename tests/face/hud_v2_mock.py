@@ -1512,13 +1512,16 @@ class MockDaemon:
                     t = next((t for t in w["threads"] if t["id"] == parts[1]), None)
                     if t is None:
                         return self._err(404, "no such thread")
-                    if set(body) - {"model", "effort", "speed"}:
-                        return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort", "speed"})))
+                    if set(body) - {"model", "effort", "speed", "speed_model"}:
+                        return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort", "speed", "speed_model"})))
                     if t.get("task_id") or t.get("role") != "chat":
                         return self._err(409, "a task's threads run the model routing gave them")
                     home = next((p for p in w["projects"] if p["id"] == t["project_id"]), {})
                     if t.get("archived") or home.get("archived"):
                         return self._err(409, "restore the thread before changing its model")
+                    current_model = t.get("model") or _thread_models(w)["providers"][t["provider"]]["default"]
+                    if "speed" in body and body.get("speed_model") != current_model:
+                        return self._err(409, "the model changed; choose speed again for the current model")
                     model = body["model"] if "model" in body else t.get("model")
                     effort = body.get("effort") if "model" in body else body.get("effort", t.get("effort"))
                     refusal = _check_choice(w, t["provider"], model, effort, current=t.get("model"))
@@ -1528,9 +1531,17 @@ class MockDaemon:
                     # model (A4 amendment): the record holds the effort only.
                     was_default = t.get("model") is None
                     t["model"], t["effort"] = model, effort
+                    shown = model or _thread_models(w)["providers"][t["provider"]]["default"]
+                    if "model" in body:
+                        rows = _thread_models(w)["providers"][t["provider"]]["models"]
+                        tiers = next((r.get("speeds", []) for r in rows if r["id"] == shown), [])
+                        if t.get("speed") in {tier[0] for tier in tiers}:
+                            t["speed_model"] = shown
+                        else:
+                            t["speed"], t["speed_model"] = None, None
                     if "speed" in body:
                         t["speed"] = body["speed"]
-                    shown = model or _thread_models(w)["providers"][t["provider"]]["default"]
+                        t["speed_model"] = shown if body["speed"] else None
                     shown_effort = effort or _default_effort(w, t["provider"], shown)
                     if model is None and was_default:
                         text = (f"effort → {effort or 'default · ' + (shown_effort or 'none')}"

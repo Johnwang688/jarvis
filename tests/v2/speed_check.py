@@ -2,10 +2,14 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from jarvis import config
+from jarvis.v2.daemon import APIError, Daemon, _Session
+from jarvis.v2.stores import Stores
 from jarvis.v2 import claude_catalog as C, codex_catalog as X, router, thread_model as TM
 from jarvis.v2.model import ProviderName as P, Role, Thread, from_json, to_json
 from jarvis.v2.provider import Brief
@@ -46,6 +50,29 @@ class Catalog(unittest.TestCase):
                 self.assertEqual(C.load(path), table)
         self.assertEqual(C.parse([{"value": "claude-old"}])["claude-old"]["speeds"], ())
 
+    def test_worst_case_catalogs_save_and_load_within_read_cap(self):
+        # Astral characters cost 12 bytes in ensure_ascii JSON; CJK costs 6.
+        for text in ("界", "😀"):
+            tiers = [{"id": f"t{i}".ljust(64, "x"), "name": text * X.MAX_NAME,
+                      "description": text * X.MAX_DESCRIPTION} for i in range(X.MAX_SPEEDS)]
+            tables = (
+                (X, X.parse([{"id": f"m{i}".ljust(64, "x"), "displayName": text * X.MAX_NAME,
+                              "serviceTiers": tiers, "inputModalities": ["text", "image"],
+                              "supportedReasoningEfforts": list(router.CODEX_EFFORT_LADDER),
+                              "defaultReasoningEffort": "ultra"} for i in range(X.MAX_MODELS)])),
+                (C, C.parse([{"value": f"claude-{i}".ljust(64, "x"),
+                              "displayName": "Claude " + text * (C.MAX_NAME - 7),
+                              "supportsFastMode": True, "supportsEffort": True,
+                              "supportedEffortLevels": list(router._CLAUDE_EFFORTS)}
+                             for i in range(C.MAX_MODELS)])),
+            )
+            for module, table in tables:
+                with self.subTest(catalog=module.__name__, text=text), tempfile.TemporaryDirectory() as root:
+                    path = Path(root) / "catalog.json"
+                    self.assertTrue(module.save(table, path))
+                    self.assertLessEqual(path.stat().st_size, module.MAX_CACHE_BYTES)
+                    self.assertEqual(module.load(path), table)
+
 
 class Choices(unittest.TestCase):
     def setUp(self):
@@ -78,7 +105,7 @@ class Choices(unittest.TestCase):
                 TM.check_speed(P.CODEX, "gpt-plain", "priority")
 
     def test_turn_downgrade_preserves_saved_choice_and_describe(self):
-        thread = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE, model="claude-a", speed="fast")
+        thread = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE, model="claude-a", speed="fast", speed_model="claude-a")
         self.assertEqual(TM.effective_speed(thread, "claude-a"), "fast")
         with patch.object(router, "warn_once") as note:
             self.assertIsNone(TM.effective_speed(thread, "claude-b"))
@@ -90,6 +117,15 @@ class Choices(unittest.TestCase):
             rows = TM.describe()["providers"]["claude"]["models"]
         self.assertEqual(rows[0]["speeds"], list(C.FAST_SPEED))
         self.assertEqual(rows[1]["speeds"], [])
+
+    def test_legacy_saved_speed_is_dormant_until_owner_reselects(self):
+        thread = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE, model="claude-a", speed="fast")
+        with patch.object(router, "warn_once"):
+            self.assertIsNone(TM.effective_speed(thread, "claude-a"))
+        self.assertEqual((thread.speed, thread.speed_model), ("fast", None))
+        legacy = to_json(thread)
+        legacy.pop("speed_model")
+        self.assertIsNone(from_json(Thread, legacy).speed_model)
 
     def options(self, speed, model="claude-a", settings=None):
         session = SimpleNamespace(mcp_config=None, isolated=False, stderr=[])
@@ -111,6 +147,153 @@ class Choices(unittest.TestCase):
         for speed, model in ((None, "claude-a"), ("fast", "claude-b")):
             self.assertEqual(json.loads(self.options(speed, model, settings={"fastMode": True, "theme": "dark"}).settings),
                              {"theme": "dark"})
+
+
+class LockedWrites(unittest.TestCase):
+    """Real thread store and daemon write/turn methods; no listeners or providers."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for key, value in {"V2_DATA_DIR": root / "data", "PROVIDER_DEFAULTS_PATH": root / "defaults.json"}.items():
+            guard = patch.object(config, key, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        table = {m: {"name": m, "efforts": ("high", "low"), "vision": True,
+                     "speeds": (("ultrafast", "Ultrafast", "more quota"),)} for m in ("gpt-a", "gpt-b")}
+        guard = patch.dict(router.CLI_MODELS, {"codex": table})
+        guard.start()
+        self.addCleanup(guard.stop)
+        self.stores = Stores()
+        self.project = self.stores.projects.create("Test", str(root))
+        self.thread = self.stores.threads.create(self.project.id, Role.CHAT, P.CODEX,
+                                                model="gpt-a", speed="ultrafast", speed_model="gpt-a")
+        self.stores.threads.save(self.thread)
+        self.daemon = object.__new__(Daemon)
+        self.daemon.stores = self.stores
+        self.daemon._lock = threading.RLock()
+        self.daemon._active = lambda: None
+        self.daemon.providers = {P.CODEX: SimpleNamespace(set_model=lambda *a, **k: None)}
+        self.daemon._sessions = {}
+        self.daemon.bus = SimpleNamespace(publish=lambda event: None)
+        self.daemon.thread_json = to_json
+
+    def write(self, body, **kw):
+        return self.daemon.set_thread_model(self.thread.id, body, **kw)
+
+    def saved(self):
+        return self.stores.threads.get(self.thread.id)
+
+    def queue_write(self, body):
+        # Suspend immediately before lock acquisition. An implementation that
+        # derived speed or authorized from a pre-lock read has already done so.
+        queued, release = threading.Event(), threading.Event()
+        lock = self.daemon._lock
+        class Gate:
+            def __enter__(gate):
+                if threading.current_thread().name == "non-owner":
+                    queued.set()
+                    if not release.wait(5):
+                        raise AssertionError("owner did not release the queued write")
+                return lock.__enter__()
+            def __exit__(gate, *args):
+                return lock.__exit__(*args)
+        self.daemon._lock = Gate()
+        results = []
+        def refuse_owner():
+            raise APIError(403, "owner required")
+        def run():
+            try:
+                results.append(self.write(body, owner_check=refuse_owner))
+            except Exception as exc:
+                results.append(exc)
+        worker = threading.Thread(target=run, name="non-owner")
+        worker.start()
+        self.addCleanup(lambda: (release.set(), worker.join(5)))
+        self.assertTrue(queued.wait(5))
+        return release, worker, results
+
+    def test_non_owner_effort_cannot_restore_owner_speed_reset(self):
+        release, worker, results = self.queue_write({"effort": "low"})
+        self.write({"speed": None, "speed_model": "gpt-a"})
+        release.set()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertIsInstance(results[0], dict)
+        self.assertEqual(self.saved().effort, "low")
+        self.assertEqual((self.saved().speed, self.saved().speed_model), (None, None))
+
+    def test_model_authorization_uses_locked_record(self):
+        self.write({"speed": None, "speed_model": "gpt-a"})
+        release, worker, results = self.queue_write({"model": "gpt-b"})
+        self.write({"speed": "ultrafast", "speed_model": "gpt-a"})
+        release.set()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertIsInstance(results[0], APIError)
+        self.assertEqual(results[0].status, 403)
+        self.assertEqual((self.saved().model, self.saved().speed_model), ("gpt-a", "gpt-a"))
+
+    def test_default_change_cannot_reactivate_dormant_tier_and_owner_reselects(self):
+        thread = self.saved()
+        thread.model = None
+        self.stores.threads.save(thread)
+        TM.set_provider_default("codex", "gpt-a")
+        router.CLI_MODELS["codex"]["gpt-a"]["speeds"] = ()
+        with patch.object(router, "warn_once"):
+            self.assertIsNone(TM.effective_speed(self.saved(), TM.effective(self.saved())[0]))
+            TM.set_provider_default("codex", "gpt-b")
+            self.assertEqual(TM.effective(self.saved())[0], "gpt-b")
+            self.assertIsNone(TM.effective_speed(self.saved(), "gpt-b"))
+        self.assertEqual((self.saved().speed, self.saved().speed_model), ("ultrafast", "gpt-a"))
+        self.write({"speed": "ultrafast", "speed_model": "gpt-b"})
+        self.assertEqual(self.saved().speed_model, "gpt-b")
+        self.assertEqual(TM.effective_speed(self.saved(), "gpt-b"), "ultrafast")
+
+    def test_owner_model_write_rebinds_compatible_speed_and_clears_incompatible_pair(self):
+        self.write({"model": "gpt-b"})
+        self.assertEqual((self.saved().speed, self.saved().speed_model), ("ultrafast", "gpt-b"))
+        router.CLI_MODELS["codex"]["gpt-a"]["speeds"] = ()
+        self.write({"model": "gpt-a"})
+        self.assertEqual((self.saved().speed, self.saved().speed_model), (None, None))
+
+    def test_speed_model_precondition_rejects_old_model_even_with_same_tier(self):
+        self.write({"model": "gpt-b"})
+        before = to_json(self.saved())
+        for speed in ("ultrafast", None):
+            with self.assertRaises(APIError) as error:
+                self.write({"speed": speed, "speed_model": "gpt-a"})
+            self.assertEqual(error.exception.status, 409)
+            self.assertEqual(to_json(self.saved()), before)
+        with self.assertRaises(APIError) as error:
+            self.write({"speed": "ultrafast"})
+        self.assertEqual(error.exception.status, 409)
+
+    def test_reconnect_rollback_uses_the_snapshot_applied_to_provider(self):
+        self.write({"speed": None, "speed_model": "gpt-a"})
+        session = _Session(self.saved(), Brief(Role.CHAT, "/tmp"), SimpleNamespace())
+        session.applied = session.announced = ("gpt-a", "high")
+        session.applied_record = ("gpt-a", None)
+        self.daemon._sessions[self.thread.id] = session
+        self.write({"speed": "ultrafast", "speed_model": "gpt-a"})
+        applied = []
+        def reconnect(handle, model, effort, *, speed=None):
+            applied.append(speed)
+            # The owner saves Standard while the successful Fast reconnect is out of lock.
+            self.write({"speed": None, "speed_model": "gpt-a"})
+        session.provider.set_model = reconnect
+        self.daemon._apply_choice(session)
+        self.assertEqual(applied, ["ultrafast"])
+        self.assertIsNone(self.saved().speed)
+        self.assertEqual((session.applied_record_speed, session.applied_record_speed_model), ("ultrafast", "gpt-a"))
+        def fail_reconnect(*args, **kwargs):
+            raise ValueError("failed; provider restored the previous Fast client")
+        session.provider.set_model = fail_reconnect
+        self.daemon._apply_choice(session)
+        self.assertEqual(session.applied_speed, "ultrafast")
+        self.assertEqual((self.saved().speed, self.saved().speed_model), ("ultrafast", "gpt-a"))
 
 
 if __name__ == "__main__":

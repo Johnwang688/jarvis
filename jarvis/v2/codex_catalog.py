@@ -46,7 +46,14 @@ MAX_NAME = 64            # display-name characters
 MAX_SPEEDS = 8
 MAX_DESCRIPTION = 256
 MAX_EFFORTS = 16         # effort entries looked at per row
-MAX_CACHE_BYTES = 512 * 1024
+# json.dumps uses ensure_ascii: a Unicode code point costs at most 12 bytes
+# (a surrogate pair), IDs at most 64 ASCII bytes. Per-row JSON structure,
+# effort words, indentation and flags fit within the extra 2 KiB; the header
+# fits within 1 KiB. This also bounds Claude's smaller shared-cache format.
+MAX_CACHE_BYTES = 1024 + MAX_MODELS * (
+    2048 + 64 + 12 * MAX_NAME
+    + MAX_SPEEDS * (128 + 64 + 12 * (MAX_NAME + MAX_DESCRIPTION))
+)
 CACHE_VERSION = 1
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 

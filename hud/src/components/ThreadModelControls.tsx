@@ -96,6 +96,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   // of the latest one whose success has been drawn.
   const latest = useRef<Record<string, number>>({});
   const landed = useRef<Record<string, number>>({});
+  const pendingChoices = useRef<Record<string, number>>({});
+  const [, redrawPending] = useState(0);
   /** `from`: the conversation an effort move was made on (the chip's key when
    * it started). The pane showing another by now drops it — never onto a
    * thread or compose row it was not made on (review of PR #30). */
@@ -117,7 +119,10 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         return;
       }
       if (!targetId || !choice) return;
-      const body = patchBody(choice, next);
+      const body = patchBody(choice, next, models);
+      // Also guard the callback: a second event can arrive before React draws
+      // the disabled select, or through a callback from an earlier render.
+      if (body && "speed" in body && pendingChoices.current[targetId]) return;
       if (!body) return;
       const key = keyOf(cs);
       // An older answer must not undo a newer one: the effort slider can send
@@ -128,6 +133,11 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       // `thread_updated` to put it right; review of PR #30). Only the latest
       // change's refusal is said. The SSE `thread_updated` still carries every
       // change, in the order the daemon made them.
+      const pendingChoice = "model" in body || "effort" in body;
+      if (pendingChoice) {
+        pendingChoices.current[targetId] = (pendingChoices.current[targetId] || 0) + 1;
+        redrawPending((n) => n + 1);
+      }
       const n = (latest.current[targetId] = (latest.current[targetId] || 0) + 1);
       const isLatest = () => latest.current[targetId] === n;
       return api
@@ -157,9 +167,15 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           const s2 = now.current;
           const at = PANE_NOS.find((p) => keyOf(paneChips(s2, p)) === key);
           if (at !== undefined) setErrors((all) => ({ ...all, [at]: { key, text: `Could not change model: ${e.message}` } }));
+        })
+        .finally(() => {
+          if (pendingChoice) {
+            pendingChoices.current[targetId] -= 1;
+            redrawPending((n) => n + 1);
+          }
         });
     },
-    [dispatch],
+    [dispatch, models],
   );
 
   const openCatalog = useCallback((mode: "thread" | "roster" = "thread", pane: PaneNo = 1) => {
@@ -250,8 +266,17 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         zoom={zoom}
       />
       <SpeedChip models={models} choice={cs.choice}
+        pending={!!(cs.targetId && pendingChoices.current[cs.targetId])}
         disabled={!cs.editable.model || state.approvals.length > 0}
-        onChange={(speed) => change(pane, { ...cs.choice!, speed }, keyOf(cs))} />
+        onChange={(speed) => {
+          if (cs.targetId && pendingChoices.current[cs.targetId]) return;
+          const current = paneChips(now.current, pane).choice;
+          if (!current) return;
+          // A callback from an older render remains a speed write with its
+          // original model precondition, even if an SSE moved the model on.
+          return change(pane, { ...current, speed,
+            speed_model: cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null }, keyOf(cs));
+        }} />
       </>
     );
   };

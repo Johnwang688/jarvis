@@ -63,6 +63,7 @@ export interface Choice {
   model: string | null;
   effort: string | null;
   speed?: string | null;
+  speed_model?: string | null;
 }
 
 export const PROVIDERS: ProviderName[] = ["fast", "claude", "codex"];
@@ -201,7 +202,7 @@ export function composeChoice(c: { provider?: ProviderName; model?: string | nul
 
 export function choiceOf(thread: Thread): Choice {
   return { provider: thread.provider, model: thread.model ?? null, effort: thread.effort ?? null,
-           ...(thread.speed !== undefined ? { speed: thread.speed } : {}) };
+           ...(thread.speed !== undefined ? { speed: thread.speed, speed_model: thread.speed_model ?? null } : {}) };
 }
 
 /** True when a pinned OpenRouter model has since left the roster (A3). */
@@ -298,14 +299,21 @@ export function threadBody(c: Choice): { provider: ProviderName; brief?: { model
 }
 
 /** The `PATCH /threads/{id}` body for a change, or null when nothing changed. */
-export function patchBody(before: Choice, after: Choice): { model?: string | null; effort?: string | null; speed?: string | null } | null {
-  const body: { model?: string | null; effort?: string | null; speed?: string | null } = {};
+export function patchBody(before: Choice, after: Choice, tm: ThreadModels | null = null): {
+  model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null;
+} | null {
+  const body: { model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null } = {};
   if (before.model !== after.model) {
     body.model = after.model;
     if (after.effort) body.effort = after.effort;
-    if (before.speed != null || after.speed != null) body.speed = after.speed ?? null;
-  } else if (before.effort !== after.effort) body.effort = after.effort;
-  if ((before.speed ?? null) !== (after.speed ?? null)) body.speed = after.speed ?? null;
+    // The backend carries or clears the saved tier atomically with this model.
+  } else {
+    if (before.effort !== after.effort) body.effort = after.effort;
+    if ((before.speed ?? null) !== (after.speed ?? null) || before.speed_model !== after.speed_model) {
+      body.speed = after.speed ?? null;
+      body.speed_model = after.speed_model || after.model || defaultModel(tm, after.provider);
+    }
+  }
   return Object.keys(body).length ? body : null;
 }
 
