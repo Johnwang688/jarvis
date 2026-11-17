@@ -2630,3 +2630,9 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
 .appearance-help { margin: 2px 0 0; font-size: 12px; color: var(--text-muted); }
 .appearance-preview { display: flex; gap: 0; margin: 8px 0; border-radius: var(--radius-btn); overflow: hidden; border: 1px solid var(--rim); }
 .appearance-preview span { flex: 1 1 0; height: 18px; }
+
+/* Native select reserves the widest tier, keeping the compact bar still on a speed change. */
+.speedchip { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: 4px; }
+.speedchip select { min-width: 0; max-width: 100%; text-overflow: ellipsis; color: inherit; }
+.speedchip[data-on="true"] { color: var(--accent-hi); border-color: var(--accent); background: var(--accent-soft); }
+.speedchip[data-unavailable="true"] { color: var(--text-muted); opacity: .55; }

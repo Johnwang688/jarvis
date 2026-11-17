@@ -2049,6 +2049,66 @@ class Backend(unittest.TestCase):
             self.request("POST", "/say", {"text": "hi"}, port=hud,
                          headers={"Host": f"localhost:{hud}", "Origin": f"http://localhost:{hud}"})
 
+    def test_speed_owner_write_validation_reset_and_model_change(self):
+        from jarvis.v2 import router, thread_model
+        tiers = (("fast", "Fast", "extra usage"),)
+        table = {m: dict(e, speeds=tiers if m == "claude-fable-5-2" else ())
+                 for m, e in router.CLI_MODELS["claude"].items()}
+        with patch.dict(router.CLI_MODELS, {"claude": table}):
+            fake = ModelFake(P.CLAUDE)
+            changes = []
+            def set_model(handle, model, effort, *, speed=None):
+                changes.append((model, effort, speed))
+            fake.set_model = set_model
+            self.daemon.providers[P.CLAUDE] = fake
+            thread = self.daemon.open_thread(self.project.id, Role.CHAT, P.CLAUDE,
+                                            Brief(Role.CHAT, str(self.project_root), model="claude-fable-5-2"))
+            tid = thread.id
+            path = f"/threads/{tid}"
+            self.request("PATCH", path, {"speed": "fast"}, status=403)
+            self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                         "provider": "claude", "brief": {"speed": "fast"}}, status=403)
+            for port in (self.daemon.port, self.daemon.face_port):
+                self.request("PATCH", path, {"speed": None}, status=403, port=port)
+            self.request("PATCH", path, {"speed": "fast"}, status=404, port=self.daemon.workshop_port)
+            self.assertIsNone(self.stores.threads.get(tid).speed)
+            self.assertIn("claude-fable-5-2", self.owner("PATCH", path, {"speed": "ultrafast"}, status=400)["error"])
+            saved = self.brief_bytes(tid)
+            self.assertEqual(self.owner("PATCH", path, {"speed": "fast"})["speed"], "fast")
+            self.send_and_settle(tid)
+            self.assertIsNone(fake.opened[-1][1].speed, "open starts at Standard before the owner write")
+            self.assertEqual(changes[-1][2], "fast")
+            self.owner("PATCH", path, {"effort": "max"})
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], efforts=("high",))
+            reset = self.owner("PATCH", path, {"speed": None})
+            self.assertEqual(reset["effort"], "max", "speed writes preserve even a stale saved effort")
+            self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], None)
+            self.owner("PATCH", path, {"speed": "fast"})
+            self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], "fast")
+            # A catalog change downgrades the next turn, preserving the record.
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], speeds=())
+            with patch.object(router, "warn_once") as note:
+                self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], None)
+            self.assertEqual(self.stores.threads.get(tid).speed, "fast")
+            self.assertTrue(note.called)
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], speeds=tiers)
+            # Model writes which would change saved speed also require the owner.
+            self.request("PATCH", path, {"model": "claude-sonnet-5-5"}, status=403)
+            self.assertIsNone(self.owner("PATCH", path, {"model": "claude-sonnet-5-5"})["speed"])
+            self.owner("PATCH", path, {"model": "claude-fable-5-2", "speed": "fast"})
+            self.assertIsNone(self.owner("PATCH", path, {"speed": ""})["speed"])
+            self.assertEqual(self.brief_bytes(tid), saved)
+            # Compose speed reaches both the persisted thread and initial runtime brief.
+            opened = self.owner("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                                "provider": "claude", "brief": {"model": "claude-fable-5-2", "speed": "fast"}}, status=201)
+            self.assertEqual(opened["speed"], "fast")
+            self.assertEqual(fake.opened[-1][1].speed, "fast")
+            self.assertEqual(self.stores.threads.get(opened["id"]).speed, "fast")
+            self.owner("POST", "/thread-models", {"provider": "claude", "model": "claude-fable-5-2", "speed": "fast"}, status=400)
+
     def test_model_and_avatar_writes_are_the_owners_alone(self):
         """#227 review: `POST /model`, `POST /models` (the protected `models.json`: an API-listener
         client could add `evil/model` and select it) and `POST /avatar` are owner-only, checked
@@ -2856,7 +2916,7 @@ class Backend(unittest.TestCase):
         self.assertEqual(published[1]["data"]["effective_effort"], "high")
         # The record plus the envelope a rename's thread_updated also carries.
         self.assertEqual(published[1]["data"]["thread_id"], tid)
-        self.assertEqual(published[1]["data"]["changed"], ["model", "effort"])
+        self.assertEqual(published[1]["data"]["changed"], ["model", "effort", "speed"])
         self.assertEqual(published[1]["data"]["id"], tid)
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])

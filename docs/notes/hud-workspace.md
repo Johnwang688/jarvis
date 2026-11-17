@@ -2494,3 +2494,16 @@ snapshot and takes no new entries).
 - **WS-3 (§11).** The rainbow Inbox row is the In progress list's header and folds it; a "Needs you" line with
   its count (0 included) is always at the top of the unfolded list and opens the page; today's Inbox page is
   renamed "Needs you" and lists every row (ranks 1 to 8), grouped under its thread with a link to open it.
+
+## Per-chat speed (2026-11-17)
+
+The input bar's separate ⚡ speed chip offers Standard and the current model's
+catalog tiers, including future Codex tiers. A selected tier lights the cyan
+glass badge and its tooltip shows the catalog's cost description; Claude Fast
+says “billed as extra usage beyond your subscription.” Models without tiers
+have a grey disabled chip (“This model has no fast mode”). The native select
+reserves its widest option and keeps keyboard events local. Compose choices
+ride the first message; existing chats use the owner-checked model PATCH with
+`speed` (null or empty resets). Model changes retain only compatible speed ids
+in that same write. There is no speed default, confirmation, auto-off, phone
+control, Discord command or agent/MCP tool.

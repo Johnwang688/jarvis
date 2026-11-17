@@ -114,26 +114,26 @@ _CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
 _CODEX_MAX = ("low", "medium", "high", "xhigh", "max")
 _CODEX_ULTRA = ("low", "medium", "high", "xhigh", "max", "ultra")
 CODEX_FALLBACK: dict[str, dict] = {
-    "gpt-6.1-sol": {"name": "GPT-6.1 Sol", "efforts": _CODEX_ULTRA, "vision": True},
-    "gpt-6-sol": {"name": "GPT-6 Sol", "efforts": _CODEX_ULTRA, "vision": True},
-    "gpt-6-luna": {"name": "GPT-6 Luna", "efforts": _CODEX_MAX, "vision": True},
-    "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_ULTRA, "vision": True},
-    "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_ULTRA, "vision": True},
-    "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_ULTRA, "vision": True},
-    "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_MAX, "vision": True},
+    "gpt-6.1-sol": {"name": "GPT-6.1 Sol", "efforts": _CODEX_ULTRA, "vision": True, "speeds": ()},
+    "gpt-6-sol": {"name": "GPT-6 Sol", "efforts": _CODEX_ULTRA, "vision": True, "speeds": ()},
+    "gpt-6-luna": {"name": "GPT-6 Luna", "efforts": _CODEX_MAX, "vision": True, "speeds": ()},
+    "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_ULTRA, "vision": True, "speeds": ()},
+    "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_ULTRA, "vision": True, "speeds": ()},
+    "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_ULTRA, "vision": True, "speeds": ()},
+    "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_MAX, "vision": True, "speeds": ()},
     # Hidden from the account's listing on 2026-10-08, so its ladder is the
     # one this table always carried rather than an advertised one.
-    "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
+    "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True, "speeds": ()},
 }
 CLAUDE_FALLBACK: dict[str, dict] = {
-    "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-fable-5-2": {"name": "Claude Fable 5.2", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-haiku-5-5": {"name": "Claude Haiku 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-    "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
+    "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-fable-5-2": {"name": "Claude Fable 5.2", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-haiku-5-5": {"name": "Claude Haiku 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True, "speeds": ()},
+    "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True, "speeds": ()},
 }
 CLI_MODELS: dict[str, dict[str, dict]] = {
     "claude": {model: dict(entry) for model, entry in CLAUDE_FALLBACK.items()},

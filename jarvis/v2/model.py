@@ -116,6 +116,7 @@ class Thread:
     tokens: int = 0                             # work_tokens, §8.3
     model: str | None = None
     effort: str | None = None
+    speed: str | None = None                   # None = standard; owner chat choice
     migrated_from: str | None = None            # v1 session id, if any
     # The folder the thread was opened in. Fixed for its life: a move between
     # projects re-labels the thread, it never re-roots it (design §18).

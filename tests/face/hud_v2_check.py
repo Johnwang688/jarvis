@@ -2433,6 +2433,31 @@ def _empty_front_report(call):
             and type(body["panes"]) is list and body["panes"] == [])
 
 
+def speed_chip_checks(page, mock):
+    print("\nper-chat speed chip")
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    speed = page.locator('[data-testid="pane-1"] [data-testid="speed-chip-select"]')
+    check("OpenRouter without speeds is disabled", until(lambda: speed.count() and speed.is_disabled()))
+    page.locator('[data-testid="pane-1"] [data-testid="provider-chip-select"]').select_option("claude")
+    until(lambda: speed.is_enabled())
+    before = speed.bounding_box()
+    speed.select_option("fast")
+    chip = page.locator('[data-testid="pane-1"] [data-testid="speed-chip"]')
+    check("speed lights cyan with the subscription cost", chip.get_attribute("data-on") == "true"
+          and "billed as extra usage beyond your subscription" in chip.get_attribute("title"))
+    after = speed.bounding_box()
+    check("speed uses the cyan accent", chip.evaluate("el => getComputedStyle(el).color") ==
+          chip.evaluate("el => getComputedStyle(document.documentElement).getPropertyValue('--accent-hi').trim()")
+          or chip.evaluate("el => getComputedStyle(el).color") == "rgb(154, 214, 234)")
+    model_chip = page.locator('[data-testid="pane-1"] [data-testid="model-chip"]')
+    check("speed and effort chips have the same height", chip.bounding_box()["height"] == model_chip.bounding_box()["height"],
+          str((chip.bounding_box(), model_chip.bounding_box())))
+    check("selecting speed keeps compact bar dimensions", before == after, str((before, after)))
+    speed.select_option("")
+    check("Standard resets the lit badge", chip.get_attribute("data-on") == "false")
+
+
 def thread_model_checks(page, mock):
     print("\nthe model a thread runs on: provider, model, effort")
     w = mock.world
@@ -3661,6 +3686,7 @@ def main():
             compose_checks(page, mock)
             newproject_checks(page, mock)
             move_checks(page, mock)
+            speed_chip_checks(page, mock)
             thread_model_checks(page, mock)
             effort_slider_checks(page, mock)
             provider_default_checks(page, mock)

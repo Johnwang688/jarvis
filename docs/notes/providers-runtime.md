@@ -1713,3 +1713,15 @@ Code: `jarvis/tools/skills.py` (`external_skills`, `_paths`),
   first `jarvis skills link` made 25 Codex links. Synced skills written for
   Claude-only tools (`computer-use`, `chrome-browser`) are listed but may
   only half-work on the fast path or Codex.
+
+## Per-chat speed (2026-11-17)
+
+Chat speed is per thread (`Thread.speed`, copied into `Brief.speed`), with
+`null` meaning Standard and no global speed default. Catalogs supply the
+available tiers: Codex `serviceTiers` and Claude's exact `supportsFastMode: true`.
+Claude merges `fastMode: true` into session settings only for a supported Fast
+choice and reconnects on the next message when speed changes. Every Codex
+`turn/start` sends `serviceTierForTurn`, explicitly `"default"` for Standard;
+steering leaves speed alone. An unavailable saved tier runs Standard with a
+note, preserving the choice; an owner's model change clears an incompatible
+speed in the same write. Speed changes billing and latency only, never permissions.

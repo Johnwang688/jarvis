@@ -434,6 +434,8 @@ class _Session:
     # Chat threads only: the (model, effort) the provider is running now, and
     # the last one the transcript announced. A turn starts by comparing the
     # thread's effective choice with `applied` (thread_model, decisions A1/A7).
+    applied_speed: str | None = None
+    applied_record_speed: str | None = None
     applied: tuple | None = None
     announced: tuple | None = None
     # The thread record's (model, effort) when `applied` was set: what a
@@ -1065,6 +1067,8 @@ class Daemon:
                                       "always_ask": project.always_ask, "role": role, **value})
             self._within_project(project, brief)
         _validate(brief, Brief)
+        if brief.speed is not None and (role != Role.CHAT or brief.task_id is not None):
+            raise APIError(400, "speed is an owner chat choice")
         if brief.role != role or not Path(brief.cwd).is_absolute():
             raise APIError(400, "brief role must match thread role and cwd must be absolute")
         return brief
@@ -1123,7 +1127,7 @@ class Daemon:
             # its first turn: born marked, the start-up recount never reads it.
             recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
-                                               model=brief.model, effort=brief.effort, task_id=brief.task_id,
+                                               model=brief.model, effort=brief.effort, speed=brief.speed, task_id=brief.task_id,
                                                cwd=brief.cwd, cost_recount=recounted,
                                                # A title fixed at birth (the Voice chat, VA-D4)
                                                # is in the first metadata write, so a crash
@@ -1217,11 +1221,13 @@ class Daemon:
             raise APIError(400, why)
         try:
             model, effort = thread_model.check(provider, brief.model, brief.effort)
+            speed = thread_model.check_speed(provider, model, brief.speed)
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
         # An effort with no model keeps the thread on the default model (A4
         # amendment): the record holds the effort on its own.
-        changes = {"model": model, "effort": effort}
+        changes = {"model": model, "effort": effort,
+                   "speed": speed}
         if provider in (ProviderName.CLAUDE, ProviderName.CODEX) and not brief.system_append:
             changes["system_append"] = roles.brief_for(Role.CHAT).system_append
         return replace(brief, **changes)
@@ -1243,6 +1249,8 @@ class Daemon:
             return run_brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
+        session.applied_speed = thread_model.effective_speed(session.thread, choice[0])
+        session.applied_record_speed = session.thread.speed
         session.applied_record = (session.thread.model, session.thread.effort)
         # A saved brief never carries a jarvis server (`make_brief` refuses
         # MCP servers from a caller); if one somehow did, it is not passed on.
@@ -1252,7 +1260,7 @@ class Daemon:
         if token is not None:
             from .bridge import server_entry
             servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
-        return replace(run_brief, model=choice[0], effort=choice[1], mcp_servers=servers)
+        return replace(run_brief, model=choice[0], effort=choice[1], speed=session.applied_speed, mcp_servers=servers)
 
     def _mint(self, session) -> str | None:
         """A caller token for an owner's chat on Claude or Codex that is
@@ -1281,23 +1289,30 @@ class Daemon:
                 # routing.json) keeps the thread on what it already runs.
                 LOG.warning("Cannot resolve the model for thread %s", session.thread.id, exc_info=True)
                 return
-            if want == session.applied:
+            speed = thread_model.effective_speed(session.thread, want[0])
+            if want == session.applied and speed == session.applied_speed:
+                session.applied_record_speed = session.thread.speed
                 return
         setter = getattr(session.provider, "set_model", None)
         try:
             if setter is None:
                 raise ValueError(f"the {session.thread.provider.value} provider cannot change "
                                  "model mid-thread")
-            setter(session.handle, *want)
+            if speed is not None or session.applied_speed is not None:
+                setter(session.handle, *want, speed=speed)
+            else:
+                setter(session.handle, *want)
         except Exception as exc:
             # A refused switch may already have disconnected the old CLI
             # (Claude reconnects the old model then): its children are gone.
             self._switch_ended_subagents(session)
-            self._switch_refused(session, want, exc)
+            self._switch_refused(session, want, exc, wanted_speed=speed)
             return
         self._switch_ended_subagents(session)
         with self._lock:
             session.applied = want
+            session.applied_speed = speed
+            session.applied_record_speed = session.thread.speed
             session.applied_record = (session.thread.model, session.thread.effort)
             if want != session.announced:
                 session.announced = want
@@ -1321,7 +1336,7 @@ class Daemon:
         except Exception:
             LOG.warning("Cannot end the sub-agents of %s", session.thread.id, exc_info=True)
 
-    def _switch_refused(self, session, want, exc):
+    def _switch_refused(self, session, want, exc, *, wanted_speed=None):
         """A provider refused to move a thread onto `want`. The record goes
         back to what the provider is still running, so the next message does
         not try (and fail) the same switch again, and the transcript says so.
@@ -1343,10 +1358,12 @@ class Daemon:
             # Roll back only while the record still asks for the refused
             # choice: a PATCH that landed during the switch is the owner's
             # newer word, and the next turn tries that one instead.
-            rollback = asked == want
+            rollback = (asked == want and
+                        thread_model.effective_speed(thread, want[0]) == wanted_speed)
             if rollback:
                 restored = session.applied_record or (None, None)
                 thread.model, thread.effort = restored
+                thread.speed = session.applied_record_speed
                 try:
                     still = thread_model.effective(thread)
                 except Exception:
@@ -1362,14 +1379,14 @@ class Daemon:
             text = (f"switch to {thread_model.label(*want)} refused: {reason}; "
                     f"still on {thread_model.label(*applied)}")
             self._system_line(thread, "model_set", text, {
-                "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+                "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
                 "effective_model": applied[0], "effective_effort": applied[1],
                 "refused_model": want[0], "refused_effort": want[1]})
             record = self.thread_json(thread)
             self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
                               "project_id": thread.project_id,
                               "data": {**record, "thread_id": thread.id,
-                                       "changed": ["model", "effort"],
+                                       "changed": ["model", "effort", "speed"],
                                        "effective_model": applied[0],
                                        "effective_effort": applied[1]}})
             if isinstance(exc, SessionLost):
@@ -1385,7 +1402,7 @@ class Daemon:
         from . import thread_model
         text = f"model → {thread_model.label(*choice)} ({why})"
         self._system_line(thread, "model_set", text, {
-            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
             "effective_model": choice[0], "effective_effort": choice[1]})
         return text
 
@@ -1397,7 +1414,7 @@ class Daemon:
             effort = f"default · {effort}"
         text = f"effort → {effort} (default model: {choice[0] or 'unknown'})"
         self._system_line(thread, "model_set", text, {
-            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
             "effective_model": choice[0], "effective_effort": choice[1]})
         return text
 
@@ -1409,7 +1426,7 @@ class Daemon:
         self.bus.publish(record)
 
     def set_thread_model(self, thread_id, body) -> dict:
-        """`PATCH /threads/{id}` `{model?, effort?}`. Applies from the next
+        """`PATCH /threads/{id}` `{model?, effort?, speed?}`. Applies from the next
         message, never in the middle of a turn; `brief.json` is untouched.
 
         A model change — a new model, or `model: null` back to the default —
@@ -1432,9 +1449,17 @@ class Daemon:
             effort = body.get("effort")
         else:
             model = thread.model
-            effort = body["effort"]
+            effort = body.get("effort", thread.effort)
         try:
-            model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+            if "model" in body or "effort" in body:
+                model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+            speed = thread.speed
+            if "model" in body and model != thread.model:
+                target = model or thread_model.default_model(thread.provider)
+                if speed not in {t[0] for t in thread_model.speeds_of(thread.provider, target)}:
+                    speed = None
+            if "speed" in body:
+                speed = thread_model.check_speed(thread.provider, model, body["speed"])
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
         from . import projects
@@ -1446,6 +1471,8 @@ class Daemon:
             if thread.archived or projects.is_archived(self.stores, thread.project_id):
                 raise APIError(409, "restore the thread before changing its model")
             before = (thread.model, thread.effort)
+            before_speed = thread.speed
+            thread.speed = speed
             thread.model, thread.effort = model, effort
             thread.updated = utcnow()
             self.stores.threads.save(thread)
@@ -1455,7 +1482,11 @@ class Daemon:
                 # keep it in step so a turn in flight cannot write the old
                 # choice back over this one.
                 session.thread.model, session.thread.effort = model, effort
+                session.thread.speed = speed
             choice = thread_model.effective(thread)
+            if before_speed != speed:
+                self._system_line(thread, "model_set", f"speed → {speed or 'standard'} (from the next message)",
+                                  {"speed": speed})
             if before != (model, effort):
                 if session is not None:
                     session.announced = choice
@@ -1470,7 +1501,7 @@ class Daemon:
             self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
                               "project_id": thread.project_id,
                               "data": {**record, "thread_id": thread.id,
-                                       "changed": ["model", "effort"],
+                                       "changed": ["model", "effort", "speed"],
                                        "effective_model": choice[0],
                                        "effective_effort": choice[1]}})
             return record
@@ -3781,6 +3812,9 @@ def _handler(daemon):
                     body = _object(self._body(), ("project_id", "role", "provider", "brief"),
                                    ("project_id", "role"))
                     body.setdefault("brief", {})
+                    if isinstance(body["brief"], dict) and "speed" in body["brief"]:
+                        from .projects import owner_only
+                        owner_only(self, daemon)
                     if "provider" not in body:
                         if body["role"] != "chat":
                             raise APIError(400, "missing fields: provider")

@@ -17,6 +17,7 @@ export interface ModelEntry {
   id: string;
   name?: string;
   efforts?: string[];
+  speeds?: [string, string, string][];
   /** The roster's per-model pin (OpenRouter only). */
   effort?: string | null;
   vision?: boolean;
@@ -61,6 +62,7 @@ export interface Choice {
   provider: ProviderName;
   model: string | null;
   effort: string | null;
+  speed?: string | null;
 }
 
 export const PROVIDERS: ProviderName[] = ["fast", "claude", "codex"];
@@ -192,12 +194,14 @@ export function providerRefusal(
 }
 
 /** A compose row's choice; absent fields are the defaults (A5). */
-export function composeChoice(c: { provider?: ProviderName; model?: string | null; effort?: string | null } | null): Choice {
-  return { provider: c?.provider || "fast", model: c?.model ?? null, effort: c?.effort ?? null };
+export function composeChoice(c: { provider?: ProviderName; model?: string | null; effort?: string | null; speed?: string | null } | null): Choice {
+  return { provider: c?.provider || "fast", model: c?.model ?? null, effort: c?.effort ?? null,
+           ...(c?.speed !== undefined ? { speed: c.speed } : {}) };
 }
 
 export function choiceOf(thread: Thread): Choice {
-  return { provider: thread.provider, model: thread.model ?? null, effort: thread.effort ?? null };
+  return { provider: thread.provider, model: thread.model ?? null, effort: thread.effort ?? null,
+           ...(thread.speed !== undefined ? { speed: thread.speed } : {}) };
 }
 
 /** True when a pinned OpenRouter model has since left the roster (A3). */
@@ -267,8 +271,10 @@ export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
 /** A new model resets the effort to that model's default (A4). Going back to
  * the default (`null`) is a choice of model too, so it clears a stored
  * effort as well as the pin. */
-export function applyModel(c: Choice, model: string | null): Choice {
-  return { ...c, model, effort: null };
+export function applyModel(c: Choice, model: string | null, tm: ThreadModels | null = null): Choice {
+  const speeds = entry(tm, c.provider, model || defaultModel(tm, c.provider))?.speeds || [];
+  return { ...c, model, effort: null,
+           ...(c.speed !== undefined ? { speed: speeds.some((s) => s[0] === c.speed) ? c.speed : null } : {}) };
 }
 
 /** An effort alone never pins a model: a default thread keeps following the
@@ -283,20 +289,24 @@ export function applyProvider(_c: Choice, provider: ProviderName): Choice {
 }
 
 /** The `POST /threads` fields for a compose choice. A default sends no model. */
-export function threadBody(c: Choice): { provider: ProviderName; brief?: { model?: string; effort?: string } } {
-  const brief: { model?: string; effort?: string } = {};
+export function threadBody(c: Choice): { provider: ProviderName; brief?: { model?: string; effort?: string; speed?: string } } {
+  const brief: { model?: string; effort?: string; speed?: string } = {};
   if (c.model) brief.model = c.model;
   if (c.effort) brief.effort = c.effort;
+  if (c.speed) brief.speed = c.speed;
   return Object.keys(brief).length ? { provider: c.provider, brief } : { provider: c.provider };
 }
 
 /** The `PATCH /threads/{id}` body for a change, or null when nothing changed. */
-export function patchBody(before: Choice, after: Choice): { model?: string | null; effort?: string | null } | null {
+export function patchBody(before: Choice, after: Choice): { model?: string | null; effort?: string | null; speed?: string | null } | null {
+  const body: { model?: string | null; effort?: string | null; speed?: string | null } = {};
   if (before.model !== after.model) {
-    return after.effort ? { model: after.model, effort: after.effort } : { model: after.model };
-  }
-  if (before.effort !== after.effort) return { effort: after.effort };
-  return null;
+    body.model = after.model;
+    if (after.effort) body.effort = after.effort;
+    if (before.speed != null || after.speed != null) body.speed = after.speed ?? null;
+  } else if (before.effort !== after.effort) body.effort = after.effort;
+  if ((before.speed ?? null) !== (after.speed ?? null)) body.speed = after.speed ?? null;
+  return Object.keys(body).length ? body : null;
 }
 
 /** Who may change what: the provider only while composing; the model and

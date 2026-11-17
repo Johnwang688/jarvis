@@ -61,6 +61,7 @@ export interface Thread {
   tokens: number;
   model: string | null;
   effort: string | null;
+  speed?: string | null;
   /** The folder the thread was opened in. A move never changes it. */
   cwd?: string | null;
   /** When the owner archived this thread; such a thread is only in `/archive`. */

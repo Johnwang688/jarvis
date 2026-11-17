@@ -534,7 +534,9 @@ def _thread_models(w):
             (default, effort), source = _BUILTIN[p], ("built-in" if p == "claude" else "routing")
         providers[p] = {
             "label": labels[p], "default": default, "default_effort": effort,
-            "models": [dict(r, default_effort=_default_effort(w, p, r["id"])) for r in _rows(w, p)],
+            "models": [dict(r, default_effort=_default_effort(w, p, r["id"]),
+                            speeds=([("fast", "Fast", "Faster output, billed as extra usage beyond your subscription")]
+                                    if p == "claude" else [])) for r in _rows(w, p)],
             "note": "", "default_source": source, "settable": p != "fast",
             "hud_default": dict(hud[p]) if p in hud else None,
             "builtin": ({"model": _BUILTIN[p][0], "effort": _BUILTIN[p][1]} if p in _BUILTIN else None),
@@ -1504,21 +1506,21 @@ class MockDaemon:
                             p.update({k: v for k, v in body.items() if k in p})
                             return self._json(p)
                     return self._err(404, "no such project")
-                if len(parts) == 2 and parts[0] == "threads" and ("model" in body or "effort" in body):
+                if len(parts) == 2 and parts[0] == "threads" and ("model" in body or "effort" in body or "speed" in body):
                     # A chat thread's model and effort (decisions A1-A7), with
                     # the real daemon's refusals and its two broadcasts.
                     t = next((t for t in w["threads"] if t["id"] == parts[1]), None)
                     if t is None:
                         return self._err(404, "no such thread")
-                    if set(body) - {"model", "effort"}:
-                        return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort"})))
+                    if set(body) - {"model", "effort", "speed"}:
+                        return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort", "speed"})))
                     if t.get("task_id") or t.get("role") != "chat":
                         return self._err(409, "a task's threads run the model routing gave them")
                     home = next((p for p in w["projects"] if p["id"] == t["project_id"]), {})
                     if t.get("archived") or home.get("archived"):
                         return self._err(409, "restore the thread before changing its model")
                     model = body["model"] if "model" in body else t.get("model")
-                    effort = body.get("effort") if "model" in body else body["effort"]
+                    effort = body.get("effort") if "model" in body else body.get("effort", t.get("effort"))
                     refusal = _check_choice(w, t["provider"], model, effort, current=t.get("model"))
                     if refusal:
                         return self._err(400, refusal)
@@ -1526,6 +1528,8 @@ class MockDaemon:
                     # model (A4 amendment): the record holds the effort only.
                     was_default = t.get("model") is None
                     t["model"], t["effort"] = model, effort
+                    if "speed" in body:
+                        t["speed"] = body["speed"]
                     shown = model or _thread_models(w)["providers"][t["provider"]]["default"]
                     shown_effort = effort or _default_effort(w, t["provider"], shown)
                     if model is None and was_default:

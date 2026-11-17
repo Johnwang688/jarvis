@@ -43,6 +43,8 @@ LOG = logging.getLogger(__name__)
 MAX_ROWS = 2000          # rows looked at in one catalog (the provider pages 20 × 100)
 MAX_MODELS = 100         # usable models kept
 MAX_NAME = 64            # display-name characters
+MAX_SPEEDS = 8
+MAX_DESCRIPTION = 256
 MAX_EFFORTS = 16         # effort entries looked at per row
 MAX_CACHE_BYTES = 512 * 1024
 CACHE_VERSION = 1
@@ -64,6 +66,28 @@ def _efforts(row) -> tuple[str, ...]:
         if isinstance(effort, str) and effort in CODEX_EFFORT_LADDER and effort not in found:
             found.append(effort)
     return tuple(found)
+
+
+def _speeds(row) -> tuple[tuple[str, str, str], ...]:
+    tiers = row.get("serviceTiers")
+    if not isinstance(tiers, list):
+        return ()
+    found = {}
+    # Bound inspection as well as the number of accepted tiers.
+    for tier in tiers[:MAX_ROWS]:
+        if len(found) >= MAX_SPEEDS:
+            break
+        if not isinstance(tier, dict):
+            continue
+        tier_id = tier.get("id")
+        if not isinstance(tier_id, str) or not _ID.fullmatch(tier_id) or tier_id in found:
+            continue
+        def line(key, cap):
+            value = tier.get(key)
+            return clean_line(value[:cap * 4], cap) if isinstance(value, str) else ""
+        found[tier_id] = (tier_id, line("name", MAX_NAME) or tier_id,
+                          line("description", MAX_DESCRIPTION))
+    return tuple(found.values())
 
 
 def parse(rows) -> dict[str, dict]:
@@ -88,6 +112,7 @@ def parse(rows) -> dict[str, dict]:
         parsed[model_id] = {
             "name": name or model_id,
             "efforts": efforts,
+            "speeds": _speeds(row),
             "vision": isinstance(modalities, list) and "image" in modalities,
             "advertised_effort": advertised if isinstance(advertised, str) and advertised in efforts else None,
         }
@@ -104,7 +129,9 @@ def rows_of(table: dict[str, dict]) -> list[dict]:
         row = {"model": model_id, "displayName": entry["name"],
                "supportedReasoningEfforts": [{"reasoningEffort": e} for e in entry["efforts"]],
                "inputModalities": ["text", "image"] if entry["vision"] else ["text"],
-               "hidden": False}
+               "hidden": False,
+               "serviceTiers": [dict(zip(("id", "name", "description"), tier))
+                                for tier in entry.get("speeds", ())]}
         if entry.get("advertised_effort"):
             row["defaultReasoningEffort"] = entry["advertised_effort"]
         rows.append(row)

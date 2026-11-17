@@ -2215,9 +2215,12 @@ def route(handler, daemon, parts, query):
         return 200, payload
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
-        body = _object(handler._body(), ("title", "project_id", "model", "effort"))
+        body = _object(handler._body(), ("title", "project_id", "model", "effort", "speed"))
+        if "speed" in body or ("model" in body and daemon.require(stores.threads, parts[1]).speed is not None):
+            from .projects import owner_only
+            owner_only(handler, daemon)
         kinds = [k for k, keys in (("rename", {"title"}), ("move", {"project_id"}),
-                                   ("model", {"model", "effort"})) if body.keys() & keys]
+                                   ("model", {"model", "effort", "speed"})) if body.keys() & keys]
         if len(kinds) != 1:
             fail(400, "rename, move and model change are separate requests" if kinds
                  else "missing fields: title, project_id, or model/effort")

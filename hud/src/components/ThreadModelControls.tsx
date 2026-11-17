@@ -16,12 +16,13 @@ import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow } from "../types";
 import {
-  chipState, defaultBody, patchBody, PROVIDER_LABELS, PROVIDERS, providerRefusal, visionNote,
+  applyModel, chipState, defaultBody, patchBody, PROVIDER_LABELS, PROVIDERS, providerRefusal, visionNote,
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import type { ProviderName } from "../types";
 import { PANE_NOS, type PaneNo } from "../lib/workspace";
 import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
+import { SpeedChip } from "./SpeedChip";
 import { refusal, rosterIds } from "../lib/roster";
 
 /** The chips' view of one pane's conversation (lib/threadmodel `chipState`),
@@ -111,7 +112,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         // Composing: kept here, sent with the first message, nothing before.
         dispatch({
           type: "chat", pane,
-          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort } },
+          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort, speed: next.speed ?? null } },
         });
         return;
       }
@@ -147,7 +148,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           if (holder !== undefined && row)
             dispatch({
               type: "chat", pane: holder,
-              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null } },
+              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null, speed: record.speed ?? null } },
             });
         })
         .catch((e) => {
@@ -229,6 +230,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
     const err = errors[pane];
     return (
+      <>
       <ModelChip
         models={models}
         choice={cs.choice}
@@ -247,6 +249,10 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         pane={pane}
         zoom={zoom}
       />
+      <SpeedChip models={models} choice={cs.choice}
+        disabled={!cs.editable.model || state.approvals.length > 0}
+        onChange={(speed) => change(pane, { ...cs.choice!, speed }, keyOf(cs))} />
+      </>
     );
   };
 
@@ -283,7 +289,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           .then(() => {
             setCatalogOpen(false);
             const { choice } = paneChips(now.current, catalogPane);
-            if (choice) change(catalogPane, { ...choice, model: id, effort: null });
+            if (choice) change(catalogPane, applyModel(choice, id, models));
           })
           .catch((e) => setCatalogError(e.message))
       }

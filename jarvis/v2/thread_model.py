@@ -34,6 +34,12 @@ Where the choice lives, and why there:
   turn, and dropped for a default with no reasoning control. Only an
   explicit model choice pins a model to a thread.
 
+- `Thread.speed = None` is standard. Speeds come from the current model's
+  catalog. An unavailable saved speed degrades to standard with a note for
+  that turn; the saved choice is never rewritten. Only an owner's model
+  change clears an incompatible speed, in that same write. Speed has no
+  global default and changes no permissions.
+
 Nothing here is a tool. The agent cannot change its own model or provider,
 nor a provider's default; only the owner can, through `PATCH /threads/{id}`
 and `POST /thread-models` (asserted by the suites).
@@ -123,6 +129,33 @@ def efforts_of(provider: ProviderName, model: str) -> tuple[str, ...] | None:
         return None if info is None else tuple(info.efforts)
     entry = _cli(provider).get(model)
     return None if entry is None else tuple(entry["efforts"])
+
+
+def speeds_of(provider: ProviderName, model: str | None) -> tuple:
+    provider = ProviderName(provider)
+    if provider == ProviderName.FAST:
+        return ()
+    return tuple(_cli(provider).get(model, {}).get("speeds", ()))
+
+
+def check_speed(provider: ProviderName, model: str | None, speed: Any) -> str | None:
+    target = model or default_model(provider)
+    if speed is not None and not isinstance(speed, str):
+        raise ChoiceRefused(f"{target}: speed must be a string or null")
+    speed = (speed or "").strip() or None
+    if speed is not None and speed not in {tier[0] for tier in speeds_of(provider, target)}:
+        raise ChoiceRefused(f"{target} does not offer speed {speed!r}")
+    return speed
+
+
+def effective_speed(thread: Thread, model: str | None) -> str | None:
+    """Degrade for this turn only; never rewrite a saved speed choice."""
+    if thread.speed and thread.speed not in {tier[0] for tier in speeds_of(thread.provider, model)}:
+        from .router import warn_once
+        warn_once(f"{model} no longer offers speed {thread.speed!r}; using standard speed "
+                  "for this turn (the choice is kept)")
+        return None
+    return thread.speed
 
 
 def _words(provider: ProviderName) -> tuple[str, ...]:
@@ -501,6 +534,7 @@ def provider_models(provider: ProviderName) -> list[dict[str, Any]]:
     rows = []
     for model_id, entry in _cli(provider).items():
         rows.append({"id": model_id, "name": entry["name"], "efforts": list(entry["efforts"]),
+                     "speeds": list(speeds_of(provider, model_id)),
                      "vision": entry["vision"], "default_effort": default_effort(provider, model_id)})
     return rows
 
@@ -540,6 +574,7 @@ def describe() -> dict[str, Any]:
             source = "hud" if stored else ("built-in" if provider == ProviderName.CLAUDE else "routing")
         rows = provider_models(provider)
         for row in rows:
+            row.setdefault("speeds", [])
             row.setdefault("default_effort", default_effort(provider, row["id"]))
         result[provider.value] = {"label": LABELS[provider], "default": model,
                                   "default_effort": effort, "models": rows,
