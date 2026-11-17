@@ -92,6 +92,24 @@ class WakeListener:
         self._audio_queue = queue.Queue(maxsize=8)
         self._epoch = 0
         self._stream = self._thread = self._spotter = self._temp = None
+        self._tap = None
+
+    def tap(self, callback):
+        """Lend the open wake stream to the hotkey capture.
+
+        Windows refuses to start a second WASAPI stream on the microphone while
+        this one runs (PortAudio -9999), so the capture reads these frames
+        instead. Returns False when there is no live stream to lend; the caller
+        then opens its own. tap(None) ends the loan.
+        """
+        if callback is None:
+            self._tap = None
+            return True
+        stream = self._stream
+        if stream is None or self._done.is_set() or not getattr(stream, "active", False):
+            return False
+        self._tap = callback
+        return True
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -153,6 +171,12 @@ class WakeListener:
         # queued audio AND a partial utterance, even if the worker was in a callback.
         if self._done.is_set():
             return
+        tap = self._tap
+        if tap is not None:
+            try:
+                tap(indata, frames, timing, status)
+            except Exception:
+                pass
         if status or self.busy():
             self._epoch += 1
             return
@@ -247,6 +271,7 @@ class WakeListener:
 
     def _close_resources(self):
         # Only the worker closes after it starts; stop() joins before cleanup.
+        self._tap = None
         stream, self._stream = self._stream, None
         if stream is not None:
             try:
