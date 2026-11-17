@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from .. import config
@@ -34,6 +35,11 @@ _seen: dict[str, float] = {}
 # the footer says exactly which lines came back and how to ask for the next
 # page, so nothing is unreachable the way it used to be.
 MAX_READ_CHARS = 40_000
+# find_files walks with a wall-clock bound: over WSL's /mnt/c a `**` walk of a
+# Windows profile ran for minutes and held a Voice chat turn (2026-11-17).
+FIND_SECONDS = 5.0
+FIND_MAX = 200
+_clock = time.monotonic
 DEFAULT_LINES = 1500
 
 # Jarvis may improve his own code (see skills/self-improve.md), but not the
@@ -1075,6 +1081,30 @@ def list_dir(
     return "\n".join(entries) or "[empty directory]"
 
 
+def _find_plan(pattern):
+    """The pattern's segments and a test for which directories can hold a match.
+
+    Path.glob only returns control when it finds something, so a walk with no
+    matches cannot be stopped from outside; find_files walks itself instead and
+    matches with PurePath.full_match, glob's own rules. A directory is entered
+    only while its path can still match the pattern's leading segments, so
+    `*.py` lists the root alone, as glob does."""
+    segments = [s for s in pattern.replace("\\", "/").split("/") if s not in ("", ".")]
+    if not segments or pattern.startswith(("/", "~")) or ".." in segments:
+        return None, None
+    star = segments.index("**") if "**" in segments else None
+
+    def enter(parts):
+        k = len(parts)
+        if star is None and k >= len(segments):
+            return False
+        if star is not None and k > star:
+            return True
+        return PurePosixPath(*parts).full_match("/".join(segments[:k]))
+
+    return "/".join(segments), enter
+
+
 @tool
 def find_files(
     pattern: Annotated[str, "Glob pattern, e.g. **/*.py"],
@@ -1087,16 +1117,37 @@ def find_files(
     root = _resolve(path)
     if not root.is_dir():
         return f"Error: {root} is not a directory."
+    glob, enter = _find_plan(pattern)
+    if glob is None:
+        return f"Error: {pattern!r} must be a relative glob under `path`, without '..'."
 
     # A credential folder's names are left out wherever the walk meets one
     # (a folder configured with no dot in its path, a symlink to one).
     folder = credential_folder_judge()
-    hits = []
-    for match in root.glob(pattern):
-        if any(part.startswith(".") for part in match.parts) or folder(match):
-            continue
-        hits.append(os.path.relpath(match, root))
-        if len(hits) >= 200:
-            hits.append("[...more matches truncated]")
+    deadline = _clock() + FIND_SECONDS
+    hits, timed_out = [], False
+    for dirpath, dirnames, filenames in root.walk():
+        if _clock() > deadline:
+            timed_out = True
             break
+        parts = dirpath.relative_to(root).parts
+        dirnames.sort()
+        for name in dirnames + sorted(filenames):
+            if not PurePosixPath(*parts, name).full_match(glob):
+                continue
+            match = dirpath / name
+            if any(part.startswith(".") for part in match.parts) or folder(match):
+                continue
+            hits.append(os.path.relpath(match, root))
+            if len(hits) >= FIND_MAX:
+                hits.append("[...more matches truncated]")
+                return "\n".join(hits)
+        # Hidden folders' matches are all left out above, so they are not walked.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and enter(parts + (d,))]
+    if timed_out:
+        note = (f"stopped after {FIND_SECONDS:g} s before the walk finished. "
+                "Narrow `path` or `pattern`.")
+        if not hits:
+            return f"No files matching {pattern!r} found under {root}; {note}"
+        hits.append(f"[{note}]")
     return "\n".join(hits) or f"No files matching {pattern!r} under {root}."
