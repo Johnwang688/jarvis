@@ -6,6 +6,8 @@ venv\Scripts\python.exe voice_agent.py 127.0.0.1 8409 <key path>
 from __future__ import annotations
 
 import io
+import logging
+import os
 from pathlib import Path
 import queue
 import sys
@@ -18,7 +20,7 @@ if __package__:
     from .voicetype import Typer
     from .voiceactions import Actions
     from .voiceflow import Flow
-    from . import voiceui, voicewake
+    from . import voiceui, voicewake, voicelog
 else:
     from voicewire import Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     try:
@@ -27,16 +29,42 @@ else:
         from voiceflow import Flow
         import voiceui
         import voicewake
+        import voicelog
     except ModuleNotFoundError:
         # Also support importlib loading by the Linux VA-1 verifier.
         from windows.voicetype import Typer
         from windows.voiceactions import Actions
         from windows.voiceflow import Flow
-        from windows import voiceui, voicewake
+        from windows import voiceui, voicewake, voicelog
 
 VK_RCONTROL = 0xA3
 RATE = 16000
 MAX_FRAMES = 120 * RATE
+log = logging.getLogger("jarvis.voice")
+
+
+def _mutex(kernel32=None):
+    import ctypes
+    kernel32 = ctypes.windll.kernel32 if kernel32 is None else kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateMutexW(None, False, "Local\\JarvisVoiceAgent")
+    if not handle:
+        raise OSError("Could not create voice-agent mutex")
+    if kernel32.GetLastError() == 183:
+        kernel32.CloseHandle(handle)
+        log.info("another voice agent is running")
+        return None
+    return kernel32, handle
+
+
+def _remove_pid(path, pid):
+    try:
+        if path.read_text(encoding="ascii").strip() == str(pid):
+            path.unlink()
+    except (OSError, UnicodeError):
+        pass
 
 
 class Player:
@@ -112,6 +140,8 @@ class Agent:
         from ctypes import wintypes
 
         self.host, self.port, self.key_path = host, port, key_path
+        self.bridge = Path(key_path).parent
+        self._shut_down = False
         self.done = threading.Event()
         self.online = threading.Event()
         self.recording = threading.Event()
@@ -133,6 +163,7 @@ class Agent:
         self.user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         self.root = tk.Tk()
         self.root.withdraw()
+        self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         self.overlay = voiceui.Overlay(self.root)
         self.player = Player()
         self.wake = None
@@ -142,7 +173,10 @@ class Agent:
             self.generation += 1
             return self.generation
 
-    def show(self, generation, text, transient=False):
+    def show(self, generation, text, transient=False, *, log_text=None):
+        if transient:
+            exc = sys.exc_info()[1]
+            log.warning("%s (%s)", log_text or text, type(exc).__name__ if exc else "NoException", exc_info=True)
         # Keep the VA-1 headless recorder seam usable without creating Win32/Tk.
         if not hasattr(self, "overlay"):
             self.events.put((generation, text, transient))
@@ -174,6 +208,8 @@ class Agent:
         self.enqueue(wav, "wake", generation)
 
     def wake_state(self, state, text=None):
+        if state == "error":
+            log.warning("%s", text or getattr(self.wake, "reason", "Wake word unavailable"), exc_info=True)
         if not self.busy() and not self.hud_in_front():
             self.overlay.set_state(state, text)
 
@@ -277,6 +313,7 @@ class Agent:
                         else:
                             self.finish_capture(cancel=action == "cancel")
                     except Exception:
+                        log.warning("Microphone unavailable", exc_info=True)
                         machine.state = "wait" if held else "idle"
                         try:
                             self.finish_capture(cancel=True)
@@ -309,6 +346,7 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
+                        log.info("Voice link connected")
                         delay, last_ping = 1.0, time.monotonic()
                         if hasattr(self, "online"):
                             # Drop anything captured during the failed/offline interval.
@@ -321,6 +359,7 @@ class Agent:
                         message = ("Not paired: run jarvis voice-link setup" if isinstance(exc, KeyFileError)
                                    else "That wasn't Jarvis — refused" if isinstance(exc, NotJarvis)
                                    else "Jarvis isn't running")
+                        log.warning("%s (%s): %s", message, type(exc).__name__, exc, exc_info=True)
                         self.discard_clips(message)
                         self.done.wait(delay)
                         delay = min(30.0, delay * 2)
@@ -332,7 +371,8 @@ class Agent:
                         try:
                             client.ping()
                             last_ping = time.monotonic()
-                        except LinkError:
+                        except LinkError as exc:
+                            log.warning("Voice link lost (%s): %s", type(exc).__name__, exc, exc_info=True)
                             if hasattr(self, "online"):
                                 self.online.clear()
                             client.close()
@@ -343,7 +383,11 @@ class Agent:
                 source = item[2] if len(item) > 2 else "hotkey"
                 try:
                     if typer is None:  # VA-1 headless recorder compatibility
-                        self.show(generation, client.dictate(clip)["text"] or "No speech heard", True)
+                        started = time.perf_counter()
+                        self.show(generation, client.dictate(clip)["text"] or "No speech heard", True,
+                                  log_text="Voice dictation result displayed")
+                        log.info("Clip source=%s route=dictate transcribe_ms=%.1f route_ms=0 ask_ms=0 outcome=ok",
+                                 source, (time.perf_counter() - started) * 1000)
                     else:
                         if source == "wake" and (self.hud_in_front() or self.recording.is_set()):
                             continue
@@ -362,6 +406,7 @@ class Agent:
                             raise flow.link_error
                     last_ping = time.monotonic()
                 except LinkError as exc:
+                    log.warning("Voice link lost (%s): %s", type(exc).__name__, exc, exc_info=True)
                     self.show(generation, str(exc), True)
                     if hasattr(self, "online"):
                         self.online.clear()
@@ -381,30 +426,76 @@ class Agent:
                 actions.close()
 
     def run(self):
-        threading.Thread(target=self.poll, name="voice-hotkey", daemon=True).start()
+        self.poll_thread = threading.Thread(target=self.poll, name="voice-hotkey", daemon=True)
+        self.poll_thread.start()
         threading.Thread(target=self.network, name="voice-network", daemon=True).start()
         try:
             self.wake = voicewake.WakeListener(self.on_wake, self.overlay.push_level,
                                               self.busy, on_state=self.wake_state)
-            if not self.wake.start():
+            started = self.wake.start()
+            log.info("Wake start result=%s reason=%s", started, self.wake.reason)
+            if not started:
+                log.warning("%s", self.wake.reason, exc_info=True)
                 self.overlay.set_state("error", self.wake.reason)
         except Exception:
+            log.warning("Wake word unavailable; Right Ctrl still works.", exc_info=True)
             self.overlay.set_state("error", "Wake word unavailable; Right Ctrl still works.")
         try:
+            self.root.after(500, self.check_stop)
             self.root.mainloop()
         finally:
-            self.done.set()
-            self.player.stop()
-            if self.wake:
-                self.wake.stop()
+            self.shutdown()
+
+    def check_stop(self):
+        """Runs only on Tk's thread, alongside the close handler."""
+        stop = self.bridge / "voice-agent.stop"
+        if stop.exists():
+            stop.unlink(missing_ok=True)
+            log.info("Voice agent stop requested")
+            self.shutdown()
+        elif not self.done.is_set():
+            self.root.after(500, self.check_stop)
+
+    def shutdown(self):
+        if getattr(self, "_shut_down", False):
+            return
+        self._shut_down = True
+        self.done.set()
+        self.player.stop()
+        if self.wake:
+            self.wake.stop()
+        poll = getattr(self, "poll_thread", None)
+        if poll is not None:
+            poll.join(2)
+        try:
+            if (self.capture is not None or getattr(self, "tapped", False)
+                    or self.recording.is_set()):
+                self.finish_capture(cancel=True)
+        except Exception:
+            log.warning("Microphone release failed", exc_info=True)
+        self.root.quit()
 
 
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8409
     key = Path(sys.argv[3]) if len(sys.argv) > 3 else Path(sys.executable).resolve().parents[2] / "voice-link.key"
-    Agent(host, port, key).run()
+    voicelog.setup(key.parent / "logs")
+    mutex = _mutex()
+    if mutex is None:
+        return 0
+    pid, pid_file = os.getpid(), key.parent / "voice-agent.pid"
+    try:
+        (key.parent / "voice-agent.stop").unlink(missing_ok=True)
+        pid_file.write_text(str(pid), encoding="ascii")
+        log.info("Voice agent start python=%s host=%s port=%s", sys.version.split()[0], host, port)
+        Agent(host, port, key).run()
+        return 0
+    finally:
+        _remove_pid(pid_file, pid)
+        mutex[0].CloseHandle(mutex[1])
+        log.info("Voice agent exited")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

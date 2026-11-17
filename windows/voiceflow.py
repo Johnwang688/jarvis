@@ -1,6 +1,12 @@
 """Sequential voice workflow; dependencies are injected for pure checks."""
 from __future__ import annotations
 
+import logging
+import sys
+import time
+
+log = logging.getLogger("jarvis.voice")
+
 if __package__:
     from .voicetype import mentions_command, might_be_command, plan, sanitize
     from .voicewire import LinkError
@@ -15,6 +21,22 @@ class Flow:
         self.ui, self.player = ui, player
         self.link_error = None
         self.typer.on_scratch = self._scratch
+
+    def _state(self, state, text=None, *, log_text=None):
+        if state == "error":
+            self.outcome = "error"
+            exc = sys.exc_info()[1]
+            log.warning("%s (%s)", log_text or text or "Voice unavailable",
+                        type(exc).__name__ if exc else "NoException", exc_info=True,
+                        extra={"voice_private": True})
+        self.ui.set_state(state, text)
+
+    def _timed(self, stage, call, *args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return call(*args, **kwargs)
+        finally:
+            self.timings[stage] += (time.perf_counter() - start) * 1000
 
     def _scratch(self, which):
         try:
@@ -56,21 +78,27 @@ class Flow:
 
     def on_clip(self, wav, source):
         self.link_error = None
+        self.timings = dict.fromkeys(("transcribe", "route", "ask"), 0.0)
+        self.outcome, kind = "ok", "dictate"
         try:
             if source not in {"hotkey", "wake"}:
                 raise ValueError("Unknown voice source")
             self.ui.set_state("transcribing")
-            text = self.client.dictate(wav, source=source)["text"]
+            text = self._timed("transcribe", self.client.dictate, wav, source=source)["text"]
             if not sanitize(text):
                 self.ui.set_state("done", "No speech heard")
+                self.outcome = "empty"
                 return
             if source == "hotkey" and not might_be_command(text):
                 self._type(text)
             else:
                 self.ui.set_state("thinking")
                 try:
-                    intent = self.client.route(text, source)
+                    intent = self._timed("route", self.client.route, text, source)
                 except Exception as exc:
+                    log.warning("Voice routing failed; using fallback (%s)", type(exc).__name__,
+                                exc_info=True, extra={"voice_private": True})
+                    self.outcome = "fallback"
                     # Routing is optional: preserve the utterance on failure.
                     # Retain transport failures so the agent still reconnects.
                     if isinstance(exc, LinkError):
@@ -89,29 +117,34 @@ class Flow:
                         partial += piece
                         self.ui.set_state("answering", partial)
 
-                    answer = self.client.ask(words, on_delta=delta)
+                    answer = self._timed("ask", self.client.ask, words, on_delta=delta)
                     self.ui.set_state("answering", answer)
                     self.player.play(self.client.say(answer))
                 elif kind in {"open_app", "switch_app"}:
                     if not getattr(self.actions, kind)(target):
-                        self.ui.set_state("error", f"Could not find {target}.")
+                        self._state("error", f"Could not find {target}.", log_text="Could not find [app].")
                         return
                 elif kind == "search":
                     self.actions.search(target or words)
                 elif kind == "read_selection":
                     selection = self.actions.read_selection()
                     if not selection:
-                        self.ui.set_state("error", "No selected text to read.")
+                        self._state("error", "No selected text to read.")
                         return
                     self.ui.set_state("answering", selection)
                     self.player.play(self.client.say(selection))
                 else:
-                    self.ui.set_state("error", "Unknown voice action.")
+                    self._state("error", "Unknown voice action.")
                     return
             self.ui.set_state("done")
         except LinkError as exc:
             self.link_error = exc
-            self.ui.set_state("error", str(exc))
-        except (OSError, RuntimeError):
+            self._state("error", str(exc))
+        except Exception:
             # OS exception messages can contain document text or local paths.
-            self.ui.set_state("error", "The voice action could not be completed.")
+            self._state("error", "The voice action could not be completed.")
+        finally:
+            log.info("Clip source=%s route=%s transcribe_ms=%.1f route_ms=%.1f ask_ms=%.1f outcome=%s",
+                     source if source in {"hotkey", "wake"} else "unknown",
+                     kind if kind in {"dictate", "ask", "open_app", "switch_app", "search", "read_selection"} else "unknown",
+                     self.timings["transcribe"], self.timings["route"], self.timings["ask"], self.outcome)

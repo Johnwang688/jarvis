@@ -13,9 +13,11 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import queue
+import re
 import socket
 import stat
 import threading
@@ -25,6 +27,25 @@ import unicodedata
 from jarvis import config
 from windows import voicewire as wire
 from . import remote_stt, dictation_guard, dictation_rules
+
+log = logging.getLogger("jarvis.v2.voice_link")
+
+
+def _failure(op, source, exc, *private, redact_message=False):
+    # Providers sometimes echo their input in an exception. Scrub it BEFORE
+    # constructing a record (including records propagated to the root logger).
+    message = "[voice details withheld]" if redact_message else str(exc)
+    for value in sorted((v for v in private if isinstance(v, str) and v), key=len, reverse=True):
+        message = message.replace(value, "[voice text]")
+        # Also cover a backend quoting only part of an utterance or answer.
+        for word in set(re.findall(r"\w+", value)):
+            message = re.sub(r"(?<!\w)" + re.escape(word) + r"(?!\w)", "[voice text]",
+                             message, flags=re.IGNORECASE)
+    message = re.sub(r"[0-9a-fA-F]{64}", "[private material]", message)
+    message = " ".join(message.split())[:200]
+    log.warning("Voice op=%s source=%s failed: %s: %s", op,
+                source if source in ("hotkey", "wake") else "unspecified",
+                type(exc).__name__, message)
 
 HANDSHAKE_TIMEOUT_S = 5.0
 MAX_UNAUTHENTICATED = 4
@@ -63,12 +84,18 @@ def _clean(text, cap):
     return "".join(c for c in text if not unicodedata.category(c).startswith("C"))[:cap]
 
 
-def parse_intent(raw, source, text):
+def parse_intent(raw, source, text, *, on_fallback=None):
     fallback = {"kind": "ask" if source == "wake" else "dictate",
                 "text": _clean(text, 2000), "target": ""}
+
+    def failed():
+        if on_fallback:
+            on_fallback()
+        return fallback
+
     try:
         if not isinstance(raw, str) or len(raw) > 16000:
-            return fallback
+            return failed()
         # Some providers wrap their JSON in a fenced block or a short preface.
         start, end = raw.find("{"), raw.rfind("}")
         value = json.loads(raw[start:end + 1])
@@ -76,11 +103,11 @@ def parse_intent(raw, source, text):
                 or value["kind"] not in KINDS
                 or not isinstance(value.get("text", text), str)
                 or not isinstance(value.get("target", ""), str)):
-            return fallback
+            return failed()
         return {"kind": value["kind"], "text": _clean(value.get("text", text), 2000),
                 "target": _clean(value.get("target", ""), 80)}
     except (ValueError, TypeError, RecursionError):
-        return fallback
+        return failed()
 
 
 def _shutdown(sock):
@@ -175,7 +202,7 @@ class VoiceLink:
         with self._lock:
             return self._active is conn and self._server is server
 
-    def _stream_ask(self, conn, server, stream, ident, text):
+    def _stream_ask(self, conn, server, stream, ident, text, source=None):
         """Bound the wait independently of providers; replacement ends this stream.
 
         The queue is bounded. A stalled reader cannot retain an unbounded answer,
@@ -183,7 +210,16 @@ class VoiceLink:
         """
         events = queue.Queue(maxsize=256)
         stopped = threading.Event()
+        failure_lock = threading.Lock()
+        failure_logged = False
         deadline = time.monotonic() + ASK_TIMEOUT_S
+
+        def failed(exc, *private, redact_message=False):
+            nonlocal failure_logged
+            with failure_lock:
+                if not failure_logged:
+                    failure_logged = True
+                    _failure("ask", source, exc, text, *private, redact_message=redact_message)
 
         def cancelled():
             return stopped.is_set() or not self._current(conn, server)
@@ -199,12 +235,31 @@ class VoiceLink:
 
         def work():
             self._context.cancelled = cancelled
+            # Retain only the current stream, already held in memory, to redact
+            # any answer echoed by a backend exception.
+            pieces = []
+            private_size = 0
+            privacy_overflow = False
+
+            def delta(piece):
+                nonlocal private_size, privacy_overflow
+                private_size += len(piece) if isinstance(piece, str) else 0
+                if private_size <= 64000:
+                    pieces.append(piece)
+                else:
+                    pieces.clear()
+                    privacy_overflow = True
+                offer("delta", piece)
+
             try:
-                answer = self.asker(text, lambda piece: offer("delta", piece))
+                answer = self.asker(text, delta)
                 result = ("done", answer)
-            except TimeoutError:
+            except TimeoutError as exc:
+                failed(exc, "".join(p for p in pieces if isinstance(p, str)), redact_message=privacy_overflow)
                 result = ("error", ASK_TIMEOUT)
-            except Exception:
+            except Exception as exc:
+                if not cancelled():
+                    failed(exc, "".join(p for p in pieces if isinstance(p, str)), redact_message=privacy_overflow)
                 result = ("error", ASK_FAILED)
             try:
                 offer(*result)
@@ -216,6 +271,7 @@ class VoiceLink:
             while self._current(conn, server):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    failed(TimeoutError("Answer deadline elapsed"))
                     return {"id": ident, "ok": False, "error": ASK_TIMEOUT}
                 try:
                     kind, value = events.get(timeout=min(0.1, remaining))
@@ -224,6 +280,7 @@ class VoiceLink:
                 if kind == "error":
                     return {"id": ident, "ok": False, "error": value}
                 if not isinstance(value, str):
+                    failed(ValueError("Invalid answer type"))
                     return {"id": ident, "ok": False, "error": ASK_FAILED}
                 if kind == "done":
                     reply = {"id": ident, "ok": True, "done": True, "text": value}
@@ -232,6 +289,7 @@ class VoiceLink:
                 # Check the exact wire bytes, including JSON escaping and the
                 # newline, before writing any part of an oversized answer.
                 if len(wire.json_line(reply)) > wire.MAX_LINE:
+                    failed(ValueError("Answer exceeds wire limit"))
                     return {"id": ident, "ok": False, "error": ASK_FAILED}
                 if kind == "done":
                     return reply
@@ -317,6 +375,7 @@ class VoiceLink:
         timer = threading.Timer(HANDSHAKE_TIMEOUT_S, _shutdown, args=(conn,))
         timer.daemon = True
         timer.start()
+        log.info("Voice agent connected")
         try:
             conn.settimeout(HANDSHAKE_TIMEOUT_S)
             stream = conn.makefile("rwb")
@@ -324,6 +383,7 @@ class VoiceLink:
             a = hello.get("nonce_a")
             if (hello.get("hello") != "jarvis-voice-agent" or type(hello.get("v")) is not int
                     or hello["v"] != 1 or not isinstance(a, str) or not wire.HEX64.fullmatch(a)):
+                log.warning("Voice handshake failed: invalid hello")
                 return
             d = wire.new_nonce()
             wire.send_json(stream, {"hello": "jarvis-voice-link", "v": 1, "nonce_d": d,
@@ -331,6 +391,7 @@ class VoiceLink:
             proof = wire.read_json(stream, 4096).get("proof")
             if (not isinstance(proof, str) or not wire.HEX64.fullmatch(proof)
                     or not hmac.compare_digest(wire.agent_proof(key, d, a), proof)):
+                log.warning("Voice handshake failed: invalid proof")
                 return
             timer.cancel()
             conn.settimeout(None)
@@ -342,6 +403,8 @@ class VoiceLink:
                 pending = False
                 if old:
                     _shutdown(old)
+            log.info("Voice agent handshake ok")
+            last_source = None
             while True:
                 try:
                     request = wire.read_json(stream)
@@ -375,13 +438,15 @@ class VoiceLink:
                     if source not in ("hotkey", "wake"):
                         wire.send_json(stream, reply)
                         continue
+                    last_source = source
                     try:
                         encoded = request.get("wav_b64")
                         if not isinstance(encoded, str):
                             raise ValueError()
                         data = base64.b64decode(encoded, validate=True)
                         remote_stt.check_wav(data, max_s=wire.MAX_CLIP_S)
-                    except (ValueError, remote_stt._Refused):
+                    except (ValueError, remote_stt._Refused) as exc:
+                        _failure("dictate", source, exc)
                         reply["error"] = BAD_CLIP
                     else:
                         try:
@@ -390,24 +455,30 @@ class VoiceLink:
                             if not isinstance(got["text"], str) or got["backend"] not in ("local", "cloud"):
                                 raise ValueError()
                             reply = {"id": ident, "ok": True, "text": got["text"], "backend": got["backend"]}
-                        except NotOwner:
+                        except NotOwner as exc:
+                            _failure("dictate", source, exc, redact_message=True)
                             reply["error"] = NOT_OWNER
-                        except Exception:
+                        except Exception as exc:
+                            _failure("dictate", source, exc, redact_message=True)
                             reply["error"] = FAILED
                 elif type(ident) is int and request.get("op") in ("route", "ask", "say"):
                     op, text = request["op"], request.get("text")
-                    source = request.get("source")
+                    source = request.get("source") if op == "route" else last_source
                     if (isinstance(text, str) and text.strip()
                             and (op != "route" or source in ("hotkey", "wake"))):
                         if op == "route":
+                            last_source = source
+                            fallback_log = lambda: _failure("route", source, ValueError("Invalid route response"))
                             try:
                                 raw = self.route_model(text[:2000], source)
-                            except Exception:
+                            except Exception as exc:
+                                _failure("route", source, exc, text)
                                 raw = None
+                                fallback_log = None
                             reply = {"id": ident, "ok": True,
-                                     "intent": parse_intent(raw, source, text)}
+                                     "intent": parse_intent(raw, source, text, on_fallback=fallback_log)}
                         elif op == "ask":
-                            reply = self._stream_ask(conn, server, stream, ident, text)
+                            reply = self._stream_ask(conn, server, stream, ident, text, source)
                             if reply is None:
                                 return
                         else:
@@ -419,15 +490,20 @@ class VoiceLink:
                                 if len(encoded) > wire.MAX_AUDIO_LINE - 1024:
                                     raise ValueError()
                                 reply = {"id": ident, "ok": True, "wav_b64": encoded}
-                            except Exception:
+                            except Exception as exc:
+                                _failure("say", source, exc, text, text.strip()[:SAY_CHARS])
                                 reply["error"] = SAY_FAILED
                 with self._lock:
                     if self._active is not conn or self._server is not server:
                         return
                 wire.send_json(stream, reply)
-        except (OSError, ValueError, wire.LinkError):
-            pass
+        except (OSError, ValueError, wire.LinkError) as exc:
+            if pending:
+                # No untrusted handshake bytes, nonces, proofs or exception
+                # messages (which may echo those bytes) enter a record.
+                log.warning("Voice handshake failed: %s", type(exc).__name__)
         finally:
+            log.info("Voice agent disconnected")
             timer.cancel()
             _shutdown(conn)
             if stream:

@@ -9,6 +9,23 @@ conflicts using the latest explicit owner decision and current implementation.
 Paths in preserved prose are repository-relative. Source labels refer to the
 original file. Keep payloads verbatim; later notes belong outside the markers.
 
+## VA-7 operations (2026-11-17)
+
+The owner permits `jarvis voice-link setup|start|stop|status|logs` through the
+existing CLI approval card; `rules.py` is unchanged. There is no logon startup.
+`start` launches Windows pythonw from the HUD terminal; the console launcher
+still works. A named mutex prevents duplicate typing, a verified PID identifies
+the process, and a stop file requests Tk cleanup before any verified force stop.
+
+Diagnostics rotate in the closed Windows bridge's `logs/voice-agent.log`.
+They include lifecycle, stage durations and failures, including the actual
+PortAudio exception in the hotkey poll loop. Speech, answers and clipboard
+content are excluded; action exception details that could echo them are
+redacted. Daemon voice-link warnings reach the user journal. `logs` shows both.
+Fake-only regression coverage is in `tests/voice_ops_impl_check.py`; removing
+the poll warning is killed by its traceback/record test. Windows live behavior
+has not been exercised by this package.
+
 ## Original CLAUDE.md lines 7531–7902
 
 <!-- claude-source:007531-007902:begin -->

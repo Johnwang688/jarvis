@@ -79,20 +79,28 @@ def write_keys(wsl_path, win_path):
             tmp.unlink(missing_ok=True)
 
 
+def bridge_dir() -> Path:
+    """Locate and certify the same closed Windows folder for all voice verbs."""
+    converted = subprocess.run(["wslpath", "-u", config.DESKTOP_BRIDGE_DIR],
+                               capture_output=True, text=True, timeout=30)
+    if converted.returncode or not converted.stdout.strip():
+        raise ValueError("Could not locate the Windows bridge folder.")
+    bridge = Path(converted.stdout.strip())
+    if not windows_folder_closed(bridge):
+        raise ValueError("Windows bridge must be in a closed profile folder (a dot folder or AppData).")
+    return bridge
+
+
 def setup():
     console = desktop_setup.console
     python = desktop_setup._find_python()
     if python is None:
         console.print("No Windows Python found. Run jarvis desktop setup first.")
         return 1
-    converted = subprocess.run(["wslpath", "-u", config.DESKTOP_BRIDGE_DIR],
-                               capture_output=True, text=True, timeout=30)
-    if converted.returncode or not converted.stdout.strip():
-        console.print("Could not locate the Windows bridge folder.")
-        return 1
-    bridge = Path(converted.stdout.strip())
-    if not windows_folder_closed(bridge):
-        console.print("Windows bridge must be in a closed profile folder (a dot folder or AppData).")
+    try:
+        bridge = bridge_dir()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        console.print(str(exc))
         return 1
     venv_python = bridge / "venv" / "Scripts" / "python.exe"
     if not venv_python.is_file():
@@ -114,6 +122,7 @@ def setup():
         "@echo off\r\ntitle Jarvis voice\r\n"
         f'"{win}\\venv\\Scripts\\python.exe" "{src}" 127.0.0.1 '
         f'{config.VOICE_LINK_PORT} "{win}\\voice-link.key"\r\npause\r\n', encoding="utf-8")
-    console.print(rf"Paired. Start {win}\run-voice.cmd on Windows. Hold Right Ctrl, or tap to toggle.")
-    console.print("Restart the daemon yourself to load the new pairing. VA-1 displays text only.")
+    console.print("Paired. Hold Right Ctrl, or tap to toggle. The Windows run-voice.cmd launcher also works.")
+    console.print("Restart the daemon yourself to load the new pairing.")
+    console.print("Start it with: jarvis voice-link start")
     return 0

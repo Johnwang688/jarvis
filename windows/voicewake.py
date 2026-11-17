@@ -1,6 +1,10 @@
 """Local Jarvis KWS and bounded in-memory utterances; no device imports on import."""
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("jarvis.voice")
+
 import hashlib
 import json
 from pathlib import Path
@@ -121,12 +125,14 @@ class WakeListener:
             import sherpa_onnx
         except Exception:
             self.reason = "Wake word needs sherpa-onnx: run jarvis voice-link setup"
+            log.warning("%s", self.reason, exc_info=True)
             return False
         try:
             import numpy as np
             import sounddevice as sd
         except Exception:
             self.reason = "Wake word needs audio dependencies: run jarvis voice-link setup"
+            log.warning("%s", self.reason, exc_info=True)
             return False
         self._np = np
         self._done.clear()
@@ -145,6 +151,7 @@ class WakeListener:
                 max_active_paths=4, num_trailing_blanks=1)
         except Exception:
             self.reason = "Wake word model could not load"
+            log.warning("%s", self.reason, exc_info=True)
             self.stop()
             return False
         try:
@@ -162,6 +169,7 @@ class WakeListener:
             self._thread.start()
         except Exception:
             self.reason = "Wake word microphone unavailable"
+            log.warning("%s", self.reason, exc_info=True)
             self.stop()
             return False
         return True
@@ -191,6 +199,7 @@ class WakeListener:
         except Exception:
             if not self._done.is_set():
                 self.reason = "Wake word microphone or recognizer stopped"
+                log.warning("%s", self.reason, exc_info=True)
                 self._done.set()
                 try:
                     self.on_state("error")
