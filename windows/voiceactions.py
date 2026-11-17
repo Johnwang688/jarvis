@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 import json
 import ntpath
 import os
@@ -23,6 +24,11 @@ ALIASES = {"vs code": "visual studio code", "vscode": "visual studio code",
            "code": "visual studio code", "chrome": "google chrome", "edge": "microsoft edge"}
 
 
+def _sound(text):
+    # The recognizer hears "Codex" as "codecs": treat x and cs/ks/cks alike.
+    return re.sub(r"cks|ks|cs", "x", text)
+
+
 def match_app(name, apps):
     name = _normal(name)
     name = ALIASES.get(name, name)
@@ -40,7 +46,8 @@ def match_app(name, apps):
             return app
     best, score = None, 0.75
     for app, label in entries:
-        ratio = difflib.SequenceMatcher(None, name, label).ratio()
+        ratio = max(difflib.SequenceMatcher(None, name, label).ratio(),
+                    difflib.SequenceMatcher(None, _sound(name), _sound(label)).ratio())
         if ratio >= score and (best is None or ratio > score):
             best, score = app, ratio
     return best

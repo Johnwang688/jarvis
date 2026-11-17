@@ -190,6 +190,13 @@ class Matching(unittest.TestCase):
         self.assertEqual(actions.match_app("studio", APPS), APPS[0])
         self.assertEqual(actions.match_app("notpad", APPS), APPS[3])
 
+    def test_recognizer_sound_alikes_x_and_cs(self):
+        # Live 2026-11-17: Parakeet heard "open Codex" as "Open codecs."
+        codex = {"name": "Codex", "id": "codex-id"}
+        self.assertEqual(actions.match_app("codecs", APPS + [codex]), codex)
+        self.assertEqual(actions.match_app("codecs", [{"name": "Codecs Pack", "id": "p"}, codex])["id"], "p")
+        self.assertIsNone(actions.match_app("codecs", APPS))
+
     def test_exact_precedes_prefix_and_threshold_is_inclusive(self):
         entries = [{"name": "Notepad++", "id": "plus"}, APPS[-1]]
         # Punctuation normalization makes these equal, so use a distinct prefix.

@@ -13,7 +13,8 @@ import sys
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -213,20 +214,42 @@ class Backends(Base):
             with self.assertRaisesRegex(wire.LinkError, "The text could not be spoken"):
                 c.say("hello")
 
+    def test_router_sends_one_real_request_through_llm_chat(self):
+        # Only the HTTP post is fake: llm.chat's own attempt loop and Reply run.
+        # Found live 2026-11-17: max_retries=0 made zero attempts and `.content`
+        # does not exist on Reply, so every route fell back.
+        body = {"model": "anthropic/claude-haiku-5.5",
+                "choices": [{"message": {"role": "assistant",
+                                         "content": '{"kind":"open_app","text":"open Codex","target":"Codex"}'}}]}
+        post = Mock(return_value=SimpleNamespace(status_code=200, json=lambda: body, text=""))
+        with patch.object(llm._client, "post", post), \
+                patch.object(llm.config, "STREAM", False), \
+                patch.object(llm.config, "api_key", return_value="test-key"), \
+                patch.object(models, "tier", return_value="anthropic/claude-haiku-5.5"):
+            raw = voice_link.VoiceLink._route_model(None, "open Codex", "hotkey")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(voice_link.parse_intent(raw, "hotkey", "open Codex"),
+                         {"kind": "open_app", "text": "open Codex", "target": "Codex"})
+
     def test_router_lazy_safe_default_small_uncached_completion(self):
-        from types import SimpleNamespace
-        with patch.object(llm, "chat", return_value=SimpleNamespace(content='{"kind":"ask"}')) as chat, \
+        # A real Reply and a non-fallback kind: a fake with `.content` and an
+        # "ask" answer for wake speech hid that the router never worked live.
+        reply = llm.Reply(message={"role": "assistant",
+                                   "content": '{"kind":"open_app","text":"open Slack","target":"Slack"}'},
+                          finish_reason="stop", model="anthropic/claude-haiku-5.5", latency_s=0.1)
+        with patch.object(llm, "chat", return_value=reply) as chat, \
                 patch.object(models, "tier", return_value="anthropic/claude-haiku-5.5"):
             self.start()
             chat.assert_not_called()
             c = self.client()
-            self.assertEqual(c.route("Jarvis hello", "wake")["kind"], "ask")
+            self.assertEqual(c.route("open Slack", "hotkey"),
+                             {"kind": "open_app", "text": "open Slack", "target": "Slack"})
             args, kw = chat.call_args
             self.assertEqual(args[0], "anthropic/claude-haiku-5.5")
             for kind in voice_link.KINDS:
                 self.assertIn(kind, args[1][0]["content"])
             self.assertEqual((kw["tools"], kw["temperature"], kw["timeout"], kw["cache"], kw["max_retries"]),
-                             (None, 0, 4.0, False, 0))
+                             (None, 0, 4.0, False, 1))
             self.assertLessEqual(kw["max_tokens"], 1000)
             chat.reset_mock()
             with patch.object(models, "tier", return_value="deepseek/blocked"):
