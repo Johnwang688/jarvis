@@ -106,6 +106,7 @@ export function createSpeech(): Speech {
     change: (thread, change) => api.speechVoice(thread, change),
   });
   const controller = new SpeechController({
+    timingNow: () => performance.now(),
     say: (text, opts) => api.say(text, { voice: opts.voice, localOnly: SAY_LOCAL_ONLY, signal: opts.signal }),
     summarize: (text, opts) => api.speechSummary(text, opts.thread, { signal: opts.signal }),
     player,

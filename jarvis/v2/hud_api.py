@@ -1523,7 +1523,8 @@ def say(handler, body):
 
 def stt_view() -> dict:
     from jarvis import stt_local, stt_settings
-    return {**stt_settings.load(), "backends": list(stt_settings.BACKENDS), "local": stt_local.status()}
+    return {**stt_settings.load(), "dictation_cleanup": stt_settings.load_cleanup(),
+            "backends": list(stt_settings.BACKENDS), "local": stt_local.status()}
 
 
 def watch_stt(daemon) -> None:
@@ -1543,8 +1544,9 @@ def watch_stt(daemon) -> None:
 def stt_settings_route(handler, daemon, query):
     """`/stt/settings` (voice rework V13): the owner's speech-to-text switches.
 
-        GET  -> {backend, cloud_fallback, error, local: {installed, reason, loaded, threads, ...}}
-        POST {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}  (at least one)
+        GET  -> {backend, cloud_fallback, dictation_cleanup, error, local: {...}}
+        POST {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool,
+              dictation_cleanup?: "off"|"rules"}  (at least one)
 
     Owner-only, the HUD listener (like the other voice stores): an agent or a
     page must not be able to point the owner's audio at the network. A read never
@@ -1566,13 +1568,15 @@ def stt_settings_route(handler, daemon, query):
         return 200, view()
     if handler.command != "POST":
         return None
-    body = _object(handler._body(), ("backend", "cloud_fallback"))
+    body = _object(handler._body(), ("backend", "cloud_fallback", "dictation_cleanup"))
     if not body:
-        fail(400, "expected backend and/or cloud_fallback")
+        fail(400, "expected backend, cloud_fallback or dictation_cleanup")
     if "backend" in body and body["backend"] not in stt_settings.BACKENDS:
         fail(400, f"backend must be one of {', '.join(stt_settings.BACKENDS)}")
     if "cloud_fallback" in body and not isinstance(body["cloud_fallback"], bool):
         fail(400, "cloud_fallback must be a boolean")
+    if "dictation_cleanup" in body and body["dictation_cleanup"] not in stt_settings.CLEANUP:
+        fail(400, "dictation_cleanup must be off or rules")
     try:
         stt_settings.update(**body)
     except OSError as exc:
@@ -2012,6 +2016,16 @@ def route(handler, daemon, parts, query):
         return hud_files(handler, parts)
     if parts == ["stt", "settings"]:
         return stt_settings_route(handler, daemon, query)
+    if parts == ["stt", "cleanup"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        _object(query, ())
+        if method != "GET":
+            fail(405, "method not allowed")
+        link = getattr(daemon, "voice_link", None)
+        from .voice_link import CLEAN_PASSES
+        return 200, link.cleanup_counts() if link else {
+            name: {"typed": 0, "scratched": 0} for name in CLEAN_PASSES}
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt", "speech/summary"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "speaker":
@@ -2388,7 +2402,7 @@ def route(handler, daemon, parts, query):
                     # its acknowledged turn. Legacy response bytes stay fixed.
                     if query.get("tools") == "1" and isinstance(row.get("turn_id"), str):
                         message["turn_id"] = row["turn_id"]
-                    if kind == "user" and data.get("via") in ("discord", "dm", "inbox", "phone"):
+                    if kind == "user" and data.get("via") in ("discord", "dm", "inbox", "phone", "voice"):
                         # Typed in Discord (PR C): the HUD labels it "via Discord";
                         # a decision answered in the inbox (B1), "via the inbox";
                         # one answered on the phone (P-4), "via the phone".

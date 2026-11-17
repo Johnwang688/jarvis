@@ -50,6 +50,21 @@ DEFAULT_LINES = 1500
 # the boundary rather than a smaller version of one.
 SELF_PROTECTED = frozenset(
     {
+        # VA-2 will type into any app: code holding the owner's microphone,
+        # keyboard and pairing is authorization code.
+        "jarvis/v2/voice_link.py",
+        "windows/voicewire.py",
+        "windows/voice_agent.py",
+        "jarvis/voice_link_setup.py",
+        # VA-2/4/5 (2026-11-16): typing, actions, the wake listener and the
+        # overlay run in the same owner-started process.
+        "windows/voicetype.py",
+        "windows/voiceactions.py",
+        "windows/voiceflow.py",
+        "windows/voiceui.py",
+        "windows/voicewake.py",
+        # VA3-D2: decides what a dictation cleanup may type into any app.
+        "jarvis/v2/dictation_guard.py",
         "jarvis/tools/secrets.py",
         "jarvis/tools/files.py",
         "jarvis/tools/__init__.py",

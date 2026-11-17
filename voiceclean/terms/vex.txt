@@ -1,0 +1,68 @@
+auton
+drivetrain
+odometry
+PID
+intake
+V5 Brain
+V5 Controller
+V5 Smart Motor
+V5 Robot Battery
+V5 Radio
+V5 Smart Cable
+VEXcode
+VEXcode Pro
+PROS
+LemLib
+OkapiLib
+EZ Template
+inertial sensor
+rotation sensor
+optical sensor
+distance sensor
+vision sensor
+AI Vision Sensor
+bumper switch
+limit switch
+potentiometer
+three wire port
+smart port
+motor cartridge
+blue cartridge
+green cartridge
+red cartridge
+gear ratio
+gear train
+high strength shaft
+shaft collar
+bearing flat
+pillow block
+C channel
+angle gusset
+standoff
+nylock nut
+flex wheel
+omni wheel
+traction wheel
+mecanum wheel
+tracking wheel
+pneumatic cylinder
+solenoid
+air reservoir
+pressure regulator
+sprocket
+chain tensioner
+rubber band
+linear slide
+lift arm
+four bar lift
+six bar lift
+motion profiling
+pure pursuit
+slew rate
+deadband
+brake mode
+coast mode
+hold mode
+Skills Challenge
+Robot Skills
+VEX V5

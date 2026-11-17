@@ -771,6 +771,65 @@ def download_port(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+COMMIT_TIMEOUT_S = 3.0
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}", re.ASCII)
+
+
+def head_commit(root) -> tuple[str | None, bool | None]:
+    """The commit a download is sent from, for the owner to read beside it:
+    `(sha, dirty)`, HEAD of the repository holding `root`, and whether the
+    project folder has changes HEAD does not hold (tracked or untracked,
+    the `build/` folder's contents aside; a tracked `build` file or symlink
+    still counts). `(None, None)` when there is no repository or no commit,
+    when the repository's own config names a program for git to run
+    (`gitops._config_risk`, as the editor's gutter refuses it; config
+    that cannot be listed counts) and when git fails or is slow; `dirty` is
+    None when only that check failed. Only `gitops`' hardened git (hooks and fsmonitor off, scrubbed environment)
+    and never anything that writes. It decides nothing: a label."""
+    from jarvis import gitops
+    cwd = Path(root)
+    try:
+        # Judged from `root` itself, where every later git here runs, so the
+        # config judged is the config those runs obey: from the toplevel git
+        # reports, a nested repository's `core.worktree` naming its parent
+        # had the parent's config judged and its own obeyed (PR #398 review).
+        risk = gitops._config_risk(cwd, timeout=COMMIT_TIMEOUT_S)
+        if risk is None or risk:            # unlisted config is not a clean one
+            return None, None
+        code, out, _ = gitops._git(cwd, ["rev-parse", "-q", "--verify", "HEAD^{commit}"],
+                                   timeout=COMMIT_TIMEOUT_S)
+        sha = out.strip()
+        if code != 0 or not COMMIT_SHA.fullmatch(sha):
+            return None, None
+        # No optional locks (gitops pins GIT_OPTIONAL_LOCKS=0 too): never an index write.
+        code, out, _ = gitops._git(cwd, ["--no-optional-locks", "status", "--porcelain",
+                                         "--untracked-files=normal", "--", ".", ":(exclude)build/"],
+                                   timeout=COMMIT_TIMEOUT_S)
+    except Exception:
+        return None, None
+    return sha, (bool(out.strip()) if code == 0 else None)
+
+
+def local_clock(iso: str) -> str:
+    """`HH:MM:SS` on this machine's clock for one of `_utcnow()`'s stamps."""
+    try:
+        return datetime.datetime.fromisoformat(iso).astimezone().strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+
+
+def download_title(project: str, slot: int, sha: str | None, dirty: bool | None, started: str) -> str:
+    """The download terminal's title: what is sent where, from which commit
+    (`+` when the folder had uncommitted changes), started when."""
+    parts = [f"vex download · {project} → slot {slot}"]
+    if sha:
+        parts.append(sha[:7] + ("+" if dirty else ""))
+    clock = local_clock(started)
+    if clock:
+        parts.append(f"started {clock}")
+    return " · ".join(parts)
+
+
 def escaped(data: bytes) -> str:
     r"""Bytes as text a person can read, every control and invisible character
     (and the backslash) escaped: `\x1b[6n`, `\r\n`. For the brain record."""
@@ -851,6 +910,197 @@ def parse_errors(text: str, root_windows: str | None = None) -> list[dict]:
         if len(out) >= ERRORS_KEPT:
             break
     return out
+
+
+# -- the brain terminal's saved log -------------------------------------------------------------
+
+BRAIN_LOG_NAME = re.compile(r"brain-\d{8}-\d{6}-[0-9a-f]{8}\.log", re.ASCII)
+BRAIN_LOG_CAP = 32 << 20          # one session's file; past it, the terminal only
+BRAIN_LINE_CAP = 64 << 10         # a line with no newline yet, written as one past this
+
+
+def _brain_log_dir() -> int:
+    """The log folder, opened: made private (0700) if missing, never through
+    a symbolic link, and only one this user owns. -> a directory fd."""
+    folder = Path(config.VEX_BRAIN_LOG_DIR).expanduser()
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        pass
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise PermissionError("the brain log folder belongs to another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def prune_brain_logs(dir_fd: int, now: float | None = None) -> int:
+    """Remove this folder's brain logs older than `VEX_BRAIN_LOG_DAYS`: only
+    regular files with `BRAIN_LOG_NAME`'s exact shape, judged without
+    following a link. -> how many were removed."""
+    cutoff = (time.time() if now is None else now) - config.VEX_BRAIN_LOG_DAYS * 86400
+    removed = 0
+    for name in os.listdir(dir_fd):
+        if not BRAIN_LOG_NAME.fullmatch(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                os.unlink(name, dir_fd=dir_fd)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _utf8_cut(buf, limit: int) -> int:
+    """Where to cut `buf` at most `limit` bytes in without splitting a UTF-8
+    character (a continuation byte is never the first of the next piece)."""
+    size = limit
+    while size > limit - 3 and size < len(buf) and buf[size] & 0xC0 == 0x80:
+        size -= 1
+    return size if buf[size:size + 1] and buf[size] & 0xC0 != 0x80 else limit
+
+
+class BrainLog:
+    """One brain terminal session saved as text (the owner, 2026-11-16): each
+    line plain (`plain`, `_visible`: escapes and control characters out, a
+    line redrawn with CR kept as its last state) after the local time its
+    first byte arrived, `HH:MM:SS.mmm`, with a `# date` line when the day
+    changes. Written as it arrives, so a closed terminal, a daemon restart
+    or a crash loses nothing already printed. The file is made new (never
+    through a link, never over another), private (0600), and stops at
+    `BRAIN_LOG_CAP` with a line that says so. A write that fails ends the
+    log, never the terminal. The daemon log gets its path, never its text."""
+
+    def __init__(self, fd: int, path: str, clock=time.time):
+        self._fd: int | None = fd
+        self.path = path
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._buf = bytearray()
+        self._line_at: float | None = None
+        self._day: str | None = None
+        self.size = 0
+
+    @classmethod
+    def open(cls, port: str | None, clock=time.time) -> "BrainLog | None":
+        """A new log in `VEX_BRAIN_LOG_DIR` after pruning the old ones, or
+        None (said in the daemon log) when the folder cannot be used."""
+        try:
+            dir_fd = _brain_log_dir()
+        except Exception as exc:  # noqa: BLE001 — a log never stops the terminal
+            LOG.warning("vex brain log off: the folder cannot be used (%s)", type(exc).__name__)
+            return None
+        try:
+            try:
+                prune_brain_logs(dir_fd, clock())
+            except OSError:
+                pass
+            now = clock()
+            name = (f"brain-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-"
+                    f"{secrets.token_hex(4)}.log")
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=dir_fd)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("vex brain log off: no file could be made (%s)", type(exc).__name__)
+            return None
+        finally:
+            os.close(dir_fd)
+        try:
+            log = cls(fd, str(Path(config.VEX_BRAIN_LOG_DIR).expanduser() / name), clock)
+            stamp = datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds")
+            log._write(f"# VEX brain terminal, started {stamp}; port "
+                       f"{port or 'picked by vexcom'}\n")
+        except BaseException:
+            os.close(fd)
+            raise
+        return log
+
+    def _write(self, text: str) -> None:
+        if self._fd is None:
+            return
+        data = text.encode("utf-8", "replace")
+        try:
+            if self.size + len(data) > BRAIN_LOG_CAP:
+                note = (f"# log capped at {BRAIN_LOG_CAP >> 20} MB; later output is in the "
+                        "terminal only\n").encode()
+                os.write(self._fd, note)
+                self._end()
+                return
+            view = memoryview(data)
+            while view:
+                view = view[os.write(self._fd, view):]
+            self.size += len(data)
+        except OSError as exc:
+            LOG.warning("vex brain log stopped: a write failed (%s)", type(exc).__name__)
+            self._end()
+
+    def _end(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _line(self, raw: bytes, at: float) -> None:
+        when = datetime.datetime.fromtimestamp(at).astimezone()
+        day = when.strftime("%Y-%m-%d")
+        if day != self._day:
+            if self._day is not None:
+                self._write(f"# date {day}\n")
+            self._day = day
+        # The PTY ends a line with CRLF: the CR is the line's end, not a redraw.
+        text = _visible(plain(raw.removesuffix(b"\r"))).replace("\n", " ")
+        self._write(f"{when.strftime('%H:%M:%S')}.{when.microsecond // 1000:03d}  {text}\n")
+
+    def feed(self, data: bytes) -> None:
+        """A chunk of the terminal's output (`Terminal.on_output`)."""
+        with self._lock:
+            if self._fd is None or not data:
+                return
+            now = self._clock()
+            pos = 0
+            while pos < len(data):
+                if self._line_at is None:
+                    self._line_at = now
+                cut = data.find(b"\n", pos)
+                self._buf += data[pos:] if cut < 0 else data[pos:cut]
+                # However the line arrived, a piece past the cap is written as
+                # its own line, cut where no UTF-8 character is split.
+                # Past the cap, not at it: the byte after the cut must be seen.
+                while len(self._buf) > BRAIN_LINE_CAP:
+                    size = _utf8_cut(self._buf, BRAIN_LINE_CAP)
+                    self._line(bytes(self._buf[:size]), self._line_at)
+                    del self._buf[:size]
+                    self._line_at = now
+                if cut < 0:
+                    if not self._buf:
+                        self._line_at = None
+                    break
+                self._line(bytes(self._buf), self._line_at)
+                self._buf.clear()
+                self._line_at = None
+                pos = cut + 1
+
+    def close(self, exit_code: int | None = None) -> None:
+        """The session ended: a line not yet ended by a newline, then when and how."""
+        with self._lock:
+            if self._fd is None:
+                return
+            if self._buf and plain(bytes(self._buf)).strip():
+                self._line(bytes(self._buf), self._line_at or self._clock())
+            self._buf.clear()
+            stamp = datetime.datetime.fromtimestamp(self._clock()).astimezone().isoformat(
+                timespec="seconds")
+            self._write(f"# ended {stamp}" + (f" (exit {exit_code})" if exit_code is not None
+                                              else "") + "\n")
+            self._end()
 
 
 def _visible(text: str) -> str:
@@ -1517,10 +1767,14 @@ class Download:
     ended: str | None = None
     timed_out: bool = False
     timer: threading.Timer | None = None
+    # HEAD when the download started, and whether the project folder had
+    # changes it does not hold (`head_commit`): a label for the owner.
+    commit: str | None = None
+    dirty: bool | None = None
 
     def view(self):
         return {key: getattr(self, key) for key in ("id", "project_id", "slot", "started",
-                "terminal_id", "state", "exit_code", "output", "ended")}
+                "terminal_id", "state", "exit_code", "output", "ended", "commit", "dirty")}
 
 
 @dataclass
@@ -1644,7 +1898,7 @@ class Vex:
             self._last[key] = old
 
     def _start(self, argv, *, cfg, tool, also=(), folder, label, program, title, project_id=None,
-               input_ok=False, on_exit=None, key=None):
+               input_ok=False, on_exit=None, on_output=None, key=None):
         """Spawn `argv` as a program terminal. `argv[0]` is `cfg.<tool>`; it and
         the tools in `also` are hashed against `vex.json` immediately before
         the spawn (`verify_tools`), and nothing else runs in between."""
@@ -1659,7 +1913,7 @@ class Vex:
         try:
             terminal = self.daemon.terminals.create_program(
                 argv, folder=folder, label=label, program=program, title=title,
-                project_id=project_id, input_ok=input_ok, on_exit=on_exit)
+                project_id=project_id, input_ok=input_ok, on_exit=on_exit, on_output=on_output)
         except TerminalError as exc:
             raise VexError(str(exc)) from None
         if key is not None:
@@ -1947,6 +2201,9 @@ class Vex:
                            "download here; rename it in .vscode/vex_project_settings.json")
         cfg = load_config()
         root = project.root
+        # Which commit is sent, for the owner to read beside the download: read
+        # before anything is held, so a slow git never keeps the device.
+        commit, dirty = head_commit(root)
         # The device first (one device action at a time, said as such), then
         # the project's build lock, held for the download so no build rewrites
         # the binary while it is being sent — and the binary judged under it,
@@ -1968,7 +2225,8 @@ class Vex:
             raise
         with self._lock:
             self._held.add(lock)
-            record = Download(self._id(self._downloads), project.id, slot, _utcnow())
+            record = Download(self._id(self._downloads), project.id, slot, _utcnow(),
+                              commit=commit, dirty=dirty)
             self._keep(self._downloads, record.id, record)
 
         def ended(terminal):
@@ -2011,7 +2269,8 @@ class Vex:
         try:
             terminal = self._start(argv, cfg=cfg, tool="vexcom", folder=root, label=project.name,
                                    program="vex-download",
-                                   title=f"vex download · {project.name} → slot {slot}",
+                                   title=download_title(project.name, slot, commit, dirty,
+                                                        record.started),
                                    project_id=project.id, on_exit=ended,
                                    key=("vex-download", project.id))
         except BaseException:
@@ -2207,9 +2466,18 @@ class Vex:
         argv = brain_argv(cfg, port)
         release, bind = self._reserve_device("brain")
         finished: dict = {}             # set by `ended`, under the lock, if it runs at all
+        # The session's output, saved as it arrives (`BrainLog`); None when
+        # the folder cannot be used, which never stops the terminal.
+        try:
+            log = BrainLog.open(port)
+        except BaseException:
+            release()                   # never a device held for a log that failed
+            raise
 
         def ended(terminal):
             release()
+            if log is not None:
+                log.close(terminal.exit_code)
             reading = self._brain_reading(terminal)
             with self._lock:
                 # vexcom failed by itself with the remembered port (gone, busy,
@@ -2231,21 +2499,26 @@ class Vex:
             terminal = self._start(argv, cfg=cfg, tool="vexcom",
                                    folder=os.path.dirname(cfg.vexcom), label="brain",
                                    program="vex-brain", title="vex brain", input_ok=True,
-                                   on_exit=ended, key=("vex-brain",))
+                                   on_exit=ended, on_output=log.feed if log is not None else None,
+                                   key=("vex-brain",))
         except BaseException:
             release()
+            if log is not None:
+                log.close()
             raise
         if not terminal.exited:
             bind(terminal.id)
         with self._lock:
             self._brain_record = {"terminal_id": terminal.id, "started": _utcnow(), "ended": None,
-                                  "args": argv[1:], "port": port}
+                                  "args": argv[1:], "port": port,
+                                  "log": log.path if log is not None else None}
             # An exit hook that already ran (vexcom ended at once) left its
             # reading; otherwise the record reads the live terminal until it does.
             self._brain_record.update(finished)
             self._brain_terminal = None if finished else terminal
         self._announce("brain")
-        LOG.info("vex brain terminal started (--quiet, port %s)", port or "picked by vexcom")
+        LOG.info("vex brain terminal started (--quiet, port %s); log %s", port or "picked by vexcom",
+                 log.path if log is not None else "off")
         return {"terminal_id": terminal.id, "started": True, "port": port}
 
     # -- device info --------------------------------------------------------------------

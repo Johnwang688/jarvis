@@ -2249,6 +2249,41 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   `ss -F<key>`, `-nf/abs`) is judged too — every tail of a short-option
   cluster that looks like a path (starts with `/`, `~`, `.` or holds a `/`),
   for every program, with no table of which letters take a value.
+  Paths or settings read from **another file** are refused (2026-11-16,
+  `docs/plans/2026-11-16-run-readonly-list-files.md`; PR #388's Sol verifier
+  had `file -m magic -f list` print a file named only inside `list`). The
+  audit of the installed allowlist found: `file -f`/`--files-from`, `file -m`
+  naming a colon list or a folder (parse warnings quote each file read,
+  nested symlinks followed), `wc`/`du --files0-from`, `find -files0-from`,
+  and env in any position before the program with `-f`/`--file` (variables
+  from a file: PATH ran a planted `ls`, unasked), `-C`/`--chdir` (relative
+  operands judged in the project but opened in `~/.ssh`: printed the key)
+  or `-S`/`--split-string` (`env -S'-f V' ls` ran). Long options by any
+  prefix. Options whose named file *is* the input stay allowed: `grep -f`,
+  `rg -f`, `date -f`, `ss -F`, `du -X`, `--exclude-from`, `file -m ONE`.
+  The Sol verifier added three: a plain `file x` loading a planted
+  `~/.magic` symlink (and `-m X` loading `X.mgc`), refused when either is a
+  symlink or in a credential folder; glued bare tails (`date -fkeylink`, a
+  relative symlink to the key), now judged like path-like ones; and
+  `ionice -p/-P/-u`, which changed a running process.
+  An Opus review the same day found older holes in the operand judge, closed
+  by letting **dash expand the words**: once a line holds no operator,
+  substitution or `$`, `sh -c 'printf "%s\0" LINE'` can only expand quotes,
+  `~` and patterns. Every resulting word is judged as it stands and by name
+  (`is_credential`; a bare glued tail or `-` word by folder only when it
+  names something that exists)
+  (`~/.s[[:lower:]]h/id_ed25519`, `cat -- -keylink`, `cat .e[[:lower:]]v`); an
+  option word only a pattern produced is refused (a planted `-f` reached by
+  `-?`, `find -de?ete`); so is a pattern before or as the program. Every
+  check after the expansion reads dash's words, and **what runs is those
+  words, each quoted** (a `#` comment had hidden a word from shlex's copy;
+  delta review), so nothing is expanded twice. Refusals repeat only words as
+  written, never an expanded name. Also
+  refused: procps `watch` (runs `sh -c`), home magic folders, `.mime.mgc`
+  companions. **Open:** rg's `.ignore`/`.rgignore` read from searched
+  folders, links followed (invalid glob lines are quoted); other processes'
+  environments through `ps eww` and `/proc/PID/environ`.
+  `tests/readonly_list_files_check.py`, 46 of 46 mutations biting.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.
@@ -3841,3 +3876,49 @@ offered (79), the rule missing from the defaults (229).
   | xargs file readers allowed | 12 |
   | git env ignored | 18 |
   | `-f` symlink unresolved | 3 |
+
+**Name-only credential hardening (2026-11-15).** `secrets.is_credential_name`
+judges `PROTECTED_NAMES`, `EXACT_NAMES` and the owner's env-name rule as whole
+names, case-folded both as written and with Windows' trailing dots/spaces
+trimmed. `is_protected` asks that name rule; `is_credential` uses the same
+walker as the env-only `is_env_credential` to judge every last-component
+symlink hop and the realpath, refusing unfollowable links. Agent reads,
+`grep_files` and v2 `denied_read` inherit it; `run_readonly` also judges each
+placed, expanded/globbed operand by `is_credential`, alongside its existing
+credential-folder and recursion checks. Short-option tails also judge bare
+relative aliases by name; folder checks still require path-like tails.
+Parent directories resolve in kernel order before walking the final name,
+and an initial lookup error keeps the name verdict; errors after following
+a link refuse. `grep_files` judges its root before resolving it. Raw command
+names are matched after Unicode case folding of the line and the names (the
+name rule's own folding; not a regex IGNORECASE, which pairs `İ` with `i`, and
+not ASCII-only, which misses `ſ` and the Kelvin sign), with the same
+name-character boundaries. Accepted cost, by the lead (PR #388 verifier round 2):
+with no per-program table of which letters take a value, a short-option tail is
+judged as a file, so `ls -la` is refused in a folder that holds a credential
+alias named exactly `a` or `la`; the refusal names the word. A plain
+recursive `grep -r`/`rg` over an ordinary folder holding a credential *file*
+remains the stated limit, the class of `grep -r foo .`; this adds no
+recursive file-name scan.
+
+**`credentials-read` sets data here-document bodies aside (HD-0,
+2026-11-16).** Layer 2 split the raw line, so a `python3 - <<'EOF'` body's
+`pass` line was judged as the password store and carded. Only the
+`credential_read` kind now reads a line through
+`permissions._heredoc_data_reading`: bodies inlined as here-strings
+(`rules._inline_heredocs`), used only when nothing on the line can run a
+body. Every segment's program, as written, is on `HEREDOC_INERT_PROGRAMS`
+(`cat`, `tee`, `wc`, `grep`, `head`, `tail`, `ls`, `echo`, `cd`, `pwd`,
+`mkdir`, `true`; `grep` without ugrep's command-running options, since
+Claude Code's shell runs `grep` as ugrep) or is the `python3 -`/`node -` its
+own body is the program of; redirections are plain paths; the line has no unquoted `( ) { } <( >(`,
+nothing live outside single quotes and no `PATH=`. Anything else keeps the
+raw reading, so nothing asked before stops being asked. **The list names
+what is safe, never what is dangerous**: two review rounds on #396 broke a
+consumer-name check and then a deny-list of shells and runners (`make`,
+`awk system()`, `at -f`, `taskset dash`, `$l` read from a file). The other
+layer-2 readings (always-ask stems and git rules, gate-state, the vex
+backstop) still read bodies as commands: the owner deferred them
+(`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
+(layer 2 reads no `$(…)` or shell-fed here-string). Regression:
+`tests/v2/heredoc_credentials_read_check.py`.

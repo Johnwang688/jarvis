@@ -94,6 +94,7 @@ def state(mock) -> dict:
         "downloads": [],
         "download_records": {},
         "download_auto": True,
+        "download_commit": (None, None),     # (sha, dirty) a download record names
         "download_live": False,
         "connection": {"brain": True, "controller": False, "checked_at": "2026-10-13T12:00:00+00:00",
                        "state": "ready", "message": "USB check complete.", "events": []},
@@ -498,7 +499,10 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 return True
             code = v["download_exit"]
             live = not v["download_auto"] and v.get("download_live")
-            row = _program_row(mock, "vex-download", f"vex download · {det['name']} → slot {slot}", pid,
+            commit, dirty = v.get("download_commit", (None, None))
+            title = f"vex download · {det['name']} → slot {slot}" + (
+                f" · {commit[:7]}{'+' if dirty else ''}" if commit else "") + " · started 06:00:00"
+            row = _program_row(mock, "vex-download", title, pid,
                                exited=not live, exit_code=None if live else code)
             v["downloads"][-1]["terminal_id"] = row["id"]
             v["downloads"][-1]["sent"] = True
@@ -507,7 +511,7 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             v["download_records"][rid] = {"id": rid, "project_id": pid, "slot": slot,
                 "state": "succeeded" if code == 0 else "failed", "terminal_id": row["id"],
                 "exit_code": code, "output": "Downloading User Program\nFinished", "started": "2026-10-13T12:00:00+00:00",
-                "ended": "2026-10-13T12:00:01+00:00"}
+                "ended": "2026-10-13T12:00:01+00:00", "commit": commit, "dirty": dirty}
             if not v["download_auto"]:
                 v["download_records"][rid].update(state="running", exit_code=None, ended=None, output="Downloading <b>fixture</b>")
             h._json({"terminal_id": row["id"], "download_id": rid}, 202)

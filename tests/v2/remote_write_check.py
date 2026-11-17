@@ -229,7 +229,7 @@ class Sending(Base):
 
     def test_never_steer_is_read_from_the_message(self):
         # Any caller of `deliver`, not only the phone's route.
-        self.assertEqual(daemon_mod.NEVER_STEER, ("phone",))
+        self.assertEqual(daemon_mod.NEVER_STEER, ("phone", "voice"))  # VA-2/4/5: voice questions queue too (orchestrator)
         thread = self.chat(PN.CLAUDE)
         self.d.deliver(thread.id, UserMessage("go"))
         eventually(self.gate.running.is_set, what="the turn")

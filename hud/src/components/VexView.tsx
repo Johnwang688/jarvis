@@ -51,7 +51,7 @@ import { DEVICE_POLL_MS, vex } from "../state/vex";
 import { TerminalView, terminals, useTerminals } from "./Terminal";
 import {
   OUTPUT_TABS, SETUP_COMMAND, SLOTS, actionState, brainView, buildLine, chainLine, chainSteps, defaultName, deviceBadge,
-  downloadButtonLabel, downloadLabel, downloadProgress, errorTarget, errorWhere, helpText, isExplicitClick, isTrustedPress,
+  downloadButtonLabel, downloadLabel, downloadOrigin, downloadProgress, errorTarget, errorWhere, helpText, isExplicitClick, isTrustedPress,
   markGlyph, nameRefusal, nextTab, outputTabFor, setupNote, staleNotes, tabBadge, type ActionKind, type BrainView,
   type BuildError, type Detection, type HelpId, type Mark, type OutputTab,
 } from "../lib/vex";
@@ -901,9 +901,19 @@ function DownloadTab(props: { pane: number; d: Detection; pid: string; blocked: 
   if (props.d.language !== "cpp") {
     return <div className="vexobody muted small">Downloading a Python project waits on a setup check; use VS Code for now.</div>;
   }
+  const origin = run.download ? downloadOrigin(run.download) : null;
   return <>
     <div className="vexobar" data-testid="vex-download-state" aria-busy={active}>
       <span>{run.download ? `vexcom · slot ${run.download.slot}` : "vexcom"}</span>
+      {origin?.commit ? (
+        <span className="vexmono" data-testid="vex-download-commit"
+              title={`Commit ${run.download!.commit}${run.download!.dirty ? ", with uncommitted changes in the project folder" : ""}`}>
+          {origin.commit}
+        </span>
+      ) : null}
+      {origin?.started ? (
+        <span data-testid="vex-download-started" title={run.download!.started}>started {origin.started}</span>
+      ) : null}
       {progress !== null ? (
         <span className="vexprogress" data-testid="vex-download-progress" role="progressbar" aria-label="Download progress"
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>

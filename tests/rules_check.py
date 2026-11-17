@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -887,7 +888,9 @@ def run_readonly_checks() -> None:
             ran.clear()
         for command in READONLY_MUST_ALLOW:
             out = shell.run_readonly(command)
-            assert ran == [command], f"run_readonly refused ordinary work {command!r}: {out}"
+            # What runs is dash's words for the line, each quoted (2026-11-16).
+            assert len(ran) == 1 and shlex.split(ran[0]) == shell._shell_words(command), (
+                f"run_readonly refused ordinary work {command!r}: {out}")
             ran.clear()
         # git is the typed tool's, in every costume — a read as much as a write.
         for command in READONLY_GIT_MOVED:
@@ -922,7 +925,9 @@ def run_readonly_narrowing_checks() -> None:
     with recorded() as ran:
         for command in READONLY_QUOTED_METACHARACTERS:
             out = shell.run_readonly(command)
-            assert ran == [command], f"run_readonly refused a read: {command!r}: {out}"
+            # What runs is dash's words for the line, each quoted (2026-11-16).
+            assert len(ran) == 1 and shlex.split(ran[0]) == shell._shell_words(command), (
+                f"run_readonly refused a read: {command!r}: {out}")
             ran.clear()
 
     # The quote-awareness comes from rules.py's scanner, not a second copy of

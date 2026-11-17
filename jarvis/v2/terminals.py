@@ -784,6 +784,11 @@ class Terminal:
         # Called once, with this terminal, after its program has exited and
         # its output has been read to the end (or on finish). vex.py's only.
         self.on_exit = None
+        # Called with each chunk of a program's output, in order, on the
+        # reader thread and outside every lock, after the ring holds it (the
+        # brain terminal's saved log). vex.py's only; a hook that raises is
+        # dropped, never the terminal.
+        self.on_output = None
         self._exit_fired = False
         self.created = utcnow()
         self.cols, self.rows = cols, rows
@@ -965,6 +970,13 @@ class Terminal:
                 self._sniffer = None
             LOG.warning("terminal %s: dev-server detection stopped (%s)", self.id,
                         type(failure).__name__)
+        hook = self.on_output
+        if hook is not None:
+            try:
+                hook(data)
+            except Exception as exc:  # noqa: BLE001 — a hook never breaks the terminal
+                self.on_output = None
+                LOG.warning("terminal %s: output hook failed (%s)", self.id, type(exc).__name__)
 
     def _sniff(self, data: bytes, start: int, enabled: bool) -> list[str]:
         """Parse live command output under the state lock; no registry calls.
@@ -1524,7 +1536,7 @@ class Terminals:
 
     def create_program(self, argv: list[str], *, folder: str, label: str, program: str,
                        title: str, project_id: str | None = None, input_ok: bool = False,
-                       on_exit=None, cols: int = 80, rows: int = 24) -> Terminal:
+                       on_exit=None, on_output=None, cols: int = 80, rows: int = 24) -> Terminal:
         """A program terminal (VX-1): one program on a PTY, its output in the
         ring like a shell's, attached and closed by the same routes.
 
@@ -1535,7 +1547,8 @@ class Terminals:
         environment (`program_environment`: nothing of the daemon's crosses
         into a Windows program), and HUP/INT/QUIT/TERM/TSTP at their defaults.
         `on_exit(terminal)` runs once when the program has ended and its
-        output has been read to the end."""
+        output has been read to the end; `on_output(data)` with each chunk
+        of output before that, in order."""
         if not _size_ok(cols, rows):
             raise ValueError("cols must be 2-1000 and rows 1-500")
         if not argv or not all(isinstance(a, str) for a in argv) or not os.path.isabs(argv[0]):
@@ -1556,6 +1569,7 @@ class Terminals:
             # Set before the program starts: one that ends at once still
             # reaches its hook.
             terminal.on_exit = on_exit
+            terminal.on_output = on_output
             try:
                 terminal.spawn([*prefix, *argv], program_environment())
             except BaseException:
