@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import importlib.util
 import json
 import logging
 import os
 from pathlib import Path
+import queue
 import socket
 import sys
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -97,6 +99,90 @@ class Base(rac.Base):
     def ping(self, c):
         wire.send_json(c._stream, {"op": "ping", "id": 901})
         self.assertEqual(wire.read_json(c._stream), {"id": 901, "ok": True})
+
+
+class HudLaunch(Base):
+    def post(self, port, path="/voice-agent/start", body=None, *, origin=True):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+        headers = {"Content-Type": "application/json"}
+        if origin:
+            headers["Origin"] = f"http://127.0.0.1:{port}"
+        try:
+            conn.request("POST", path, json.dumps({} if body is None else body), headers)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read())
+        finally:
+            conn.close()
+
+    def test_only_owner_can_launch_with_empty_parameters(self):
+        self.start()
+        with patch.object(self.link, "start_windows_agent") as start:
+            self.assertEqual(self.post(self.d.port)[0], 403)
+            self.assertEqual(self.post(self.d.workshop_port)[0], 404)
+            self.assertEqual(self.post(self.d.face_port, origin=False)[0], 403)
+            self.assertEqual(self.post(self.d.face_port, body={"path": "other"})[0], 400)
+            self.assertEqual(self.post(self.d.face_port, "/voice-agent/start?port=1")[0], 400)
+            start.assert_not_called()
+            self.assertEqual(self.post(self.d.face_port), (200, {"connected": True}))
+            start.assert_called_once_with()
+
+    def test_unpaired_owner_gets_offline_message(self):
+        self.key.unlink()
+        self.d.start()
+        status, body = self.post(self.d.face_port)
+        self.assertEqual(status, 409)
+        self.assertIn("Voice link is offline", body["error"])
+
+    def test_connected_agent_is_not_launched_again(self):
+        self.start()
+        with patch.object(self.link, "_launch_windows_process") as launch:
+            self.client()
+            self.assertEqual(self.post(self.d.face_port), (200, {"connected": True}))
+            launch.assert_not_called()
+
+    def test_start_waits_for_authenticated_connect_and_avoids_duplicate_launch(self):
+        self.start()
+        child = Mock()
+        child.poll.return_value = None
+        launched = threading.Event()
+
+        def launch():
+            launched.set()
+            return child
+
+        with patch.object(self.link, "_launch_windows_process", side_effect=launch) as spawn:
+            jobs = queue.Queue()
+
+            def click():
+                try:
+                    jobs.put(self.post(self.d.face_port))
+                except Exception as error:
+                    jobs.put(error)
+
+            clicks = [threading.Thread(target=click) for _ in range(2)]
+            for click_thread in clicks:
+                click_thread.start()
+            try:
+                self.assertTrue(launched.wait(2))
+                self.assertTrue(jobs.empty())
+                self.client()
+                for _ in clicks:
+                    self.assertEqual(jobs.get(timeout=5), (200, {"connected": True}))
+                spawn.assert_called_once()
+            finally:
+                for click_thread in clicks:
+                    click_thread.join(timeout=5)
+
+    def test_early_process_exit_is_reported_and_can_be_retried(self):
+        self.start()
+        child = Mock()
+        child.poll.return_value = 1
+        with patch.object(self.link, "_launch_windows_process", return_value=child) as spawn:
+            for _ in range(2):
+                status, body = self.post(self.d.face_port)
+                self.assertEqual(status, 503)
+                self.assertIn("exited before connecting", body["error"])
+            self.assertEqual(spawn.call_count, 2)
 
 
 class DeskPath(Base):
@@ -262,7 +348,7 @@ class Connections(Base):
         self.start()
         c = self.client()
         with patch.object(self.link, "transcribe") as transcribe:
-            for payload in ({"op": "other", "id": 1}, {"op": "dictate", "id": 2, "wav_b64": "☃"},
+            for payload in ({"op": "other", "id": 1}, {"op": "dictate", "id": 2, "wav_b64": "â˜ƒ"},
                             {"op": "dictate", "id": 3, "wav_b64": []}, {"op": "ping", "id": True}):
                 wire.send_json(c._stream, payload)
                 self.assertIs(wire.read_json(c._stream)["ok"], False)

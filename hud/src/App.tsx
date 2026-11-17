@@ -3897,6 +3897,31 @@ export default function App() {
 
   // ---- actions ------------------------------------------------------------
 
+  const [voiceAgentStarting, setVoiceAgentStarting] = useState(false);
+  const voiceAgentRequest = useRef(false);
+  const [voiceAgentResult, setVoiceAgentResult] = useState<{ text: string; error: boolean } | null>(null);
+  useEffect(() => {
+    if (!voiceAgentResult) return;
+    const timeout = window.setTimeout(() => setVoiceAgentResult(null), 8000);
+    return () => window.clearTimeout(timeout);
+  }, [voiceAgentResult]);
+  const startVoiceAgent = async () => {
+    if (blockedNow.current || settingsNow.current || voiceAgentRequest.current) return;
+    voiceAgentRequest.current = true;
+    setVoiceAgentStarting(true);
+    setVoiceAgentResult(null);
+    try {
+      await api.startVoiceAgent();
+      setVoiceAgentResult({ text: "Windows voice agent connected.", error: false });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "Could not start the Windows voice agent.";
+      setVoiceAgentResult({ text, error: true });
+    } finally {
+      voiceAgentRequest.current = false;
+      setVoiceAgentStarting(false);
+    }
+  };
+
   const setMode = (mode: DictationMode) => {
     const wasMuted = isMuted(live.current.dictation);
     saveMode(mode);
@@ -5069,6 +5094,9 @@ export default function App() {
         status={orbStatus}
         mode={state.dictation}
         onModeChange={setMode}
+        voiceAgentStarting={voiceAgentStarting}
+        voiceAgentResult={voiceAgentResult}
+        onStartVoiceAgent={() => { void startVoiceAgent(); }}
         onPress={press}
         onRelease={release}
       />

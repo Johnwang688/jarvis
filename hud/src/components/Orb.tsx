@@ -48,6 +48,9 @@ export function Orb(props: {
   /** The dictation mode, and its change. */
   mode: DictationMode;
   onModeChange: (m: DictationMode) => void;
+  voiceAgentStarting: boolean;
+  voiceAgentResult: { text: string; error: boolean } | null;
+  onStartVoiceAgent: () => void;
   /** Folded into the left rail's foot while the sidebar is hidden. */
   compact?: boolean;
   /** A short window: the strip folds into the one cycling button, beside the
@@ -133,6 +136,21 @@ export function Orb(props: {
 
   const next = nextMode(props.mode);
   const folded = !!props.compact || !!props.tight;
+  const launchLabel = props.voiceAgentStarting ? "Starting voice agent…" : "Start voice agent";
+  const launchButton = (
+    <button
+      type="button"
+      id="voice-agent-start"
+      className={props.compact ? "rail" : props.tight ? "beside" : undefined}
+      disabled={props.blocked || props.voiceAgentStarting}
+      title={launchLabel}
+      aria-label={launchLabel}
+      onMouseDown={noPointerFocus}
+      onClick={props.onStartVoiceAgent}
+    >
+      {props.compact ? (props.voiceAgentStarting ? "…" : "▶") : launchLabel}
+    </button>
+  );
   return (
     <>
     <div
@@ -157,8 +175,11 @@ export function Orb(props: {
             </button>
           ))}
         </div>
-        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
-          <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
+        <div className="mic-tools">
+          {folded ? null : launchButton}
+          <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
+            <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
+          </div>
         </div>
       </div>
       <canvas
@@ -193,7 +214,13 @@ export function Orb(props: {
         {props.status || ""}
       </div>
     </div>
-    {props.compact ? props.speechRail : null}
+    {props.compact ? (
+      <div id="voice-controls-rail">{props.speechRail}{launchButton}</div>
+    ) : props.tight ? launchButton : null}
+    <div id="voice-agent-result" className={props.voiceAgentResult?.error ? "err" : undefined}
+      data-compact={props.compact || undefined} role="status">
+      {props.blocked ? null : props.voiceAgentResult?.text}
+    </div>
     {folded ? (
       // The dock is scaled down to a 36px mini orb, and so would a strip inside
       // it be; a short window has no room above the orb for it. Either way the

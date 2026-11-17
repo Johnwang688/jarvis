@@ -2014,6 +2014,18 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
+    if parts == ["voice-agent", "start"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if method != "POST":
+            fail(405, "method not allowed")
+        _object(query, ())
+        _object(handler._body(), ())
+        link = getattr(daemon, "voice_link", None)
+        if link is None:
+            fail(409, "Voice link is offline. Check voice-link setup and the daemon.")
+        link.start_windows_agent()
+        return 200, {"connected": True}
     if parts == ["stt", "settings"]:
         return stt_settings_route(handler, daemon, query)
     if parts == ["stt", "cleanup"]:

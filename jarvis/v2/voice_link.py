@@ -18,6 +18,7 @@ from pathlib import Path
 import queue
 import socket
 import stat
+import subprocess
 import threading
 import time
 import unicodedata
@@ -111,8 +112,60 @@ class VoiceLink:
         self._connections = set()
         self._pending = 0
         self._lock = threading.Lock()
+        self._launch_lock = threading.Lock()
+        self._launched_agent = None
         self._key = None
         self._cleanup_counts = {name: {"typed": 0, "scratched": 0} for name in CLEAN_PASSES}
+
+    def start_windows_agent(self):
+        """Only the local HUD's explicit start button calls this."""
+        from .daemon import APIError
+        with self._launch_lock:
+            with self._lock:
+                if self._server is None:
+                    raise APIError(409, "Voice link is offline. Check voice-link setup and the daemon.")
+                if self._active is not None:
+                    return
+            child = self._launched_agent
+            if child is None or child.poll() is not None:
+                child = self._launch_windows_process()
+                self._launched_agent = child
+            # A manual launcher connects through the same authenticated socket.
+            # Keep a slow-starting child so another click checks that process.
+            deadline = time.monotonic() + 8
+            while True:
+                with self._lock:
+                    if self._active is not None:
+                        return
+                if child.poll() is not None:
+                    raise APIError(503, "The Windows voice agent exited before connecting.")
+                if time.monotonic() >= deadline:
+                    raise APIError(503, "Voice agent opened but has not connected. Check its window and retry.")
+                time.sleep(0.1)
+
+    def _launch_windows_process(self):
+        from jarvis.voice_link_setup import windows_folder_closed
+        from .daemon import APIError
+
+        def convert(flag, path):
+            return subprocess.run(["wslpath", flag, str(path)], check=True,
+                                  capture_output=True, text=True, timeout=3).stdout.strip()
+
+        try:
+            bridge = Path(convert("-u", config.DESKTOP_BRIDGE_DIR))
+            if not bridge.is_absolute() or not windows_folder_closed(bridge):
+                raise APIError(409, "Check the Windows voice-link installation folder.")
+            python = bridge / "venv" / "Scripts" / "pythonw.exe"
+            key = bridge / "voice-link.key"
+            if not python.is_file() or not key.is_file():
+                raise APIError(409, "Voice agent setup is missing. Run jarvis voice-link setup.")
+            script = convert("-w", config.REPO_ROOT / "windows" / "voice_agent.py")
+            return subprocess.Popen(
+                [str(python), script, "127.0.0.1", str(self.port), convert("-w", key)],
+                cwd=bridge, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except (OSError, subprocess.SubprocessError):
+            raise APIError(503, "Could not start the Windows voice agent. Check Windows interop.") from None
 
     def cleanup_counts(self):
         """Counts only, copied under the connection lock; never retain words."""
