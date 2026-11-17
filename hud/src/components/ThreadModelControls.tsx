@@ -56,9 +56,12 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   const now = useRef(state);
   now.current = state;
 
+  const reloadSequence = useRef(0);
   const reload = useCallback(async () => {
+    const sequence = ++reloadSequence.current;
     try {
-      setModels(await api.threadModels());
+      const response = await api.threadModels();
+      if (sequence === reloadSequence.current) setModels(response);
     } catch {
       /* the chip shows ids without decoration */
     }

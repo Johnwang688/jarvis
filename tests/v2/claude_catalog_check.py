@@ -6,7 +6,6 @@ import copy
 import json
 import os
 from pathlib import Path
-import stat
 import tempfile
 import threading
 import time
@@ -16,7 +15,7 @@ from unittest.mock import patch
 
 from jarvis import config, protected_state
 from jarvis.tools import files
-from jarvis.v2 import claude_catalog as C, daemon as D, hud_api as H, router as R, thread_model as TM
+from jarvis.v2 import claude_catalog as C, daemon as D, router as R, thread_model as TM
 from jarvis.v2.model import ProviderName as P, Role, Thread
 from jarvis.v2.provider import Brief, Decision
 from jarvis.v2.providers import claude
@@ -60,7 +59,8 @@ class Fixture(unittest.TestCase):
         old = R.CLI_MODELS["claude"]
         self.addCleanup(lambda: R.CLI_MODELS.__setitem__("claude", old))
         R.CLI_MODELS["claude"] = copy.deepcopy(R.CLAUDE_FALLBACK)
-        R.CLAUDE_CATALOG_STOPPED.clear()
+        self.generation = R.claude_catalog_begin()
+        self.addCleanup(lambda: R.claude_catalog_end(self.generation))
         listeners = patch.object(R, "_claude_catalog_listeners", [])
         listeners.start()
         self.addCleanup(listeners.stop)
@@ -69,10 +69,15 @@ class Fixture(unittest.TestCase):
     def captured(self):
         """Drain the background capture before assertions or fixture teardown."""
         with R._CLAUDE_QUEUE_LOCK:
-            worker = R._claude_capture_worker
-        if worker is not None:
-            worker.join(5)
-            self.assertFalse(worker.is_alive(), "session capture did not finish")
+            self.assertTrue(R._CLAUDE_QUEUE_LOCK.wait_for(
+                lambda: R._claude_pending is None and not R._claude_busy, 5),
+                "session capture did not finish")
+
+    def install(self, rows):
+        table = C.parse(rows)
+        R.offer_claude_rows(rows)
+        self.captured()
+        return table
 
     def client(self, info=None, error=None):
         class Client:
@@ -96,10 +101,6 @@ class Fixture(unittest.TestCase):
                 raise AssertionError("catalog must never send a prompt")
         return Client()
 
-    def ledger(self):
-        ledger = H.HUDLedger(self.root / "ledger-stores")
-        self.addCleanup(lambda: ledger.stop_claude(5))
-        return ledger
 
 
 class Parse(Fixture):
@@ -170,7 +171,7 @@ class Parse(Fixture):
 
 class Cache(Fixture):
     def test_roundtrip_install_replace_unchanged_does_not_write(self):
-        table = R.set_claude_models(ROWS)
+        table = self.install(ROWS)
         self.assertEqual(R.CLI_MODELS["claude"], table)
         self.assertNotIn("claude-fable-5-1", table, "never union with fallback")
         path = config.CLAUDE_CATALOG_PATH
@@ -180,11 +181,11 @@ class Cache(Fixture):
         self.assertIn("saved_at", payload)
         self.assertEqual(C.load(), table)
         with patch.object(C, "save") as save:
-            self.assertEqual(R.set_claude_models(ROWS), table)
+            self.assertEqual(self.install(ROWS), table)
             save.assert_not_called()
         self.assertEqual(path.read_bytes(), body)
         with self.assertRaises(ValueError):
-            R.set_claude_models([{"value": "not-claude"}])
+            self.install([{"value": "not-claude"}])
         self.assertEqual(R.CLI_MODELS["claude"], table)
         self.assertEqual(path.read_bytes(), body)
         R.CLI_MODELS["claude"] = {}
@@ -228,16 +229,16 @@ class Cache(Fixture):
 
     def test_failed_save_keeps_installed_table(self):
         with patch.object(C, "_write_bytes", side_effect=OSError("private")):
-            self.assertEqual(R.set_claude_models(ROWS), C.parse(ROWS))
+            self.assertEqual(self.install(ROWS), C.parse(ROWS))
         self.assertFalse(config.CLAUDE_CATALOG_PATH.exists())
 
     def test_saved_choices_degrade_and_return_without_rewrite(self):
         TM.set_provider_default("claude", "claude-fable-5-2", "max")
         saved = config.PROVIDER_DEFAULTS_PATH.read_bytes()
-        R.set_claude_models([ROWS[1]])
+        self.install([ROWS[1]])
         self.assertNotEqual(TM.default_choice(P.CLAUDE)[0], "claude-fable-5-2")
         self.assertEqual(config.PROVIDER_DEFAULTS_PATH.read_bytes(), saved)
-        R.set_claude_models(ROWS)
+        self.install(ROWS)
         self.assertEqual(TM.default_choice(P.CLAUDE), ("claude-fable-5-2", "max"))
         self.assertEqual(config.PROVIDER_DEFAULTS_PATH.read_bytes(), saved)
 
@@ -282,138 +283,6 @@ class SDK(Fixture):
                 self.assertEqual(R.CLI_MODELS["claude"], before)
                 self.assertFalse(config.CLAUDE_CATALOG_PATH.exists())
 
-    def test_metadata_options_private_cwd_cleanup_environment_and_no_prompt(self):
-        client = self.client({"models": ROWS})
-        seen = []
-
-        def factory(options):
-            seen.append(options)
-            cwd = Path(options.cwd)
-            self.assertTrue(cwd.is_dir())
-            self.assertEqual(stat.S_IMODE(cwd.stat().st_mode), 0o700)
-            self.assertEqual(list(cwd.iterdir()), [])
-            self.assertEqual(options.tools, [])
-            self.assertEqual(options.setting_sources, [])
-            self.assertEqual(options.mcp_servers, {})
-            self.assertTrue(options.strict_mcp_config)
-            self.assertFalse(options.hooks)
-            self.assertIsNone(options.can_use_tool)
-            self.assertEqual(options.allowed_tools, [])
-            self.assertEqual(options.cli_path, "/fake/claude")
-            self.assertEqual(options.env, {})  # ordinary sessions inherit the environment too
-            self.assertIsNone(options.model)
-            return client
-        with patch.object(claude, "resolve_cli", return_value="/fake/claude"), patch.object(claude, "_client_factory", side_effect=factory):
-            self.assertEqual(claude.ClaudeProvider().model_catalog(), ROWS)
-        self.assertFalse(Path(seen[0].cwd).exists())
-        self.assertEqual((client.connects, client.disconnects, client.queries), (1, 1, 0))
-        self.assertFalse(config.CLAUDE_CATALOG_PATH.exists(), "the worker's install gate owns the save")
-
-    def test_metadata_error_disconnects_and_removes_cwd(self):
-        client = self.client(error=RuntimeError("private"))
-        seen = []
-        with patch.object(claude, "resolve_cli", return_value=None), patch.object(claude, "_client_factory", side_effect=lambda o: (seen.append(o), client)[1]):
-            self.assertIsNone(claude.ClaudeProvider().model_catalog())
-        self.assertEqual(client.disconnects, 1)
-        self.assertFalse(Path(seen[0].cwd).exists())
-
-    def test_metadata_disconnect_is_awaited_after_success_and_stalled_connect(self):
-        self.assertEqual(claude.CLAUDE_METADATA_CONNECT_READ_TIMEOUT_S, 28)
-        self.assertGreaterEqual(claude.CLAUDE_METADATA_DISCONNECT_TIMEOUT_S, 25)
-        for stalled in (False, True):
-            with self.subTest(stalled=stalled):
-                client = self.client({"models": ROWS})
-                finished, cancelled, seen = [], [], []
-
-                async def connect():
-                    try:
-                        await asyncio.Event().wait()
-                    finally:
-                        cancelled.append("connect")
-
-                async def disconnect():
-                    client.disconnects += 1
-                    self.assertTrue(Path(seen[0].cwd).is_dir())
-                    try:
-                        await asyncio.sleep(3)
-                        self.assertTrue(Path(seen[0].cwd).is_dir())
-                        finished.append(1)
-                    except asyncio.CancelledError:
-                        cancelled.append("disconnect")
-                        raise
-                if stalled:
-                    client.connect = connect
-                client.disconnect = disconnect
-                with patch.object(claude, "CLAUDE_METADATA_CONNECT_READ_TIMEOUT_S", 0.03), patch.object(claude, "resolve_cli", return_value=None), patch.object(claude, "_client_factory", side_effect=lambda o: (seen.append(o), client)[1]):
-                    started = time.monotonic()
-                    result = claude.ClaudeProvider().model_catalog()
-                    elapsed = time.monotonic() - started
-                self.assertEqual(result, None if stalled else ROWS)
-                self.assertEqual(finished, [1], "disconnect must complete, not be cancelled")
-                self.assertEqual(cancelled, ["connect"] if stalled else [])
-                self.assertGreaterEqual(elapsed, 3)
-                self.assertLess(elapsed, 4, "the connect stall remains bounded")
-                self.assertEqual((client.disconnects, client.queries), (1, 0))
-                self.assertFalse(Path(seen[0].cwd).exists())
-
-    def test_metadata_timeout_disconnects_without_query(self):
-        client = self.client()
-        cancelled = []
-
-        async def slow():
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.append(1)
-        client.connect = slow
-        with patch.object(claude, "CLAUDE_METADATA_CONNECT_READ_TIMEOUT_S", 0.02), patch.object(claude, "resolve_cli", return_value=None), patch.object(claude, "_client_factory", return_value=client):
-            started = time.monotonic()
-            self.assertIsNone(claude.ClaudeProvider().model_catalog())
-            self.assertLess(time.monotonic() - started, 1)
-        self.assertEqual(cancelled, [1])
-        self.assertEqual((client.disconnects, client.queries), (1, 0))
-
-    def test_session_capture_never_waits_for_install_and_coalesces(self):
-        entered, release = threading.Event(), threading.Event()
-        calls, workers = [], []
-
-        def install(rows):
-            calls.append(rows)
-            workers.append(threading.current_thread())
-            entered.set()
-            release.wait(1)
-            raise OSError("private disk failure")
-
-        with patch.object(R, "set_claude_models", side_effect=install):
-            try:
-                started = time.monotonic()
-                asyncio.run(claude._connect_session(self.client({"models": ROWS})))
-                self.assertLess(time.monotonic() - started, 0.3)
-                self.assertTrue(entered.wait(1))
-                for i in range(40):
-                    newest = [{"value": f"claude-new-{i}"}]
-                    asyncio.run(claude._connect_session(self.client({"models": newest})))
-                self.assertEqual(calls, [ROWS], "storm must not start more installers")
-            finally:
-                release.set()
-                self.captured()
-        self.assertEqual(calls, [ROWS, newest])
-        self.assertTrue(all(w.daemon and w is workers[0] for w in workers))
-
-    def test_session_capture_blocked_config_lock_and_after_stop_save_nothing(self):
-        ledger = self.ledger()
-        before = copy.deepcopy(R.CLI_MODELS["claude"])
-        with R._CONFIG_LOCK:
-            started = time.monotonic()
-            asyncio.run(claude._connect_session(self.client({"models": ROWS})))
-            self.assertLess(time.monotonic() - started, 0.3)
-            ledger.stop_claude(0)
-        self.captured()
-        asyncio.run(claude._connect_session(self.client({"models": ROWS})))
-        self.captured()
-        self.assertEqual(R.CLI_MODELS["claude"], before)
-        self.assertFalse(config.CLAUDE_CATALOG_PATH.exists())
-
     def test_session_catalog_listener_changes_only_and_contains_errors(self):
         changes = []
 
@@ -427,126 +296,108 @@ class SDK(Fixture):
         self.assertEqual(changes, [1])
 
 
-class Refresh(Fixture):
-    def test_ttl_success_failure_and_unchanged_notification(self):
-        self.assertEqual(H.CLAUDE_METADATA_TTL_S, 6 * 3600)
-        for result in (ROWS, [], RuntimeError("private")):
-            ledger = self.ledger()
-            now, calls, changes = [1.0], [], []
-            ledger.metadata_clock = lambda: now[0]
-
-            def read():
-                calls.append(1)
-                if isinstance(result, Exception):
-                    raise result
-                return result
-            provider = SimpleNamespace(model_catalog=read)
-            ledger.listen_claude_catalog(lambda changes=changes: changes.append(1))
-            self.assertTrue(ledger.refresh_claude(provider))
-            self.assertTrue(ledger.wait_claude_refresh(5))
-            self.assertFalse(ledger.refresh_claude(provider))
-            now[0] += H.CLAUDE_METADATA_TTL_S - 0.1
-            self.assertFalse(ledger.refresh_claude(provider))
-            now[0] += 0.1
-            self.assertTrue(ledger.refresh_claude(provider))
-            self.assertTrue(ledger.wait_claude_refresh(5))
-            self.assertEqual(len(calls), 2)
-            self.assertEqual(changes, [1] if result == ROWS else [])
-        self.assertFalse(self.ledger().refresh_claude(object()))
-
-    def test_one_inflight_and_slot_reserved_before_start(self):
-        ledger = self.ledger()
+class Worker(Fixture):
+    def test_blocked_save_offers_connects_validation_and_lock(self):
         entered, release = threading.Event(), threading.Event()
-        self.addCleanup(release.set)
-        now = [1.0]
-        ledger.metadata_clock = lambda: now[0]
-
-        def read():
-            entered.set()
-            self.assertTrue(release.wait(5))
-            return ROWS
-        provider = SimpleNamespace(model_catalog=read)
-        start = threading.Thread.start
-        reserved = []
-
-        def inspect_start(worker):
-            reserved.append(ledger._claude_next)
-            self.assertIs(ledger._claude_worker, worker)
-            start(worker)
-        with patch.object(threading.Thread, "start", inspect_start):
-            self.assertTrue(ledger.refresh_claude(provider))
-        self.assertEqual(reserved, [1.0 + H.CLAUDE_METADATA_TTL_S])
-        self.assertTrue(entered.wait(2))
-        now[0] += H.CLAUDE_METADATA_TTL_S + 1
-        self.assertFalse(ledger.refresh_claude(provider), "inflight still owns slot beyond TTL")
-        self.assertFalse(ledger.wait_claude_refresh(0))
-        release.set()
-        self.assertTrue(ledger.wait_claude_refresh(5))
-
-    def test_stop_before_save_and_daemon_shutdown_wiring(self):
-        ledger = self.ledger()
-        before = copy.deepcopy(R.CLI_MODELS["claude"])
-        entered, release = threading.Event(), threading.Event()
-        self.addCleanup(release.set)
-        changes = []
-
-        def read():
+        saves, workers = [], []
+        def save(table):
+            saves.append(table)
+            workers.append(threading.current_thread())
             entered.set()
             release.wait(5)
-            return ROWS
-        provider = SimpleNamespace(model_catalog=read)
-        ledger.listen_claude_catalog(lambda: changes.append(1))
-        ledger.refresh_claude(provider)
-        self.assertTrue(entered.wait(2))
-        fake_daemon = SimpleNamespace(router=SimpleNamespace(ledger=ledger))
-        D.Daemon._stop_claude_metadata(fake_daemon, time.monotonic())
-        self.assertFalse(ledger.refresh_claude(provider))
-        release.set()
-        self.assertTrue(ledger.wait_claude_refresh(5))
-        self.assertEqual(R.CLI_MODELS["claude"], before)
-        self.assertFalse(config.CLAUDE_CATALOG_PATH.exists())
-        self.assertEqual(changes, [])
-
-    def test_thread_start_and_notification_errors_are_contained(self):
-        ledger = self.ledger()
-        provider = SimpleNamespace(model_catalog=lambda: ROWS)
-        with patch.object(threading.Thread, "start", side_effect=RuntimeError("private")):
-            self.assertFalse(ledger.refresh_claude(provider))
-        self.assertTrue(ledger.wait_claude_refresh(0))
-        ledger._claude_next = None
-        def bad_notification():
-            raise RuntimeError("private")
-        ledger.listen_claude_catalog(bad_notification)
-        self.assertTrue(ledger.refresh_claude(provider))
-        self.assertTrue(ledger.wait_claude_refresh(5))
-        self.assertEqual(R.CLI_MODELS["claude"], C.parse(ROWS))
-
-    def test_stop_timeout_includes_gate_wait_during_install(self):
-        ledger = self.ledger()
-        entered, release = threading.Event(), threading.Event()
-
-        def save(_):
-            entered.set()
-            release.wait(0.8)
-            return True
-
         with patch.object(C, "save", side_effect=save):
             try:
-                self.assertTrue(ledger.refresh_claude(SimpleNamespace(model_catalog=lambda: ROWS)))
+                R.offer_claude_rows(ROWS)
                 self.assertTrue(entered.wait(2))
-                started = time.monotonic()
-                self.assertFalse(ledger.stop_claude(0))
-                self.assertLess(time.monotonic() - started, 0.2)
-                self.assertTrue(R.CLAUDE_CATALOG_STOPPED.is_set())
-                started = time.monotonic()
-                self.assertFalse(ledger.stop_claude())
-                self.assertLess(time.monotonic() - started, 0.2)
-                started = time.monotonic()
-                self.assertFalse(ledger.stop_claude(0.05))
-                self.assertLess(time.monotonic() - started, 0.2)
+                acquired = threading.Event()
+                def take_lock():
+                    with R._CONFIG_LOCK:
+                        acquired.set()
+                probe = threading.Thread(target=take_lock, daemon=True)
+                probe.start()
+                self.assertTrue(acquired.wait(0.5), "save must not hold config lock")
+                start = time.monotonic()
+                for i in range(20):
+                    newest = [{"value": f"claude-new-{i}"}]
+                    asyncio.run(claude._connect_session(self.client({"models": newest})))
+                for bad in ([], [None, {}], None):
+                    R.offer_claude_rows(bad)
+                self.assertLess(time.monotonic() - start, 0.5)
+                self.assertEqual(saves, [C.parse(ROWS)])
             finally:
                 release.set()
-                self.assertTrue(ledger.wait_claude_refresh(5))
+                self.captured()
+            probe.join(1)
+        self.assertEqual(saves, [C.parse(ROWS), C.parse(newest)])
+        self.assertEqual(R.CLI_MODELS["claude"], C.parse(newest))
+        self.assertTrue(all(w.daemon and w is workers[0] for w in workers))
+
+    def test_ended_generation_cannot_swap_or_revive(self):
+        before = copy.deepcopy(R.CLI_MODELS["claude"])
+        with patch.object(C, "save") as save:
+            with R._CONFIG_LOCK:
+                R.offer_claude_rows(ROWS)
+                R.claude_catalog_end(self.generation)
+                # A new daemon uses begin, never clears a shared stop event.
+                self.generation = R.claude_catalog_begin()
+            self.captured()
+            self.assertEqual(R.CLI_MODELS["claude"], before)
+            save.assert_not_called()
+            R.offer_claude_rows(ROWS)
+            self.captured()
+            self.assertEqual(R.CLI_MODELS["claude"], C.parse(ROWS))
+            save.assert_called_once()
+
+    def test_generation_checked_again_before_save(self):
+        lock = R._CONFIG_LOCK
+        generation = self.generation
+        class EndAfterSwap:
+            def __enter__(self):
+                lock.acquire()
+            def __exit__(self, *args):
+                R.claude_catalog_end(generation)
+                lock.release()
+        with patch.object(R, "_CONFIG_LOCK", EndAfterSwap()), patch.object(C, "save") as save:
+            R.offer_claude_rows(ROWS)
+            self.captured()
+            self.assertEqual(R.CLI_MODELS["claude"], C.parse(ROWS))
+            save.assert_not_called()
+
+    def test_shutdown_returns_during_save_and_old_generation_stays_ended(self):
+        entered, release = threading.Event(), threading.Event()
+        def save(table):
+            entered.set()
+            release.wait(5)
+        daemon = SimpleNamespace(_claude_catalog_generation=self.generation,
+                                 _remove_claude_catalog_listener=None)
+        with patch.object(C, "save", side_effect=save):
+            try:
+                R.offer_claude_rows(ROWS)
+                self.assertTrue(entered.wait(2))
+                R.offer_claude_rows([{"value": "claude-old-pending"}])
+                start = time.monotonic()
+                D.Daemon._end_claude_catalog(daemon)
+                self.assertLess(time.monotonic() - start, 0.2)
+                self.generation = R.claude_catalog_begin()
+            finally:
+                release.set()
+                self.captured()
+        self.assertEqual(R.CLI_MODELS["claude"], C.parse(ROWS))
+
+    def test_notification_observes_swap_and_equal_has_no_event(self):
+        from jarvis.v2.bus import EventBus
+        bus = EventBus()
+        events, observed = [], []
+        # Use the same listener shape as the daemon, with an in-memory bus.
+        bus.observe(events.append)
+        def notify():
+            observed.append(copy.deepcopy(R.CLI_MODELS["claude"]))
+            bus.publish({"kind": "claude_metadata", "data": {"provider": "claude"}})
+        self.addCleanup(R.add_claude_catalog_listener(notify))
+        self.install(ROWS)
+        self.install(ROWS)
+        self.assertEqual(observed, [C.parse(ROWS)])
+        self.assertEqual(events, [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
 
 
 class Protection(Fixture):

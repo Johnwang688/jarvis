@@ -100,7 +100,7 @@ def clamp_effort(wanted: str, ladder, provider) -> str | None:
 # Both native catalogs are saved to config.{CLAUDE,CODEX}_CATALOG_PATH and
 # loaded at daemon start. CLAUDE_FALLBACK and CODEX_FALLBACK stand until a
 # usable cache or live list arrives. Claude reads the SDK's server info after
-# connect and on background HUD refresh; Codex reads account model/list.
+# every session connect; no background reader. Codex reads account model/list.
 # Each table is replaced whole, never unioned: a model the account stops
 # offering disappears. Saved routing entries, project models and HUD defaults
 # are never rewritten: absent models degrade to the default with a note,
@@ -174,18 +174,38 @@ def load_codex_catalog(path=None) -> dict[str, dict] | None:
     return {m: dict(e) for m, e in parsed.items()}
 
 
-# Both metadata refreshes and session captures obey the daemon's stop flag.
-CLAUDE_CATALOG_STOPPED = threading.Event()
-CLAUDE_CATALOG_GATE = threading.RLock()
-_CLAUDE_QUEUE_LOCK = threading.Lock()
+# Session connects supply Claude Code's full list for free; no background
+# reader. One worker serializes swaps, atomic cache saves and HUD notifications.
+_CLAUDE_QUEUE_LOCK = threading.Condition()
 _claude_pending = None
 _claude_capture_worker: threading.Thread | None = None
+_claude_busy = False
+_claude_generation_counter = 0
+_claude_generation = None
 _CLAUDE_LISTENER_LOCK = threading.Lock()
 _claude_catalog_listeners = []
 
 
+def claude_catalog_begin() -> int:
+    """Start a fresh daemon generation; old work can never become current again."""
+    global _claude_generation_counter, _claude_generation
+    with _CLAUDE_QUEUE_LOCK:
+        _claude_generation_counter += 1
+        _claude_generation = _claude_generation_counter
+        return _claude_generation
+
+
+def claude_catalog_end(generation) -> None:
+    """Fence this daemon's installs without waiting for disk I/O or callbacks."""
+    global _claude_generation
+    with _CLAUDE_QUEUE_LOCK:
+        if _claude_generation == generation:
+            _claude_generation = None
+
+
 def add_claude_catalog_listener(fn):
-    """Observe changing live installs; return an unsubscribe function."""
+    """Return a remover. A callback already snapshotted may run once after
+    removal; harmless for the HUD listener, which only asks it to reload."""
     with _CLAUDE_LISTENER_LOCK:
         _claude_catalog_listeners.append(fn)
 
@@ -196,63 +216,77 @@ def add_claude_catalog_listener(fn):
     return remove
 
 
-def queue_claude_models(rows) -> None:
-    """Hand off in-memory session rows; one daemon worker keeps the newest."""
+def offer_claude_rows(rows) -> None:
+    """Validate before replacing the pending slot; newest usable table wins."""
+    from . import claude_catalog
     global _claude_pending, _claude_capture_worker
+    # Record the generation at entry, including time spent parsing.
     with _CLAUDE_QUEUE_LOCK:
-        if CLAUDE_CATALOG_STOPPED.is_set():
+        generation = _claude_generation
+    try:
+        parsed = claude_catalog.parse(rows)
+    except (TypeError, ValueError):
+        return
+    with _CLAUDE_QUEUE_LOCK:
+        if generation is None or generation != _claude_generation:
             return
-        _claude_pending = rows
-        if _claude_capture_worker is not None:
-            return
-        worker = threading.Thread(target=_install_session_claude_models,
-                                  name="jarvis-claude-catalog", daemon=True)
-        _claude_capture_worker = worker
-        try:
-            worker.start()
-        except Exception:
-            _claude_capture_worker = None
-            _claude_pending = None
-            raise
+        _claude_pending = (generation, parsed)
+        if _claude_capture_worker is None:
+            worker = threading.Thread(target=_install_session_claude_models,
+                                      name="jarvis-claude-catalog", daemon=True)
+            _claude_capture_worker = worker
+            try:
+                worker.start()
+            except Exception:
+                _claude_capture_worker = None
+                _claude_pending = None
+                raise
+        _CLAUDE_QUEUE_LOCK.notify_all()
 
 
 def _install_session_claude_models() -> None:
-    global _claude_pending, _claude_capture_worker
+    global _claude_pending, _claude_busy
     while True:
-        # Never hold the queue lock while parsing, waiting for the install
-        # gate/config lock, saving, or notifying listeners.
         with _CLAUDE_QUEUE_LOCK:
-            rows, _claude_pending = _claude_pending, None
-            if rows is None or CLAUDE_CATALOG_STOPPED.is_set():
-                _claude_capture_worker = None
-                return
+            _CLAUDE_QUEUE_LOCK.wait_for(lambda: _claude_pending is not None)
+            (generation, parsed), _claude_pending = _claude_pending, None
+            if generation != _claude_generation:
+                _CLAUDE_QUEUE_LOCK.notify_all()
+                continue
+            _claude_busy = True
         try:
-            set_claude_models(rows)
+            _install_claude_table(generation, parsed)
         except Exception as exc:
             LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
+        finally:
+            with _CLAUDE_QUEUE_LOCK:
+                _claude_busy = False
+                _CLAUDE_QUEUE_LOCK.notify_all()
 
 
-def set_claude_models(rows) -> dict[str, dict]:
-    """Replace the Claude table whole; refuse garbage without changing state.
-    Save changed tables only, so session connects do not churn the cache.
-    """
+def _install_claude_table(generation, parsed) -> None:
+    """Worker-only: compare/swap, save outside locks, then notify in order."""
     from . import claude_catalog
-    parsed = claude_catalog.parse(rows)
-    changed = False
-    with CLAUDE_CATALOG_GATE, _CONFIG_LOCK:
-        if not CLAUDE_CATALOG_STOPPED.is_set() and CLI_MODELS["claude"] != parsed:
+    with _CONFIG_LOCK:
+        with _CLAUDE_QUEUE_LOCK:
+            if generation != _claude_generation:
+                return
+            if CLI_MODELS["claude"] == parsed:
+                return
             CLI_MODELS["claude"] = parsed
-            claude_catalog.save(parsed)
-            changed = True
-    if changed:
-        with _CLAUDE_LISTENER_LOCK:
-            listeners = tuple(_claude_catalog_listeners)
-        for listener in listeners:
-            try:
-                listener()
-            except Exception as exc:
-                LOG.warning("Claude metadata notification failed (%s)", type(exc).__name__)
-    return {m: dict(e) for m, e in parsed.items()}
+    with _CLAUDE_QUEUE_LOCK:
+        if generation != _claude_generation:
+            return
+    # No lock spans disk I/O. A save already writing at shutdown may
+    # finish: it writes a valid catalog atomically; this is just a cache.
+    claude_catalog.save(parsed)
+    with _CLAUDE_LISTENER_LOCK:
+        listeners = tuple(_claude_catalog_listeners)
+    for listener in listeners:
+        try:
+            listener()
+        except Exception as exc:
+            LOG.warning("Claude metadata notification failed (%s)", type(exc).__name__)
 
 
 def load_claude_catalog(path=None) -> dict[str, dict] | None:

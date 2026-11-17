@@ -4,14 +4,13 @@ import inspect
 import io
 from pathlib import Path
 import runpy
-import textwrap
 import unittest
+from types import FunctionType
 from unittest.mock import patch
 
 from jarvis.tools import files
 from jarvis.v2 import claude_catalog as catalog
-from jarvis.v2 import hud_api
-from jarvis.v2.providers import claude
+from jarvis.v2 import router
 
 
 def main():
@@ -21,11 +20,8 @@ def main():
     sources = {
         "catalog": (parse_source, catalog, "parse", catalog.__dict__),
         "protection": (protection_source, files, "_protected_state_paths", files.__dict__),
-        "connect": (inspect.getsource(claude._connect_session), claude, "_connect_session", claude.__dict__),
-        "metadata": (textwrap.dedent(inspect.getsource(claude.ClaudeProvider.model_catalog)),
-                     claude.ClaudeProvider, "model_catalog", claude.__dict__),
-        "stop": (textwrap.dedent(inspect.getsource(hud_api.HUDLedger.stop_claude)),
-                 hud_api.HUDLedger, "stop_claude", hud_api.__dict__),
+        "offer": (inspect.getsource(router.offer_claude_rows), router, "offer_claude_rows", router.__dict__),
+        "install": (inspect.getsource(router._install_claude_table), router, "_install_claude_table", router.__dict__),
     }
     mutants = [
         ("default row accepted", "catalog", ' or row.get("value") == "default"', "", "Parse", "test_sdk_rows_default_skip_resolved_id_first_wins_and_no_alias"),
@@ -48,23 +44,29 @@ def main():
         ("dated ids aliased", "catalog", 'efforts = []', 'model_id = model_id.removesuffix("-20251001")\n        efforts = []', "Parse", "test_sdk_rows_default_skip_resolved_id_first_wins_and_no_alias"),
         ("protected path omitted", "protection", 'config.CLAUDE_CATALOG_PATH.expanduser(),', '', "Protection", "test_protected_path_parity_direct_symlink_and_shell"),
         ("protected path missing from cache key", "protection", ' str(config.CLAUDE_CATALOG_PATH),', '', "Protection", "test_protected_path_parity_direct_symlink_and_shell"),
-        ("install inside connect await", "connect", 'from ..router import queue_claude_models',
-         'from ..router import set_claude_models as queue_claude_models',
-         "SDK", "test_session_capture_never_waits_for_install_and_coalesces"),
-        ("disconnect cancelled by short timeout", "metadata",
-         'with anyio.fail_after(CLAUDE_METADATA_DISCONNECT_TIMEOUT_S):',
-         'async with asyncio.timeout(0.01):',
-         "SDK", "test_metadata_disconnect_is_awaited_after_success_and_stalled_connect"),
-        ("stop waits on gate before setting event", "stop", 'self._claude_stopped.set()',
-         'with self._claude_gate:\n        self._claude_stopped.set()',
-         "Refresh", "test_stop_timeout_includes_gate_wait_during_install"),
+        ("validation after touching pending slot", "offer", 'parsed = claude_catalog.parse(rows)',
+         'with _CLAUDE_QUEUE_LOCK:\n            _claude_pending = None\n        parsed = claude_catalog.parse(rows)',
+         "Worker", "test_blocked_save_offers_connects_validation_and_lock"),
+        ("save under config lock", "install", '    claude_catalog.save(parsed)',
+         '    with _CONFIG_LOCK:\n        claude_catalog.save(parsed)',
+         "Worker", "test_blocked_save_offers_connects_validation_and_lock"),
+        ("ended generation not checked before save", "install",
+         '    with _CLAUDE_QUEUE_LOCK:\n        if generation != _claude_generation:\n            return', '',
+         "Worker", "test_generation_checked_again_before_save"),
+        ("notify before swap", "install", '            CLI_MODELS["claude"] = parsed',
+         '            pass', "Worker", "test_notification_observes_swap_and_equal_has_no_event"),
+
     ]
     killed = 0
     for name, module, old, new, cls, test in mutants:
         original, target, attr, globals_ = sources[module]
         assert original.count(old) == 1, (name, original.count(old))
+        if name == "notify before swap":
+            original += '\n    CLI_MODELS["claude"] = parsed\n'
         namespace = globals_.copy()
         exec(compile(original.replace(old, new), f"<mutant: {name}>", "exec"), namespace)
+        if module in ("offer", "install"):
+            namespace[attr] = FunctionType(namespace[attr].__code__, globals_, attr)
         files._STATE_PATHS.clear()
         with patch.object(target, attr, namespace[attr]), redirect_stderr(io.StringIO()):
             result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.TestSuite([checks[cls](test)]))

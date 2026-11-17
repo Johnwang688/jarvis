@@ -640,9 +640,9 @@ class Daemon:
         from .router import Router
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
-        from .router import CLAUDE_CATALOG_STOPPED
-        CLAUDE_CATALOG_STOPPED.clear()
-        self.router.ledger.listen_claude_catalog(lambda: self.bus.publish(
+        from .router import claude_catalog_begin, add_claude_catalog_listener
+        self._claude_catalog_generation = claude_catalog_begin()
+        self._remove_claude_catalog_listener = add_claude_catalog_listener(lambda: self.bus.publish(
             {"kind": "claude_metadata", "data": {"provider": "claude"}}))
         self.schedules = Schedules(self)
         # Where a permanent delete goes (decisions B2). Only Jarvis's own
@@ -3217,6 +3217,7 @@ class Daemon:
         return len(released)
 
     def stop(self):
+        self._end_claude_catalog()
         voice_link = getattr(self, "voice_link", None)
         if voice_link is not None:
             voice_link.stop()
@@ -3286,13 +3287,7 @@ class Daemon:
                     job = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
                     job.start()
                     jobs.append(job)
-        # Close Claude's install gate before waiting on either provider.
-        ledger = getattr(getattr(self, "router", None), "ledger", None)
-        stop_claude = getattr(ledger, "stop_claude", None)
-        if callable(stop_claude):
-            stop_claude(0)
         self._stop_codex_metadata(deadline)
-        self._stop_claude_metadata(deadline)
         if titles is not None and not titles.join(min(3.0, max(0, deadline - time.monotonic()))):
             LOG.warning("Chat titler still running at shutdown; it writes nothing now")
         for job in jobs:
@@ -3334,13 +3329,14 @@ class Daemon:
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
 
-    def _stop_claude_metadata(self, deadline: float) -> None:
-        """Prevent late catalog installs and wait within the shutdown bound."""
-        ledger = getattr(getattr(self, "router", None), "ledger", None)
-        stop = getattr(ledger, "stop_claude", None)
-        if callable(stop):
-            if not stop(max(0.0, deadline - time.monotonic())):
-                LOG.warning("Claude metadata refresh still running at shutdown; it saves nothing")
+    def _end_claude_catalog(self) -> None:
+        """End this generation immediately, including while a cache save blocks."""
+        from .router import claude_catalog_end
+        claude_catalog_end(getattr(self, "_claude_catalog_generation", None))
+        remove = getattr(self, "_remove_claude_catalog_listener", None)
+        if remove is not None:
+            remove()
+            self._remove_claude_catalog_listener = None
 
     def _stop_codex_metadata(self, deadline: float) -> None:
         """Shutdown for the background Codex models/quota refresh (PR #20

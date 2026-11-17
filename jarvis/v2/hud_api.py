@@ -44,7 +44,6 @@ LOG = logging.getLogger(__name__)
 # version is the CLI in use (`providers/claude.py` `usage_agent_version`).
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
-CLAUDE_METADATA_TTL_S = 6 * 3600
 # Codex's account models and quota: refreshed at most once per TTL (a failure
 # waits the same), and only CODEX_METADATA_BUSY_S after a turn held the lock.
 CODEX_METADATA_TTL_S = 300
@@ -652,12 +651,6 @@ class HUDLedger(UsageLedger):
         # nothing is saved or swapped, however late the read returns.
         self._codex_stopped = threading.Event()
         self._codex_gate = threading.Lock()
-        self._claude_next: float | None = None
-        self._claude_worker: threading.Thread | None = None
-        from . import router
-        self._claude_stopped = router.CLAUDE_CATALOG_STOPPED
-        self._claude_gate = router.CLAUDE_CATALOG_GATE
-        self._remove_claude_listener = None
         super().__init__(*args, **kwargs)
 
     def _merge_rate_limits(self, key, report):
@@ -810,76 +803,6 @@ class HUDLedger(UsageLedger):
             except Exception as exc:
                 LOG.warning("Codex metadata notification failed (%s)", type(exc).__name__)
 
-    def listen_claude_catalog(self, on_change) -> None:
-        """Publish changes from both session captures and metadata refreshes."""
-        from .router import add_claude_catalog_listener
-        if self._remove_claude_listener is not None:
-            self._remove_claude_listener()
-        self._remove_claude_listener = add_claude_catalog_listener(on_change)
-
-    def refresh_claude(self, provider) -> bool:
-        """Reserve one background SDK metadata read, throttling failures too."""
-        read = getattr(provider, "model_catalog", None)
-        if not callable(read):
-            return False
-        with self._claude_gate, self._lock:
-            if self._claude_stopped.is_set():
-                return False
-            now = self.metadata_clock()
-            if self._claude_next is not None and now < self._claude_next:
-                return False
-            if self._claude_worker is not None and self._claude_worker.is_alive():
-                return False
-            self._claude_next = now + CLAUDE_METADATA_TTL_S
-            worker = threading.Thread(target=self._refresh_claude, args=(read,),
-                                      name="jarvis-claude-metadata", daemon=True)
-            self._claude_worker = worker
-            # Start under the gate so shutdown never joins an unstarted thread.
-            try:
-                worker.start()
-            except Exception as exc:
-                self._claude_worker = None
-                LOG.warning("Claude metadata worker not started (%s)", type(exc).__name__)
-                return False
-        return True
-
-    def wait_claude_refresh(self, timeout: float | None = None) -> bool:
-        """For tests and bounded daemon shutdown; handlers never wait."""
-        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
-        acquired = (self._claude_gate.acquire() if deadline is None else
-                    self._claude_gate.acquire(timeout=max(0, deadline - time.monotonic())))
-        if not acquired:
-            return False
-        try:
-            worker = self._claude_worker
-        finally:
-            self._claude_gate.release()
-        if worker is not None:
-            worker.join(None if deadline is None else max(0, deadline - time.monotonic()))
-            return not worker.is_alive()
-        return True
-
-    def stop_claude(self, timeout: float = 0) -> bool:
-        """Stop both install paths first, then wait within the caller's bound."""
-        self._claude_stopped.set()
-        if self._remove_claude_listener is not None:
-            self._remove_claude_listener()
-            self._remove_claude_listener = None
-        return self.wait_claude_refresh(timeout)
-
-    def _refresh_claude(self, read) -> None:
-        try:
-            if self._claude_stopped.is_set():
-                return
-            rows = read()
-            from . import router
-            with self._claude_gate:
-                if self._claude_stopped.is_set():
-                    return
-                router.set_claude_models(rows)
-        except Exception as exc:
-            LOG.warning("Claude metadata refresh failed (%s)", type(exc).__name__)
-
     def _claude_subscription(self):
         """The subscription windows, cached. A miss is null, never a guess.
 
@@ -927,7 +850,7 @@ def usage(daemon):
     settings = usage_settings()
     # Kicks off a background refresh when one is due; this read serves the
     # meters as they are now.
-    _refresh_provider_metadata(daemon)
+    _refresh_codex_metadata(daemon)
     result = {}
     for provider in ProviderName:
         instance = daemon.providers.get(provider)
@@ -962,15 +885,16 @@ def _codex_rate_limits(body) -> dict[str, dict] | None:
     return reports or None
 
 
-def _refresh_provider_metadata(daemon) -> None:
-    """Refresh native catalogs in the background; serve the current snapshot."""
+def _refresh_codex_metadata(daemon) -> None:
+    """Start a background Codex models/quota refresh if one is due. Never
+    blocks: the handler answers from what it has, and a refresh that changed
+    something publishes `codex_metadata` so the HUD re-reads."""
     from .router import daemon_router
     ledger = daemon_router(daemon).ledger
     if isinstance(ledger, HUDLedger):
         ledger.refresh_codex(daemon.providers.get(ProviderName.CODEX),
                              on_change=lambda: daemon.bus.publish(
                                  {"kind": "codex_metadata", "data": {"provider": "codex"}}))
-        ledger.refresh_claude(daemon.providers.get(ProviderName.CLAUDE))
 
 
 def _scrub_source(text):
@@ -2266,7 +2190,7 @@ def route(handler, daemon, parts, query):
         # What the input bar's provider/model/effort chips offer (decisions A2).
         from . import thread_model
         _object(query, ())
-        _refresh_provider_metadata(daemon)
+        _refresh_codex_metadata(daemon)
         return 200, thread_model.describe()
     if parts == ["thread-models"] and method == "POST":
         # The default Claude or Codex chat threads run on (2026-10-08): the
@@ -2276,7 +2200,7 @@ def route(handler, daemon, parts, query):
         from . import thread_model
         _object(query, ())
         body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
-        _refresh_provider_metadata(daemon)
+        _refresh_codex_metadata(daemon)
         try:
             thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
         except thread_model.ChoiceRefused as exc:
