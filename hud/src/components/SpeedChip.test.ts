@@ -9,7 +9,7 @@ const models: ThreadModels = { providers: { claude: { label: "Claude", default: 
   { id: "claude-a", speeds: [["fast", "Fast", description], ["future", "Future", "More usage"]] },
   { id: "claude-b", speeds: [] }, { id: "claude-c", speeds: [["fast", "Fast", description]] },
 ] } } };
-const choice: Choice = { provider: "claude", model: "claude-a", effort: null, speed: null };
+const choice: Choice = { provider: "claude", model: "claude-a", effort: null, speed: null, speed_model: "claude-a" };
 
 describe("per-chat speed chip", () => {
   let host: HTMLDivElement;
@@ -90,7 +90,7 @@ describe("per-chat speed chip", () => {
     draw({ ...choice, speed: "old" });
     expect(chip().dataset.on).toBe("true");
     expect(chip().title).toContain("next message uses Standard");
-    expect(select().value).toBe("old");
+    expect(select().value).toBe("__saved_speed");
     expect(changes).toEqual([]);
   });
   it("allows reselecting a dormant saved tier even when the current model offers the same id", () => {
@@ -99,6 +99,19 @@ describe("per-chat speed chip", () => {
     expect(select().value).toBe("__saved_speed");
     act(() => { select().value = "fast"; select().dispatchEvent(new Event("change", { bubbles: true })); });
     expect(changes).toEqual(["fast"]);
+  });
+  it("keeps a dormant saved speed enabled on a tierless model so Standard can clear it", () => {
+    draw({ ...choice, model: "claude-b", speed: "fast", speed_model: "claude-a" });
+    expect(select().disabled).toBe(false);
+    expect(select().selectedOptions[0].text).toBe("fast (not active on this model)");
+    expect(chip().title).toContain("next message uses Standard");
+    act(() => { select().value = ""; select().dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(changes).toEqual([null]);
+  });
+  it("shows a saved default-following thread's speed as dormant even at the bound default", () => {
+    draw({ ...choice, model: null, speed: "fast", speed_model: "claude-a" });
+    expect(select().value).toBe("__saved_speed");
+    expect(chip().title).toContain("next message uses Standard");
   });
   it("includes the default model precondition for speed and Standard", () => {
     const before = { ...choice, model: null };
@@ -112,6 +125,6 @@ describe("per-chat speed chip", () => {
     expect(patchBody(before, after)).toEqual({ model: "claude-b" });
     expect(applyModel(before, "claude-c", models).speed).toBe("fast");
     expect(patchBody(before, { ...before, speed: null })).toEqual({ speed: null, speed_model: "claude-a" });
-    expect(threadBody(before)).toEqual({ provider: "claude", brief: { model: "claude-a", speed: "fast" } });
+    expect(threadBody(before)).toEqual({ provider: "claude", brief: { model: "claude-a", speed: "fast", speed_model: "claude-a" } });
   });
 });

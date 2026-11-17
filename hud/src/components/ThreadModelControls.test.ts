@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { api } from "../api";
 import { initialState, reduce, type Action, type State } from "../state/store";
 import type { Thread } from "../types";
-import { applyModel, type Choice, type ThreadModels } from "../lib/threadmodel";
+import { applyModel, composeChoice, threadBody, type Choice, type ThreadModels } from "../lib/threadmodel";
 import { useThreadModel } from "./ThreadModelControls";
 
 const captured = vi.hoisted(() => ({ model: null as any, speed: null as any }));
@@ -96,5 +96,48 @@ describe("speed ordering with model and effort writes", () => {
     await act(async () => first.reject(new Error("refused")));
     expect(select().disabled).toBe(false);
     expect(chip().dataset.pending).toBeUndefined();
+  });
+});
+
+
+describe("compose speed binding", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+  let current: State;
+  let controls: ReturnType<typeof useThreadModel>;
+  function Harness() {
+    const [state, setState] = useState<State>({ ...initialState,
+      chats: { ...initialState.chats, 1: { ...initialState.chats[1], threadId: null,
+        compose: { id: "draft", projectId: "p1", provider: "codex", model: null, effort: "low" } } } });
+    current = state;
+    controls = useThreadModel(state, (action: Action) => setState((s) => reduce(s, action)));
+    return controls.chipFor(1);
+  }
+  beforeEach(async () => {
+    vi.spyOn(api, "threadModels").mockResolvedValue(models);
+    host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+    await act(async () => root.render(createElement(Harness)));
+  });
+  afterEach(() => { act(() => root.unmount()); host.remove(); vi.restoreAllMocks(); });
+  const pick = async (speed: string) => act(async () => {
+    const select = host.querySelector("select")!;
+    select.value = speed; select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  it("sends a speed pick with an explicit displayed-model pin and binding", async () => {
+    await pick("priority");
+    expect(threadBody(composeChoice(current.chats[1].compose))).toEqual({ provider: "codex",
+      brief: { model: "gpt-a", effort: "low", speed: "priority", speed_model: "gpt-a" } });
+    expect(host.querySelector('[data-testid="speed-chip"]')?.getAttribute("data-on")).toBe("true");
+    await pick("");
+    expect(threadBody(composeChoice(current.chats[1].compose))).toEqual({ provider: "codex", brief: { effort: "low" } });
+  });
+  it("resets a default-following draft to Standard when the displayed default moves", async () => {
+    await pick("priority");
+    vi.mocked(api.threadModels).mockResolvedValue({ providers: { codex: { ...models.providers.codex!, default: "gpt-b" } } });
+    await act(async () => { await controls.reload(); });
+    const choice = composeChoice(current.chats[1].compose);
+    expect(choice).toMatchObject({ model: null, effort: "low", speed: null, speed_model: null });
+    expect(threadBody(choice)).toEqual({ provider: "codex", brief: { effort: "low" } });
+    expect(host.querySelector("select")!.value).toBe("");
   });
 });

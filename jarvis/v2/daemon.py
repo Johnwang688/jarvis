@@ -1109,7 +1109,6 @@ class Daemon:
         return task
 
     def open_thread(self, project_id, role, provider, brief, *, title=None) -> Thread:
-        from . import thread_model
         project = self.require(self.stores.projects, project_id)
         if project.archived:
             raise DaemonError(f"project {project.name} is archived; restore it from the Archive first")
@@ -1121,16 +1120,16 @@ class Daemon:
                 raise APIError(400, "brief task belongs to another project")
         if provider not in self.providers:
             raise DaemonError(f"provider {provider.value} unavailable: not in roster")
-        if role == Role.CHAT and brief.task_id is None:
-            brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
+            if role == Role.CHAT and brief.task_id is None:
+                brief = self._chat_brief(provider, brief)
             # A Claude thread opened now counts each result's own cost from
             # its first turn: born marked, the start-up recount never reads it.
             recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, speed=brief.speed,
-                                               speed_model=(brief.model or thread_model.default_model(provider)) if brief.speed else None,
+                                               speed_model=brief.model if brief.speed else None,
                                                task_id=brief.task_id,
                                                cwd=brief.cwd, cost_recount=recounted,
                                                # A title fixed at birth (the Voice chat, VA-D4)
@@ -1224,8 +1223,14 @@ class Daemon:
         if why is not None:
             raise APIError(400, why)
         try:
-            model, effort = thread_model.check(provider, brief.model, brief.effort)
-            speed = thread_model.check_speed(provider, model, brief.speed)
+            # Resolve a default-following speed choice once, under open_thread's
+            # lock, and validate, pin and bind that same model.
+            selected_speed = brief.speed.strip() or None if isinstance(brief.speed, str) else brief.speed
+            target = (brief.model or thread_model.default_model(provider)) if selected_speed is not None else brief.model
+            if selected_speed is not None and brief.speed_model is not None and brief.speed_model != target:
+                raise APIError(409, "the model changed; choose speed again for the current model")
+            model, effort = thread_model.check(provider, target, brief.effort)
+            speed = thread_model.check_speed(provider, model, selected_speed) if selected_speed is not None else None
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
         # An effort with no model keeps the thread on the default model (A4
@@ -1468,7 +1473,7 @@ class Daemon:
                 current_model = thread_model.effective(thread)[0]
                 if (body.get("speed_model") != current_model or current_model is None
                         or ("model" in body and
-                            (body["model"] or thread_model.default_model(thread.provider)) != current_model)):
+                            (body["model"] or current_model) != current_model)):
                     raise APIError(409, "the model changed; choose speed again for the current model")
             elif "speed_model" in body:
                 raise APIError(400, "speed_model requires speed")
@@ -1480,18 +1485,24 @@ class Daemon:
                 effort = body.get("effort", thread.effort)
             try:
                 if "model" in body or "effort" in body:
-                    model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+                    if "speed" in body and model in (None, ""):
+                        _, effort = thread_model.check(thread.provider, current_model, effort, current=thread.model)
+                        model = None
+                    else:
+                        model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
                 speed, speed_model = thread.speed, thread.speed_model
                 if "model" in body:
-                    target = model or thread_model.default_model(thread.provider)
-                    if speed in {t[0] for t in thread_model.speeds_of(thread.provider, target)}:
-                        speed_model = target
-                    else:
+                    if model is None:
+                        speed, speed_model = None, None
+                    elif speed_model is not None and speed in {t[0] for t in thread_model.speeds_of(thread.provider, model)}:
+                        speed_model = model
+                    elif speed_model is not None:
                         speed, speed_model = None, None
                 if "speed" in body:
-                    target = model or thread_model.default_model(thread.provider)
-                    speed = thread_model.check_speed(thread.provider, model, body["speed"])
-                    speed_model = target if speed else None
+                    speed = thread_model.check_speed(thread.provider, current_model, body["speed"])
+                    speed_model = current_model if speed else None
+                    if speed:
+                        model = current_model
             except thread_model.ChoiceRefused as exc:
                 raise APIError(400, str(exc)) from exc
             # An archived thread, or one in an archived project, is read-only

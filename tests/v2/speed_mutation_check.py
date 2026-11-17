@@ -2,6 +2,10 @@
 import importlib
 import inspect
 import io
+import json
+from pathlib import Path
+import subprocess
+import tempfile
 import textwrap
 import unittest
 from unittest.mock import patch
@@ -44,15 +48,24 @@ def main():
          speed_check.LockedWrites("test_model_authorization_uses_locked_record")),
         ("default change reactivates a tier chosen for another model", thread_model, "effective_speed", thread_model,
          'thread.speed_model != model or thread.speed_model is None\n                         or ', '',
-         speed_check.LockedWrites("test_default_change_cannot_reactivate_dormant_tier_and_owner_reselects")),
+         speed_check.Choices("test_turn_downgrade_preserves_saved_choice_and_describe")),
         ("speed write omits model precondition", daemon.Daemon, "set_thread_model", daemon,
          '(body.get("speed_model") != current_model or current_model is None\n'
          '                    or ("model" in body and\n'
-         '                        (body["model"] or thread_model.default_model(thread.provider)) != current_model))',
+         '                        (body["model"] or current_model) != current_model))',
          'False', speed_check.LockedWrites("test_speed_model_precondition_rejects_old_model_even_with_same_tier")),
         ("reconnect records current speed instead of applied snapshot", daemon.Daemon, "_apply_choice", daemon,
          'session.applied_record_speed = record_speed', 'session.applied_record_speed = session.thread.speed',
          speed_check.LockedWrites("test_reconnect_rollback_uses_the_snapshot_applied_to_provider")),
+        ("speed effective with model None", thread_model, "effective_speed", thread_model,
+         'thread.model is None or thread.model != thread.speed_model\n                         or ', '',
+         speed_check.Choices("test_default_following_speed_is_never_effective_even_at_its_bound_model")),
+        ("default write activates speed when pinned check is skipped", thread_model, "effective_speed", thread_model,
+         'thread.model is None or thread.model != thread.speed_model\n                         or ', '',
+         backend.Backend("test_default_route_cannot_reactivate_speed_for_another_model")),
+        ("model write binds an unbound legacy tier", daemon.Daemon, "set_thread_model", daemon,
+         'elif speed_model is not None and speed in', 'elif speed in',
+         speed_check.LockedWrites("test_owner_model_write_does_not_bind_legacy_speed")),
     ]
     killed = 0
     for name, target, attr, module, old, new, test in mutants:
@@ -73,8 +86,43 @@ def main():
         if not dead:
             print(result.errors or result.failures)
         killed += dead
-    print(f"Speed mutation checks: {killed}/{len(mutants)} killed by assertions")
-    return 0 if killed == len(mutants) else 1
+    killed += hud_chip_mutant()
+    total = len(mutants) + 1
+    print(f"Speed mutation checks: {killed}/{total} killed by assertions")
+    return 0 if killed == total else 1
+
+
+def hud_chip_mutant():
+    """Transform the chip in Vite memory; never rewrite the working tree."""
+    hud = Path(__file__).resolve().parents[2] / "hud"
+    old, new = "(!tiers.length && !lit)", "!tiers.length"
+    assert (hud / "src/components/SpeedChip.tsx").read_text().count(old) == 1
+    with tempfile.TemporaryDirectory(prefix="speed-mutant-") as root:
+        root = Path(root)
+        config, report = root / "mutant.config.mjs", root / "result.json"
+        config.write_text(
+            f"import original from {json.dumps(str(hud / 'vite.config.ts'))};\n"
+            "export default {...original, plugins: [...original.plugins, {\n"
+            "name: 'speed-chip-mutant', enforce: 'pre',\n"
+            "transform(source, id) { if (id.endsWith('/src/components/SpeedChip.tsx')) {\n"
+            f"return source.replace({json.dumps(old)}, {json.dumps(new)});\n"
+            "} } }]};\n")
+        run = subprocess.run(["npx", "--offline", "--no-install", "vitest", "run",
+                              "src/components/SpeedChip.test.ts", "--config", str(config),
+                              "--maxWorkers=1", "--reporter=json", "--outputFile", str(report)],
+                             cwd=hud, capture_output=True, text=True, timeout=120)
+        result = json.loads(report.read_text()) if report.exists() else {}
+        failures = [test for suite in result.get("testResults", [])
+                    for test in suite.get("assertionResults", []) if test.get("status") == "failed"]
+        dead = (run.returncode == 1 and len(failures) == 1 and
+                "keeps a dormant saved speed enabled" in failures[0]["fullName"] and
+                any("AssertionError" in msg for msg in failures[0].get("failureMessages", [])) and
+                result.get("numRuntimeErrorTestSuites", 0) == 0 and
+                result.get("numPassedTests", 0) > 0)
+        print(f"{'KILLED' if dead else 'SURVIVED'}: chip disabled with a saved speed ({len(failures)} assertion failures)")
+        if not dead:
+            print(run.stdout, run.stderr)
+        return int(dead)
 
 
 if __name__ == "__main__":

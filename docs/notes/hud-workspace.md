@@ -2501,9 +2501,20 @@ The input bar's separate ⚡ speed chip offers Standard and the current model's
 catalog tiers, including future Codex tiers. A selected tier lights the cyan
 glass badge and its tooltip shows the catalog's cost description; Claude Fast
 says “billed as extra usage beyond your subscription.” Models without tiers
-have a grey disabled chip (“This model has no fast mode”). The native select
-reserves its widest option and keeps keyboard events local. Compose choices
-ride the first message; existing chats use the owner-checked model PATCH with
-`speed` (null or empty resets). Model changes retain only compatible speed ids
-in that same write. There is no speed default, confirmation, auto-off, phone
-control, Discord command or agent/MCP tool.
+have a grey disabled chip only when nothing is saved. A saved dormant tier
+keeps Standard available to clear it and is labelled “not active on this model.”
+The native select reserves its widest option and keeps keyboard events local.
+Compose choices ride the first message: picking speed captures the displayed
+model and sends it as an explicit `model` with `speed` and `speed_model`.
+A default-following draft resets to Standard if the displayed default moves
+before send. Existing chats use the owner-checked PATCH with `speed_model`
+as the effective-model precondition; a speed choice pins a default-following
+thread in that same locked write, preserving effort. Standard clears speed
+and binding without pinning. Paid speed is effective only when the thread
+has an explicit model equal to its binding and the current catalog still
+offers the tier; a default-following thread always runs Standard. Model
+changes rebind only already bound compatible tiers, keep unbound legacy
+tiers dormant, and clear incompatible bound pairs. Choosing “follow default”
+clears both speed fields. Default and route writes never touch speed or move
+pins. There is no speed default, confirmation, auto-off, phone control,
+Discord command or agent/MCP tool.

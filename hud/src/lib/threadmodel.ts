@@ -195,9 +195,9 @@ export function providerRefusal(
 }
 
 /** A compose row's choice; absent fields are the defaults (A5). */
-export function composeChoice(c: { provider?: ProviderName; model?: string | null; effort?: string | null; speed?: string | null } | null): Choice {
+export function composeChoice(c: { provider?: ProviderName; model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null } | null): Choice {
   return { provider: c?.provider || "fast", model: c?.model ?? null, effort: c?.effort ?? null,
-           ...(c?.speed !== undefined ? { speed: c.speed } : {}) };
+           ...(c?.speed !== undefined ? { speed: c.speed, speed_model: c.speed_model ?? null } : {}) };
 }
 
 export function choiceOf(thread: Thread): Choice {
@@ -274,8 +274,10 @@ export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
  * effort as well as the pin. */
 export function applyModel(c: Choice, model: string | null, tm: ThreadModels | null = null): Choice {
   const speeds = entry(tm, c.provider, model || defaultModel(tm, c.provider))?.speeds || [];
+  const retain = model !== null && c.speed_model != null && speeds.some((s) => s[0] === c.speed);
   return { ...c, model, effort: null,
-           ...(c.speed !== undefined ? { speed: speeds.some((s) => s[0] === c.speed) ? c.speed : null } : {}) };
+           ...(c.speed !== undefined ? { speed: retain || (model !== null && c.speed_model == null) ? c.speed : null,
+             speed_model: retain ? model : null } : {}) };
 }
 
 /** An effort alone never pins a model: a default thread keeps following the
@@ -289,12 +291,16 @@ export function applyProvider(_c: Choice, provider: ProviderName): Choice {
   return { provider, model: null, effort: null };
 }
 
-/** The `POST /threads` fields for a compose choice. A default sends no model. */
-export function threadBody(c: Choice): { provider: ProviderName; brief?: { model?: string; effort?: string; speed?: string } } {
-  const brief: { model?: string; effort?: string; speed?: string } = {};
+/** A paid compose choice pins the model displayed when speed was picked. */
+export function threadBody(c: Choice): { provider: ProviderName; brief?: { model?: string; effort?: string; speed?: string; speed_model?: string } } {
+  const brief: { model?: string; effort?: string; speed?: string; speed_model?: string } = {};
   if (c.model) brief.model = c.model;
   if (c.effort) brief.effort = c.effort;
-  if (c.speed) brief.speed = c.speed;
+  if (c.speed && c.speed_model) {
+    brief.model = c.speed_model;
+    brief.speed = c.speed;
+    brief.speed_model = c.speed_model;
+  }
   return Object.keys(brief).length ? { provider: c.provider, brief } : { provider: c.provider };
 }
 

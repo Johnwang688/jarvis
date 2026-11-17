@@ -2111,35 +2111,57 @@ class Backend(unittest.TestCase):
             self.assertEqual(self.stores.threads.get(opened["id"]).speed, "fast")
             self.owner("POST", "/thread-models", {"provider": "claude", "model": "claude-fable-5-2", "speed": "fast"}, status=400)
 
-    def test_default_route_cannot_reactivate_speed_for_another_model(self):
-        from jarvis.v2 import router
+    def _default_restore_speed_scenario(self, route):
+        from jarvis.v2 import router, thread_model
         tiers = (("ultrafast", "Ultrafast", "more quota"),)
         table = {m: {"name": m, "efforts": ("high",), "vision": True, "speeds": tiers}
                  for m in ("gpt-a", "gpt-b")}
         with patch.dict(router.CLI_MODELS, {"codex": table}):
             fake = ModelFake(P.CODEX)
             applied = []
-            fake.set_model = lambda handle, model, effort, *, speed=None: applied.append(speed)
+            fake.set_model = lambda handle, model, effort, *, speed=None: applied.append((model, speed))
             self.daemon.providers[P.CODEX] = fake
-            self.request("POST", "/thread-models", {"provider": "codex", "model": "gpt-a"})
-            opened = self.owner("POST", "/threads", {"project_id": self.project.id, "role": "chat",
-                                "provider": "codex", "brief": {"speed": "ultrafast"}}, status=201)
-            tid = opened["id"]
-            self.assertIsNone(opened["model"])
-            self.assertEqual(opened["speed_model"], "gpt-a")
-            table["gpt-a"]["speeds"] = ()
-            self.send_and_settle(tid)
-            self.assertIsNone(applied[-1])
-            self.request("POST", "/thread-models", {"provider": "codex", "model": "gpt-b"})
-            self.send_and_settle(tid)
-            self.assertIsNone(applied[-1])
-            self.assertEqual(self.stores.threads.get(tid).speed_model, "gpt-a")
-            path = f"/threads/{tid}"
-            self.owner("PATCH", path, {"speed": "ultrafast", "speed_model": "gpt-a"}, status=409)
-            self.owner("PATCH", path, {"speed": "ultrafast", "speed_model": "gpt-b"})
-            self.send_and_settle(tid)
-            self.assertEqual(applied[-1], "ultrafast")
-            self.assertEqual(self.stores.threads.get(tid).speed_model, "gpt-b")
+            def set_default(model, *, owner=False):
+                write = self.owner if owner else self.request
+                if route == "/thread-models":
+                    write("POST", route, {"provider": "codex", "model": model})
+                else:
+                    write("POST", route, {"action": "models", "role": "orchestrator",
+                                          "provider": "codex", "model": model + "/high"})
+            if route == "/route":
+                self.request("POST", "/thread-models", {"provider": "codex", "model": ""})
+            set_default("gpt-a")
+            def open_speed():
+                return self.owner("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                                  "provider": "codex", "brief": {"speed": "ultrafast"}}, status=201)
+            pinned = open_speed()
+            self.assertEqual((pinned["model"], pinned["speed_model"]), ("gpt-a", "gpt-a"))
+            legacy = open_speed()
+            tid = legacy["id"]
+            # Emulate a persisted record from before speed writes pinned models.
+            thread = self.stores.threads.get(tid)
+            thread.model = None
+            self.stores.threads.save(thread)
+            self.daemon._sessions[tid].thread.model = None
+            for model in ("gpt-b", "gpt-a"):
+                # Owner moves away; a non-owner restores the bound model.
+                set_default(model, owner=model == "gpt-b")
+                self.send_and_settle(tid)
+                self.assertTrue(applied, "the provider must switch from its initial paid choice")
+                self.assertEqual(applied[-1], (model, None), "default restoration must run Standard")
+                saved = self.stores.threads.get(tid)
+                self.assertEqual((saved.model, saved.speed, saved.speed_model), (None, "ultrafast", "gpt-a"))
+                kept = self.stores.threads.get(pinned["id"])
+                self.assertEqual((kept.model, kept.speed, kept.speed_model), ("gpt-a", "ultrafast", "gpt-a"))
+                self.assertEqual(thread_model.effective(kept)[0], "gpt-a", "default writes cannot move a pin")
+            self.send_and_settle(pinned["id"])
+            self.assertEqual(self.daemon._sessions[pinned["id"]].applied_speed, "ultrafast")
+
+    def test_default_route_cannot_reactivate_speed_for_another_model(self):
+        self._default_restore_speed_scenario("/thread-models")
+
+    def test_routing_default_restore_cannot_activate_unpinned_speed(self):
+        self._default_restore_speed_scenario("/route")
 
     def test_model_and_avatar_writes_are_the_owners_alone(self):
         """#227 review: `POST /model`, `POST /models` (the protected `models.json`: an API-listener

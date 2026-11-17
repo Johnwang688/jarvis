@@ -1722,6 +1722,15 @@ available tiers: Codex `serviceTiers` and Claude's exact `supportsFastMode: true
 Claude merges `fastMode: true` into session settings only for a supported Fast
 choice and reconnects on the next message when speed changes. Every Codex
 `turn/start` sends `serviceTierForTurn`, explicitly `"default"` for Standard;
-steering leaves speed alone. An unavailable saved tier runs Standard with a
-note, preserving the choice; an owner's model change clears an incompatible
-speed in the same write. Speed changes billing and latency only, never permissions.
+steering leaves speed alone. A tier is effective only on an explicit
+`Thread.model` pin equal to `Thread.speed_model`, while the current catalog
+still offers it. `model: null` always runs Standard, including legacy saved
+speed records. An unavailable saved tier runs Standard with a note, keeping
+the pair. Selecting speed pins a default-following thread in the same locked
+write, preserving effort; creation resolves its effective model once under
+the lock for validation, pin and binding. Clearing speed never pins.
+Owner model changes rebind only already bound compatible tiers, clear an
+incompatible bound pair, and leave unbound legacy tiers dormant. Choosing
+`model: null` clears both speed fields. Default and route writes never touch
+speed, cannot activate unpinned tiers, and cannot move pins. Speed changes
+billing and latency only, never permissions.

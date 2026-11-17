@@ -533,16 +533,29 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   effective model shown when the tier was chosen (also when resetting with
   `speed: null`). A stale or missing model precondition returns 409 without
   writing. Change model first, then choose speed after its response. A tier
-  must be offered by that model or the request returns 400. The thread stores
-  `speed` and `speed_model` together; Standard clears both. Model writes on a
-  thread with a saved speed also require the owner, checked under the write
-  lock. They rebind a compatible tier to the selected model or clear both
-  fields for an incompatible one. Effort writes leave the pair untouched.
-  At turn start a saved tier applies only if the effective model matches its
-  binding and still offers it. Otherwise that turn uses Standard and keeps
-  the saved pair. Legacy speeds without a binding stay dormant until the
-  owner selects speed again. Provider-default changes require no new owner
-  gate and cannot apply a tier saved for a different model.
+  must be offered by that model or the request returns 400. Selecting speed
+  on a default-following thread pins its current effective model and stores
+  `speed` and `speed_model` in the same locked write, preserving effort.
+  Standard clears both speed fields and never pins a model.
+  Creation with speed also resolves the model once under the lock and pins
+  that same validated model; compose sends explicit `model`, `speed` and
+  `speed_model`. An optional creation `speed_model` must match that model or
+  creation returns 409. A default-following draft resets to Standard when
+  its displayed default changes before send, rather than rebinding speed.
+  Model writes on a thread with a saved speed require the owner under the
+  write lock. They rebind an already bound compatible tier, clear both fields
+  for an incompatible bound tier, and leave an unbound legacy tier dormant.
+  Choosing `model: null` clears both speed fields in that write. Effort writes
+  leave them untouched.
+  At turn start a tier applies only when `Thread.model` is explicitly pinned,
+  equals `Thread.speed_model` and the current catalog still offers the tier.
+  A thread with `model: null` always runs Standard, regardless of saved speed
+  fields. An unavailable tier runs Standard with the saved pair preserved.
+  Legacy speeds without a binding stay dormant until the owner selects speed
+  again. Provider-default and route writes never touch speed and cannot
+  activate it on a default-following thread or move a pinned thread.
+  A saved dormant speed remains clearable through the enabled HUD chip even
+  when the current model offers no tiers; it is labelled not active on this model.
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default

@@ -57,6 +57,20 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   const now = useRef(state);
   now.current = state;
 
+  // A default-following draft must never transfer a paid choice to a new
+  // displayed default. The send body pins the captured binding instead.
+  useEffect(() => {
+    if (!models) return;
+    for (const pane of PANE_NOS) {
+      const { composing, choice } = paneChips(state, pane);
+      const compose = state.chats[pane].compose;
+      if (composing && compose && choice?.model === null && choice.speed &&
+          choice.speed_model !== models.providers[choice.provider]?.default) {
+        dispatch({ type: "chat", pane, patch: { compose: { ...compose, speed: null, speed_model: null } } });
+      }
+    }
+  }, [models, state.chats, dispatch]);
+
   const reloadSequence = useRef(0);
   const reload = useCallback(async () => {
     const sequence = ++reloadSequence.current;
@@ -114,7 +128,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         // Composing: kept here, sent with the first message, nothing before.
         dispatch({
           type: "chat", pane,
-          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort, speed: next.speed ?? null } },
+          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort,
+            speed: next.speed ?? null, speed_model: next.speed_model ?? null } },
         });
         return;
       }
@@ -158,7 +173,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           if (holder !== undefined && row)
             dispatch({
               type: "chat", pane: holder,
-              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null, speed: record.speed ?? null } },
+              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null,
+                speed: record.speed ?? null, speed_model: record.speed_model ?? null } },
             });
         })
         .catch((e) => {
@@ -266,6 +282,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         zoom={zoom}
       />
       <SpeedChip models={models} choice={cs.choice}
+        composing={cs.composing}
         pending={!!(cs.targetId && pendingChoices.current[cs.targetId])}
         disabled={!cs.editable.model || state.approvals.length > 0}
         onChange={(speed) => {
@@ -275,7 +292,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           // A callback from an older render remains a speed write with its
           // original model precondition, even if an SSE moved the model on.
           return change(pane, { ...current, speed,
-            speed_model: cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null }, keyOf(cs));
+            speed_model: speed ? cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null
+              : cs.composing ? null : cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null }, keyOf(cs));
         }} />
       </>
     );

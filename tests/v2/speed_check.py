@@ -107,7 +107,7 @@ class Choices(unittest.TestCase):
     def test_turn_downgrade_preserves_saved_choice_and_describe(self):
         thread = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE, model="claude-a", speed="fast", speed_model="claude-a")
         self.assertEqual(TM.effective_speed(thread, "claude-a"), "fast")
-        with patch.object(router, "warn_once") as note:
+        with patch.object(router, "warn_once") as note, patch.dict(router.CLI_MODELS["claude"]["claude-b"], speeds=C.FAST_SPEED):
             self.assertIsNone(TM.effective_speed(thread, "claude-b"))
         self.assertIn("using standard speed", note.call_args[0][0])
         self.assertEqual(thread.speed, "fast")
@@ -126,6 +126,12 @@ class Choices(unittest.TestCase):
         legacy = to_json(thread)
         legacy.pop("speed_model")
         self.assertIsNone(from_json(Thread, legacy).speed_model)
+
+    def test_default_following_speed_is_never_effective_even_at_its_bound_model(self):
+        thread = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE, speed="fast", speed_model="claude-a")
+        with patch.object(router, "warn_once"):
+            self.assertIsNone(TM.effective_speed(thread, "claude-a"))
+        self.assertEqual((thread.model, thread.speed, thread.speed_model), (None, "fast", "claude-a"))
 
     def options(self, speed, model="claude-a", settings=None):
         session = SimpleNamespace(mcp_config=None, isolated=False, stderr=[])
@@ -258,6 +264,64 @@ class LockedWrites(unittest.TestCase):
         router.CLI_MODELS["codex"]["gpt-a"]["speeds"] = ()
         self.write({"model": "gpt-a"})
         self.assertEqual((self.saved().speed, self.saved().speed_model), (None, None))
+
+    def test_owner_model_write_does_not_bind_legacy_speed(self):
+        thread = self.saved()
+        thread.speed_model = None
+        self.stores.threads.save(thread)
+        self.write({"model": "gpt-b"})
+        self.assertEqual((self.saved().model, self.saved().speed, self.saved().speed_model),
+                         ("gpt-b", "ultrafast", None))
+        with patch.object(router, "warn_once"):
+            self.assertIsNone(TM.effective_speed(self.saved(), "gpt-b"))
+
+    def test_follow_default_clears_both_speed_fields(self):
+        TM.set_provider_default("codex", "gpt-a")
+        self.write({"model": None})
+        self.assertEqual((self.saved().model, self.saved().speed, self.saved().speed_model), (None, None, None))
+
+    def test_speed_write_pins_once_preserves_effort_and_standard_never_pins(self):
+        thread = self.saved()
+        thread.model, thread.effort = None, "low"
+        self.stores.threads.save(thread)
+        with patch.object(TM, "default_choice", return_value=("gpt-a", "high")) as resolve:
+            for reset in (None, "", "  "):
+                self.write({"speed": reset, "speed_model": "gpt-a"})
+                self.assertIsNone(self.saved().model)
+            with self.assertRaises(APIError) as error:
+                self.write({"speed": "ultrafast", "speed_model": "gpt-b"})
+            self.assertEqual(error.exception.status, 409)
+            resolve.reset_mock()
+            self.write({"speed": "ultrafast", "speed_model": "gpt-a"})
+            resolve.assert_called_once()
+        self.assertEqual((self.saved().model, self.saved().effort, self.saved().speed_model), ("gpt-a", "low", "gpt-a"))
+        self.assertEqual(TM.effective_speed(self.saved(), "gpt-a"), "ultrafast")
+
+    def test_creation_speed_resolves_once_under_lock_and_pins_the_validated_model(self):
+        self.daemon._open = lambda *args: None
+        self.daemon._lifecycle = lambda *args: None
+        def resolve(provider):
+            self.assertTrue(self.daemon._lock._is_owned())
+            return "gpt-a"
+        with patch.object(TM, "default_model", side_effect=resolve) as default:
+            opened = self.daemon.open_thread(self.project.id, Role.CHAT, P.CODEX,
+                                             {"speed": "ultrafast", "effort": "low"})
+            default.assert_called_once_with(P.CODEX)
+        self.assertEqual((opened.model, opened.speed_model, opened.speed, opened.effort),
+                         ("gpt-a", "gpt-a", "ultrafast", "low"))
+        self.assertEqual(TM.effective_speed(opened, "gpt-a"), "ultrafast")
+
+    def test_creation_standard_does_not_pin_and_stale_binding_is_refused(self):
+        self.daemon._open = lambda *args: None
+        self.daemon._lifecycle = lambda *args: None
+        TM.set_provider_default("codex", "gpt-a")
+        for reset in (None, "", "  "):
+            opened = self.daemon.open_thread(self.project.id, Role.CHAT, P.CODEX, {"speed": reset})
+            self.assertEqual((opened.model, opened.speed, opened.speed_model), (None, None, None))
+        with self.assertRaises(APIError) as error:
+            self.daemon.open_thread(self.project.id, Role.CHAT, P.CODEX,
+                                    {"speed": "ultrafast", "speed_model": "gpt-b"})
+        self.assertEqual(error.exception.status, 409)
 
     def test_speed_model_precondition_rejects_old_model_even_with_same_tier(self):
         self.write({"model": "gpt-b"})

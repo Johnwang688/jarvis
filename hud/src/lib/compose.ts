@@ -34,6 +34,7 @@ export interface Compose {
   model?: string | null;
   effort?: string | null;
   speed?: string | null;
+  speed_model?: string | null;
   /** The send in flight for this compose row (its local message id): after
    * each await the send finds the pane holding this row again by it, so a
    * trade of conversations or another thread opened meanwhile never makes
