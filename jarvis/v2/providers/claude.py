@@ -52,6 +52,7 @@ for the daemon to save. Tokens need none of this: `usage` is per turn.
 from __future__ import annotations
 
 import asyncio
+import anyio
 import concurrent.futures
 import contextlib
 import hashlib
@@ -411,13 +412,13 @@ def _client_factory(options: ClaudeAgentOptions) -> Any:
 
 
 async def _connect_session(client) -> None:
-    """Capture already-held SDK info on every connect; never fail a session."""
+    """Hand off already-held SDK info; installs never enter the connect await."""
     await client.connect()
     try:
         info = await client.get_server_info()
         if isinstance(info, dict) and isinstance(info.get("models"), list):
-            from ..router import set_claude_models
-            set_claude_models(info["models"])
+            from ..router import queue_claude_models
+            queue_claude_models(info["models"])
     except Exception as exc:
         LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
 
@@ -438,7 +439,9 @@ def _cli_options(*, isolated=False, origin_tag=None) -> dict[str, Any]:
     return kwargs
 
 
-CLAUDE_METADATA_TIMEOUT_S = 30
+CLAUDE_METADATA_CONNECT_READ_TIMEOUT_S = 28
+# SDK close bounds its write-lock wait plus EOF/TERM/KILL at about 20 s.
+CLAUDE_METADATA_DISCONNECT_TIMEOUT_S = 25
 
 
 # --- which claude -----------------------------------------------------------
@@ -1000,29 +1003,39 @@ class ClaudeProvider:
         return True, f"claude {label}, subscription login"
 
     def model_catalog(self) -> list[dict] | None:
-        """Read startup metadata without a prompt, tools, settings or project.
+        """Read startup metadata without a prompt, tools or project settings.
 
         Use the session CLI/environment, with a private disposable cwd. The
-        whole operation is bounded, including disconnect on failed connect.
+        connect/read is bounded at 28 s, followed by up to 25 s for disconnect
+        (longer than the SDK's own escalation), even after a failed connect.
+        The private cwd remains until disconnect returns.
         This runs only on the HUD metadata thread, never a turn's loop.
         """
         async def read(cwd):
-            async with asyncio.timeout(CLAUDE_METADATA_TIMEOUT_S):
-                options = ClaudeAgentOptions(
-                    cwd=cwd, tools=[], setting_sources=[], mcp_servers={},
-                    strict_mcp_config=True, allowed_tools=[],
-                    **_cli_options(),
-                )
-                client = _client_factory(options)
-                try:
-                    # Leave a small part of the total budget for teardown.
-                    async with asyncio.timeout(CLAUDE_METADATA_TIMEOUT_S - 2):
-                        await client.connect()
-                        info = await client.get_server_info()
-                        return info.get("models") if isinstance(info, dict) else None
-                finally:
-                    async with asyncio.timeout(2):
-                        await client.disconnect()
+            # setting_sources=[] excludes user, project and local settings:
+            # strictly less than every real Jarvis Claude session loads.
+            # Managed policy settings (and hooks) can still load; the lead
+            # verified this machine has no managed-settings file. --bare is
+            # unsuitable: it reports only five aliases, shrinking the list.
+            # No prompt is sent, so no model tool can run.
+            # The SDK's separate `claude -v` probe inherits the daemon's cwd
+            # and environment. It only prints a version; leave it enabled.
+            options = ClaudeAgentOptions(
+                cwd=cwd, tools=[], setting_sources=[], mcp_servers={},
+                strict_mcp_config=True, allowed_tools=[],
+                **_cli_options(),
+            )
+            client = _client_factory(options)
+            try:
+                async with asyncio.timeout(CLAUDE_METADATA_CONNECT_READ_TIMEOUT_S):
+                    await client.connect()
+                    info = await client.get_server_info()
+                    return info.get("models") if isinstance(info, dict) else None
+            finally:
+                # Use native anyio cancellation so the SDK's shield protects
+                # its reaping escalation; raw asyncio timeouts bypass it.
+                with anyio.fail_after(CLAUDE_METADATA_DISCONNECT_TIMEOUT_S):
+                    await client.disconnect()
 
         try:
             with tempfile.TemporaryDirectory(prefix="jarvis-claude-models-") as cwd:

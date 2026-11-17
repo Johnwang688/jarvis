@@ -230,7 +230,14 @@ lacks (it still runs — there is nothing to fall back to). Tests point
 Claude's model list comes from Claude Code's SDK server info after each
 session connects, and from a prompt-free background read triggered by HUD
 usage or thread-model reads (one at a time, six-hour TTL after success or
-failure, 30-second timeout). The last good list replaces the table whole and
+failure, 28-second connect/read bound followed by up to 25 seconds for SDK
+disconnect escalation). Session capture queues only the newest pending list
+on one daemon thread, and changing installs notify open HUDs through the same
+listener as background refreshes. The metadata client excludes user, project
+and local settings (less than every real session), but can load managed policy
+settings and their hooks; the lead verified none are configured on this machine,
+`--bare` would shrink the list to five aliases, and no prompt is sent so no model
+tool can run. The last good list replaces the table whole and
 is saved atomically to `config.CLAUDE_CATALOG_PATH` (`JARVIS_CLAUDE_CATALOG`,
 default `~/.local/share/jarvis/claude-models.json`), then reloaded at daemon
 startup. Missing or unusable cache data leaves `CLAUDE_FALLBACK`, including

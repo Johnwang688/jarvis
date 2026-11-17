@@ -654,8 +654,10 @@ class HUDLedger(UsageLedger):
         self._codex_gate = threading.Lock()
         self._claude_next: float | None = None
         self._claude_worker: threading.Thread | None = None
-        self._claude_stopped = threading.Event()
-        self._claude_gate = threading.Lock()
+        from . import router
+        self._claude_stopped = router.CLAUDE_CATALOG_STOPPED
+        self._claude_gate = router.CLAUDE_CATALOG_GATE
+        self._remove_claude_listener = None
         super().__init__(*args, **kwargs)
 
     def _merge_rate_limits(self, key, report):
@@ -808,7 +810,14 @@ class HUDLedger(UsageLedger):
             except Exception as exc:
                 LOG.warning("Codex metadata notification failed (%s)", type(exc).__name__)
 
-    def refresh_claude(self, provider, on_change=None) -> bool:
+    def listen_claude_catalog(self, on_change) -> None:
+        """Publish changes from both session captures and metadata refreshes."""
+        from .router import add_claude_catalog_listener
+        if self._remove_claude_listener is not None:
+            self._remove_claude_listener()
+        self._remove_claude_listener = add_claude_catalog_listener(on_change)
+
+    def refresh_claude(self, provider) -> bool:
         """Reserve one background SDK metadata read, throttling failures too."""
         read = getattr(provider, "model_catalog", None)
         if not callable(read):
@@ -822,7 +831,7 @@ class HUDLedger(UsageLedger):
             if self._claude_worker is not None and self._claude_worker.is_alive():
                 return False
             self._claude_next = now + CLAUDE_METADATA_TTL_S
-            worker = threading.Thread(target=self._refresh_claude, args=(read, on_change),
+            worker = threading.Thread(target=self._refresh_claude, args=(read,),
                                       name="jarvis-claude-metadata", daemon=True)
             self._claude_worker = worker
             # Start under the gate so shutdown never joins an unstarted thread.
@@ -836,35 +845,38 @@ class HUDLedger(UsageLedger):
 
     def wait_claude_refresh(self, timeout: float | None = None) -> bool:
         """For tests and bounded daemon shutdown; handlers never wait."""
-        with self._claude_gate:
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        acquired = (self._claude_gate.acquire() if deadline is None else
+                    self._claude_gate.acquire(timeout=max(0, deadline - time.monotonic())))
+        if not acquired:
+            return False
+        try:
             worker = self._claude_worker
+        finally:
+            self._claude_gate.release()
         if worker is not None:
-            worker.join(timeout)
+            worker.join(None if deadline is None else max(0, deadline - time.monotonic()))
             return not worker.is_alive()
         return True
 
-    def stop_claude(self, timeout: float | None = None) -> bool:
-        """Close the install gate before waiting: late reads save nothing."""
-        with self._claude_gate:
-            self._claude_stopped.set()
+    def stop_claude(self, timeout: float = 0) -> bool:
+        """Stop both install paths first, then wait within the caller's bound."""
+        self._claude_stopped.set()
+        if self._remove_claude_listener is not None:
+            self._remove_claude_listener()
+            self._remove_claude_listener = None
         return self.wait_claude_refresh(timeout)
 
-    def _refresh_claude(self, read, on_change) -> None:
+    def _refresh_claude(self, read) -> None:
         try:
             if self._claude_stopped.is_set():
                 return
             rows = read()
             from . import router
-            from .claude_catalog import parse
-            parsed = parse(rows)
             with self._claude_gate:
                 if self._claude_stopped.is_set():
                     return
-                with router._CONFIG_LOCK:
-                    changed = router.CLI_MODELS["claude"] != parsed
-                    router.set_claude_models(rows)
-            if changed and on_change is not None:
-                on_change()
+                router.set_claude_models(rows)
         except Exception as exc:
             LOG.warning("Claude metadata refresh failed (%s)", type(exc).__name__)
 
@@ -958,9 +970,7 @@ def _refresh_provider_metadata(daemon) -> None:
         ledger.refresh_codex(daemon.providers.get(ProviderName.CODEX),
                              on_change=lambda: daemon.bus.publish(
                                  {"kind": "codex_metadata", "data": {"provider": "codex"}}))
-        ledger.refresh_claude(daemon.providers.get(ProviderName.CLAUDE),
-                              on_change=lambda: daemon.bus.publish(
-                                  {"kind": "claude_metadata", "data": {"provider": "claude"}}))
+        ledger.refresh_claude(daemon.providers.get(ProviderName.CLAUDE))
 
 
 def _scrub_source(text):

@@ -317,6 +317,7 @@ class Bench:
                       PROVIDER_DEFAULTS_PATH=root / "cfg" / "provider_defaults.json",
                       ROUTING_PATH=root / "cfg" / "routing.json",
                       CODEX_CATALOG_PATH=root / "cfg" / "codex-models.json",
+                      CLAUDE_CATALOG_PATH=root / "cfg" / "claude-models.json",
                       V2_ALWAYS_ASK=root / "cfg" / "always-ask.json",
                       DISCORD_GUILD_PATH=root / "cfg" / "guild.json",
                       DISCORD_TOKEN_PATH=root / "cfg" / "discord_token.json",

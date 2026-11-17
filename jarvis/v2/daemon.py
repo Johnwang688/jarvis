@@ -640,6 +640,10 @@ class Daemon:
         from .router import Router
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
+        from .router import CLAUDE_CATALOG_STOPPED
+        CLAUDE_CATALOG_STOPPED.clear()
+        self.router.ledger.listen_claude_catalog(lambda: self.bus.publish(
+            {"kind": "claude_metadata", "data": {"provider": "claude"}}))
         self.schedules = Schedules(self)
         # Where a permanent delete goes (decisions B2). Only Jarvis's own
         # entries in it are ever purged: `owned` is this daemon's data root.

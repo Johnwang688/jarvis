@@ -174,16 +174,84 @@ def load_codex_catalog(path=None) -> dict[str, dict] | None:
     return {m: dict(e) for m, e in parsed.items()}
 
 
+# Both metadata refreshes and session captures obey the daemon's stop flag.
+CLAUDE_CATALOG_STOPPED = threading.Event()
+CLAUDE_CATALOG_GATE = threading.RLock()
+_CLAUDE_QUEUE_LOCK = threading.Lock()
+_claude_pending = None
+_claude_capture_worker: threading.Thread | None = None
+_CLAUDE_LISTENER_LOCK = threading.Lock()
+_claude_catalog_listeners = []
+
+
+def add_claude_catalog_listener(fn):
+    """Observe changing live installs; return an unsubscribe function."""
+    with _CLAUDE_LISTENER_LOCK:
+        _claude_catalog_listeners.append(fn)
+
+    def remove():
+        with _CLAUDE_LISTENER_LOCK:
+            if fn in _claude_catalog_listeners:
+                _claude_catalog_listeners.remove(fn)
+    return remove
+
+
+def queue_claude_models(rows) -> None:
+    """Hand off in-memory session rows; one daemon worker keeps the newest."""
+    global _claude_pending, _claude_capture_worker
+    with _CLAUDE_QUEUE_LOCK:
+        if CLAUDE_CATALOG_STOPPED.is_set():
+            return
+        _claude_pending = rows
+        if _claude_capture_worker is not None:
+            return
+        worker = threading.Thread(target=_install_session_claude_models,
+                                  name="jarvis-claude-catalog", daemon=True)
+        _claude_capture_worker = worker
+        try:
+            worker.start()
+        except Exception:
+            _claude_capture_worker = None
+            _claude_pending = None
+            raise
+
+
+def _install_session_claude_models() -> None:
+    global _claude_pending, _claude_capture_worker
+    while True:
+        # Never hold the queue lock while parsing, waiting for the install
+        # gate/config lock, saving, or notifying listeners.
+        with _CLAUDE_QUEUE_LOCK:
+            rows, _claude_pending = _claude_pending, None
+            if rows is None or CLAUDE_CATALOG_STOPPED.is_set():
+                _claude_capture_worker = None
+                return
+        try:
+            set_claude_models(rows)
+        except Exception as exc:
+            LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
+
+
 def set_claude_models(rows) -> dict[str, dict]:
     """Replace the Claude table whole; refuse garbage without changing state.
     Save changed tables only, so session connects do not churn the cache.
     """
     from . import claude_catalog
     parsed = claude_catalog.parse(rows)
-    with _CONFIG_LOCK:
-        if CLI_MODELS["claude"] != parsed:
+    changed = False
+    with CLAUDE_CATALOG_GATE, _CONFIG_LOCK:
+        if not CLAUDE_CATALOG_STOPPED.is_set() and CLI_MODELS["claude"] != parsed:
             CLI_MODELS["claude"] = parsed
             claude_catalog.save(parsed)
+            changed = True
+    if changed:
+        with _CLAUDE_LISTENER_LOCK:
+            listeners = tuple(_claude_catalog_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception as exc:
+                LOG.warning("Claude metadata notification failed (%s)", type(exc).__name__)
     return {m: dict(e) for m, e in parsed.items()}
 
 

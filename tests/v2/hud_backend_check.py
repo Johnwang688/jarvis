@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 from datetime import datetime, timezone
 import http.client
 import inspect
@@ -1083,6 +1084,31 @@ class Backend(unittest.TestCase):
         self.assertEqual([row["id"] for row in described["models"]], ["claude-fable-5-2"])
         self.assertEqual(router.CLI_MODELS["claude"]["claude-fable-5-2"]["name"], "Claude Fable 5.2")
         self.assertTrue(config.CLAUDE_CATALOG_PATH.exists())
+
+    def test_session_capture_publishes_once_and_refresh_does_not_repeat(self):
+        from jarvis.v2 import router
+        from jarvis.v2.providers import claude
+        rows = [{"value": "claude-session-catalog", "displayName": "Session catalog"}]
+
+        class Client:
+            async def connect(self):
+                pass
+
+            async def get_server_info(self):
+                return {"models": rows}
+
+        for _ in range(2):
+            asyncio.run(claude._connect_session(Client()))
+            with router._CLAUDE_QUEUE_LOCK:
+                worker = router._claude_capture_worker
+            if worker is not None:
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+        self.providers[P.CLAUDE].model_catalog = lambda: rows
+        self.request("GET", "/thread-models")
+        self.assertTrue(self.daemon.router.ledger.wait_claude_refresh(5))
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "claude_metadata"],
+                         [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
 
     def test_codex_metadata_refreshes_in_the_background_and_fills_both_halves(self):
         from jarvis.v2 import router
