@@ -1316,3 +1316,47 @@ the full id is in its tooltip) and `started <time>` on the browser's clock.
 The commit is a label and decides nothing. The record does not prove that the
 binary was built from that commit: a dirty tree says so, but a clean tree
 with a binary built before the last commit still names the newer HEAD.
+
+### Brain terminal logs are saved (2026-11-16)
+
+The owner asked that brain terminal output not be lost when the terminal
+closes, with the logs in a folder agents can fetch, documented for them. Their
+answers: one dedicated folder (not the project), a local timestamp on every
+line, keep 30 days, no HUD change.
+
+- **Where:** `config.VEX_BRAIN_LOG_DIR`, by default
+  `~/.local/share/jarvis/brain-logs` (`JARVIS_VEX_BRAIN_LOGS` overrides). It
+  is deliberately not under `V2_DATA_DIR`, whose reads a Codex chat's sandbox
+  denies. Files are named `brain-YYYYMMDD-HHMMSS-<8 hex>.log`, mode 0600, in a
+  0700 folder.
+- **What:** `BrainLog` gets each output chunk through `Terminal.on_output`, a
+  new hook that `create_program` sets before spawn. It runs on the reader
+  thread after the ring holds the chunk, outside every lock, and a hook that
+  raises is dropped, never the terminal. Each line is `HH:MM:SS.mmm  text`,
+  stamped with the time its first byte arrived. Escapes and control characters
+  are removed (`plain`, `_visible`). A CR-redrawn line keeps its last state;
+  the PTY's CRLF is a line end, not a redraw. The file has a header line with
+  the start and port, `# date` when the day changes, and `# ended … (exit N)`
+  at the end. A line with no newline is cut at 64 KB, and a file stops at
+  32 MB with a line saying so. Output is written as it arrives, so a closed
+  terminal, a daemon restart or a crash loses nothing already printed. The
+  owner's typed input appears too, because the PTY echoes it.
+- **Boundary:** the folder is opened `O_NOFOLLOW` and must be owned by this
+  user. A linked folder turns the log off, never the terminal. Files are
+  created `O_EXCL|O_NOFOLLOW` through the folder's fd. Pruning (on each new
+  session) removes only regular files with the exact name shape older than
+  `VEX_BRAIN_LOG_DAYS`, judged without following links. Agents may write
+  there; nothing reads the logs to decide anything. The daemon log gets the
+  path, never the text, as before. The brain record (`/vex/brain/record`)
+  carries `log`.
+- **Agents are told:** a paragraph in `config.SYSTEM_PROMPT` (it names no
+  tool, so every narrowing keeps it) and one in `roles._CHAT` for Claude and
+  Codex chats. Both name the configured folder and the retention, and say to
+  treat the logs as data and leave them as they are. A chat's read of a log
+  gets the same permission answer as a read inside its project, in every
+  profile (`test_a_chat_reads_a_brain_log_as_it_reads_its_project`); in
+  `ask` and `strict` profiles that means asked or refused, as for the project.
+- Tests: `tests/v2/vex_check.py` `BrainLogs` and
+  `Sockets.test_the_brain_session_is_saved_and_outlives_its_terminal`. The VEX
+  test base points `VEX_BRAIN_LOG_DIR` at its temp root, since the default
+  is fixed at import from the real home.

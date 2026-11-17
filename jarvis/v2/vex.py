@@ -912,6 +912,179 @@ def parse_errors(text: str, root_windows: str | None = None) -> list[dict]:
     return out
 
 
+# -- the brain terminal's saved log -------------------------------------------------------------
+
+BRAIN_LOG_NAME = re.compile(r"brain-\d{8}-\d{6}-[0-9a-f]{8}\.log", re.ASCII)
+BRAIN_LOG_CAP = 32 << 20          # one session's file; past it, the terminal only
+BRAIN_LINE_CAP = 64 << 10         # a line with no newline yet, written as one past this
+
+
+def _brain_log_dir() -> int:
+    """The log folder, opened: made private (0700) if missing, never through
+    a symbolic link, and only one this user owns. -> a directory fd."""
+    folder = Path(config.VEX_BRAIN_LOG_DIR).expanduser()
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        pass
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise PermissionError("the brain log folder belongs to another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def prune_brain_logs(dir_fd: int, now: float | None = None) -> int:
+    """Remove this folder's brain logs older than `VEX_BRAIN_LOG_DAYS`: only
+    regular files with `BRAIN_LOG_NAME`'s exact shape, judged without
+    following a link. -> how many were removed."""
+    cutoff = (time.time() if now is None else now) - config.VEX_BRAIN_LOG_DAYS * 86400
+    removed = 0
+    for name in os.listdir(dir_fd):
+        if not BRAIN_LOG_NAME.fullmatch(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                os.unlink(name, dir_fd=dir_fd)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+class BrainLog:
+    """One brain terminal session saved as text (the owner, 2026-11-16): each
+    line plain (`plain`, `_visible`: escapes and control characters out, a
+    line redrawn with CR kept as its last state) after the local time its
+    first byte arrived, `HH:MM:SS.mmm`, with a `# date` line when the day
+    changes. Written as it arrives, so a closed terminal, a daemon restart
+    or a crash loses nothing already printed. The file is made new (never
+    through a link, never over another), private (0600), and stops at
+    `BRAIN_LOG_CAP` with a line that says so. A write that fails ends the
+    log, never the terminal. The daemon log gets its path, never its text."""
+
+    def __init__(self, fd: int, path: str, clock=time.time):
+        self._fd: int | None = fd
+        self.path = path
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._buf = bytearray()
+        self._line_at: float | None = None
+        self._day: str | None = None
+        self.size = 0
+
+    @classmethod
+    def open(cls, port: str | None, clock=time.time) -> "BrainLog | None":
+        """A new log in `VEX_BRAIN_LOG_DIR` after pruning the old ones, or
+        None (said in the daemon log) when the folder cannot be used."""
+        try:
+            dir_fd = _brain_log_dir()
+        except Exception as exc:  # noqa: BLE001 — a log never stops the terminal
+            LOG.warning("vex brain log off: the folder cannot be used (%s)", type(exc).__name__)
+            return None
+        try:
+            try:
+                prune_brain_logs(dir_fd, clock())
+            except OSError:
+                pass
+            now = clock()
+            name = (f"brain-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-"
+                    f"{secrets.token_hex(4)}.log")
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=dir_fd)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("vex brain log off: no file could be made (%s)", type(exc).__name__)
+            return None
+        finally:
+            os.close(dir_fd)
+        log = cls(fd, str(Path(config.VEX_BRAIN_LOG_DIR).expanduser() / name), clock)
+        stamp = datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds")
+        log._write(f"# VEX brain terminal, started {stamp}; port "
+                   f"{port or 'picked by vexcom'}\n")
+        return log
+
+    def _write(self, text: str) -> None:
+        if self._fd is None:
+            return
+        data = text.encode("utf-8", "replace")
+        try:
+            if self.size + len(data) > BRAIN_LOG_CAP:
+                note = (f"# log capped at {BRAIN_LOG_CAP >> 20} MB; later output is in the "
+                        "terminal only\n").encode()
+                os.write(self._fd, note)
+                self._end()
+                return
+            view = memoryview(data)
+            while view:
+                view = view[os.write(self._fd, view):]
+            self.size += len(data)
+        except OSError as exc:
+            LOG.warning("vex brain log stopped: a write failed (%s)", type(exc).__name__)
+            self._end()
+
+    def _end(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _line(self, raw: bytes, at: float) -> None:
+        when = datetime.datetime.fromtimestamp(at).astimezone()
+        day = when.strftime("%Y-%m-%d")
+        if day != self._day:
+            if self._day is not None:
+                self._write(f"# date {day}\n")
+            self._day = day
+        # The PTY ends a line with CRLF: the CR is the line's end, not a redraw.
+        text = _visible(plain(raw.removesuffix(b"\r"))).replace("\n", " ")
+        self._write(f"{when.strftime('%H:%M:%S')}.{when.microsecond // 1000:03d}  {text}\n")
+
+    def feed(self, data: bytes) -> None:
+        """A chunk of the terminal's output (`Terminal.on_output`)."""
+        with self._lock:
+            if self._fd is None or not data:
+                return
+            now = self._clock()
+            pos = 0
+            while pos < len(data):
+                if self._line_at is None:
+                    self._line_at = now
+                cut = data.find(b"\n", pos)
+                if cut < 0:
+                    self._buf += data[pos:]
+                    while len(self._buf) >= BRAIN_LINE_CAP:
+                        self._line(bytes(self._buf[:BRAIN_LINE_CAP]), self._line_at)
+                        del self._buf[:BRAIN_LINE_CAP]
+                        self._line_at = now if self._buf else None
+                    break
+                self._buf += data[pos:cut]
+                self._line(bytes(self._buf), self._line_at)
+                self._buf.clear()
+                self._line_at = None
+                pos = cut + 1
+
+    def close(self, exit_code: int | None = None) -> None:
+        """The session ended: a line not yet ended by a newline, then when and how."""
+        with self._lock:
+            if self._fd is None:
+                return
+            if self._buf and plain(bytes(self._buf)).strip():
+                self._line(bytes(self._buf), self._line_at or self._clock())
+            self._buf.clear()
+            stamp = datetime.datetime.fromtimestamp(self._clock()).astimezone().isoformat(
+                timespec="seconds")
+            self._write(f"# ended {stamp}" + (f" (exit {exit_code})" if exit_code is not None
+                                              else "") + "\n")
+            self._end()
+
+
 def _visible(text: str) -> str:
     return "".join(ch for ch in text if ch in "\n\t" or not (ord(ch) < 32 or untrusted.unseen(ch)))
 
@@ -1707,7 +1880,7 @@ class Vex:
             self._last[key] = old
 
     def _start(self, argv, *, cfg, tool, also=(), folder, label, program, title, project_id=None,
-               input_ok=False, on_exit=None, key=None):
+               input_ok=False, on_exit=None, on_output=None, key=None):
         """Spawn `argv` as a program terminal. `argv[0]` is `cfg.<tool>`; it and
         the tools in `also` are hashed against `vex.json` immediately before
         the spawn (`verify_tools`), and nothing else runs in between."""
@@ -1722,7 +1895,7 @@ class Vex:
         try:
             terminal = self.daemon.terminals.create_program(
                 argv, folder=folder, label=label, program=program, title=title,
-                project_id=project_id, input_ok=input_ok, on_exit=on_exit)
+                project_id=project_id, input_ok=input_ok, on_exit=on_exit, on_output=on_output)
         except TerminalError as exc:
             raise VexError(str(exc)) from None
         if key is not None:
@@ -2275,9 +2448,14 @@ class Vex:
         argv = brain_argv(cfg, port)
         release, bind = self._reserve_device("brain")
         finished: dict = {}             # set by `ended`, under the lock, if it runs at all
+        # The session's output, saved as it arrives (`BrainLog`); None when
+        # the folder cannot be used, which never stops the terminal.
+        log = BrainLog.open(port)
 
         def ended(terminal):
             release()
+            if log is not None:
+                log.close(terminal.exit_code)
             reading = self._brain_reading(terminal)
             with self._lock:
                 # vexcom failed by itself with the remembered port (gone, busy,
@@ -2299,21 +2477,26 @@ class Vex:
             terminal = self._start(argv, cfg=cfg, tool="vexcom",
                                    folder=os.path.dirname(cfg.vexcom), label="brain",
                                    program="vex-brain", title="vex brain", input_ok=True,
-                                   on_exit=ended, key=("vex-brain",))
+                                   on_exit=ended, on_output=log.feed if log is not None else None,
+                                   key=("vex-brain",))
         except BaseException:
             release()
+            if log is not None:
+                log.close()
             raise
         if not terminal.exited:
             bind(terminal.id)
         with self._lock:
             self._brain_record = {"terminal_id": terminal.id, "started": _utcnow(), "ended": None,
-                                  "args": argv[1:], "port": port}
+                                  "args": argv[1:], "port": port,
+                                  "log": log.path if log is not None else None}
             # An exit hook that already ran (vexcom ended at once) left its
             # reading; otherwise the record reads the live terminal until it does.
             self._brain_record.update(finished)
             self._brain_terminal = None if finished else terminal
         self._announce("brain")
-        LOG.info("vex brain terminal started (--quiet, port %s)", port or "picked by vexcom")
+        LOG.info("vex brain terminal started (--quiet, port %s); log %s", port or "picked by vexcom",
+                 log.path if log is not None else "off")
         return {"terminal_id": terminal.id, "started": True, "port": port}
 
     # -- device info --------------------------------------------------------------------
