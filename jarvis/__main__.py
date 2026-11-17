@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import threading
 
@@ -335,9 +336,18 @@ def cmd_auth(args) -> int:
 
 
 def cmd_voice_link(args) -> int:
-    # Human-only: the existing command judge asks for every jarvis CLI verb.
-    from . import voice_link_setup
-    return voice_link_setup.setup()
+    # The existing command judge asks for every jarvis CLI verb.
+    from . import voice_agent_ctl, voice_link_setup
+    if args.action == "setup":
+        return voice_link_setup.setup()
+    try:
+        bridge = voice_link_setup.bridge_dir()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(str(exc))
+        return 1
+    if args.action == "logs":
+        return voice_agent_ctl.logs(bridge, n=args.lines, follow=args.follow)
+    return getattr(voice_agent_ctl, args.action)(bridge)
 
 
 def cmd_desktop(args) -> int:
@@ -942,8 +952,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     auth.set_defaults(func=cmd_auth)
 
-    voice_link = sub.add_parser("voice-link", help="pair the Windows voice agent (human-only)")
-    voice_link.add_argument("action", choices=["setup"])
+    voice_link = sub.add_parser("voice-link", help="control the Windows voice agent (human-only verbs ask when an agent runs them)",
+                                description="Windows voice agent (human-only verbs ask when an agent runs them)")
+    voice_link.add_argument("action", choices=["setup", "start", "stop", "status", "logs"])
+    voice_link.add_argument("-n", "--lines", type=int, default=50, help="log lines to show")
+    voice_link.add_argument("-f", "--follow", action="store_true", help="follow the agent log")
     voice_link.set_defaults(func=cmd_voice_link)
 
     desktop = sub.add_parser(
