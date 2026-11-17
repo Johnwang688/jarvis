@@ -13,8 +13,9 @@ refused (codex.py). So the rule is a **floor**, not a pin:
 - ``config.CODEX_STRICT`` (env ``JARVIS_CODEX_STRICT=1``) restores the exact
   match: only a version in ``VERIFIED`` runs.
 
-The protocol diff that justifies ``CODEX_VERIFIED`` is
-``docs/codex-briefs/codex-0.161-protocol-notes.md``.
+The protocol diffs that justify ``CODEX_VERIFIED`` are
+``docs/codex-briefs/codex-0.161-protocol-notes.md`` and
+``docs/codex-briefs/codex-0.169-protocol-notes.md``.
 
 Resolution, first hit wins: ``config.CODEX_CLI`` (env ``JARVIS_CODEX_CLI``),
 then the first ``codex`` on PATH that is not under ``/mnt/`` — the Windows npm
@@ -30,9 +31,9 @@ import re
 from jarvis import config
 
 CODEX_MIN = "0.153.4"
-CODEX_VERIFIED = "0.161.0"
+CODEX_VERIFIED = "0.169.0"
 # Every version whose generated protocol was checked against the adapter.
-VERIFIED = ("0.153.4", "0.161.0")
+VERIFIED = ("0.153.4", "0.161.0", "0.169.0")
 
 log = logging.getLogger(__name__)
 _announced: set[str] = set()

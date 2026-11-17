@@ -177,6 +177,9 @@ def main(argv: list[str]) -> int:
     sys.path.insert(0, str(REPO))
     sys.path.insert(0, str(HERE.parent / "subagents"))
     import record_codex as rc
+    # Which release this run judged: the evidence a version bump cites.
+    print("CODEX", rc.CODEX, subprocess.run([str(rc.CODEX), "--version"], capture_output=True,
+                                           text=True, timeout=60).stdout.strip(), flush=True)
     from jarvis import config
     from jarvis.v2.model import Role
     from jarvis.v2.provider import Brief, BriefRefused

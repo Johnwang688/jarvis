@@ -1,7 +1,8 @@
 """Codex app-server adapter, with native tools and broker callbacks.
 
-The protocol was generated from and verified against codex-cli 0.153.4 and
-0.161.0 (docs/codex-briefs/codex-0.161-protocol-notes.md). Any version at or
+The protocol was generated from and verified against codex-cli 0.153.4,
+0.161.0 and 0.169.0 (docs/codex-briefs/codex-0.161-protocol-notes.md,
+codex-0.169-protocol-notes.md). Any version at or
 above codex_cli.CODEX_MIN runs; one newer than CODEX_VERIFIED runs with a
 warning. What keeps a newer version from loosening the gate is narrower than
 "anything not understood is refused", and worth stating exactly:

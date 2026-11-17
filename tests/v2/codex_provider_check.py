@@ -3976,7 +3976,7 @@ class HealthChecks(unittest.TestCase):
         self.assertEqual(self.calls(binary), ["--version"])
 
     def test_floor_and_verified_are_accepted_quietly(self):
-        for version in ("0.153.4", "0.158.2", "0.161.0"):
+        for version in ("0.153.4", "0.158.2", "0.161.0", "0.169.0"):
             with self.subTest(version=version), self.assertNoLogs(codex_cli.log, "WARNING"):
                 binary, (ok, reason) = self.health(version, where=f"bin-{version}")
                 self.assertTrue(ok, reason)
@@ -3993,8 +3993,8 @@ class HealthChecks(unittest.TestCase):
         message = warnings[0].getMessage()
         self.assertIn("0.170.2", message)
         self.assertIn("verified against", message)
-        self.assertIn("0.161.0", message)
-        self.assertIn("protocol verified up to 0.161.0", reason)
+        self.assertIn("0.169.0", message)
+        self.assertIn("protocol verified up to 0.169.0", reason)
 
     def test_versions_are_parsed_not_string_compared(self):
         # "0.153.10" < "0.153.4" as strings; as versions it is newer.
@@ -4102,11 +4102,11 @@ class HealthChecks(unittest.TestCase):
         self.assertNotIn("app-server", "\n".join(self.calls(release)))
 
     def test_newer_by_number_not_by_string(self):
-        """0.1000.0 is newer than 0.161.0, though it sorts lower as text."""
+        """0.1000.0 is newer than 0.169.0, though it sorts lower as text."""
         with self.assertLogs(codex_cli.log, "WARNING") as logs:
             _, (ok, reason) = self.health("0.1000.0")
         self.assertTrue(ok, reason)
-        self.assertIn("protocol verified up to 0.161.0", reason)
+        self.assertIn("protocol verified up to 0.169.0", reason)
         self.assertEqual(len(logs.records), 1)
         with self.assertNoLogs(codex_cli.log, "WARNING"):
             _, (ok, reason) = self.health("0.160.9", where="b9")
