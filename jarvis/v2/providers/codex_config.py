@@ -315,7 +315,7 @@ ENV_GLOB = "**/" + ENV_NAME
 # (tests pin the two together: re-run tests/v2/fixtures/cg2_probe.py before
 # moving either).
 FEATURE = "exec_permission_approvals"
-FEATURE_VERIFIED = "0.169.0"
+FEATURE_VERIFIED = "0.169.1"
 # Turn-wide grants (§5.1): must stay off; its requests get an empty grant.
 TURN_WIDE_FEATURE = "request_permissions_tool"
 

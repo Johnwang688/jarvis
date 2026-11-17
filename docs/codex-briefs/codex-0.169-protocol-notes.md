@@ -112,6 +112,27 @@ checked only after the installed CLI is updated, by reading
 refresh. Nothing in Jarvis lists Codex models by name: `router.CLI_MODELS
 ["codex"]` is the account's `model/list`, replaced whole.
 
+## 0.169.1 (same day)
+
+During this work the owner's installed CLI updated itself from 0.161.0 to
+0.169.1. A `codex exec` run with the owner's `~/.codex` most likely triggered
+the CLI's own update check; nobody ran `codex update`. The catalog it then
+fetched (`client_version: 0.169.1`) lists `gpt-6.2-sol` (service tiers
+`priority` "Fast" and `ultrafast` "Ultrafast") and `gpt-6.2-astra`
+(`priority`), and the HUD's refresh saved them to
+`~/.local/share/jarvis/codex-models.json`. That confirms the
+client-version filter.
+
+Checked on the installed 0.169.1 binary
+(`~/.codex/packages/standalone/releases/0.169.1-…/bin/codex`):
+
+- `generate-json-schema --experimental` and `generate-ts --experimental`
+  output is **byte-identical** to 0.169.0 (`diff -rq`, both trees).
+- `cg2_probe.py` with `JARVIS_CODEX_CLI` set to it: **45/45, ALL PASS**,
+  printed `codex-cli 0.169.1`.
+
+So `CODEX_VERIFIED` is 0.169.1, the version actually running.
+
 ## Not verified
 
 - No real turn was run on 0.169.0, and the owner's login was not used with it.

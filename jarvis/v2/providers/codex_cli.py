@@ -31,9 +31,9 @@ import re
 from jarvis import config
 
 CODEX_MIN = "0.153.4"
-CODEX_VERIFIED = "0.169.0"
+CODEX_VERIFIED = "0.169.1"
 # Every version whose generated protocol was checked against the adapter.
-VERIFIED = ("0.153.4", "0.161.0", "0.169.0")
+VERIFIED = ("0.153.4", "0.161.0", "0.169.0", "0.169.1")
 
 log = logging.getLogger(__name__)
 _announced: set[str] = set()
