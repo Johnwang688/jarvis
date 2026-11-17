@@ -269,6 +269,7 @@ class Base(unittest.TestCase):
                 MODELS_PATH=cfg / "models.json", PROVIDER_DEFAULTS_PATH=cfg / "provider_defaults.json",
                 DISCORD_GUILD_PATH=cfg / "discord_guild.json", ROUTING_PATH=cfg / "routing.json",
                 CODEX_CATALOG_PATH=self.root / "codex-models.json", VEX_PATH=cfg / "vex.json",
+                CLAUDE_CATALOG_PATH=self.root / "claude-models.json",
                 VEX_BRAIN_LOG_DIR=self.root / "brain-logs",
                 VEX_STORAGE_ROOTS=(str(self.world.storage),),
                 VEX_EXTENSION_ROOTS=(str(self.world.extensions),),

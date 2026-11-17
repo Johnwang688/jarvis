@@ -168,6 +168,7 @@ class Harness(unittest.TestCase):
                             ("PROVIDER_DEFAULTS_PATH", self.root / "provider_defaults.json"),
                             ("ALLOWLIST_PATH", self.root / "allowlist.json"),
                             ("CODEX_CATALOG_PATH", self.root / "codex-models.json"),
+                            ("CLAUDE_CATALOG_PATH", self.root / "claude-models.json"),
                             ("TITLE_CODEX_MODEL", "gpt-6-luna")):
             patcher = patch.object(config, name, value)
             patcher.start()

@@ -410,6 +410,37 @@ def _client_factory(options: ClaudeAgentOptions) -> Any:
     return ClaudeSDKClient(options=options)
 
 
+async def _connect_session(client) -> None:
+    """Capture already-held SDK info on every connect; never fail a session."""
+    await client.connect()
+    try:
+        info = await client.get_server_info()
+        if isinstance(info, dict) and isinstance(info.get("models"), list):
+            from ..router import set_claude_models
+            set_claude_models(info["models"])
+    except Exception as exc:
+        LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
+
+
+def _cli_options(*, isolated=False, origin_tag=None) -> dict[str, Any]:
+    """Shared CLI resolution and environment construction for all clients."""
+    kwargs: dict[str, Any] = {}
+    cli_path = resolve_cli()
+    if isolated:
+        kwargs["env"] = isolated_env()
+    if origin_tag is not None:
+        kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": origin_tag}
+    if cli_path is not None:
+        # The owner's own install, never the SDK's bundled copy, which
+        # lags it and refuses newer models. None leaves the SDK to its
+        # bundled CLI — the last resort `resolve_cli` already warned of.
+        kwargs["cli_path"] = cli_path
+    return kwargs
+
+
+CLAUDE_METADATA_TIMEOUT_S = 30
+
+
 # --- which claude -----------------------------------------------------------
 
 LOG = logging.getLogger(__name__)
@@ -968,6 +999,39 @@ class ClaudeProvider:
             return False, f"claude {label}: login expired; run `claude login`"
         return True, f"claude {label}, subscription login"
 
+    def model_catalog(self) -> list[dict] | None:
+        """Read startup metadata without a prompt, tools, settings or project.
+
+        Use the session CLI/environment, with a private disposable cwd. The
+        whole operation is bounded, including disconnect on failed connect.
+        This runs only on the HUD metadata thread, never a turn's loop.
+        """
+        async def read(cwd):
+            async with asyncio.timeout(CLAUDE_METADATA_TIMEOUT_S):
+                options = ClaudeAgentOptions(
+                    cwd=cwd, tools=[], setting_sources=[], mcp_servers={},
+                    strict_mcp_config=True, allowed_tools=[],
+                    **_cli_options(),
+                )
+                client = _client_factory(options)
+                try:
+                    # Leave a small part of the total budget for teardown.
+                    async with asyncio.timeout(CLAUDE_METADATA_TIMEOUT_S - 2):
+                        await client.connect()
+                        info = await client.get_server_info()
+                        return info.get("models") if isinstance(info, dict) else None
+                finally:
+                    async with asyncio.timeout(2):
+                        await client.disconnect()
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="jarvis-claude-models-") as cwd:
+                Path(cwd).chmod(0o700)
+                return asyncio.run(read(cwd))
+        except Exception as exc:
+            LOG.warning("Claude model metadata read failed (%s)", type(exc).__name__)
+            return None
+
     # -- lifecycle
 
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback, *,
@@ -1010,7 +1074,7 @@ class ClaudeProvider:
                 session.mcp_config = write_mcp_config(thread.id, dict(brief.mcp_servers))
             options = self._options(brief, session, resume=resume, session_id=session_id)
             session.client = _client_factory(options)
-            _await(loop, session.client.connect(), CONNECT_TIMEOUT_S)
+            _await(loop, _connect_session(session.client), CONNECT_TIMEOUT_S)
         except BaseException as exc:  # noqa: BLE001 — a failed start must not leak a thread
             _stop_loop(loop, runner)
             remove_mcp_config(session.mcp_config)
@@ -1079,16 +1143,7 @@ class ClaudeProvider:
             # turn's events from leaking into the next.
             "extra_args": {"replay-user-messages": None},
         }
-        cli_path = resolve_cli()
-        if session.isolated:
-            kwargs["env"] = isolated_env()
-        if brief.origin_tag is not None:
-            kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": brief.origin_tag}
-        if cli_path is not None:
-            # The owner's own install, never the SDK's bundled copy, which
-            # lags it and refuses newer models. None leaves the SDK to its
-            # bundled CLI — the last resort `resolve_cli` already warned of.
-            kwargs["cli_path"] = cli_path
+        kwargs.update(_cli_options(isolated=session.isolated, origin_tag=brief.origin_tag))
         if brief.model:
             kwargs["model"] = brief.model
         if brief.effort:
@@ -2827,7 +2882,7 @@ class ClaudeProvider:
             def connect(target: Brief) -> Any:
                 options = self._options(target, session, resume=resume, session_id=session.session_id)
                 client = _client_factory(options)
-                _await(session.loop, client.connect(), CONNECT_TIMEOUT_S)
+                _await(session.loop, _connect_session(client), CONNECT_TIMEOUT_S)
                 return client
 
             # The old client's reader goes with it, and so does anything the old

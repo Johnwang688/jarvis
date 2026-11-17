@@ -528,6 +528,12 @@ CODEX_CATALOG_PATH = Path(
                    Path.home() / ".local" / "share" / "jarvis" / "codex-models.json")
 )
 
+# Claude Code's last good SDK catalog, protected like the Codex cache.
+CLAUDE_CATALOG_PATH = Path(
+    os.environ.get("JARVIS_CLAUDE_CATALOG",
+                   Path.home() / ".local" / "share" / "jarvis" / "claude-models.json")
+)
+
 # The Codex CLI the v2 Codex provider runs (`jarvis/v2/providers/codex_cli.py`).
 # Empty means "find it": the first `codex` on PATH that is not a Windows shim
 # under /mnt/, then ~/.local/bin/codex. Set it to pin one binary; it wins over

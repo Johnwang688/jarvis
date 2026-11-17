@@ -97,21 +97,15 @@ def clamp_effort(wanted: str, ladder, provider) -> str | None:
 # (`thread_model`) and by the HUD's model chip — so the router, the check and
 # the list cannot disagree about what exists.
 #
-# Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
-# (`providers/claude.py` `EFFORT_LEVELS`). Haiku 5.5 takes all five (its
-# default is medium); Haiku 4.5 has no effort control.
-#
-# Codex: the signed-in account's own catalog (`model/list`, installed by
-# `set_codex_models` after a HUD read refreshes it), saved to
-# `config.CODEX_CATALOG_PATH` and loaded at daemon start
-# (`load_codex_catalog`). `CODEX_FALLBACK` stands until then, and whenever the
-# cache is missing or corrupt; its ladders are the ones the account advertised
-# on 2026-10-08. The table is replaced whole, never unioned: a model the
-# account stops offering is gone from it. What was saved naming that model —
-# a routing.json entry, a project's routing.models, the HUD's Codex default —
-# is **never rewritten**: it degrades to the default with a note while the
-# model is absent, an effort the model no longer offers is clamped, and the
-# owner's choice comes back when the model does (PR #20 review).
+# Both native catalogs are saved to config.{CLAUDE,CODEX}_CATALOG_PATH and
+# loaded at daemon start. CLAUDE_FALLBACK and CODEX_FALLBACK stand until a
+# usable cache or live list arrives. Claude reads the SDK's server info after
+# connect and on background HUD refresh; Codex reads account model/list.
+# Each table is replaced whole, never unioned: a model the account stops
+# offering disappears. Saved routing entries, project models and HUD defaults
+# are never rewritten: absent models degrade to the default with a note,
+# efforts are clamped, and the owner's choice returns when the model does.
+# Claude effort words follow the SDK's EffortLevel; Haiku 4.5 has no control.
 #
 # A new choice (`/route`, a project write, the chip) is held to the table as
 # it is now; a model missing from it is refused by name, never guessed at.
@@ -131,16 +125,18 @@ CODEX_FALLBACK: dict[str, dict] = {
     # one this table always carried rather than an advertised one.
     "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
 }
+CLAUDE_FALLBACK: dict[str, dict] = {
+    "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-fable-5-2": {"name": "Claude Fable 5.2", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-haiku-5-5": {"name": "Claude Haiku 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+    "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
+}
 CLI_MODELS: dict[str, dict[str, dict]] = {
-    "claude": {
-        "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-haiku-5-5": {"name": "Claude Haiku 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
-        "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
-    },
+    "claude": {model: dict(entry) for model, entry in CLAUDE_FALLBACK.items()},
     "codex": {model: dict(entry) for model, entry in CODEX_FALLBACK.items()},
 }
 
@@ -175,6 +171,30 @@ def load_codex_catalog(path=None) -> dict[str, dict] | None:
         return None
     with _CONFIG_LOCK:
         CLI_MODELS["codex"] = parsed
+    return {m: dict(e) for m, e in parsed.items()}
+
+
+def set_claude_models(rows) -> dict[str, dict]:
+    """Replace the Claude table whole; refuse garbage without changing state.
+    Save changed tables only, so session connects do not churn the cache.
+    """
+    from . import claude_catalog
+    parsed = claude_catalog.parse(rows)
+    with _CONFIG_LOCK:
+        if CLI_MODELS["claude"] != parsed:
+            CLI_MODELS["claude"] = parsed
+            claude_catalog.save(parsed)
+    return {m: dict(e) for m, e in parsed.items()}
+
+
+def load_claude_catalog(path=None) -> dict[str, dict] | None:
+    """At daemon start install a usable cache, otherwise keep the fallback."""
+    from . import claude_catalog
+    parsed = claude_catalog.load(path)
+    if parsed is None:
+        return None
+    with _CONFIG_LOCK:
+        CLI_MODELS["claude"] = parsed
     return {m: dict(e) for m, e in parsed.items()}
 
 

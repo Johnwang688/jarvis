@@ -152,6 +152,7 @@ class Base(unittest.TestCase):
                                 HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
                                 HUD_DEV=False, ROUTING_PATH=self.root / "routing.json",
                                 CODEX_CATALOG_PATH=self.root / "codex-models.json",
+                                CLAUDE_CATALOG_PATH=self.root / "claude-models.json",
                                 MODEL_CACHE_PATH=self.root / "catalog.json",
                                 V2_ALWAYS_ASK=self.root / "always-ask.json").items():
             guard = patch.object(config, name, value)

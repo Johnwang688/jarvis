@@ -144,6 +144,9 @@ class FakeClient:
     async def connect(self):
         self.connected = True
 
+    async def get_server_info(self):
+        return None
+
     async def query(self, prompt, session_id: str = "default"):
         if hasattr(prompt, "__aiter__"):
             self.queries.append([msg async for msg in prompt])
@@ -1475,7 +1478,7 @@ def _temp_config():
     from jarvis import config
 
     names = ("ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "V2_DATA_DIR",
-             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH")
+             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH", "CLAUDE_CATALOG_PATH")
     saved = {name: getattr(config, name) for name in names}
     with tempfile.TemporaryDirectory(prefix="br0-") as tmp:
         root = Path(tmp)
@@ -1489,6 +1492,7 @@ def _temp_config():
         config.DISCORD_GUILD_PATH = home / "discord_guild.json"
         config.ROUTING_PATH = home / "routing.json"
         config.CODEX_CATALOG_PATH = root / "codex-models.json"
+        config.CLAUDE_CATALOG_PATH = root / "claude-models.json"
         try:
             yield root
         finally:

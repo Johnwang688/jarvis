@@ -407,7 +407,8 @@ def _daemon_with_a_card(tmp: Path):
                        ("V2_DATA_DIR", tmp / "v2data"), ("V2_ALWAYS_ASK", home / "always-ask.json"),
                        ("DISCORD_GUILD_PATH", home / "discord_guild.json"),
                        ("ROUTING_PATH", home / "routing.json"),
-                       ("CODEX_CATALOG_PATH", tmp / "codex-models.json")):
+                       ("CODEX_CATALOG_PATH", tmp / "codex-models.json"),
+                       ("CLAUDE_CATALOG_PATH", tmp / "claude-models.json")):
         _SAVED_CONFIG.setdefault(name, getattr(config, name))
         setattr(config, name, path)
     daemon = daemon_mod.Daemon(Stores(config.V2_DATA_DIR), {}, None, 0)

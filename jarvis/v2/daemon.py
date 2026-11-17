@@ -3282,7 +3282,13 @@ class Daemon:
                     job = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
                     job.start()
                     jobs.append(job)
+        # Close Claude's install gate before waiting on either provider.
+        ledger = getattr(getattr(self, "router", None), "ledger", None)
+        stop_claude = getattr(ledger, "stop_claude", None)
+        if callable(stop_claude):
+            stop_claude(0)
         self._stop_codex_metadata(deadline)
+        self._stop_claude_metadata(deadline)
         if titles is not None and not titles.join(min(3.0, max(0, deadline - time.monotonic()))):
             LOG.warning("Chat titler still running at shutdown; it writes nothing now")
         for job in jobs:
@@ -3323,6 +3329,14 @@ class Daemon:
             LOG.exception("phone: the last save of an unsaved revocation failed")
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
+
+    def _stop_claude_metadata(self, deadline: float) -> None:
+        """Prevent late catalog installs and wait within the shutdown bound."""
+        ledger = getattr(getattr(self, "router", None), "ledger", None)
+        stop = getattr(ledger, "stop_claude", None)
+        if callable(stop):
+            if not stop(max(0.0, deadline - time.monotonic())):
+                LOG.warning("Claude metadata refresh still running at shutdown; it saves nothing")
 
     def _stop_codex_metadata(self, deadline: float) -> None:
         """Shutdown for the background Codex models/quota refresh (PR #20
@@ -4074,6 +4088,23 @@ def load_codex_catalog_at_start() -> bool:
     return bool(loaded)
 
 
+def load_claude_catalog_at_start() -> bool:
+    """Install the saved Claude catalog, or keep the built-in table. Nothing
+    about that file may stop the daemon from starting (PR #20 re-review):
+    under systemd a crash here is a crash loop, so every failure — a
+    MemoryError included — is one log line and the fallback."""
+    from .router import load_claude_catalog
+    try:
+        loaded = load_claude_catalog()
+    except Exception as exc:
+        LOG.warning("Claude model catalog not loaded (%s); using the built-in table",
+                    type(exc).__name__)
+        return False
+    if loaded:
+        LOG.info("Claude model catalog loaded from %s", config.CLAUDE_CATALOG_PATH)
+    return bool(loaded)
+
+
 def _log_hud_served() -> None:
     """Say at start-up which HUD is served, and warn when it is not today's
     (review of PR #44, L6): dev mode, nothing installed or intact, or a
@@ -4118,12 +4149,13 @@ def main() -> int:
     from .runner import TaskRunner
 
     configure_logging()
-    # The Codex models the account offered last time, before anything reads
+    # The native models the account offered last time, before anything reads
     # routing (PR #20 review): a restart, or a Discord-only daemon no HUD ever
     # reads, routes and offers against them rather than the built-in fallback.
     # Missing or corrupt leaves the fallback. Here and not in `Daemon.start`,
     # so no embedded or test daemon reads the owner's file.
     load_codex_catalog_at_start()
+    load_claude_catalog_at_start()
 
     remote = discord_connected()
     approvals = None

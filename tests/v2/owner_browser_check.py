@@ -495,6 +495,7 @@ class OwnerBrowser(unittest.TestCase):
                       PROVIDER_DEFAULTS_PATH=cls.root / "cfg" / "provider_defaults.json",
                       ROUTING_PATH=cls.root / "cfg" / "routing.json",
                       CODEX_CATALOG_PATH=cls.root / "cfg" / "codex-models.json",
+                      CLAUDE_CATALOG_PATH=cls.root / "cfg" / "claude-models.json",
                       V2_ALWAYS_ASK=cls.root / "cfg" / "always-ask.json",
                       DISCORD_GUILD_PATH=cls.root / "cfg" / "guild.json",
                       DISCORD_TOKEN_PATH=cls.root / "cfg" / "discord_token.json",

@@ -1883,6 +1883,9 @@ export default function App() {
         case "usage_updated":
           api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
           break;
+        case "claude_metadata":
+          void reloadThreadModels.current();
+          break;
         case "codex_metadata":
           // A background refresh of Codex's account catalog and quota landed
           // (the daemon never makes a HUD read wait for one): re-read both.

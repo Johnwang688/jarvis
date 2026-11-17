@@ -215,12 +215,14 @@ class Backend(unittest.TestCase):
         self.addCleanup(routing.stop)
         # A HUD read saves the Codex catalog it got: never over the owner's
         # file, and never leaking one test's catalog into the next.
-        saved_catalog = patch.object(config, "CODEX_CATALOG_PATH", self.root / "codex-models.json")
-        saved_catalog.start()
-        self.addCleanup(saved_catalog.stop)
-        from jarvis.v2 import router as _router
-        codex_table = _router.CLI_MODELS["codex"]
-        self.addCleanup(lambda: _router.CLI_MODELS.__setitem__("codex", codex_table))
+        for provider in ("codex", "claude"):
+            saved_catalog = patch.object(config, f"{provider.upper()}_CATALOG_PATH",
+                                         self.root / f"{provider}-models.json")
+            saved_catalog.start()
+            self.addCleanup(saved_catalog.stop)
+            from jarvis.v2 import router as _router
+            table = _router.CLI_MODELS[provider]
+            self.addCleanup(lambda p=provider, t=table: _router.CLI_MODELS.__setitem__(p, t))
         always = patch.object(config, "V2_ALWAYS_ASK", self.root / "always-ask.json")
         always.start()
         self.addCleanup(always.stop)
@@ -1046,6 +1048,41 @@ class Backend(unittest.TestCase):
     def refreshed(self):
         """Wait for the background refresh the last read started."""
         self.assertTrue(self.daemon.router.ledger.wait_codex_refresh(5), "refresh still running")
+
+    def test_claude_catalog_refresh_from_each_hud_read(self):
+        from jarvis.v2 import router
+        rows = [{"value": "fable", "resolvedModel": "claude-fable-5-2",
+                 "displayName": "Fable 5.2", "supportsEffort": True,
+                 "supportedEffortLevels": ["low", "high", "max"]}]
+        calls, entered, release = [], threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def read():
+            calls.append(1)
+            entered.set()
+            release.wait(5)
+            return rows
+        self.providers[P.CLAUDE].model_catalog = read
+        ledger = self.daemon.router.ledger
+        self.assertIsNone(ledger._claude_worker, "Daemon.start does not read metadata")
+        for method, path, body in (("GET", "/usage", None),
+                                   ("GET", "/thread-models", None),
+                                   ("POST", "/thread-models", {"provider": "claude",
+                                     "model": "claude-fable-5-2", "effort": "high"})):
+            with self.subTest(method=method, path=path):
+                ledger._claude_next = None
+                entered.clear()
+                self.request(method, path, body)
+                self.assertTrue(entered.wait(2), "each handler starts a read without waiting")
+                release.set()
+                self.assertTrue(ledger.wait_claude_refresh(5))
+        self.assertEqual(len(calls), 3)
+        published = [e for e in self.events_all() if e["kind"] == "claude_metadata"]
+        self.assertEqual(published, [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
+        described = self.request("GET", "/thread-models")["providers"]["claude"]
+        self.assertEqual([row["id"] for row in described["models"]], ["claude-fable-5-2"])
+        self.assertEqual(router.CLI_MODELS["claude"]["claude-fable-5-2"]["name"], "Claude Fable 5.2")
+        self.assertTrue(config.CLAUDE_CATALOG_PATH.exists())
 
     def test_codex_metadata_refreshes_in_the_background_and_fills_both_halves(self):
         from jarvis.v2 import router
