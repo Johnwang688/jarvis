@@ -177,9 +177,11 @@ def load_codex_catalog(path=None) -> dict[str, dict] | None:
 # Session connects supply Claude Code's full list for free; no background
 # reader. One worker serializes swaps, atomic cache saves and HUD notifications.
 _CLAUDE_QUEUE_LOCK = threading.Condition()
-_claude_pending = None
+_claude_pending = None          # (sequence, generation, parsed) or None
 _claude_capture_worker: threading.Thread | None = None
 _claude_busy = False
+_claude_sequence = 0            # offers are numbered when they arrive
+_claude_taken = 0               # the newest sequence the worker has taken
 _claude_generation_counter = 0
 _claude_generation = None
 _CLAUDE_LISTENER_LOCK = threading.Lock()
@@ -187,7 +189,9 @@ _claude_catalog_listeners = []
 
 
 def claude_catalog_begin() -> int:
-    """Start a fresh daemon generation; old work can never become current again."""
+    """Start a fresh capture generation; old work can never become current
+    again. Only the owner's real daemon calls this (`daemon.main`): an
+    embedded or test daemon never captures, so it never writes the cache."""
     global _claude_generation_counter, _claude_generation
     with _CLAUDE_QUEUE_LOCK:
         _claude_generation_counter += 1
@@ -196,11 +200,19 @@ def claude_catalog_begin() -> int:
 
 
 def claude_catalog_end(generation) -> None:
-    """Fence this daemon's installs without waiting for disk I/O or callbacks."""
+    """Fence this generation's installs without waiting for disk I/O or callbacks."""
     global _claude_generation
     with _CLAUDE_QUEUE_LOCK:
-        if _claude_generation == generation:
+        if generation is not None and _claude_generation == generation:
             _claude_generation = None
+
+
+def claude_catalog_current():
+    """The capture generation now, or None when capture is off. A session
+    reads it before it connects, so a connect that outlives its daemon's
+    generation offers under the ended one and is dropped."""
+    with _CLAUDE_QUEUE_LOCK:
+        return _claude_generation
 
 
 def add_claude_catalog_listener(fn):
@@ -216,22 +228,31 @@ def add_claude_catalog_listener(fn):
     return remove
 
 
-def offer_claude_rows(rows) -> None:
-    """Validate before replacing the pending slot; newest usable table wins."""
+def offer_claude_rows(rows, generation=None) -> None:
+    """Validate before touching the pending slot; the newest *arrival* wins.
+
+    `generation` is the one the session read before it connected
+    (`claude_catalog_current`); None means "now" (tests and direct callers)."""
     from . import claude_catalog
-    global _claude_pending, _claude_capture_worker
-    # Record the generation at entry, including time spent parsing.
+    global _claude_pending, _claude_capture_worker, _claude_sequence
     with _CLAUDE_QUEUE_LOCK:
-        generation = _claude_generation
+        if generation is None:
+            generation = _claude_generation
+        _claude_sequence += 1
+        sequence = _claude_sequence
+    if generation is None:
+        return
     try:
         parsed = claude_catalog.parse(rows)
     except (TypeError, ValueError):
         return
     with _CLAUDE_QUEUE_LOCK:
-        if generation is None or generation != _claude_generation:
+        if generation != _claude_generation or sequence <= _claude_taken:
             return
-        _claude_pending = (generation, parsed)
-        if _claude_capture_worker is None:
+        if _claude_pending is not None and _claude_pending[0] > sequence:
+            return              # a later arrival is already waiting
+        _claude_pending = (sequence, generation, parsed)
+        if _claude_capture_worker is None or not _claude_capture_worker.is_alive():
             worker = threading.Thread(target=_install_session_claude_models,
                                       name="jarvis-claude-catalog", daemon=True)
             _claude_capture_worker = worker
@@ -245,27 +266,42 @@ def offer_claude_rows(rows) -> None:
 
 
 def _install_session_claude_models() -> None:
-    global _claude_pending, _claude_busy
-    while True:
-        with _CLAUDE_QUEUE_LOCK:
-            _CLAUDE_QUEUE_LOCK.wait_for(lambda: _claude_pending is not None)
-            (generation, parsed), _claude_pending = _claude_pending, None
-            if generation != _claude_generation:
-                _CLAUDE_QUEUE_LOCK.notify_all()
-                continue
-            _claude_busy = True
-        try:
-            _install_claude_table(generation, parsed)
-        except Exception as exc:
-            LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
-        finally:
+    global _claude_pending, _claude_busy, _claude_taken, _claude_capture_worker
+    try:
+        while True:
             with _CLAUDE_QUEUE_LOCK:
-                _claude_busy = False
-                _CLAUDE_QUEUE_LOCK.notify_all()
+                _CLAUDE_QUEUE_LOCK.wait_for(lambda: _claude_pending is not None)
+                (sequence, generation, parsed), _claude_pending = _claude_pending, None
+                _claude_taken = max(_claude_taken, sequence)
+                if generation != _claude_generation:
+                    _CLAUDE_QUEUE_LOCK.notify_all()
+                    continue
+                _claude_busy = True
+            try:
+                _install_claude_table(generation, parsed)
+            except Exception as exc:
+                LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
+            finally:
+                with _CLAUDE_QUEUE_LOCK:
+                    _claude_busy = False
+                    _CLAUDE_QUEUE_LOCK.notify_all()
+    finally:
+        # Even a BaseException out of a callback must not leave a dead worker
+        # that later offers would wait on forever: the next offer starts one.
+        with _CLAUDE_QUEUE_LOCK:
+            if _claude_capture_worker is threading.current_thread():
+                _claude_capture_worker = None
+            _claude_busy = False
 
 
 def _install_claude_table(generation, parsed) -> None:
-    """Worker-only: compare/swap, save outside locks, then notify in order."""
+    """Worker-only: compare/swap, save outside locks, then notify in order.
+
+    The HUD is told about a swap even when the save fails: the table in
+    memory is what it shows. A save that fails is retried by the next
+    changing install, not by an equal one (the cache only matters at the
+    next start, which then falls back to the previous cache or the
+    built-in table)."""
     from . import claude_catalog
     with _CONFIG_LOCK:
         with _CLAUDE_QUEUE_LOCK:
@@ -275,11 +311,15 @@ def _install_claude_table(generation, parsed) -> None:
                 return
             CLI_MODELS["claude"] = parsed
     with _CLAUDE_QUEUE_LOCK:
-        if generation != _claude_generation:
-            return
-    # No lock spans disk I/O. A save already writing at shutdown may
-    # finish: it writes a valid catalog atomically; this is just a cache.
-    claude_catalog.save(parsed)
+        live = generation == _claude_generation
+    if live:
+        # No lock spans disk I/O. Shutdown landing between that check and
+        # the write lets this one save finish: it writes a valid catalog
+        # atomically, and the file is only a cache.
+        try:
+            claude_catalog.save(parsed)
+        except Exception as exc:
+            LOG.warning("Claude model catalog cache not written (%s)", type(exc).__name__)
     with _CLAUDE_LISTENER_LOCK:
         listeners = tuple(_claude_catalog_listeners)
     for listener in listeners:

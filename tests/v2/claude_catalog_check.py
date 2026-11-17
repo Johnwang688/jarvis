@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextlib import redirect_stderr
+import io
 import json
 import os
 from pathlib import Path
@@ -398,6 +400,84 @@ class Worker(Fixture):
         self.install(ROWS)
         self.assertEqual(observed, [C.parse(ROWS)])
         self.assertEqual(events, [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
+
+
+    def test_a_connect_that_outlives_its_generation_is_dropped(self):
+        """Round-3 review: the session reads the generation before connecting,
+        so a slow connect finishing under a replacement daemon cannot install."""
+        started, release = threading.Event(), threading.Event()
+        old_rows = [{"value": "claude-old-session"}]
+
+        class Slow:
+            async def connect(self_inner):
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+
+            async def get_server_info(self_inner):
+                return {"models": old_rows}
+        runner = threading.Thread(target=lambda: asyncio.run(claude._connect_session(Slow())), daemon=True)
+        runner.start()
+        self.assertTrue(started.wait(2))
+        R.claude_catalog_end(self.generation)
+        self.generation = R.claude_catalog_begin()
+        R.offer_claude_rows(ROWS)
+        self.captured()
+        release.set()
+        runner.join(5)
+        self.captured()
+        self.assertEqual(R.CLI_MODELS["claude"], C.parse(ROWS))
+
+    def test_no_capture_without_a_generation(self):
+        """An embedded or test daemon never begins one, so it never installs or saves."""
+        R.claude_catalog_end(self.generation)
+        before = copy.deepcopy(R.CLI_MODELS["claude"])
+        with patch.object(C, "save") as save:
+            asyncio.run(claude._connect_session(self.client({"models": ROWS})))
+            R.offer_claude_rows(ROWS)
+            self.captured()
+        save.assert_not_called()
+        self.assertEqual(R.CLI_MODELS["claude"], before)
+
+    def test_an_older_arrival_never_replaces_a_newer_install(self):
+        """Round-3 review: order is by arrival, not by parse completion."""
+        in_parse, release = threading.Event(), threading.Event()
+        old_rows, new_rows = [{"value": "claude-older"}], [{"value": "claude-newer"}]
+        real_parse = C.parse
+
+        def parse(rows):
+            if rows is old_rows:
+                in_parse.set()
+                release.wait(5)
+            return real_parse(rows)
+        with patch.object(C, "parse", side_effect=parse), patch.object(C, "save"):
+            older = threading.Thread(target=R.offer_claude_rows, args=(old_rows,), daemon=True)
+            older.start()
+            self.assertTrue(in_parse.wait(2))
+            R.offer_claude_rows(new_rows)
+            self.captured()
+            release.set()
+            older.join(5)
+            self.captured()
+        self.assertEqual(R.CLI_MODELS["claude"], real_parse(new_rows))
+
+    def test_a_dead_worker_is_replaced_and_a_failed_save_still_notifies(self):
+        events = []
+        def boom():
+            raise SystemExit("listener killed the worker")
+        remove = R.add_claude_catalog_listener(boom)
+        with redirect_stderr(io.StringIO()):
+            R.offer_claude_rows(ROWS)
+            deadline = time.monotonic() + 5
+            while R._claude_capture_worker is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertIsNone(R._claude_capture_worker, "a dead worker must clear its slot")
+        remove()
+        self.addCleanup(R.add_claude_catalog_listener(lambda: events.append(1)))
+        with patch.object(C, "save", side_effect=OSError("disk")):
+            R.offer_claude_rows([{"value": "claude-after-death"}])
+            self.captured()
+        self.assertEqual(R.CLI_MODELS["claude"], C.parse([{"value": "claude-after-death"}]))
+        self.assertEqual(events, [1], "the HUD hears of a swap even when the save fails")
 
 
 class Protection(Fixture):

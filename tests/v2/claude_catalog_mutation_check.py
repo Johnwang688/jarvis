@@ -47,14 +47,25 @@ def main():
         ("validation after touching pending slot", "offer", 'parsed = claude_catalog.parse(rows)',
          'with _CLAUDE_QUEUE_LOCK:\n            _claude_pending = None\n        parsed = claude_catalog.parse(rows)',
          "Worker", "test_blocked_save_offers_connects_validation_and_lock"),
-        ("save under config lock", "install", '    claude_catalog.save(parsed)',
-         '    with _CONFIG_LOCK:\n        claude_catalog.save(parsed)',
+        ("save under config lock", "install", '            claude_catalog.save(parsed)',
+         '            with _CONFIG_LOCK:\n                claude_catalog.save(parsed)',
          "Worker", "test_blocked_save_offers_connects_validation_and_lock"),
         ("ended generation not checked before save", "install",
-         '    with _CLAUDE_QUEUE_LOCK:\n        if generation != _claude_generation:\n            return', '',
+         '        live = generation == _claude_generation', '        live = True',
          "Worker", "test_generation_checked_again_before_save"),
         ("notify before swap", "install", '            CLI_MODELS["claude"] = parsed',
          '            pass', "Worker", "test_notification_observes_swap_and_equal_has_no_event"),
+        ("offer ignores the session's generation", "offer",
+         '        if generation is None:\n            generation = _claude_generation',
+         '        generation = _claude_generation',
+         "Worker", "test_a_connect_that_outlives_its_generation_is_dropped"),
+        ("older arrival accepted after a newer install", "offer",
+         ' or sequence <= _claude_taken', '',
+         "Worker", "test_an_older_arrival_never_replaces_a_newer_install"),
+        ("failed save suppresses the HUD notice", "install",
+         """        try:\n            claude_catalog.save(parsed)\n        except Exception as exc:\n            LOG.warning("Claude model catalog cache not written (%s)", type(exc).__name__)""",
+         """        claude_catalog.save(parsed)""",
+         "Worker", "test_a_dead_worker_is_replaced_and_a_failed_save_still_notifies"),
 
     ]
     killed = 0
@@ -66,7 +77,8 @@ def main():
         namespace = globals_.copy()
         exec(compile(original.replace(old, new), f"<mutant: {name}>", "exec"), namespace)
         if module in ("offer", "install"):
-            namespace[attr] = FunctionType(namespace[attr].__code__, globals_, attr)
+            namespace[attr] = FunctionType(namespace[attr].__code__, globals_, attr,
+                                           namespace[attr].__defaults__)
         files._STATE_PATHS.clear()
         with patch.object(target, attr, namespace[attr]), redirect_stderr(io.StringIO()):
             result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.TestSuite([checks[cls](test)]))

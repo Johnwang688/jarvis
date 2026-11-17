@@ -1054,6 +1054,9 @@ class Backend(unittest.TestCase):
         from jarvis.v2 import router
         from jarvis.v2.providers import claude
         rows = [{"value": "claude-session-catalog", "displayName": "Session catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        generation = self.daemon._claude_catalog_generation = router.claude_catalog_begin()
+        self.addCleanup(router.claude_catalog_end, generation)
 
         class Client:
             async def connect(self):
@@ -1075,6 +1078,8 @@ class Backend(unittest.TestCase):
         from jarvis.v2 import router, claude_catalog
         entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
         rows = [{"value": "claude-shutdown-catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        self.daemon._claude_catalog_generation = router.claude_catalog_begin()
         saves = []
         def save(table):
             saves.append(table)
@@ -1095,8 +1100,12 @@ class Backend(unittest.TestCase):
                 self.assertTrue(stopped.wait(1), "shutdown must not wait for catalog save")
                 other = Daemon(self.stores, self.providers, lambda *_: lambda *_: Decision.DENY, 0)
                 self.addCleanup(other.stop)
-                self.assertNotEqual(other._claude_catalog_generation,
-                                    self.daemon._claude_catalog_generation)
+                # An embedded daemon captures nothing; a new generation never
+                # revives the ended one.
+                self.assertIsNone(other._claude_catalog_generation)
+                fresh = router.claude_catalog_begin()
+                self.addCleanup(router.claude_catalog_end, fresh)
+                self.assertNotEqual(fresh, self.daemon._claude_catalog_generation)
             finally:
                 release.set()
                 with router._CLAUDE_QUEUE_LOCK:

@@ -38,3 +38,38 @@ it("ignores older reload responses even when the newest request fails", async ()
     mock.mockRestore();
   }
 });
+
+it("a provider-default answer never overwrites a newer reload", async () => {
+  let resolveReload!: (value: ThreadModels) => void;
+  let resolvePost!: (value: ThreadModels) => void;
+  const reloads = vi.spyOn(api, "threadModels").mockImplementation(() => new Promise((resolve) => {
+    resolveReload = resolve;
+  }));
+  const posts = vi.spyOn(api, "setProviderDefault").mockImplementation(() => new Promise((resolve) => {
+    resolvePost = resolve;
+  }));
+  let model!: ReturnType<typeof useThreadModel>;
+  function Harness() {
+    model = useThreadModel(initialState, () => {});
+    return null;
+  }
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  const old = { version: "old-from-post" } as unknown as ThreadModels;
+  const fresh = { version: "fresh-from-reload" } as unknown as ThreadModels;
+  try {
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => { resolveReload(old); });
+    await act(async () => { model.setDefault("claude", "claude-fable-5-2", ""); });
+    let again!: Promise<void>;
+    await act(async () => { again = model.reload(); });
+    await act(async () => { resolveReload(fresh); await again; });
+    expect(model.models).toBe(fresh);
+    await act(async () => { resolvePost(old); });
+    expect(model.models).toBe(fresh);
+  } finally {
+    await act(async () => root.unmount());
+    reloads.mockRestore();
+    posts.mockRestore();
+  }
+});

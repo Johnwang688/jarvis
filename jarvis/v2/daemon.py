@@ -640,8 +640,11 @@ class Daemon:
         from .router import Router
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
-        from .router import claude_catalog_begin, add_claude_catalog_listener
-        self._claude_catalog_generation = claude_catalog_begin()
+        # Capture of Claude Code's model list is switched on by `main()` only
+        # (`claude_catalog_begin`), so an embedded or test daemon never
+        # writes the owner's catalog cache. The listener is harmless without it.
+        from .router import add_claude_catalog_listener
+        self._claude_catalog_generation = None
         self._remove_claude_catalog_listener = add_claude_catalog_listener(lambda: self.bus.publish(
             {"kind": "claude_metadata", "data": {"provider": "claude"}}))
         self.schedules = Schedules(self)
@@ -4156,6 +4159,8 @@ def main() -> int:
     # so no embedded or test daemon reads the owner's file.
     load_codex_catalog_at_start()
     load_claude_catalog_at_start()
+    from .router import claude_catalog_begin
+    claude_generation = claude_catalog_begin()
 
     remote = discord_connected()
     approvals = None
@@ -4171,6 +4176,7 @@ def main() -> int:
                 holder["daemon"]._approval_resolved(request, decision, resolution))
     daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals,
                     dev_proc_root="/proc", dev_cgroup_root="/sys/fs/cgroup")
+    daemon._claude_catalog_generation = claude_generation   # ended at shutdown
     if approvals is not None:
         holder["daemon"] = daemon
     # The owner's Browser switches (`browser.json`): here, not in the

@@ -230,8 +230,12 @@ lacks (it still runs — there is nothing to fall back to). Tests point
 Claude's model list comes from Claude Code's SDK server info at every session
 connect or reconnect. There is no background reader. Session capture validates
 rows before offering the newest usable table to one daemon worker, which swaps,
-saves and notifies open HUDs in order. Shutdown ends the daemon's generation
-without waiting for an install; a cache write already in progress may finish.
+saves and notifies open HUDs in order. Only the owner's real daemon
+(`daemon.main`) switches capture on, so an embedded or test daemon never
+writes the cache. A session reads the capture generation before it connects,
+so a connect that outlives its daemon is dropped; offers keep arrival order.
+Shutdown ends the daemon's generation without waiting for an install; a cache
+write already in progress may finish. A failed save still tells the HUD.
 The last good list replaces the table whole and
 is saved atomically to `config.CLAUDE_CATALOG_PATH` (`JARVIS_CLAUDE_CATALOG`,
 default `~/.local/share/jarvis/claude-models.json`), then reloaded at daemon

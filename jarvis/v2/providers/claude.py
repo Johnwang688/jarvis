@@ -411,13 +411,18 @@ def _client_factory(options: ClaudeAgentOptions) -> Any:
 
 
 async def _connect_session(client) -> None:
-    """Hand off already-held SDK info; installs never enter the connect await."""
+    """Hand off already-held SDK info; installs never enter the connect await.
+    The capture generation is read before connecting, so a connect that
+    outlives its daemon offers under the ended generation and is dropped."""
+    from ..router import claude_catalog_current, offer_claude_rows
+    generation = claude_catalog_current()
     await client.connect()
+    if generation is None:
+        return
     try:
         info = await client.get_server_info()
         if isinstance(info, dict) and isinstance(info.get("models"), list):
-            from ..router import offer_claude_rows
-            offer_claude_rows(info["models"])
+            offer_claude_rows(info["models"], generation)
     except Exception as exc:
         LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
 

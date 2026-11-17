@@ -205,9 +205,14 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     setDefaultsError("");
     const label = PROVIDER_LABELS[provider] || provider;
     const what = model ? `set ${model} as the ${label} default` : `reset the ${label} default`;
+    // The answer is a full catalog: it takes the same sequence as a reload,
+    // so a newer reload (a `claude_metadata` event) is never overwritten by it.
+    const sequence = ++reloadSequence.current;
     api
       .setProviderDefault(defaultBody(provider, model, effort))
-      .then((payload) => setModels(payload))
+      .then((payload) => {
+        if (sequence === reloadSequence.current) setModels(payload);
+      })
       .catch((e) => setDefaultsError(refusal(what, e)));
   }, []);
 
@@ -291,6 +296,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   return {
     models,
     reload,
+    /** A provider default write; its catalog answer is sequenced with reloads. */
+    setDefault,
     chipFor,
     picker,
     /** The catalogue or a provider-default dialog is open: an open picker,
