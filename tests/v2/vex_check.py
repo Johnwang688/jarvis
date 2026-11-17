@@ -1931,6 +1931,16 @@ class BrainLogs(Base):
                 if planted == "file":
                     self.assertEqual((folder / name).read_text(), "theirs")
 
+    def test_a_failure_after_the_file_is_made_leaks_no_descriptor(self):
+        def fds():
+            return set(os.listdir("/proc/self/fd"))
+        vex.BrainLog.open(None).close()               # the folder exists; steady state
+        before = fds()
+        with patch.object(vex.BrainLog, "_write", side_effect=MemoryError()), \
+                self.assertRaises(MemoryError):
+            vex.BrainLog.open(None)
+        self.assertEqual(fds() - before, set())
+
     def test_a_log_stops_at_its_cap_and_says_so(self):
         log = vex.BrainLog.open(None)
         with patch.object(vex, "BRAIN_LOG_CAP", 400):
