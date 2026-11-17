@@ -122,6 +122,7 @@ class Agent:
         self.capture_lock = threading.Lock()
         self.capture_online = False
         self.capture = None
+        self.tapped = False
         self.chunks = []
         self.frames = 0
         self.audio_bad = False
@@ -198,6 +199,13 @@ class Agent:
         with self.capture_lock:
             self.chunks, self.frames, self.audio_bad = [], 0, False
             self.capture_online = not hasattr(self, "online") or self.online.is_set()
+        # A second stream on the mic fails to start while the wake listener's
+        # runs, so borrow that one when it is live.
+        wake = getattr(self, "wake", None)
+        if wake is not None and wake.tap(self.audio):
+            self.tapped = True
+            self.overlay.set_state("listening")
+            return
         wasapi = next((api for api in sd.query_hostapis() if "WASAPI" in api["name"]), None)
         if wasapi is None or wasapi["default_input_device"] < 0:
             raise RuntimeError("Microphone unavailable")
@@ -208,6 +216,9 @@ class Agent:
         self.overlay.set_state("listening")
 
     def finish_capture(self, cancel=False):
+        if getattr(self, "tapped", False):
+            self.tapped = False
+            self.wake.tap(None)
         capture, self.capture = self.capture, None
         try:
             if capture:
