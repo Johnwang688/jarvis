@@ -1346,7 +1346,15 @@ line, keep 30 days, no HUD change.
   created `O_EXCL|O_NOFOLLOW` through the folder's fd. Pruning (on each new
   session) removes only regular files with the exact name shape older than
   `VEX_BRAIN_LOG_DAYS`, judged without following links. Agents may write
-  there; nothing reads the logs to decide anything. The daemon log gets the
+  there; nothing reads the logs to decide anything. PR #400's review found
+  that pruning's `stat`→`unlink` can race: an agent that swaps a fresh log
+  into an old one's name in between has it deleted. This is accepted, because
+  that agent can already delete anything in the folder, and the deletion is
+  still only a name of the log shape in that folder. A log that cannot be
+  opened, by any error, releases the device reservation before the error
+  surfaces (review MED). A line cut at the 64 KB cap waits for the byte past
+  the cap and never splits a UTF-8 character. A chunk that brings a newline
+  is cut too. The daemon log gets the
   path, never the text, as before. The brain record (`/vex/brain/record`)
   carries `log`.
 - **Agents are told:** a paragraph in `config.SYSTEM_PROMPT` (it names no

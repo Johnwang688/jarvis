@@ -1800,6 +1800,7 @@ class Sockets(DaemonBase):
     def test_the_brain_session_is_saved_and_outlives_its_terminal(self):
         # The owner, 2026-11-16: brain output is no longer lost when the
         # terminal closes. Saved as it arrives, each line after its time.
+        logs = self.enterContext(self.assertLogs("jarvis", "DEBUG"))
         brain = self.owner("POST", "/vex/brain")["terminal_id"]
         conn = self.attach(brain)
         self.until(conn, lambda t, b: b"user port open" in b)
@@ -1824,6 +1825,27 @@ class Sockets(DaemonBase):
         self.assertFalse(any("\x1b" in line or "\r" in line for line in lines))
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        # The daemon log gets the path, never the brain's text.
+        self.assertTrue(any(str(path) in line for line in logs.output))
+        self.assertFalse([line for line in logs.output if "heading?" in line or "port open" in line])
+
+    def test_a_failing_log_never_breaks_the_brain_terminal_or_holds_the_device(self):
+        with patch.object(vex.BrainLog, "feed", side_effect=RuntimeError("disk")), \
+                self.assertLogs("jarvis.v2.terminals", "WARNING") as logs:
+            brain = self.owner("POST", "/vex/brain")["terminal_id"]
+            conn = self.attach(brain)
+            self.until(conn, lambda t, b: b"user port open" in b)
+            conn.send_binary(b"heading?\n")
+            self.until(conn, lambda t, b: b"brain> heading?" in b)    # still echoing
+        self.assertTrue(any("output hook failed (RuntimeError)" in line for line in logs.output))
+        self.daemon.terminals.close(brain, grace=0)
+        eventually(lambda: self.owner("GET", "/vex/brain/record")["record"]["ended"], what="the end")
+        # A log that cannot be made at all, by any error: the device is free again.
+        with patch.object(vex.BrainLog, "open", side_effect=MemoryError()):
+            status, body = self.request("POST", "/vex/brain", {})
+        self.assertNotEqual(status, 200)
+        self.assertIn("MemoryError", body["error"])
+        eventually(lambda: self.request("POST", "/vex/brain", {})[0] == 200, what="the device again")
 
 
 # -- the brain terminal's saved log ---------------------------------------------------------------------
@@ -1873,6 +1895,41 @@ class BrainLogs(Base):
         self.assertIn("port picked by vexcom", text.splitlines()[0])
         self.assertEqual([len(line) for line in text.splitlines() if line.endswith("x")],
                          [14 + vex.BRAIN_LINE_CAP, 14 + 10])
+
+    def test_a_cut_line_never_splits_a_character_and_a_newline_does_not_skip_the_cut(self):
+        log = vex.BrainLog.open(None)
+        cap = vex.BRAIN_LINE_CAP
+        log.feed(b"x" * (cap - 1) + "✓".encode()[:1])
+        log.feed("✓".encode()[1:] + b"y\n")
+        log.feed(b"a" * 60000)
+        log.feed(b"b" * 60000 + b"\n")
+        log.close()
+        body = [line[14:] for line in self.text(log).splitlines() if not line.startswith("#")]
+        self.assertEqual(body[0], "x" * (cap - 1))
+        self.assertEqual(body[1], "✓y")
+        self.assertEqual([len(line) for line in body[2:]], [cap, 120000 - cap])
+        self.assertNotIn("\ufffd", self.text(log))
+
+    def test_a_planted_file_or_link_at_the_new_name_is_never_written(self):
+        now, clock = self.clock(time.time())        # the planted file is new, not pruned
+        folder = Path(config.VEX_BRAIN_LOG_DIR)
+        folder.mkdir(mode=0o700)
+        name = f"brain-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now[0]))}-0a1b2c3d.log"
+        outside = self.root / "keep.txt"
+        outside.write_text("keep")
+        for planted in ("link", "file"):
+            with self.subTest(planted=planted):
+                (folder / name).unlink(missing_ok=True)
+                if planted == "link":
+                    os.symlink(outside, folder / name)
+                else:
+                    (folder / name).write_text("theirs")
+                with patch.object(vex.secrets, "token_hex", return_value="0a1b2c3d"), \
+                        self.assertLogs("jarvis.v2.vex", "WARNING"):
+                    self.assertIsNone(vex.BrainLog.open(None, clock=clock))
+                self.assertEqual(outside.read_text(), "keep")
+                if planted == "file":
+                    self.assertEqual((folder / name).read_text(), "theirs")
 
     def test_a_log_stops_at_its_cap_and_says_so(self):
         log = vex.BrainLog.open(None)

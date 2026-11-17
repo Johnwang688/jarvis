@@ -957,6 +957,15 @@ def prune_brain_logs(dir_fd: int, now: float | None = None) -> int:
     return removed
 
 
+def _utf8_cut(buf, limit: int) -> int:
+    """Where to cut `buf` at most `limit` bytes in without splitting a UTF-8
+    character (a continuation byte is never the first of the next piece)."""
+    size = limit
+    while size > limit - 3 and size < len(buf) and buf[size] & 0xC0 == 0x80:
+        size -= 1
+    return size if buf[size:size + 1] and buf[size] & 0xC0 != 0x80 else limit
+
+
 class BrainLog:
     """One brain terminal session saved as text (the owner, 2026-11-16): each
     line plain (`plain`, `_visible`: escapes and control characters out, a
@@ -1002,10 +1011,14 @@ class BrainLog:
             return None
         finally:
             os.close(dir_fd)
-        log = cls(fd, str(Path(config.VEX_BRAIN_LOG_DIR).expanduser() / name), clock)
-        stamp = datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds")
-        log._write(f"# VEX brain terminal, started {stamp}; port "
-                   f"{port or 'picked by vexcom'}\n")
+        try:
+            log = cls(fd, str(Path(config.VEX_BRAIN_LOG_DIR).expanduser() / name), clock)
+            stamp = datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds")
+            log._write(f"# VEX brain terminal, started {stamp}; port "
+                       f"{port or 'picked by vexcom'}\n")
+        except BaseException:
+            os.close(fd)
+            raise
         return log
 
     def _write(self, text: str) -> None:
@@ -1057,14 +1070,19 @@ class BrainLog:
                 if self._line_at is None:
                     self._line_at = now
                 cut = data.find(b"\n", pos)
+                self._buf += data[pos:] if cut < 0 else data[pos:cut]
+                # However the line arrived, a piece past the cap is written as
+                # its own line, cut where no UTF-8 character is split.
+                # Past the cap, not at it: the byte after the cut must be seen.
+                while len(self._buf) > BRAIN_LINE_CAP:
+                    size = _utf8_cut(self._buf, BRAIN_LINE_CAP)
+                    self._line(bytes(self._buf[:size]), self._line_at)
+                    del self._buf[:size]
+                    self._line_at = now
                 if cut < 0:
-                    self._buf += data[pos:]
-                    while len(self._buf) >= BRAIN_LINE_CAP:
-                        self._line(bytes(self._buf[:BRAIN_LINE_CAP]), self._line_at)
-                        del self._buf[:BRAIN_LINE_CAP]
-                        self._line_at = now if self._buf else None
+                    if not self._buf:
+                        self._line_at = None
                     break
-                self._buf += data[pos:cut]
                 self._line(bytes(self._buf), self._line_at)
                 self._buf.clear()
                 self._line_at = None
@@ -2450,7 +2468,11 @@ class Vex:
         finished: dict = {}             # set by `ended`, under the lock, if it runs at all
         # The session's output, saved as it arrives (`BrainLog`); None when
         # the folder cannot be used, which never stops the terminal.
-        log = BrainLog.open(port)
+        try:
+            log = BrainLog.open(port)
+        except BaseException:
+            release()                   # never a device held for a log that failed
+            raise
 
         def ended(terminal):
             release()
