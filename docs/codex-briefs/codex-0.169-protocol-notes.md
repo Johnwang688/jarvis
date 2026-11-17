@@ -33,6 +33,11 @@ Then, on the real 0.169.0 binary:
   `record_codex.CODEX` now honours `JARVIS_CODEX_CLI` (it was hardcoded to
   `~/.local/bin/codex`, so an earlier run had silently judged 0.161.0), and
   the probe prints the binary and version it judged.
+- An independent GPT-6.1 Sol review re-derived the diff over every
+  definition the adapter reaches (242 → 246) and the 11 server requests,
+  injected 96 `humanCommand` cases (all refused before `permit`), and
+  confirmed all 865 test assertions kept: APPROVE, with the field-level
+  corrections folded into the table below.
 - `tests/v2/codex_provider_check.py` (144 tests), `router_check.py`,
   `thread_model_check.py` and `hud_backend_check.py`: all OK. These use a
   fake app-server and do not depend on the binary.
@@ -86,16 +91,17 @@ and the enums `AskForApproval`, `SandboxMode`, `ApprovalsReviewer`, `AuthMode`,
 | Where | Change | Effect on us |
 |---|---|---|
 | `InitializeParams.capabilities` | optional `requiredHumanApproval` | Not sent (above). |
-| `ThreadStartResponse` / `ThreadResumeResponse` | `thread` gains optional `attachedToThreadId`; resume gains `initialTurnsPage…rootTurnId` | The required fields we check are unchanged. |
-| `TurnStartParams` | optional `parentTurnId`, `rootTurnId`, `responsesapiClientMetadataPatch`, `additionalContext.*.name` | Not sent. |
-| `UserInput` image (`turn/start`, `turn/steer`) | `url` or `fileId` (as an `anyOf`) | We send `{type: "image", url: "data:…"}`, still the first alternative. |
-| `ThreadItem` | optional `startedAtMs`/`completedAtMs` on every item; `agentMessage.phase` gains `partial_answer`; `moderation` on agent messages; `imageGeneration.result` no longer required, plus `generationId`/`inputImages`; `subAgentActivity` gains optional `model`/`reasoningEffort` | We read none of these fields: not `phase`, nothing of image generation, and only the `subAgentActivity` fields we already read (kind, thread ids, status). |
+| `ThreadStartResponse` / `ThreadResumeResponse` | `thread` gains optional `attachedToThreadId`; `Turn` gains optional `rootTurnId` everywhere a turn appears (responses, notifications, stored turns) | The required fields we check are unchanged. |
+| `TurnStartParams` / `TurnSteerParams` | optional `parentTurnId`, `rootTurnId` (start only), `responsesapiClientMetadataPatch`, `additionalContext.*.name`; `TurnToolOutput` gains optional `retain` | Not sent. |
+| `UserInput` audio (`turn/start`, `turn/steer`) | `url` or `fileId` (as an `anyOf`), as image already was in 0.161.0 | We send only text and `{type: "image", url: "data:…"}`, both unchanged. |
+| `ThreadItem` | optional `startedAtMs`/`completedAtMs` on every item; `agentMessage.phase` gains `partial_answer`; `moderation` on agent messages; `imageGeneration` takes `fileId` or `result` (one is required), plus `generationId`/`inputImages`; `ItemCompletedNotification` gains optional `contentTokenCount`; `subAgentActivity` gains optional `model`/`reasoningEffort` | We read none of these fields: not `phase`, nothing of image generation, and only the `subAgentActivity` fields we already read (kind, thread ids, status). |
 | `CodexErrorInfo` (in `error`, `turn/completed`) | new string values `modelNotFound`, `policyCapacityUnavailable`, `inferenceHookDenied` | Capacity detection compares against three named strings (`serverOverloaded`, `rateLimitExceeded`, `usageLimitExceeded`), all still present; anything else is "not capacity". |
 | `ErrorNotification.error.misalignment` | optional `reviewTarget` | Not read. |
 | `GetAccountResponse` / `Account` | optional `userId`; the ChatGPT variant gains optional `workspaceName`; a fourth account variant | We read only `account.type == "chatgpt"`. |
 | rate-limit `planType` | gains `sci`, `sci_plus` | The meter does not read `planType`. |
 | `ConfigReadResponse.config` | optional `client_search_provider` | Not among the effective-config keys we compare. |
 | `ModelListParams` | optional `modelProvider` | Not sent. |
+| Raw Responses items (`ResponseItem`, `ContentItem`, `FunctionCallOutputContentItem`) | new `additional_tools` variant; `status` on `message`/`function_call`; `encrypted_content` on several call items; `input_audio` takes `file_id` or `audio_url`; `output_text` gains `annotations`/`logprobs` | Reached only through history and raw items, which we never send and do not read. |
 
 ## Model catalog
 
