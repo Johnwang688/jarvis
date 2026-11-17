@@ -37,7 +37,10 @@ import tempfile
 import threading
 import time
 
-CODEX = pathlib.Path("/home/johnw/.local/bin/codex").resolve()
+# JARVIS_CODEX_CLI points the recorder (and cg2_probe, which imports this) at
+# another release, as config.CODEX_CLI does for the provider: how a new
+# version is verified before the installed one is updated.
+CODEX = pathlib.Path(os.environ.get("JARVIS_CODEX_CLI") or "/home/johnw/.local/bin/codex").resolve()
 MODEL = "gpt-6.1-sol"
 
 

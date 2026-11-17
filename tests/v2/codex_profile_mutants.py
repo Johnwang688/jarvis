@@ -260,7 +260,7 @@ MUTANTS = [
     ("a credential file with no extension readable at a repo top", CFG,
      'CREDENTIAL_DATA = ("", "json",', 'CREDENTIAL_DATA = ("json",', KEYS),
     ("the feature pin moved without the probe", CFG,
-     'FEATURE_VERIFIED = "0.161.0"', 'FEATURE_VERIFIED = "0.162.0"',
+     'FEATURE_VERIFIED = "0.169.1"', 'FEATURE_VERIFIED = "0.170.0"',
      pc("test_the_feature_is_pinned_to_the_verified_codex")),
 ]
 
