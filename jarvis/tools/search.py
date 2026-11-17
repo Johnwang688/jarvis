@@ -320,8 +320,12 @@ def _python_hits(
 def _python_search(
     pattern: str, root: Path, glob: str, mode: str, context_lines: int, case_insensitive: bool
 ) -> list[str]:
-    """Fallback for machines without ripgrep. Same output shapes, slower."""
-    hits, _ = _python_hits(pattern, root, glob, mode, context_lines, case_insensitive)
+    """Fallback for machines without ripgrep. Same output shapes, slower, and
+    bounded by the same TIMEOUT_S as ripgrep (it had no bound)."""
+    hits, cut = _python_hits(pattern, root, glob, mode, context_lines, case_insensitive,
+                             deadline=time.monotonic() + TIMEOUT_S)
+    if cut:
+        raise TimeoutError()
     return [h.render(mode) for h in hits]
 
 
@@ -594,6 +598,8 @@ def grep_files(
             lines = _python_search(pattern, root, glob, mode, context_lines, case_insensitive)
         except re.error as exc:
             return f"Error: {exc}"
+        except TimeoutError:
+            return f"Error: search timed out after {TIMEOUT_S}s. Narrow `path` or `glob`."
 
     if not lines:
         return f"No matches for {pattern!r} under {root}."
