@@ -159,7 +159,8 @@ class VoiceLink:
         return llm.chat(model, [{"role": "system", "content": ROUTE_PROMPT},
                                {"role": "user", "content": json.dumps({"source": source, "text": text})}],
                         tools=None, temperature=0, max_tokens=700, timeout=4.0,
-                        max_retries=0, cache=False).content
+                        # max_retries counts attempts: 0 would never send it.
+                        max_retries=1, cache=False).text
 
     def _ask(self, text, on_delta):
         return self._voice_chat.ask(text, on_delta, cancelled=getattr(self._context, "cancelled", lambda: False),
