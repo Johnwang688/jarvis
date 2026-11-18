@@ -747,6 +747,37 @@ class AgentGlue(unittest.TestCase):
         a.overlay.push_level.assert_called_once_with(0.5)
         self.assertEqual(a.frames, 2)
 
+    def test_aurora_tracks_the_connected_microphone(self):
+        a = self.bare()
+        a.root, a.aurora = Mock(), Mock()
+        a.stop_requested = threading.Event()
+        listener = Mock()
+
+        def exercise():
+            tick = a.root.after.call_args.args[1]
+            listener.status.return_value = "ready"
+            tick()  # helper started before pairing
+            a.online.set()
+            tick()
+            listener.status.return_value = "microphone_unavailable"
+            tick()
+            a.tapped = True
+            a.recording.set()
+            tick()  # hotkey has acquired audio
+            a.online.clear()
+            tick()
+            a.stop_requested.set()
+            tick()
+
+        a.root.mainloop.side_effect = exercise
+        with patch.object(agentmod.threading, "Thread"), \
+             patch.object(agentmod.voicewake, "WakeListener", return_value=listener):
+            a.run()
+        self.assertEqual([call.args[0] for call in a.aurora.set_visible.call_args_list],
+                         [False, True, False, True, False])
+        a.aurora.close.assert_called_once()
+        a.root.quit.assert_called_once()
+
     def test_failed_wake_start_shows_reason_once_and_keeps_hotkey_worker(self):
         a = self.bare()
         a.root, a.wake = Mock(), None

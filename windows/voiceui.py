@@ -1,10 +1,14 @@
-"""Thread-safe, nonactivating voice pop-up; all Tk work stays on its thread."""
+"""Nonactivating Windows voice popup and display-edge indicator, owned by the Tk thread."""
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+import ctypes
+from ctypes import wintypes as w
 import math
 import os
 import queue
+import struct
 import time
 
 STATES = ("hidden", "listening", "transcribing", "thinking", "answering", "done", "error")
@@ -265,3 +269,227 @@ class Overlay:
                 left = self.width / 2 - 120 + i * 10
                 self.canvas.coords(ident, left, 51-half, left+6, 51+half)
         self.root.after(33, self._tick)
+
+
+INSET = 8  # physical pixels reserved for Windows' own capture border
+ALPHA = (40, 144, 180, 118, 66, 32, 12)  # outside to inside
+WASHES = ((42, 143, 160), (111, 195, 223), (52, 104, 196), (100, 80, 196))
+AURORA_WINDOW_STYLE = 0x00080000 | 0x00000020 | 0x08000000 | 0x00000080 | 0x00000008
+#       WS_EX_LAYERED   TRANSPARENT   NOACTIVATE    TOOLWINDOW    TOPMOST
+
+
+def _palette(index):
+    pos = index * len(WASHES) / 256
+    first = WASHES[int(pos)]
+    second = WASHES[(int(pos) + 1) % len(WASHES)]
+    t = pos % 1
+    t = t * t * (3 - 2 * t)
+    r, g, b = (a + (z - a) * t for a, z in zip(first, second))
+    return tuple(bytes((round(b * alpha / 255), round(g * alpha / 255),
+                        round(r * alpha / 255), alpha)) for alpha in ALPHA)
+
+
+# UpdateLayeredWindow takes premultiplied BGRA. Reuse the colour ramp for every monitor/frame.
+PALETTE = tuple(_palette(i) for i in range(256))
+
+
+def edge_rects(monitor):
+    left, top, right, bottom = monitor
+    x, y = left + INSET, top + INSET
+    width, height = right - left - 2 * INSET, bottom - top - 2 * INSET
+    band = len(ALPHA)
+    if min(width, height) <= 2 * band:
+        return ()
+    return (("top", x, y, width, band), ("right", x + width - band, y + band, band, height - 2 * band),
+            ("bottom", x, y + height - band, width, band), ("left", x, y + band, band, height - 2 * band))
+
+
+def _raster(side, width, height, phase):
+    horizontal = side in ("top", "bottom")
+    length = width if horizontal else height
+    count = min(160, (length + 7) // 8)
+    start, direction = {"top": (0, 1), "right": (64, 1), "bottom": (192, -1), "left": (256, -1)}[side]
+    bands = range(len(ALPHA)) if side in ("top", "left") else range(len(ALPHA) - 1, -1, -1)
+    spans = [(PALETTE[(phase + start + direction * (i * 64 // count)) % 256],
+              (i + 1) * length // count - i * length // count) for i in range(count)]
+    if horizontal:
+        return b"".join(colors[d] * n for d in bands for colors, n in spans)
+    return b"".join(b"".join(colors[d] for d in bands) * n for colors, n in spans)
+
+
+class _AuroraWin32:
+    def __init__(self):
+        u = self.user = ctypes.WinDLL("user32", use_last_error=True)
+        g = self.gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+        ptr = ctypes.c_void_p
+        self.monitor_proc = ctypes.WINFUNCTYPE(w.BOOL, w.HMONITOR, w.HDC, ctypes.POINTER(w.RECT), w.LPARAM)
+        def signature(fn, result, *args):
+            fn.restype, fn.argtypes = result, args
+        signature(u.EnumDisplayMonitors, w.BOOL, w.HDC, ptr, self.monitor_proc, w.LPARAM)
+        signature(u.SystemParametersInfoW, w.BOOL, w.UINT, w.UINT, ptr, w.UINT)
+        signature(u.SetThreadDpiAwarenessContext, ptr, ptr)
+        signature(u.CreateWindowExW, w.HWND, w.DWORD, w.LPCWSTR, w.LPCWSTR, w.DWORD,
+                  ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.HWND, w.HMENU, w.HINSTANCE, ptr)
+        signature(u.UpdateLayeredWindow, w.BOOL, w.HWND, w.HDC, ptr, ptr, w.HDC, ptr, w.DWORD, ptr, w.DWORD)
+        signature(u.DestroyWindow, w.BOOL, w.HWND)
+        signature(u.ShowWindow, w.BOOL, w.HWND, ctypes.c_int)
+        signature(g.CreateCompatibleDC, w.HDC, w.HDC)
+        signature(g.CreateDIBSection, w.HBITMAP, w.HDC, ptr, w.UINT, ctypes.POINTER(ptr), w.HANDLE, w.DWORD)
+        signature(g.SelectObject, w.HGDIOBJ, w.HDC, w.HGDIOBJ)
+        signature(g.DeleteObject, w.BOOL, w.HGDIOBJ)
+        signature(g.DeleteDC, w.BOOL, w.HDC)
+
+    @contextmanager
+    def physical_pixels(self):
+        # Tk may use another DPI context. Restore it before dispatching any Tk events.
+        previous = self.user.SetThreadDpiAwarenessContext(-4)  # per-monitor aware v2
+        if not previous:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield
+        finally:
+            self.user.SetThreadDpiAwarenessContext(previous)
+
+    def monitors(self):
+        found = []
+        @self.monitor_proc
+        def collect(_monitor, _dc, bounds, _data):
+            r = bounds.contents
+            found.append((r.left, r.top, r.right, r.bottom))
+            return 1
+        if not self.user.EnumDisplayMonitors(None, None, collect, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return tuple(sorted(set(found)))
+
+    def animated(self):
+        enabled = w.BOOL()
+        return bool(self.user.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0) and enabled.value)
+
+
+class _AuroraStrip:
+    def __init__(self, api, rect):
+        self.api = api
+        self.side, x, y, self.width, self.height = rect
+        self.pos, self.size, self.origin = w.POINT(x, y), w.SIZE(self.width, self.height), w.POINT(0, 0)
+        self.blend = (ctypes.c_ubyte * 4)(0, 0, 255, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
+        self.hwnd = self.dc = self.bitmap = self.previous = None
+        self.bits = ctypes.c_void_p()
+        self.shown = False
+        try:
+            self.hwnd = api.user.CreateWindowExW(AURORA_WINDOW_STYLE, "STATIC", "Jarvis Voice Aurora", 0x80000000,
+                                                x, y, self.width, self.height, None, None, None, None)
+            self.dc = api.gdi.CreateCompatibleDC(None)
+            if not self.hwnd or not self.dc:
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Top-down 32bpp BI_RGB DIB. Only the strip has a backing surface.
+            info = struct.pack("<IiiHHIIiiII", 40, self.width, -self.height, 1, 32, 0, 0, 0, 0, 0, 0) + bytes(4)
+            self.bitmap = api.gdi.CreateDIBSection(self.dc, info, 0, ctypes.byref(self.bits), None, 0)
+            if not self.bitmap or not self.bits:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.previous = api.gdi.SelectObject(self.dc, self.bitmap)
+            if not self.previous:
+                raise ctypes.WinError(ctypes.get_last_error())
+        except Exception:
+            self.close()
+            raise
+
+    def paint(self, phase):
+        data = _raster(self.side, self.width, self.height, phase)
+        ctypes.memmove(self.bits, data, len(data))
+        ref = ctypes.byref
+        if not self.api.user.UpdateLayeredWindow(self.hwnd, None, ref(self.pos), ref(self.size),
+                                                 self.dc, ref(self.origin), 0, ref(self.blend), 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not self.shown:
+            self.api.user.ShowWindow(self.hwnd, 4)  # SW_SHOWNOACTIVATE
+            self.shown = True
+
+    def close(self):
+        if self.previous:
+            self.api.gdi.SelectObject(self.dc, self.previous)
+        if self.bitmap:
+            self.api.gdi.DeleteObject(self.bitmap)
+        if self.dc:
+            self.api.gdi.DeleteDC(self.dc)
+        if self.hwnd:
+            self.api.user.DestroyWindow(self.hwnd)
+        self.hwnd = self.dc = self.bitmap = self.previous = None
+
+
+class AuroraEdges:
+    """Paint only the inset screen edges. All calls run on the Tk thread."""
+
+    def __init__(self, root):
+        self.root, self.api = root, None
+        self.visible = self.closed = False
+        self.timer = None
+        self.strips = []
+        self.layout = self.last_phase = None
+        self.next_settings = 0.0
+        self.moving = False
+        self.failures = 0
+
+    def _clear(self):
+        for strip in self.strips:
+            strip.close()
+        self.strips.clear()
+        self.layout = self.last_phase = None
+        self.next_settings = 0.0
+
+    def _frame(self):
+        self.timer = None
+        if not self.visible:
+            return
+        try:
+            if self.api is None:
+                self.api = _AuroraWin32()
+            with self.api.physical_pixels():
+                now = time.monotonic()
+                if now >= self.next_settings:
+                    layout = self.api.monitors()
+                    if layout != self.layout:
+                        self._clear()
+                        for monitor in layout:
+                            for rect in edge_rects(monitor):
+                                self.strips.append(_AuroraStrip(self.api, rect))
+                        self.layout = layout
+                    self.moving = self.api.animated()
+                    self.next_settings = now + 2
+                phase = int(now * 10) % 256 if self.moving else 0
+                if phase != self.last_phase:
+                    for strip in self.strips:
+                        strip.paint(phase)
+                    self.last_phase = phase
+            delay = 100 if self.moving else 2000
+        except (OSError, ValueError, AttributeError, MemoryError, ctypes.ArgumentError):
+            self._clear()
+            self.failures += 1
+            if self.failures >= 3:
+                return  # next explicit off/on can retry
+            delay = 1000 * self.failures
+        try:
+            self.timer = self.root.after(delay, self._frame)
+        except Exception:
+            # Tk can already be tearing down when its last frame returns.
+            self._clear()
+
+    def set_visible(self, visible):
+        visible = bool(visible)
+        if self.closed or self.visible == visible or os.name != "nt":
+            return
+        self.visible = visible
+        if visible:
+            self.failures = 0
+            self._frame()
+        else:
+            if self.timer is not None:
+                try:
+                    self.root.after_cancel(self.timer)
+                except Exception:
+                    pass  # an already-destroyed Tk interpreter has no timer
+                self.timer = None
+            self._clear()
+
+    def close(self):
+        self.set_visible(False)
+        self.closed = True

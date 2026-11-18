@@ -238,6 +238,7 @@ class Agent:
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = voiceui.Overlay(self.root, recording=self.recording.is_set)
+        self.aurora = voiceui.AuroraEdges(self.root)
         self.desktop_key = DesktopTalkKey(self.user32, lambda: self.overlay.set_state(
             "error", "Ctrl+D is in use by another app. Use Right Ctrl to dictate."))
         self.player = Player()
@@ -611,6 +612,9 @@ class Agent:
             if self.stop_requested.is_set():
                 self.root.quit()
             else:
+                mic_active = self.wake_status() == "ready" or (
+                    self.recording.is_set() and (self.tapped or self.capture is not None))
+                self.aurora.set_visible(self.online.is_set() and mic_active)
                 self.root.after(100, check_stop)
         if hasattr(self, "stop_requested"):
             self.root.after(100, check_stop)
@@ -618,6 +622,8 @@ class Agent:
             self.root.mainloop()
         finally:
             self.done.set()
+            if hasattr(self, "aurora"):
+                self.aurora.close()
             self.player.stop()
             if self.wake:
                 self.wake.stop()
