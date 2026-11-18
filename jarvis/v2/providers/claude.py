@@ -410,6 +410,39 @@ def _client_factory(options: ClaudeAgentOptions) -> Any:
     return ClaudeSDKClient(options=options)
 
 
+async def _connect_session(client) -> None:
+    """Hand off already-held SDK info; installs never enter the connect await.
+    The capture generation is read before connecting, so a connect that
+    outlives its daemon offers under the ended generation and is dropped."""
+    from ..router import claude_catalog_current, offer_claude_rows
+    generation = claude_catalog_current()
+    await client.connect()
+    if generation is None:
+        return
+    try:
+        info = await client.get_server_info()
+        if isinstance(info, dict) and isinstance(info.get("models"), list):
+            offer_claude_rows(info["models"], generation)
+    except Exception as exc:
+        LOG.warning("Claude session catalog ignored (%s)", type(exc).__name__)
+
+
+def _cli_options(*, isolated=False, origin_tag=None) -> dict[str, Any]:
+    """Shared CLI resolution and environment construction for all clients."""
+    kwargs: dict[str, Any] = {}
+    cli_path = resolve_cli()
+    if isolated:
+        kwargs["env"] = isolated_env()
+    if origin_tag is not None:
+        kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": origin_tag}
+    if cli_path is not None:
+        # The owner's own install, never the SDK's bundled copy, which
+        # lags it and refuses newer models. None leaves the SDK to its
+        # bundled CLI — the last resort `resolve_cli` already warned of.
+        kwargs["cli_path"] = cli_path
+    return kwargs
+
+
 # --- which claude -----------------------------------------------------------
 
 LOG = logging.getLogger(__name__)
@@ -1010,7 +1043,7 @@ class ClaudeProvider:
                 session.mcp_config = write_mcp_config(thread.id, dict(brief.mcp_servers))
             options = self._options(brief, session, resume=resume, session_id=session_id)
             session.client = _client_factory(options)
-            _await(loop, session.client.connect(), CONNECT_TIMEOUT_S)
+            _await(loop, _connect_session(session.client), CONNECT_TIMEOUT_S)
         except BaseException as exc:  # noqa: BLE001 — a failed start must not leak a thread
             _stop_loop(loop, runner)
             remove_mcp_config(session.mcp_config)
@@ -1079,20 +1112,19 @@ class ClaudeProvider:
             # turn's events from leaking into the next.
             "extra_args": {"replay-user-messages": None},
         }
-        cli_path = resolve_cli()
-        if session.isolated:
-            kwargs["env"] = isolated_env()
-        if brief.origin_tag is not None:
-            kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": brief.origin_tag}
-        if cli_path is not None:
-            # The owner's own install, never the SDK's bundled copy, which
-            # lags it and refuses newer models. None leaves the SDK to its
-            # bundled CLI — the last resort `resolve_cli` already warned of.
-            kwargs["cli_path"] = cli_path
+        kwargs.update(_cli_options(isolated=session.isolated, origin_tag=brief.origin_tag))
         if brief.model:
             kwargs["model"] = brief.model
         if brief.effort:
             kwargs["effort"] = brief.effort
+        from ..thread_model import speeds_of
+        fast = brief.speed == "fast" and any(t[0] == "fast" for t in speeds_of("claude", brief.model))
+        if fast or kwargs.get("settings"):
+            settings = json.loads(kwargs.get("settings") or "{}")
+            settings.pop("fastMode", None)
+            if fast:
+                settings["fastMode"] = True
+            kwargs["settings"] = json.dumps(settings)
         if brief.max_turns is not None:
             kwargs["max_turns"] = brief.max_turns
         if brief.allowed_tools is not None:
@@ -2792,7 +2824,7 @@ class ClaudeProvider:
 
     # -- control
 
-    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None, *, speed: str | None = None) -> None:
         """Move this conversation onto another model or effort (decisions A1).
 
         Called between turns only — the daemon calls it at the start of the
@@ -2821,13 +2853,13 @@ class ClaudeProvider:
             raise ValueError("a turn is running; the model changes at the next one")
         try:
             old_brief, old_client = session.brief, session.client
-            brief = replace(old_brief, model=model, effort=effort)
+            brief = replace(old_brief, model=model, effort=effort, speed=speed)
             resume = session.resumable
 
             def connect(target: Brief) -> Any:
                 options = self._options(target, session, resume=resume, session_id=session.session_id)
                 client = _client_factory(options)
-                _await(session.loop, client.connect(), CONNECT_TIMEOUT_S)
+                _await(session.loop, _connect_session(client), CONNECT_TIMEOUT_S)
                 return client
 
             # The old client's reader goes with it, and so does anything the old

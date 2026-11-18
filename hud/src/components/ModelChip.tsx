@@ -166,7 +166,7 @@ export function ModelChip(props: {
                         props.onSearch();
                         return;
                       }
-                      props.onChange(applyModel(c, o.value || null));
+                      props.onChange(applyModel(c, o.value || null, props.models));
                     }}
                   >
                     {o.label}

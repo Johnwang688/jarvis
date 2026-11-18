@@ -923,6 +923,7 @@ class CodexProvider:
                         "approvalPolicy": "never", "sandboxPolicy": sandbox, "environments": []}
                 if effort:
                     turn["effort"] = effort
+                turn["serviceTierForTurn"] = "default"
                 request = rpc.send("turn/start", turn, deadline=deadline)
                 return self._one_shot_reply(rpc, native, request, deadline, on_usage)
             finally:
@@ -1254,6 +1255,7 @@ class CodexProvider:
                 # a change rides the next turn and then sticks to the thread.
                 override, s.override = s.override, None
                 params.update(override or {})
+                params["serviceTierForTurn"] = s.brief.speed or "default"
             request = s.rpc.send(request_method, params)
             started, response_seen, capacity, saw_usage = False, False, False, False
             early = deque()
@@ -2402,7 +2404,7 @@ class CodexProvider:
         yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request refused: {str(method)[:80]}{note}",
                           fatal=False)
 
-    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None, *, speed: str | None = None) -> None:
         """Change the model and effort from the next turn on (decisions A1).
 
         Nothing is sent now: the pair rides the next `turn/start`, whose
@@ -2418,7 +2420,7 @@ class CodexProvider:
             raise ValueError("Codex needs a named model to switch to")
         with s.mutex:
             s.override = {"model": model, **({"effort": effort} if effort else {})}
-            s.brief = replace(s.brief, model=model, effort=effort)
+            s.brief = replace(s.brief, model=model, effort=effort, speed=speed)
 
     @staticmethod
     def _inputs(message: UserMessage) -> list[dict]:

@@ -63,6 +63,7 @@ class Sandbox:
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
             "ROUTING_PATH": config.ROUTING_PATH,
             "CODEX_CATALOG_PATH": config.CODEX_CATALOG_PATH,
+            "CLAUDE_CATALOG_PATH": config.CLAUDE_CATALOG_PATH,
             "SPEAKER_DIR": config.SPEAKER_DIR,
         }
         self._home = os.environ.get("HOME")
@@ -75,6 +76,7 @@ class Sandbox:
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
         config.ROUTING_PATH = self.home / ".config" / "jarvis" / "routing.json"
         config.CODEX_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "codex-models.json"
+        config.CLAUDE_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "claude-models.json"
         config.SPEAKER_DIR = self.home / ".local" / "share" / "jarvis" / "speaker"
         return self
 
@@ -384,6 +386,8 @@ def file_deny_checks():
             "~/.config/jarvis/stt.json",
             # PR #20: the saved Codex catalog becomes the Codex table at start.
             str(config.CODEX_CATALOG_PATH),
+            str(config.CLAUDE_CATALOG_PATH),
+            "~/.local/share/jarvis/claude-models.json",
             "~/.local/share/jarvis/codex-models.json",
             "~/.config/jarvis/allowlist.json",                # spelled with a ~
             str(repo / "jarvis" / "tools" / ".." / "rules.py"),   # spelled with a ..
@@ -441,6 +445,12 @@ def file_deny_checks():
             eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write codex-models.json")
         eq(permit(*bash(f"ln -sf /dev/zero {catalog}"), brief), Decision.DENY,
            "a symlink planted at the Codex catalog is refused")
+        catalog = config.CLAUDE_CATALOG_PATH
+        for tool, args in (("Write", {"file_path": str(catalog), "content": "{}"}),
+                           ("write_file", {"path": str(catalog), "content": "{}"})):
+            eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write claude-models.json")
+        eq(permit(*bash(f"ln -sf /dev/zero {catalog}"), brief), Decision.DENY,
+           "a symlink planted at the Claude catalog is refused")
 
         # One detector for v1 and v2 (2026-10-08): the spellings v1's shell
         # gate learned are refused here too, and the false positives the old

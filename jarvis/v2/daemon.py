@@ -434,6 +434,9 @@ class _Session:
     # Chat threads only: the (model, effort) the provider is running now, and
     # the last one the transcript announced. A turn starts by comparing the
     # thread's effective choice with `applied` (thread_model, decisions A1/A7).
+    applied_speed: str | None = None
+    applied_record_speed: str | None = None
+    applied_record_speed_model: str | None = None
     applied: tuple | None = None
     announced: tuple | None = None
     # The thread record's (model, effort) when `applied` was set: what a
@@ -640,6 +643,13 @@ class Daemon:
         from .router import Router
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
+        # Capture of Claude Code's model list is switched on by `main()` only
+        # (`claude_catalog_begin`), so an embedded or test daemon never
+        # writes the owner's catalog cache. The listener is harmless without it.
+        from .router import add_claude_catalog_listener
+        self._claude_catalog_generation = None
+        self._remove_claude_catalog_listener = add_claude_catalog_listener(lambda: self.bus.publish(
+            {"kind": "claude_metadata", "data": {"provider": "claude"}}))
         self.schedules = Schedules(self)
         # Where a permanent delete goes (decisions B2). Only Jarvis's own
         # entries in it are ever purged: `owned` is this daemon's data root.
@@ -1058,6 +1068,8 @@ class Daemon:
                                       "always_ask": project.always_ask, "role": role, **value})
             self._within_project(project, brief)
         _validate(brief, Brief)
+        if brief.speed is not None and (role != Role.CHAT or brief.task_id is not None):
+            raise APIError(400, "speed is an owner chat choice")
         if brief.role != role or not Path(brief.cwd).is_absolute():
             raise APIError(400, "brief role must match thread role and cwd must be absolute")
         return brief
@@ -1108,15 +1120,17 @@ class Daemon:
                 raise APIError(400, "brief task belongs to another project")
         if provider not in self.providers:
             raise DaemonError(f"provider {provider.value} unavailable: not in roster")
-        if role == Role.CHAT and brief.task_id is None:
-            brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
+            if role == Role.CHAT and brief.task_id is None:
+                brief = self._chat_brief(provider, brief)
             # A Claude thread opened now counts each result's own cost from
             # its first turn: born marked, the start-up recount never reads it.
             recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
-                                               model=brief.model, effort=brief.effort, task_id=brief.task_id,
+                                               model=brief.model, effort=brief.effort, speed=brief.speed,
+                                               speed_model=brief.model if brief.speed else None,
+                                               task_id=brief.task_id,
                                                cwd=brief.cwd, cost_recount=recounted,
                                                # A title fixed at birth (the Voice chat, VA-D4)
                                                # is in the first metadata write, so a crash
@@ -1209,12 +1223,20 @@ class Daemon:
         if why is not None:
             raise APIError(400, why)
         try:
-            model, effort = thread_model.check(provider, brief.model, brief.effort)
+            # Resolve a default-following speed choice once, under open_thread's
+            # lock, and validate, pin and bind that same model.
+            selected_speed = brief.speed.strip() or None if isinstance(brief.speed, str) else brief.speed
+            target = (brief.model or thread_model.default_model(provider)) if selected_speed is not None else brief.model
+            if selected_speed is not None and brief.speed_model is not None and brief.speed_model != target:
+                raise APIError(409, "the model changed; choose speed again for the current model")
+            model, effort = thread_model.check(provider, target, brief.effort)
+            speed = thread_model.check_speed(provider, model, selected_speed) if selected_speed is not None else None
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
         # An effort with no model keeps the thread on the default model (A4
         # amendment): the record holds the effort on its own.
-        changes = {"model": model, "effort": effort}
+        changes = {"model": model, "effort": effort,
+                   "speed": speed}
         if provider in (ProviderName.CLAUDE, ProviderName.CODEX) and not brief.system_append:
             changes["system_append"] = roles.brief_for(Role.CHAT).system_append
         return replace(brief, **changes)
@@ -1236,6 +1258,9 @@ class Daemon:
             return run_brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
+        session.applied_speed = thread_model.effective_speed(session.thread, choice[0])
+        session.applied_record_speed = session.thread.speed
+        session.applied_record_speed_model = session.thread.speed_model
         session.applied_record = (session.thread.model, session.thread.effort)
         # A saved brief never carries a jarvis server (`make_brief` refuses
         # MCP servers from a caller); if one somehow did, it is not passed on.
@@ -1245,7 +1270,7 @@ class Daemon:
         if token is not None:
             from .bridge import server_entry
             servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
-        return replace(run_brief, model=choice[0], effort=choice[1], mcp_servers=servers)
+        return replace(run_brief, model=choice[0], effort=choice[1], speed=session.applied_speed, mcp_servers=servers)
 
     def _mint(self, session) -> str | None:
         """A caller token for an owner's chat on Claude or Codex that is
@@ -1274,27 +1299,70 @@ class Daemon:
                 # routing.json) keeps the thread on what it already runs.
                 LOG.warning("Cannot resolve the model for thread %s", session.thread.id, exc_info=True)
                 return
-            if want == session.applied:
+            speed = thread_model.effective_speed(session.thread, want[0])
+            record = (session.thread.model, session.thread.effort)
+            record_speed = session.thread.speed
+            record_speed_model = session.thread.speed_model
+            if want == session.applied and speed == session.applied_speed:
+                session.applied_record_speed = record_speed
+                session.applied_record_speed_model = record_speed_model
+                session.applied_record = record
                 return
         setter = getattr(session.provider, "set_model", None)
         try:
             if setter is None:
                 raise ValueError(f"the {session.thread.provider.value} provider cannot change "
                                  "model mid-thread")
-            setter(session.handle, *want)
+            if speed is not None or session.applied_speed is not None:
+                setter(session.handle, *want, speed=speed)
+            else:
+                setter(session.handle, *want)
         except Exception as exc:
             # A refused switch may already have disconnected the old CLI
             # (Claude reconnects the old model then): its children are gone.
             self._switch_ended_subagents(session)
-            self._switch_refused(session, want, exc)
+            self._switch_refused(session, want, exc, wanted_speed=speed)
             return
         self._switch_ended_subagents(session)
         with self._lock:
             session.applied = want
-            session.applied_record = (session.thread.model, session.thread.effort)
+            session.applied_speed = speed
+            session.applied_record_speed = record_speed
+            session.applied_record_speed_model = record_speed_model
+            session.applied_record = record
             if want != session.announced:
                 session.announced = want
                 self._model_line(session.thread, want, "follows the default")
+
+    def _tier_unasked(self, session) -> bool:
+        """Under or outside the lock: the provider may still run a paid tier
+        the thread's record no longer asks for. Uncertain counts as yes."""
+        from . import thread_model
+        if session.applied is None or session.applied_speed is None:
+            return False
+        with self._lock:
+            try:
+                asked = thread_model.effective_speed(session.thread, session.applied[0])
+            except Exception:
+                return True
+        return asked != session.applied_speed
+
+    def _refuse_unasked_tier(self, session):
+        """Fail closed on cost: a provider that may still be on a paid tier
+        the record no longer asks for (a refused switch kept the old client)
+        gets no message and no compaction. The session is ended, so the next
+        message resumes it fresh from the record, at the tier the record asks
+        for: never a retry loop on a client that keeps refusing (review of
+        #409, rounds 3 and 4)."""
+        if not self._tier_unasked(session):
+            return
+        tier = session.applied_speed
+        with self._lock:
+            session.lost = True
+            self._retire_drive(session)
+        raise DaemonError(f"this chat was still on the {tier} tier, which it no longer asks for; "
+                          "the message was not sent and the session was closed. Send again to "
+                          "resume it at the speed it asks for.")
 
     def _switch_ended_subagents(self, session):
         """After a model switch, refused or not: a child the provider no
@@ -1314,7 +1382,7 @@ class Daemon:
         except Exception:
             LOG.warning("Cannot end the sub-agents of %s", session.thread.id, exc_info=True)
 
-    def _switch_refused(self, session, want, exc):
+    def _switch_refused(self, session, want, exc, *, wanted_speed=None):
         """A provider refused to move a thread onto `want`. The record goes
         back to what the provider is still running, so the next message does
         not try (and fail) the same switch again, and the transcript says so.
@@ -1336,8 +1404,17 @@ class Daemon:
             # Roll back only while the record still asks for the refused
             # choice: a PATCH that landed during the switch is the owner's
             # newer word, and the next turn tries that one instead.
-            rollback = asked == want
+            rollback = (asked == want and
+                        thread_model.effective_speed(thread, want[0]) == wanted_speed)
             if rollback:
+                # Speed fields are owner-only: a rollback never restores or
+                # sets a tier; it may only clear one, and it may never leave a
+                # paid tier effective that was not effective before it
+                # (review of #409, rounds 3 and 4).
+                try:
+                    tier_before = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
+                except Exception:
+                    tier_before = None
                 restored = session.applied_record or (None, None)
                 thread.model, thread.effort = restored
                 try:
@@ -1346,8 +1423,17 @@ class Daemon:
                     still = None
                 if still != applied:
                     # A default thread whose default moved on: pin it to what
-                    # it runs, or every message would retry the switch.
+                    # it runs, or every message would retry the switch. That
+                    # pin is not the owner's choice, so it never carries a
+                    # tier, now or after a later catalog refresh.
                     thread.model, thread.effort = applied
+                    thread.speed, thread.speed_model = None, None
+                try:
+                    tier_after = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
+                except Exception:
+                    tier_after = None
+                if tier_after is not None and tier_after != tier_before:
+                    thread.speed, thread.speed_model = None, None
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
                 session.announced = applied
@@ -1355,14 +1441,14 @@ class Daemon:
             text = (f"switch to {thread_model.label(*want)} refused: {reason}; "
                     f"still on {thread_model.label(*applied)}")
             self._system_line(thread, "model_set", text, {
-                "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+                "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
                 "effective_model": applied[0], "effective_effort": applied[1],
                 "refused_model": want[0], "refused_effort": want[1]})
             record = self.thread_json(thread)
             self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
                               "project_id": thread.project_id,
                               "data": {**record, "thread_id": thread.id,
-                                       "changed": ["model", "effort"],
+                                       "changed": ["model", "effort", "speed", "speed_model"],
                                        "effective_model": applied[0],
                                        "effective_effort": applied[1]}})
             if isinstance(exc, SessionLost):
@@ -1378,7 +1464,7 @@ class Daemon:
         from . import thread_model
         text = f"model → {thread_model.label(*choice)} ({why})"
         self._system_line(thread, "model_set", text, {
-            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
             "effective_model": choice[0], "effective_effort": choice[1]})
         return text
 
@@ -1390,7 +1476,7 @@ class Daemon:
             effort = f"default · {effort}"
         text = f"effort → {effort} (default model: {choice[0] or 'unknown'})"
         self._system_line(thread, "model_set", text, {
-            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort, "speed": thread.speed,
             "effective_model": choice[0], "effective_effort": choice[1]})
         return text
 
@@ -1401,8 +1487,8 @@ class Daemon:
         self.stores.threads._append(thread.id, "log.jsonl", record)
         self.bus.publish(record)
 
-    def set_thread_model(self, thread_id, body) -> dict:
-        """`PATCH /threads/{id}` `{model?, effort?}`. Applies from the next
+    def set_thread_model(self, thread_id, body, *, owner_check=None) -> dict:
+        """`PATCH /threads/{id}` `{model?, effort?, speed?, speed_model?}`. Applies from the next
         message, never in the middle of a turn; `brief.json` is untouched.
 
         A model change — a new model, or `model: null` back to the default —
@@ -1414,31 +1500,68 @@ class Daemon:
         default supports at each turn. Only an explicit model pins one.
         """
         from . import thread_model
-        thread = self.require(self.stores.threads, thread_id)
-        if not thread_model.is_chat(thread):
-            raise APIError(409, "a task's threads run the model routing gave them")
-        provider = self.providers.get(thread.provider)
-        if provider is not None and not hasattr(provider, "set_model"):
-            raise APIError(409, f"the {thread.provider.value} provider cannot change model mid-thread")
-        if "model" in body:
-            model = body["model"]
-            effort = body.get("effort")
-        else:
-            model = thread.model
-            effort = body["effort"]
-        try:
-            model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
-        except thread_model.ChoiceRefused as exc:
-            raise APIError(400, str(exc)) from exc
         from . import projects
         with self._lock:
             self._active()
             thread = self.require(self.stores.threads, thread_id)
+            # Authorization and every derived value use this same locked record.
+            # Direct daemon calls are trusted; HTTP supplies the owner gate here.
+            if "speed" in body or ("model" in body and thread.speed is not None):
+                if owner_check is not None:
+                    owner_check()
+            if not thread_model.is_chat(thread):
+                raise APIError(409, "a task's threads run the model routing gave them")
+            provider = self.providers.get(thread.provider)
+            if provider is not None and not hasattr(provider, "set_model"):
+                raise APIError(409, f"the {thread.provider.value} provider cannot change model mid-thread")
+            if "speed" in body:
+                if "model" in body and body["model"] in (None, "") and body["speed"] not in (None, ""):
+                    raise APIError(400, "a paid speed needs a pinned model; choose a model, or Standard")
+                current_model = thread_model.effective(thread)[0]
+                if (body.get("speed_model") != current_model or current_model is None
+                        or ("model" in body and
+                            (body["model"] or current_model) != current_model)):
+                    raise APIError(409, "the model changed; choose speed again for the current model")
+            elif "speed_model" in body:
+                raise APIError(400, "speed_model requires speed")
+            if "model" in body:
+                model = body["model"]
+                effort = body.get("effort")
+            else:
+                model = thread.model
+                effort = body.get("effort", thread.effort)
+            try:
+                if "model" in body or "effort" in body:
+                    model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+                speed, speed_model = thread.speed, thread.speed_model
+                if "model" in body:
+                    if model is None:
+                        speed, speed_model = None, None
+                    elif speed_model is not None and speed in {t[0] for t in thread_model.speeds_of(thread.provider, model)}:
+                        speed_model = model
+                    elif speed_model is not None:
+                        speed, speed_model = None, None
+                if "speed" in body:
+                    speed = thread_model.check_speed(thread.provider, current_model, body["speed"])
+                    speed_model = current_model if speed else None
+                    if speed:
+                        if thread.model is None and effort is None:
+                            # Pinning for a speed keeps what the chat ran:
+                            # the effort it inherited from the default too
+                            # (an explicit `effort: null` drops the override).
+                            probe = replace(thread, effort=None) if "effort" in body else thread
+                            effort = thread_model.effective(probe)[1]
+                        model = current_model
+            except thread_model.ChoiceRefused as exc:
+                raise APIError(400, str(exc)) from exc
             # An archived thread, or one in an archived project, is read-only
             # until it is restored: the same rule as rename and move.
             if thread.archived or projects.is_archived(self.stores, thread.project_id):
                 raise APIError(409, "restore the thread before changing its model")
             before = (thread.model, thread.effort)
+            before_speed = thread.speed
+            if "speed" in body or "model" in body:
+                thread.speed, thread.speed_model = speed, speed_model
             thread.model, thread.effort = model, effort
             thread.updated = utcnow()
             self.stores.threads.save(thread)
@@ -1448,7 +1571,12 @@ class Daemon:
                 # keep it in step so a turn in flight cannot write the old
                 # choice back over this one.
                 session.thread.model, session.thread.effort = model, effort
+                if "speed" in body or "model" in body:
+                    session.thread.speed, session.thread.speed_model = speed, speed_model
             choice = thread_model.effective(thread)
+            if before_speed != speed:
+                self._system_line(thread, "model_set", f"speed → {speed or 'standard'} (from the next message)",
+                                  {"speed": speed})
             if before != (model, effort):
                 if session is not None:
                     session.announced = choice
@@ -1463,7 +1591,7 @@ class Daemon:
             self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
                               "project_id": thread.project_id,
                               "data": {**record, "thread_id": thread.id,
-                                       "changed": ["model", "effort"],
+                                       "changed": ["model", "effort", "speed", "speed_model"],
                                        "effective_model": choice[0],
                                        "effective_effort": choice[1]}})
             return record
@@ -1663,6 +1791,11 @@ class Daemon:
         waits instead, and a `steer_queued` record says so."""
         thread_id = session.thread.id
         steer = getattr(provider, "steer", None)
+        if self._tier_unasked(session):
+            # The running turn may be on a paid tier the owner has since
+            # turned off: the message waits for the next turn, whose start
+            # reconciles the tier (review of #409, round 4).
+            steer = None
         if not callable(steer):
             with self._lock:
                 waiting = self._queues.setdefault(thread_id, deque())
@@ -2750,9 +2883,11 @@ class Daemon:
                 return
             if message is not None:
                 self._apply_choice(session)
+                self._refuse_unasked_tier(session)
                 self._desk_images(session, worker, turn_id, desk_slot)
                 source = session.provider.send(session.handle, message)
             elif compact:
+                self._refuse_unasked_tier(session)
                 source = session.provider.compact(session.handle)
             else:
                 source = session.provider.adopt(session.handle)
@@ -3213,6 +3348,7 @@ class Daemon:
         return len(released)
 
     def stop(self):
+        self._end_claude_catalog()
         voice_link = getattr(self, "voice_link", None)
         if voice_link is not None:
             voice_link.stop()
@@ -3323,6 +3459,15 @@ class Daemon:
             LOG.exception("phone: the last save of an unsaved revocation failed")
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
+
+    def _end_claude_catalog(self) -> None:
+        """End this generation immediately, including while a cache save blocks."""
+        from .router import claude_catalog_end
+        claude_catalog_end(getattr(self, "_claude_catalog_generation", None))
+        remove = getattr(self, "_remove_claude_catalog_listener", None)
+        if remove is not None:
+            remove()
+            self._remove_claude_catalog_listener = None
 
     def _stop_codex_metadata(self, deadline: float) -> None:
         """Shutdown for the background Codex models/quota refresh (PR #20
@@ -3764,6 +3909,9 @@ def _handler(daemon):
                     body = _object(self._body(), ("project_id", "role", "provider", "brief"),
                                    ("project_id", "role"))
                     body.setdefault("brief", {})
+                    if isinstance(body["brief"], dict) and "speed" in body["brief"]:
+                        from .projects import owner_only
+                        owner_only(self, daemon)
                     if "provider" not in body:
                         if body["role"] != "chat":
                             raise APIError(400, "missing fields: provider")
@@ -4074,6 +4222,23 @@ def load_codex_catalog_at_start() -> bool:
     return bool(loaded)
 
 
+def load_claude_catalog_at_start() -> bool:
+    """Install the saved Claude catalog, or keep the built-in table. Nothing
+    about that file may stop the daemon from starting (PR #20 re-review):
+    under systemd a crash here is a crash loop, so every failure — a
+    MemoryError included — is one log line and the fallback."""
+    from .router import load_claude_catalog
+    try:
+        loaded = load_claude_catalog()
+    except Exception as exc:
+        LOG.warning("Claude model catalog not loaded (%s); using the built-in table",
+                    type(exc).__name__)
+        return False
+    if loaded:
+        LOG.info("Claude model catalog loaded from %s", config.CLAUDE_CATALOG_PATH)
+    return bool(loaded)
+
+
 def _log_hud_served() -> None:
     """Say at start-up which HUD is served, and warn when it is not today's
     (review of PR #44, L6): dev mode, nothing installed or intact, or a
@@ -4118,12 +4283,15 @@ def main() -> int:
     from .runner import TaskRunner
 
     configure_logging()
-    # The Codex models the account offered last time, before anything reads
+    # The native models the account offered last time, before anything reads
     # routing (PR #20 review): a restart, or a Discord-only daemon no HUD ever
     # reads, routes and offers against them rather than the built-in fallback.
     # Missing or corrupt leaves the fallback. Here and not in `Daemon.start`,
     # so no embedded or test daemon reads the owner's file.
     load_codex_catalog_at_start()
+    load_claude_catalog_at_start()
+    from .router import claude_catalog_begin
+    claude_generation = claude_catalog_begin()
 
     remote = discord_connected()
     approvals = None
@@ -4139,6 +4307,7 @@ def main() -> int:
                 holder["daemon"]._approval_resolved(request, decision, resolution))
     daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals,
                     dev_proc_root="/proc", dev_cgroup_root="/sys/fs/cgroup")
+    daemon._claude_catalog_generation = claude_generation   # ended at shutdown
     if approvals is not None:
         holder["daemon"] = daemon
     # The owner's Browser switches (`browser.json`): here, not in the

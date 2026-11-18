@@ -94,7 +94,7 @@ class Box:
             f"[credential]\n\thelper = !touch {self.marks}/global-helper\n")
         self._saved = {name: getattr(config, name) for name in (
             "ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "V2_DATA_DIR",
-            "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH",
+            "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH", "CLAUDE_CATALOG_PATH",
             "SPEAKER_DIR", "CHAT_WORKTREES_DIR")}
         self._env = {k: os.environ.get(k) for k in ("HOME", "JARVIS_GH", "CODEX_HOME")}
         os.environ["HOME"] = str(self.home)
@@ -109,6 +109,7 @@ class Box:
         config.DISCORD_GUILD_PATH = cfg / "discord_guild.json"
         config.ROUTING_PATH = cfg / "routing.json"
         config.CODEX_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "codex-models.json"
+        config.CLAUDE_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "claude-models.json"
         config.SPEAKER_DIR = self.home / ".local" / "share" / "jarvis" / "speaker"
         config.CHAT_WORKTREES_DIR = self.root / "chat-worktrees"
         config.CHAT_WORKTREES_DIR.mkdir(mode=0o700)

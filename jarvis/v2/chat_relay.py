@@ -526,10 +526,13 @@ class ChatRelay:
                 and not session.retired and not session.lost and not session.cancelled.is_set()
                 and session.relay_turn is None and not daemon._waiting_on_owner(session)
                 and not getattr(session, "compacting", False)
+                and not daemon._tier_unasked(session)
                 and callable(getattr(session.provider, "steer", None))):
             # b. Into the running turn, at its next step: no desk
             # reservation (P-7), and a refusal is never an interrupt. Never
-            # into the owner's compaction (the Compact button): held, c.
+            # into the owner's compaction (the Compact button), and never
+            # into a turn that may be on a paid tier the owner has since
+            # turned off (as `Daemon._steer`): held, c.
             message = UserMessage(item.wrapped, origin="chat-reply", via="peer", desk=False)
             item.delivery, item.steer_message = "step", message
             session.relay_steered.append(item)

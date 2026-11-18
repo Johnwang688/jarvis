@@ -74,6 +74,8 @@ class Brief:
     profile: PermissionProfile = PermissionProfile.AUTO
     model: str | None = None
     effort: str | None = None
+    speed: str | None = None                   # None = standard; owner chat choice
+    speed_model: str | None = None             # optional compose model precondition
     allowed_tools: list[str] | None = None      # None -> the role's default set
     mcp_servers: dict[str, dict] = field(default_factory=dict)   # name -> config
     always_ask: list[str] = field(default_factory=list)          # §6 layer 2, project + global

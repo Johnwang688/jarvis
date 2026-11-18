@@ -1730,6 +1730,19 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.brain.calls("turn/start")[1]["params"]["input"][0]["text"], "plain")
         self.provider.close(h)
 
+    def test_speed_is_a_per_turn_override_and_standard_resets(self):
+        from dataclasses import replace
+        h = self.start(brief=replace(self.brief, speed="ultrafast"))
+        self.send(h)
+        self.send(h)
+        self.provider.set_model(h, self.brief.model, self.brief.effort, speed=None)
+        self.send(h)
+        turns = [c["params"] for c in self.brain.calls("turn/start")]
+        self.assertEqual([p.get("serviceTierForTurn") for p in turns],
+                         ["ultrafast", "ultrafast", "default"])
+        self.assertTrue(all("serviceTier" not in p for p in turns))
+        self.assertNotIn("serviceTier", self.brain.calls("thread/start")[0]["params"])
+
     def test_set_model_rides_the_next_turn_start(self):
         """Decisions A1: turn/start's model/effort override "this turn and
         subsequent turns" (TurnStartParams, 0.153.4), so a change is sent

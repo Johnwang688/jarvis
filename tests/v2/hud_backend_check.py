@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 from datetime import datetime, timezone
 import http.client
 import inspect
@@ -215,12 +216,14 @@ class Backend(unittest.TestCase):
         self.addCleanup(routing.stop)
         # A HUD read saves the Codex catalog it got: never over the owner's
         # file, and never leaking one test's catalog into the next.
-        saved_catalog = patch.object(config, "CODEX_CATALOG_PATH", self.root / "codex-models.json")
-        saved_catalog.start()
-        self.addCleanup(saved_catalog.stop)
-        from jarvis.v2 import router as _router
-        codex_table = _router.CLI_MODELS["codex"]
-        self.addCleanup(lambda: _router.CLI_MODELS.__setitem__("codex", codex_table))
+        for provider in ("codex", "claude"):
+            saved_catalog = patch.object(config, f"{provider.upper()}_CATALOG_PATH",
+                                         self.root / f"{provider}-models.json")
+            saved_catalog.start()
+            self.addCleanup(saved_catalog.stop)
+            from jarvis.v2 import router as _router
+            table = _router.CLI_MODELS[provider]
+            self.addCleanup(lambda p=provider, t=table: _router.CLI_MODELS.__setitem__(p, t))
         always = patch.object(config, "V2_ALWAYS_ASK", self.root / "always-ask.json")
         always.start()
         self.addCleanup(always.stop)
@@ -1046,6 +1049,71 @@ class Backend(unittest.TestCase):
     def refreshed(self):
         """Wait for the background refresh the last read started."""
         self.assertTrue(self.daemon.router.ledger.wait_codex_refresh(5), "refresh still running")
+
+    def test_session_capture_publishes_once_and_hud_reads_do_not_refresh(self):
+        from jarvis.v2 import router
+        from jarvis.v2.providers import claude
+        rows = [{"value": "claude-session-catalog", "displayName": "Session catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        generation = self.daemon._claude_catalog_generation = router.claude_catalog_begin()
+        self.addCleanup(router.claude_catalog_end, generation)
+
+        class Client:
+            async def connect(self):
+                pass
+
+            async def get_server_info(self):
+                return {"models": rows}
+
+        for _ in range(2):
+            asyncio.run(claude._connect_session(Client()))
+            with router._CLAUDE_QUEUE_LOCK:
+                self.assertTrue(router._CLAUDE_QUEUE_LOCK.wait_for(
+                    lambda: router._claude_pending is None and not router._claude_busy, 5))
+        self.request("GET", "/thread-models")
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "claude_metadata"],
+                         [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
+
+    def test_claude_shutdown_during_save_and_new_daemon_generation(self):
+        from jarvis.v2 import router, claude_catalog
+        entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+        rows = [{"value": "claude-shutdown-catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        self.daemon._claude_catalog_generation = router.claude_catalog_begin()
+        saves = []
+        def save(table):
+            saves.append(table)
+            entered.set()
+            release.wait(5)
+        def stop():
+            try:
+                self.daemon.stop()
+            finally:
+                stopped.set()
+        with patch.object(claude_catalog, "save", side_effect=save):
+            try:
+                router.offer_claude_rows(rows)
+                self.assertTrue(entered.wait(2))
+                router.offer_claude_rows([{"value": "claude-ended-pending"}])
+                worker = threading.Thread(target=stop, daemon=True)
+                worker.start()
+                self.assertTrue(stopped.wait(1), "shutdown must not wait for catalog save")
+                other = Daemon(self.stores, self.providers, lambda *_: lambda *_: Decision.DENY, 0)
+                self.addCleanup(other.stop)
+                # An embedded daemon captures nothing; a new generation never
+                # revives the ended one.
+                self.assertIsNone(other._claude_catalog_generation)
+                fresh = router.claude_catalog_begin()
+                self.addCleanup(router.claude_catalog_end, fresh)
+                self.assertNotEqual(fresh, self.daemon._claude_catalog_generation)
+            finally:
+                release.set()
+                with router._CLAUDE_QUEUE_LOCK:
+                    self.assertTrue(router._CLAUDE_QUEUE_LOCK.wait_for(
+                        lambda: router._claude_pending is None and not router._claude_busy, 5))
+            worker.join(1)
+        self.assertEqual(saves, [claude_catalog.parse(rows)])
+        self.assertEqual(router.CLI_MODELS["claude"], claude_catalog.parse(rows))
 
     def test_codex_metadata_refreshes_in_the_background_and_fills_both_halves(self):
         from jarvis.v2 import router
@@ -1981,6 +2049,120 @@ class Backend(unittest.TestCase):
             self.request("POST", "/say", {"text": "hi"}, port=hud,
                          headers={"Host": f"localhost:{hud}", "Origin": f"http://localhost:{hud}"})
 
+    def test_speed_owner_write_validation_reset_and_model_change(self):
+        from jarvis.v2 import router, thread_model
+        tiers = (("fast", "Fast", "extra usage"),)
+        table = {m: dict(e, speeds=tiers if m == "claude-fable-5-2" else ())
+                 for m, e in router.CLI_MODELS["claude"].items()}
+        with patch.dict(router.CLI_MODELS, {"claude": table}):
+            fake = ModelFake(P.CLAUDE)
+            changes = []
+            def set_model(handle, model, effort, *, speed=None):
+                changes.append((model, effort, speed))
+            fake.set_model = set_model
+            self.daemon.providers[P.CLAUDE] = fake
+            thread = self.daemon.open_thread(self.project.id, Role.CHAT, P.CLAUDE,
+                                            Brief(Role.CHAT, str(self.project_root), model="claude-fable-5-2"))
+            tid = thread.id
+            path = f"/threads/{tid}"
+            self.request("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"}, status=403)
+            self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                         "provider": "claude", "brief": {"speed": "fast"}}, status=403)
+            for port in (self.daemon.port, self.daemon.face_port):
+                self.request("PATCH", path, {"speed": None, "speed_model": "claude-fable-5-2"}, status=403, port=port)
+            self.request("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"}, status=404, port=self.daemon.workshop_port)
+            self.assertIsNone(self.stores.threads.get(tid).speed)
+            self.assertIn("claude-fable-5-2", self.owner("PATCH", path, {"speed": "ultrafast", "speed_model": "claude-fable-5-2"}, status=400)["error"])
+            saved = self.brief_bytes(tid)
+            self.assertEqual(self.owner("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"})["speed"], "fast")
+            self.send_and_settle(tid)
+            self.assertIsNone(fake.opened[-1][1].speed, "open starts at Standard before the owner write")
+            self.assertEqual(changes[-1][2], "fast")
+            self.owner("PATCH", path, {"effort": "max"})
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], efforts=("high",))
+            reset = self.owner("PATCH", path, {"speed": None, "speed_model": "claude-fable-5-2"})
+            self.assertEqual(reset["effort"], "max", "speed writes preserve even a stale saved effort")
+            self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], None)
+            self.owner("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"})
+            self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], "fast")
+            # A catalog change downgrades the next turn, preserving the record.
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], speeds=())
+            with patch.object(router, "warn_once") as note:
+                self.send_and_settle(tid)
+            self.assertEqual(changes[-1][2], None)
+            self.assertEqual(self.stores.threads.get(tid).speed, "fast")
+            self.assertTrue(note.called)
+            table["claude-fable-5-2"] = dict(table["claude-fable-5-2"], speeds=tiers)
+            # Model writes which would change saved speed also require the owner.
+            self.request("PATCH", path, {"model": "claude-sonnet-5-5"}, status=403)
+            self.assertIsNone(self.owner("PATCH", path, {"model": "claude-sonnet-5-5"})["speed"])
+            self.owner("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"}, status=409)
+            self.owner("PATCH", path, {"model": "claude-fable-5-2"})
+            self.owner("PATCH", path, {"speed": "fast", "speed_model": "claude-fable-5-2"})
+            self.assertIsNone(self.owner("PATCH", path, {"speed": "", "speed_model": "claude-fable-5-2"})["speed"])
+            self.assertEqual(self.brief_bytes(tid), saved)
+            # Compose speed reaches both the persisted thread and initial runtime brief.
+            opened = self.owner("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                                "provider": "claude", "brief": {"model": "claude-fable-5-2", "speed": "fast"}}, status=201)
+            self.assertEqual(opened["speed"], "fast")
+            self.assertEqual(fake.opened[-1][1].speed, "fast")
+            self.assertEqual(self.stores.threads.get(opened["id"]).speed, "fast")
+            self.owner("POST", "/thread-models", {"provider": "claude", "model": "claude-fable-5-2", "speed": "fast"}, status=400)
+
+    def _default_restore_speed_scenario(self, route):
+        from jarvis.v2 import router, thread_model
+        tiers = (("ultrafast", "Ultrafast", "more quota"),)
+        table = {m: {"name": m, "efforts": ("high",), "vision": True, "speeds": tiers}
+                 for m in ("gpt-a", "gpt-b")}
+        with patch.dict(router.CLI_MODELS, {"codex": table}):
+            fake = ModelFake(P.CODEX)
+            applied = []
+            fake.set_model = lambda handle, model, effort, *, speed=None: applied.append((model, speed))
+            self.daemon.providers[P.CODEX] = fake
+            def set_default(model, *, owner=False):
+                write = self.owner if owner else self.request
+                if route == "/thread-models":
+                    write("POST", route, {"provider": "codex", "model": model})
+                else:
+                    write("POST", route, {"action": "models", "role": "orchestrator",
+                                          "provider": "codex", "model": model + "/high"})
+            if route == "/route":
+                self.request("POST", "/thread-models", {"provider": "codex", "model": ""})
+            set_default("gpt-a")
+            def open_speed():
+                return self.owner("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                                  "provider": "codex", "brief": {"speed": "ultrafast"}}, status=201)
+            pinned = open_speed()
+            self.assertEqual((pinned["model"], pinned["speed_model"]), ("gpt-a", "gpt-a"))
+            legacy = open_speed()
+            tid = legacy["id"]
+            # Emulate a persisted record from before speed writes pinned models.
+            thread = self.stores.threads.get(tid)
+            thread.model = None
+            self.stores.threads.save(thread)
+            self.daemon._sessions[tid].thread.model = None
+            for model in ("gpt-b", "gpt-a"):
+                # Owner moves away; a non-owner restores the bound model.
+                set_default(model, owner=model == "gpt-b")
+                self.send_and_settle(tid)
+                self.assertTrue(applied, "the provider must switch from its initial paid choice")
+                self.assertEqual(applied[-1], (model, None), "default restoration must run Standard")
+                saved = self.stores.threads.get(tid)
+                self.assertEqual((saved.model, saved.speed, saved.speed_model), (None, "ultrafast", "gpt-a"))
+                kept = self.stores.threads.get(pinned["id"])
+                self.assertEqual((kept.model, kept.speed, kept.speed_model), ("gpt-a", "ultrafast", "gpt-a"))
+                self.assertEqual(thread_model.effective(kept)[0], "gpt-a", "default writes cannot move a pin")
+            self.send_and_settle(pinned["id"])
+            self.assertEqual(self.daemon._sessions[pinned["id"]].applied_speed, "ultrafast")
+
+    def test_default_route_cannot_reactivate_speed_for_another_model(self):
+        self._default_restore_speed_scenario("/thread-models")
+
+    def test_routing_default_restore_cannot_activate_unpinned_speed(self):
+        self._default_restore_speed_scenario("/route")
+
     def test_model_and_avatar_writes_are_the_owners_alone(self):
         """#227 review: `POST /model`, `POST /models` (the protected `models.json`: an API-listener
         client could add `evil/model` and select it) and `POST /avatar` are owner-only, checked
@@ -2788,7 +2970,7 @@ class Backend(unittest.TestCase):
         self.assertEqual(published[1]["data"]["effective_effort"], "high")
         # The record plus the envelope a rename's thread_updated also carries.
         self.assertEqual(published[1]["data"]["thread_id"], tid)
-        self.assertEqual(published[1]["data"]["changed"], ["model", "effort"])
+        self.assertEqual(published[1]["data"]["changed"], ["model", "effort", "speed", "speed_model"])
         self.assertEqual(published[1]["data"]["id"], tid)
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])

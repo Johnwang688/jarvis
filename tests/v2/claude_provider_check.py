@@ -144,6 +144,9 @@ class FakeClient:
     async def connect(self):
         self.connected = True
 
+    async def get_server_info(self):
+        return None
+
     async def query(self, prompt, session_id: str = "default"):
         if hasattr(prompt, "__aiter__"):
             self.queries.append([msg async for msg in prompt])
@@ -1475,7 +1478,7 @@ def _temp_config():
     from jarvis import config
 
     names = ("ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "V2_DATA_DIR",
-             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH")
+             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH", "CLAUDE_CATALOG_PATH")
     saved = {name: getattr(config, name) for name in names}
     with tempfile.TemporaryDirectory(prefix="br0-") as tmp:
         root = Path(tmp)
@@ -1489,6 +1492,7 @@ def _temp_config():
         config.DISCORD_GUILD_PATH = home / "discord_guild.json"
         config.ROUTING_PATH = home / "routing.json"
         config.CODEX_CATALOG_PATH = root / "codex-models.json"
+        config.CLAUDE_CATALOG_PATH = root / "claude-models.json"
         try:
             yield root
         finally:
@@ -1983,6 +1987,27 @@ def secrets_checks() -> None:
 
 
 # --- main -------------------------------------------------------------------
+
+
+def speed_reconnect_checks() -> None:
+    from unittest.mock import patch
+    from jarvis.v2 import router, claude_catalog
+    provider = claude.ClaudeProvider()
+    entry = dict(router.CLI_MODELS["claude"]["claude-fable-5-2"], speeds=claude_catalog.FAST_SPEED)
+    with patch.dict(router.CLI_MODELS["claude"], {"claude-fable-5-2": entry}), fake([result_message()]):
+        handle = provider.start(thread(), brief(model="claude-fable-5-2"), allow)
+        original = FakeClient.instances[-1]
+        drain(provider, handle, "one")
+        provider.set_model(handle, "claude-fable-5-2", None, speed="fast")
+        faster = FakeClient.instances[-1]
+        check(faster is not original and original.disconnects == 1, "speed: enabling reconnects")
+        eq(json.loads(faster.options.settings), {"fastMode": True}, "speed: Fast opts in")
+        eq(faster.options.resume, SESSION_ID, "speed: reconnect keeps the conversation")
+        provider.set_model(handle, "claude-fable-5-2", None, speed=None)
+        standard = FakeClient.instances[-1]
+        check(standard is not faster and faster.disconnects == 1, "speed: reset reconnects")
+        eq(standard.options.settings, None, "speed: Standard omits fastMode")
+        provider.close(handle)
 
 
 def set_model_checks() -> None:
@@ -3437,6 +3462,7 @@ def main() -> int:
     skill_checks()
     secrets_checks()
     set_model_checks()
+    speed_reconnect_checks()
     if _failures:
         print(f"\n{len(_failures)} check(s) FAILED:")
         for label in _failures:

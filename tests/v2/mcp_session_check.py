@@ -125,6 +125,7 @@ def patch_config(stack: ExitStack, root: Path) -> None:
         "V2_CREDENTIAL_DIRS": (str(creds / ".ssh"),),
         "SESSIONS_DIR": root / "sessions",
         "CODEX_CATALOG_PATH": root / "cfg" / "codex-models.json",
+        "CLAUDE_CATALOG_PATH": root / "cfg" / "claude-models.json",
     }.items():
         stack.enter_context(patch.object(config, name, value))
 

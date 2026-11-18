@@ -43,7 +43,8 @@ class ThreadModel(unittest.TestCase):
         for name, value in dict(MODELS_PATH=root / "models.json", ROUTING_PATH=root / "routing.json",
                                 PROVIDER_DEFAULTS_PATH=root / "provider_defaults.json",
                                 MODEL_CACHE_PATH=root / "catalog.json",
-                                CODEX_CATALOG_PATH=root / "codex-models.json").items():
+                                CODEX_CATALOG_PATH=root / "codex-models.json",
+                                CLAUDE_CATALOG_PATH=root / "claude-models.json").items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -76,6 +77,12 @@ class ThreadModel(unittest.TestCase):
         self.assertIsNone(tm.default_effort(P.CLAUDE, "claude-haiku-4-5"))
         self.assertEqual(tm.default_effort(P.CODEX, "gpt-5.6-sol"), "high")
         self.assertEqual(tm.default_effort(P.CODEX, "gpt-6.1-sol"), "high")
+
+    def test_fable_52_is_in_the_claude_fallback(self):
+        self.assertEqual(tm.check(P.CLAUDE, "claude-fable-5-2", "max"),
+                         ("claude-fable-5-2", "max"))
+        rows = tm.describe()["providers"]["claude"]["models"]
+        self.assertIn("Claude Fable 5.2", [row["name"] for row in rows])
 
     def test_a_catalogs_advertised_default_is_not_a4(self):
         """PR #20 review: the account catalog advertises a default effort per

@@ -227,6 +227,24 @@ lacks (it still runs — there is nothing to fall back to). Tests point
 
 <!-- claude-source:000646-000778:end -->
 
+Claude's model list comes from Claude Code's SDK server info at every session
+connect or reconnect. There is no background reader. Session capture validates
+rows before offering the newest usable table to one daemon worker, which swaps,
+saves and notifies open HUDs in order. Only the owner's real daemon
+(`daemon.main`) switches capture on, so an embedded or test daemon never
+writes the cache. A session reads the capture generation before it connects,
+so a connect that outlives its daemon is dropped; offers keep arrival order.
+Shutdown ends the daemon's generation without waiting for an install; a cache
+write already in progress may finish. A failed save still tells the HUD.
+The last good list replaces the table whole and
+is saved atomically to `config.CLAUDE_CATALOG_PATH` (`JARVIS_CLAUDE_CATALOG`,
+default `~/.local/share/jarvis/claude-models.json`), then reloaded at daemon
+startup. Missing or unusable cache data leaves `CLAUDE_FALLBACK`, including
+Fable 5.2. Saved model choices degrade without being rewritten. This cache
+file is protected permission state, with the same agent-write refusal and
+capped, no-follow reader as the Codex catalog.
+
+
 ## Original CLAUDE.md lines 939–997
 
 <!-- claude-source:000939-000997:begin -->
@@ -1695,3 +1713,34 @@ Code: `jarvis/tools/skills.py` (`external_skills`, `_paths`),
   first `jarvis skills link` made 25 Codex links. Synced skills written for
   Claude-only tools (`computer-use`, `chrome-browser`) are listed but may
   only half-work on the fast path or Codex.
+
+## Per-chat speed (2026-11-17)
+
+Chat speed is per thread (`Thread.speed`, copied into `Brief.speed`), with
+`null` meaning Standard and no global speed default. Catalogs supply the
+available tiers: Codex `serviceTiers` and Claude's exact `supportsFastMode: true`.
+Claude merges `fastMode: true` into session settings only for a supported Fast
+choice and reconnects on the next message when speed changes. Every Codex
+`turn/start` sends `serviceTierForTurn`, explicitly `"default"` for Standard;
+steering leaves speed alone. A tier is effective only on an explicit
+`Thread.model` pin equal to `Thread.speed_model`, while the current catalog
+still offers it. `model: null` always runs Standard, including legacy saved
+speed records. An unavailable saved tier runs Standard with a note, keeping
+the pair. Selecting speed pins a default-following thread in the same locked
+write, preserving effort; creation resolves its effective model once under
+the lock for validation, pin and binding. Clearing speed never pins.
+Owner model changes rebind only already bound compatible tiers, clear an
+incompatible bound pair, and leave unbound legacy tiers dormant. Choosing
+`model: null` clears both speed fields. Default and route writes never touch
+speed, cannot activate unpinned tiers, and cannot move pins. Speed changes
+billing and latency only, never permissions.
+
+The boundary is the turn, as for a model change: a speed change applies from
+the next turn, and a running turn finishes on the tier it started with
+(Claude's in-turn overflow recovery included). A refused switch's rollback
+may only clear a tier (its pin of a default-following chat always does) and
+never makes one effective. If the provider may still be on a paid tier the
+record no longer asks for, a new turn or compaction is refused and the
+session closed (the next message resumes at the recorded tier), and steers,
+the owner's or a peer chat's reply, wait for the next turn
+(`Daemon._tier_unasked`, `_refuse_unasked_tier`, `_steer`, `ChatRelay._hand_over`).
