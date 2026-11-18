@@ -128,7 +128,10 @@ describe("the wiring is pinned", () => {
     expect(appSource).toMatch(/const finish = \(\) => barge\.end\("dropped", end\.utterance\)/);
     expect(appSource).toMatch(/whenGroupSettled\(u\.gid\)\.then\([\s\S]{0,200}finish\(\)/);
     expect(appSource).toMatch(/u\.gid === null\) \{ refuse\(\); finish\(\); return; \}/);
-    expect(appSource).toContain("speech.controller.messageSent(threadId)");
+    // user_message precedes its reply on the event stream. A send acknowledgement
+    // can arrive after the reply, when cancelling speech would cut it off.
+    expect(appSource).toContain("speech.controller.event(e)");
+    expect(appSource).not.toContain("speech.controller.messageSent(threadId)");
     expect(appSource).toContain("followUpAfterSpeech.current = true");
     expect(appSource).toContain("speech.controller.onIdle(");
   });
