@@ -656,6 +656,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   display: flex; flex-direction: column; gap: 5px; align-items: stretch;
 }
 .mic-tools { display: flex; flex-direction: column; gap: 4px; }
+#micstrip #level { flex: 0 0 auto; width: 100%; }
 .voice-agent-control { min-width: 0; }
 .voice-agent-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
 #voice-agent-start {
@@ -738,6 +739,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   position: absolute; left: 0; right: 0; bottom: calc(100% + var(--micstrip-h) + 6px);
   display: flex; flex-direction: column; gap: 3px; align-items: stretch;
 }
+#micstrip #speechstrip { position: static; }
 #speechstrip .note {
   font: 9px var(--mono); letter-spacing: 0.06em; color: var(--text-muted); text-transform: uppercase;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; word-spacing: normal; }

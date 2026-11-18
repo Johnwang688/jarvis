@@ -40,6 +40,8 @@ def main():
             expect(page.locator("#micstrip #voice-agent-start")).to_be_visible()
             indicator = page.locator(".voice-agent-state")
             expect(indicator).to_have_text("Off")
+            meter = page.locator("#level").bounding_box()
+            assert meter and meter["width"] > 20 and 0 < meter["height"] < 10
 
             button.click()
             expect(page.get_by_role("button", name="Starting Voice Anywhere…")).to_be_disabled()

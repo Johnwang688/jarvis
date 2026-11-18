@@ -187,8 +187,9 @@ export function Orb(props: {
       className={props.compact ? "mini" : props.tight ? "tight" : undefined}
       data-mode={props.mode}
     >
-      {props.compact ? null : props.speech}
+      {props.tight && !props.compact ? props.speech : null}
       <div id="micstrip">
+        {folded ? null : props.speech}
         <div id="dictation" data-testid="dictation" title="What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes the mic">
           {DICTATION_MODES.map((m) => (
             <button
