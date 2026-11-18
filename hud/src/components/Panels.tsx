@@ -154,7 +154,7 @@ export function DecisionsLog(props: { route: RouteView | null }) {
   return (
     <details className="block decisions" data-testid="decisions">
       <summary data-testid="decisions-summary">
-        Decisions{decisions.length ? ` · ${decisions.length}` : ""}
+        Recent decisions{decisions.length ? ` · ${decisions.length}` : ""}
       </summary>
       {states ? (
         <div className="muted small" data-testid="route-states">{states}</div>

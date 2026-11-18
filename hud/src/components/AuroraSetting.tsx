@@ -32,7 +32,7 @@ import {
   matchingPreset, resolveColours, saveAppearance,
   type Appearance, type ColourPreset, type Motion,
 } from "../lib/appearance";
-import { deriveAccent } from "../lib/appearance";
+import { SparkleSetting } from "./SparkleSetting";
 import {
   CUSTOM_PRESETS_KEY, PRESETS_EVENT, addCustomPreset, checkCustomPreset, cleanPresetName, deleteCustomPreset, loadCustomPresets,
   renameCustomPreset, restoreCustomPreset, type CustomPreset,
@@ -140,7 +140,6 @@ export function AuroraSetting() {
   });
   // The colours the pickers hold: what is stored, whether or not RGB is on (RGB keeps them for later).
   const colours = resolveColours({ ...a, rgb: false });
-  const family = deriveAccent(colours.accent).props;
   // The code accent is shown exactly as it is applied: judged against the washes actually displayed (RGB's own
   // under RGB), not the stored ones the other pickers keep showing.
   const applied = resolveColours(a);
@@ -336,11 +335,11 @@ export function AuroraSetting() {
   const custom = colours.accent !== DEFAULT_COLOURS.accent || colours.base !== DEFAULT_COLOURS.base
     || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]) || codeColour !== DEFAULT_COLOURS.codeAccent;
 
-  return (
-    <section ref={sectionRef} className="read-aloud" data-testid="appearance" aria-label="Appearance">
-      <h3>Appearance</h3>
+  return (<>
+    <section className="settings-group settings-appearance-group" data-testid="appearance" aria-labelledby="appearance-motion-heading">
+      <h3 id="appearance-motion-heading">Motion</h3>
       <label>
-        Motion{" "}
+        Aurora animation{" "}
         <select
           data-testid="appearance-motion"
           value={a.motion}
@@ -350,8 +349,8 @@ export function AuroraSetting() {
         </select>
       </label>
       <p>
-        Fluid drifts slowly and moves a little more when stirred. Flow is the lighter animation. Still draws one frame.
-        The system's reduced-motion setting always shows one frame.
+        Fluid responds to activity, Flow uses a lighter animation, and Still holds one frame.
+        Reduced motion also uses a still background.
       </p>
       <label>
         Natural drift{" "}
@@ -384,7 +383,6 @@ export function AuroraSetting() {
         />{" "}
         Stir with the pointer
       </label>
-      <br />
       <label>
         <input
           type="checkbox"
@@ -395,8 +393,11 @@ export function AuroraSetting() {
         />{" "}
         Ripple while chats work
       </label>
-      <p>Stirring is gentle and never takes focus or reaches a Browser page. Only Fluid stirs.</p>
-      <h3>Colours</h3>
+      <p>Both effects require Fluid.</p>
+      <SparkleSetting />
+    </section>
+    <section ref={sectionRef} className="settings-group settings-appearance-group" aria-labelledby="appearance-colours-heading">
+      <h3 id="appearance-colours-heading">Colours</h3>
       <div className="appearance-presets" role="group" aria-label="Colour presets" data-testid="appearance-presets">
         {COLOUR_PRESETS.map((p) => (
           <button
@@ -518,13 +519,12 @@ export function AuroraSetting() {
           <p className="appearance-note refused" role="status" data-testid="appearance-custom-note">{customNote}</p>
         )}
       </div>
-      <p>A preset sets every colour below at once. Adjust any of them afterwards to make it your own.</p>
       {a.rgb && (
         <p data-testid="appearance-rgb-note">
-          RGB is on: the aurora cycles through every colour and the accent stays white. Choosing a preset brings your colours back.
+          RGB cycles the aurora colours and uses a white accent.
         </p>
       )}
-      <label>
+      <label className="appearance-rgb-control" hidden={!a.rgb}>
         RGB speed{" "}
         <input
           type="range"
@@ -556,16 +556,6 @@ export function AuroraSetting() {
           </div>
         ))}
       </div>
-      <div className="appearance-preview" data-testid="appearance-preview" aria-hidden="true">
-        <span style={{ background: colours.accent }} />
-        <span style={{ background: family["--accent-hi"] }} />
-        <span style={{ background: colours.base }} />
-        {colours.washes.map((w, i) => <span key={i} style={{ background: w }} />)}
-      </div>
-      <p>
-        The accent marks focus, links, the selection bar and the orb; its lighter and quieter relatives follow it.
-        Any colour works, amber and red included. A bright aurora colour is darkened to keep text readable.
-      </p>
       <div className="appearance-colour" data-testid="appearance-code-colour">
         <label>
           {CODE_SLOT.label}{" "}
@@ -578,7 +568,7 @@ export function AuroraSetting() {
           </p>
         )}
         <p className="appearance-help">
-          Colours the editor's function names, cursor and selections and the terminal's cyan. It is separate from the accent and stays put when a preset or RGB changes the rest.
+          Sets the editor and terminal accent independently of the HUD palette.
         </p>
       </div>
       <button
@@ -590,5 +580,5 @@ export function AuroraSetting() {
         Reset colours to default
       </button>
     </section>
-  );
+  </>);
 }

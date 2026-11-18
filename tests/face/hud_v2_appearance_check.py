@@ -154,7 +154,7 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         page.wait_for_selector('[data-testid="appearance-accent"]')
         check("Settings has the colour pickers, the hex readouts and Reset",
               all(page.locator(f'[data-testid="appearance-{s}"]').count() == 1
-                  for s in ("accent", "wash-1", "wash-2", "wash-3", "base", "reset", "preview"))
+                  for s in ("accent", "wash-1", "wash-2", "wash-3", "base", "reset"))
               and page.locator('[data-testid="appearance-accent-hex"]').inner_text() == DEFAULT_ACCENT)
 
         page.evaluate("""(k) => { localStorage.setItem(k, JSON.stringify({washes: ['#838283', '#3468c4', '#6450c4']}));

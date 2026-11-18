@@ -8,20 +8,19 @@ import { setSparkleEnabled, sparkleEnabled } from "../lib/sparkle";
 export function SparkleSetting() {
   const [on, setOn] = useState(sparkleEnabled);
   return (
-    <section className="read-aloud" data-testid="sparkle" aria-label="Click sparkle">
-      <h3>Click sparkle</h3>
-      <label>
+    <div className="settings-row" data-testid="sparkle">
+      <label className="settings-check">
         <input
           type="checkbox"
           data-testid="sparkle-toggle"
           checked={on}
           onChange={(e) => { setSparkleEnabled(e.target.checked); setOn(e.target.checked); }}
-        />{" "}
-        Burst a few 1s and 0s when a button is clicked
+        />
+        <span>Show a sparkle on button clicks</span>
       </label>
       <p>
-        Decoration only: it never moves anything or takes focus, and it is off while your system asks for reduced motion.
+        Turns off when your system requests reduced motion.
       </p>
-    </section>
+    </div>
   );
 }

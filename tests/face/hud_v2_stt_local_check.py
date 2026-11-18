@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright
 from tests.face.hud_v2_mock import MockDaemon
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, open_settings
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, open_settings, open_voice_diagnostics
 from tests.face.hud_v2_voice_diagnostics_check import FAKE_MIC
 
 PTT = "window.__hud.capture.press(); window.__hud.mic.feedMs(1200, .06); window.__hud.capture.release()"
@@ -91,7 +91,7 @@ def main():
             check("the daemon's reason text is not kept in the window", "ran out of time" not in str(rows))
 
             # --- Settings -> Voice
-            open_settings(page, "Voice")
+            open_voice_diagnostics(page)
             page.wait_for_selector('[data-testid="stt-settings"]')
             texts = page.locator('[data-testid="voice-diagnostic-row"]').all_inner_texts()
             # Newest first.

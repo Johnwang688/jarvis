@@ -48,7 +48,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, watch_csp  # noqa: E402
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, open_voice_diagnostics, watch_csp  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 from tests.face.hud_v2_vad_check import (  # noqa: E402
     BASE_ARGS, CLAIM_FIRST, FIXTURES, RATE, read_wav, scenario,
@@ -221,7 +221,7 @@ def main(argv=None):
                 check("Silero is live and scoring meanwhile", detector(page)["detector"] == "silero" and detector(page)["scored"] > 40)
                 check("nothing was requested for RNNoise (no fetch, so nothing compiled either)", traffic == [], str(traffic))
                 check("nothing is stored for the switch", page.evaluate(f"localStorage.getItem({json.dumps(KEY)})") is None)
-                open_settings(page, "Voice")
+                open_voice_diagnostics(page)
                 toggle = page.locator('[data-testid="noise-suppression-toggle"]')
                 check("Settings -> Voice has the Noise suppression switch, unchecked", toggle.count() == 1 and not toggle.is_checked())
                 shown = page.locator('[data-testid="voice-noise-suppression"]').inner_text()
@@ -240,7 +240,7 @@ def main(argv=None):
                 traffic = rnnoise_traffic(ctx)
                 page = open_page(ctx)
                 page.evaluate("window.__marker = 'same page'")
-                open_settings(page, "Voice")
+                open_voice_diagnostics(page)
                 toggle = page.locator('[data-testid="noise-suppression-toggle"]')
                 toggle.check()
                 wait_noise(page, "ready")
@@ -462,7 +462,7 @@ def main(argv=None):
                     page.wait_for_timeout(1500)
                     check(f"{name}: and keeps scoring; the microphone keeps flowing",
                           detector(page)["scored"] > a + 20 and page.evaluate("window.__hud.mic.state().written") - w0 > 16000)
-                    open_settings(page, "Voice")
+                    open_voice_diagnostics(page)
                     shown = page.locator('[data-testid="voice-noise-suppression"]').inner_text()
                     check(f"{name}: diagnostics say so in words", "fell back to the raw signal" in shown and len(shown) > 60, shown)
                     check(f"{name}: and Settings says it is not running", "Not running" in page.locator('[data-testid="noise-suppression-state"]').inner_text())

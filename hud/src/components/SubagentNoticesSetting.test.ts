@@ -16,7 +16,7 @@ describe("Settings -> Voice: sub-agent notices (SV-5)", () => {
     await act(async () => root.render(createElement(SubagentNoticesSetting, { on: true, onChange: (on: boolean) => calls.push(on) })));
     const box = host.querySelector('[data-testid="subagent-notices-toggle"]') as HTMLInputElement;
     expect(box.checked).toBe(true);
-    expect(host.textContent).toContain("Say when a sub-agent finishes or fails");
+    expect(box.labels?.[0]?.textContent).toBe("Announce when sub-agents finish or fail");
     await act(async () => box.click());
     expect(calls).toEqual([false]);
   });

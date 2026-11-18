@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, until, watch_csp  # noqa: E402
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_voice_diagnostics, until, watch_csp  # noqa: E402
 from tests.face.hud_v2_layout_check import _approval  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 from tests.face.hud_v2_multichat_check import _dictation, _sent  # noqa: E402
@@ -179,7 +179,7 @@ def main(argv=None):
                 frames = page.evaluate("window.__frames")
                 check("the frame seam V5 builds on delivers 512-sample frames, about 31 a second",
                       len(frames) > 20 and set(frames) == {512}, f"{len(frames)} frames of {set(frames)}")
-                open_settings(page, "Voice")
+                open_voice_diagnostics(page)
                 check("Settings -> Voice says which path is live",
                       "AudioWorklet" in page.locator('[data-testid="voice-capture-path"]').inner_text())
                 page.locator('[data-testid="settings-close"]').click()
@@ -230,7 +230,7 @@ def main(argv=None):
                     check(f"{name}: the window says so", "older capture path" in err, err)
                     check(f"{name}: without leaking where it looked", "private.example" not in err
                           and "private.example" not in page.evaluate("JSON.stringify(window.__hud.voiceDiagnostics())"))
-                    open_settings(page, "Voice")
+                    open_voice_diagnostics(page)
                     shown = page.locator('[data-testid="voice-capture-path"]').inner_text()
                     check(f"{name}: Settings -> Voice shows the fallback", "ScriptProcessor" in shown, shown)
                     page.locator('[data-testid="settings-close"]').click()

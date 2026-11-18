@@ -38,7 +38,7 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
             <input type="radio" name="stt-backend" data-testid={`stt-backend-${c}`} value={c}
               checked={value?.backend === c} disabled={off}
               onChange={() => { void change({ backend: c }); }} />{" "}
-            {LABEL[c]} <span className="muted">{HINT[c]}</span>
+            <strong>{LABEL[c]}</strong> <span className="muted">{HINT[c]}</span>
           </label>
         ))}
       </div>
@@ -48,8 +48,8 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
         Cloud fallback
       </label>
       <p className="muted">
-        On: HUD dictation audio may be sent to the cloud when Cloud is chosen, or when local speech-to-text fails or is slow.
-        Off: HUD dictation never uploads anything, and a local failure shows an error.
+        Allows cloud transcription when Cloud is selected or local transcription fails or slows down.
+        Turning this off keeps HUD dictation on this computer.
       </p>
       {value ? <p data-testid="stt-summary">{sttSummary(value)}</p> : null}
       {value ? <p data-testid="stt-wake-note">{wakeNote(value)}</p> : null}

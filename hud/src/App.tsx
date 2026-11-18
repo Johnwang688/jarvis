@@ -108,7 +108,7 @@ import { SttRetry } from "./components/SttRetry";
 import { VoiceTimingsLink } from "./lib/voiceTimingsLink";
 import { observeVoiceTiming } from "./lib/voiceTimings";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
-import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
+import { VoiceDiagnosticsDisclosure } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
 import { VoiceWordsSetting } from "./components/VoiceWords";
 import { CANCELLED_STATUS, DictationLedger, UndoHold, inertUnderCard, loadWords, sendWordOutcome, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
@@ -5231,25 +5231,55 @@ export default function App() {
               />
             ) : null}
             {settingsSection === "Voice" ? (
-              <><VoicePicker embedded
-                voices={voices}
-                override={voiceOverride}
-                onPick={(name) => api.setVoice(name).then((r) => {
-                  void loadVoices();
-                  // V12 (L3): a voice that could pass for the enrolled owner is said so, not silently chosen.
-                  if (typeof r?.speaker_warning === "string" && r.speaker_warning) dispatch({ type: "patch", patch: { error: r.speaker_warning.slice(0, 400) } });
-                }).catch(() => {})}
-                onClose={closeSettings}
-              /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
-              <SubagentNoticesSetting on={subagentNotices}
-                onChange={(on) => { saveSubagentNotices(on); speech.controller.setNotices(on); }} />
-              <DuckBrowserSetting on={duckBrowser}
-                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} />
-                <SpeakerSettings store={speaker} blocked={blocked}
-                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><WakeWordSetting stage={wakeStage} muted={isMuted(state.dictation)} sensitivity={wakeSensitivity}
-                  onSensitivity={(s) => { saveSensitivity(s); setWakeSensitivity(s); }}
-                  cardCommands={cardCommands} onCardCommands={(on) => { saveCardCommands(on); setCardCommands(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} /><NoiseSuppressionSetting on={noiseOn} diagnostics={voiceDiagnostics} onChange={(on) => { saveNoiseSuppression(on); setNoiseOn(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} onRetryNoise={() => vadStage.retryNoise()} /></>
+              <>
+                <section className="settings-group" aria-labelledby="voice-playback-heading">
+                  <h3 id="voice-playback-heading">Playback</h3>
+                  <VoicePicker embedded
+                    voices={voices} override={voiceOverride}
+                    onPick={(name) => api.setVoice(name).then((r) => {
+                      void loadVoices();
+                      // V12 (L3): tell the owner if the voice could pass for theirs.
+                      if (typeof r?.speaker_warning === "string" && r.speaker_warning) {
+                        dispatch({ type: "patch", patch: { error: r.speaker_warning.slice(0, 400) } });
+                      }
+                    }).catch(() => {})}
+                    onClose={closeSettings}
+                  />
+                  <ReadAloudSetting on={speechView.enabled}
+                    onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
+                  <SubagentNoticesSetting on={subagentNotices}
+                    onChange={(on) => { saveSubagentNotices(on); speech.controller.setNotices(on); }} />
+                  <DuckBrowserSetting on={duckBrowser}
+                    onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} />
+                </section>
+                <section className="settings-group" aria-labelledby="voice-transcription-heading">
+                  <h3 id="voice-transcription-heading">Transcription</h3>
+                  <SttSettingsPanel blocked={blocked} />
+                </section>
+                <section className="settings-group" aria-labelledby="voice-hands-free-heading">
+                  <h3 id="voice-hands-free-heading">Hands-free conversation</h3>
+                  <WakeWordSetting stage={wakeStage} muted={isMuted(state.dictation)} sensitivity={wakeSensitivity}
+                    onSensitivity={(s) => { saveSensitivity(s); setWakeSensitivity(s); }}
+                    cardCommands={cardCommands}
+                    onCardCommands={(on) => { saveCardCommands(on); setCardCommands(on); }} />
+                  <EndPauseSetting ms={endPause}
+                    onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} />
+                  <VoiceWordsSetting words={words}
+                    onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} />
+                </section>
+                <section className="settings-group" aria-labelledby="voice-input-heading">
+                  <h3 id="voice-input-heading">Microphone and voice verification</h3>
+                  <SpeakerSettings store={speaker} blocked={blocked}
+                    listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} />
+                  <SelfVoiceSetting gate={speech.selfVoice}
+                    onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} />
+                  <NoiseSuppressionSetting on={noiseOn} diagnostics={voiceDiagnostics}
+                    onChange={(on) => { saveNoiseSuppression(on); setNoiseOn(on); }} />
+                </section>
+                <VoiceDiagnosticsDisclosure diagnostics={voiceDiagnostics} capture={capture}
+                  muted={isMuted(state.dictation)} stt={stt}
+                  onRetryDetector={() => vadStage.retry()} onRetryNoise={() => vadStage.retryNoise()} />
+              </>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

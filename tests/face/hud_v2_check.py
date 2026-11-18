@@ -146,6 +146,15 @@ def open_settings(page, section="General"):
     page.locator(f'[data-testid="settings-{section.lower()}"]').click()
 
 
+def open_voice_diagnostics(page):
+    """Reveal microphone status and audio retry actions in Voice settings."""
+    open_settings(page, "Voice")
+    toggle = page.get_by_test_id("voice-diagnostics-toggle")
+    if not toggle.evaluate("(el) => el.parentElement.open"):
+        toggle.click()
+    page.get_by_test_id("voice-diagnostics").wait_for()
+
+
 # ---------------------------------------------------------------------------
 # sections
 # ---------------------------------------------------------------------------

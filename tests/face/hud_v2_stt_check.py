@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright
 from tests.face.hud_v2_mock import MockDaemon
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, open_settings
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, open_voice_diagnostics
 from tests.face.hud_v2_voice_diagnostics_check import FAKE_MIC
 
 PTT = "window.__hud.capture.press(); window.__hud.mic.feedMs(1200, .06); window.__hud.capture.release()"
@@ -213,7 +213,7 @@ def main():
             page.locator('[data-testid="dictation-review"]').click()
 
             # --- Settings -> Voice lists the kept clip with Play and Retry
-            open_settings(page, "Voice")
+            open_voice_diagnostics(page)
             check("diagnostics row offers Play and Retry", page.locator('[data-testid="voice-clip-play"]').count() == 1
                   and page.locator('[data-testid="voice-clip-retry"]').count() == 1)
             mock.stt_script = [{"text": "from diagnostics"}]
