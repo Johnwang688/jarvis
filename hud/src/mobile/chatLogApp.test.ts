@@ -215,6 +215,42 @@ describe("chat log reads: the cases the property rarely draws", () => {
     expect(seqs(h.app)).toEqual(range(10, 15));
     expect(h.app.thread?.next).toBe(15);
   });
+
+  it("lets the owner return to the latest message without interrupting their reading", async () => {
+    const h = await harness();
+    const main = document.querySelector<HTMLElement>('[data-testid="m-main"]')!;
+    let top = 0;
+    let height = 1200;
+    const viewport = 400;
+    Object.defineProperties(main, {
+      scrollHeight: { get: () => height },
+      clientHeight: { get: () => viewport },
+      scrollTop: {
+        get: () => top,
+        set: (value: number) => { top = Math.min(value, height - viewport); },
+      },
+    });
+    await h.app.openThread(T1);
+    const latest = main.querySelector<HTMLButtonElement>('[data-testid="m-chat-latest"]')!;
+    expect(top).toBe(800);
+    expect(latest.hidden).toBe(true);
+
+    main.scrollTop = 300;
+    main.dispatchEvent(new Event("scroll"));
+    expect(latest.hidden).toBe(false);
+
+    height = 1400;
+    h.replies[`${h.path}?after=5`] = page(5, 5);
+    await h.app.moreLog();
+    expect(top).toBe(300);
+    expect(latest.hidden).toBe(false);
+
+    latest.focus();
+    latest.click();
+    expect(top).toBe(1000);
+    expect(latest.hidden).toBe(true);
+    expect(document.activeElement?.textContent).toContain("message 5");
+  });
 });
 
 describe("the new-chat sheet's providers are a resource read (PR 384 MED 4)", () => {

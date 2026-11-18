@@ -710,7 +710,10 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
     return item;
   }
   if (style === "reply") {
-    item.append(el("div", "msg-head", [row.role, ...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ")));
+    const head = el("div", "msg-head");
+    head.append(el("span", "msg-author", row.role));
+    for (const part of [...row.marks, time(row.at).slice(0, 5)].filter(Boolean)) head.append(" · ", part);
+    item.append(head);
     const body = el("div", "msg-body md");
     renderPhoneMarkdown(body, row.text);
     item.append(body);
@@ -749,11 +752,20 @@ export function emptyLog(loaded: boolean, online: boolean, read: boolean = loade
 export function transcriptView(thread: ChatThread | null, rows: LogRow[], older: boolean,
                                back: () => void, composer?: HTMLElement | null,
                                read: { loaded: boolean; online: boolean; read?: boolean } = { loaded: true, online: true },
+                               navigation?: { backLabel: string; projectName?: string; latest: () => void },
 ): { view: HTMLElement; list: HTMLElement } {
   const view = testid(el("section", "view transcript-view"), "m-thread");
-  const bar = el("div", "subbar");
-  bar.append(tap("‹ Chats", back, "back", "m-back"));
-  bar.append(testid(el("h2", "subtitle", thread?.title || "(untitled)"), "m-thread-title"));
+  const bar = el("header", "subbar m-chat-header");
+  const backLabel = navigation?.backLabel ?? "Chats";
+  const backButton = tap("‹ " + backLabel, back, "back m-chat-back", "m-back");
+  backButton.setAttribute("aria-label", "Back to " + backLabel);
+  const heading = el("div", "m-chat-heading");
+  heading.append(testid(el("h2", "subtitle", thread?.title || (thread ? "Untitled chat" : "Chat")), "m-thread-title"));
+  const provider = thread?.provider;
+  const providerName = provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : provider === "fast" ? "Jarvis" : provider;
+  const context = [navigation?.projectName, providerName].filter(Boolean).join(" · ");
+  if (context) heading.append(el("p", "m-chat-context", context));
+  bar.append(backButton, heading);
   view.append(bar);
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
@@ -762,7 +774,16 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's
   // "read only" line for any other; nothing until the chat is known.
-  if (composer) view.append(composer);
+  if (composer || navigation) {
+    const dock = el("div", "m-chat-dock");
+    if (navigation) {
+      const latest = tap("Latest message", navigation.latest, "m-chat-latest", "m-chat-latest");
+      latest.hidden = true;
+      dock.append(latest);
+    }
+    if (composer) dock.append(composer);
+    view.append(dock);
+  }
   return { view, list };
 }
 
