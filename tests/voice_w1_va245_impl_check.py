@@ -580,6 +580,38 @@ class AgentGlue(unittest.TestCase):
         client.close.assert_called_once()
         action.close.assert_called_once()
 
+    def test_second_hotkey_during_first_decode_preserves_both_dictations(self):
+        agent = self.bare()
+        client, typer = Mock(), Mock()
+        client.streaming = True
+        first, second = agentmod.Capture(), agentmod.Capture()
+        def connected():
+            agent.clips.put((1, first, "hotkey"))
+        def transcript(capture):
+            if capture is first:
+                agent.generation = 2
+                agent.clips.put((2, second, "hotkey"))
+                return {"text": "first phrase"}
+            return {"text": "second phrase"}
+
+        def typed(steps):
+            if steps == [("text", "second phrase")]:
+                agent.done.set()
+        typer.run.side_effect = typed
+
+        timeout = threading.Timer(2, agent.done.set)
+        timeout.start()
+        self.addCleanup(timeout.cancel)
+        client.dictate_capture.side_effect = transcript
+        with patch.object(agentmod, "Client", return_value=client), \
+                patch.object(agentmod, "load_key", return_value=b"key"), \
+                patch.object(agentmod, "Typer", return_value=typer), \
+                patch.object(agentmod, "Actions"), patch.object(agent.online, "set", side_effect=connected):
+            agent.network()
+        self.assertEqual(typer.run.call_args_list,
+                         [unittest.mock.call([("text", "first phrase")]),
+                          unittest.mock.call([("text", "second phrase")])])
+
     def test_reconnect_backoff_and_offline_queue_discard(self):
         a = self.bare()
         a.clips.put((1, b"stale", "wake"))

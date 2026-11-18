@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import queue
+import threading
 
 if __package__:
     from .voicetype import mentions_command, might_be_command, plan, sanitize
@@ -24,6 +26,51 @@ def _wake_app_intent(text):
         return None
     kind = "switch_app" if verb.casefold() == "switch to" else "open_app"
     return {"kind": kind, "text": text, "target": target}
+
+
+class SpokenAnswer:
+    """Play WAVs in order while the link continues delivering text and sound."""
+    def __init__(self, player):
+        self.player = player
+        self.pending = queue.Queue(maxsize=2)
+        self.error = None
+        self.worker = threading.Thread(target=self._play, name="voice-playback", daemon=True)
+
+    def _play(self):
+        try:
+            while True:
+                wav = self.pending.get()
+                if wav is None:
+                    return
+                if not self.player.cancelled.is_set():
+                    self.player.play(wav)
+        except Exception:
+            self.error = RuntimeError("Speech playback unavailable")
+
+    def offer(self, wav):
+        while self.worker.is_alive():
+            if wav is not None and self.player.cancelled.is_set():
+                return
+            try:
+                self.pending.put(wav, timeout=0.05)
+                return
+            except queue.Full:
+                pass
+
+    def ask(self, client, words, delta, *, defer_speech=False):
+        self.worker.start()
+        try:
+            answer = client.ask_spoken(words, delta, self.offer, self.player.cancelled,
+                                       defer_speech=defer_speech)
+        except BaseException:
+            self.player.stop()
+            raise
+        finally:
+            self.offer(None)
+            self.worker.join()
+        if self.error:
+            raise self.error
+        return answer
 
 
 class Flow:
@@ -71,13 +118,13 @@ class Flow:
             steps.append(step)
         self.typer.run(steps)
 
-    def on_clip(self, wav, source):
+    def on_clip(self, wav, source, *, transcript=None):
         self.link_error = None
         try:
             if source not in {"hotkey", "wake"}:
                 raise ValueError("Unknown voice source")
             self.ui.set_state("transcribing")
-            text = self.client.dictate(wav, source=source)["text"]
+            text = transcript if transcript is not None else self.client.dictate(wav, source=source)["text"]
             clean = sanitize(text)
             if not clean or (source == "wake" and clean.rstrip(".,!?").casefold() == "jarvis"):
                 self.ui.set_state("done", "No speech heard")
@@ -109,9 +156,16 @@ class Flow:
                         partial += piece
                         self.ui.set_state("answering", partial)
 
-                    answer = self.client.ask(words, on_delta=delta)
-                    self.ui.set_state("answering", answer)
-                    self.player.play(self.client.say(answer))
+                    if getattr(self.client, "streaming", False) is True:
+                        if self.player.cancelled.is_set():
+                            return
+                        answer = SpokenAnswer(self.player).ask(self.client, words, delta,
+                                                               defer_speech=target == "task")
+                        self.ui.set_state("answering", answer)
+                    else:
+                        answer = self.client.ask(words, on_delta=delta)
+                        self.ui.set_state("answering", answer)
+                        self.player.play(self.client.say(answer))
                 elif kind in {"open_app", "switch_app"}:
                     if not getattr(self.actions, kind)(target):
                         self.ui.set_state("error", f"Could not find {target}.")

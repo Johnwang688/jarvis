@@ -98,17 +98,63 @@ def read_json(stream, cap=MAX_LINE):
     return value
 
 
+PACKET_BYTES = 4096  # 128 ms of mono 16 kHz signed 16-bit PCM
+MAX_PCM = MAX_CLIP_S * 32000
+
+
+class Capture:
+    """The audio callback only appends. One network worker drains complete packets."""
+    def __init__(self):
+        self.ready = threading.Condition()
+        self.pending = bytearray()
+        self.closed = self.cancelled = False
+        self.release_at = self.speech_end = None
+
+    def append(self, pcm):
+        with self.ready:
+            if not self.closed:
+                self.pending.extend(pcm)
+                if len(self.pending) >= PACKET_BYTES:
+                    self.ready.notify()
+
+    def finish(self, cancel=False, *, release_at=None):
+        with self.ready:
+            self.closed = True
+            self.release_at = release_at
+            if cancel:
+                self.cancelled = True
+                self.pending.clear()
+            self.ready.notify_all()
+
+    def packets(self):
+        while True:
+            with self.ready:
+                if not self.ready.wait_for(lambda: self.closed or len(self.pending) >= PACKET_BYTES,
+                                           timeout=MAX_CLIP_S + 5):
+                    self.cancelled = self.closed = True
+                    self.pending.clear()
+                if not self.pending:
+                    return
+                packet = bytes(self.pending[:PACKET_BYTES])
+                del self.pending[:len(packet)]
+            yield packet
+
+
 class Client:
     def __init__(self, host, port, key, timeout=10.0):
         self.host, self.port, self.key, self.timeout = host, port, key, timeout
         self._socket = self._stream = None
         self._id = 0
+        self.streaming = False
         self._request_lock = threading.Lock()
+        self._speech_lock = threading.Lock()
+        self._speaking_id = None
 
     def connect(self):
         self.close()
         try:
             self._socket = socket.create_connection((self.host, self.port), min(self.timeout, 5.0))
+            self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self._stream = self._socket.makefile("rwb")
             a = new_nonce()
             send_json(self._stream, {"hello": "jarvis-voice-agent", "v": 1, "nonce_a": a})
@@ -131,12 +177,17 @@ class Client:
         with self._request_lock:
             return self._exchange(payload, on_delta, on_status)
 
-    def _exchange(self, payload, on_delta, on_status):
+    def _exchange(self, payload, on_delta, on_status, on_audio=None, cancelled=None):
         if self._stream is None:
             raise LinkError("Jarvis isn't running")
         try:
             self._id += 1
-            send_json(self._stream, {**payload, "id": self._id})
+            with self._speech_lock:
+                if cancelled is not None and cancelled.is_set():
+                    return {"done": True, "text": ""}
+                send_json(self._stream, {**payload, "id": self._id})
+                if on_audio:
+                    self._speaking_id = self._id
             asking = payload.get("op") == "ask"
             deadline = time.monotonic() + 185.0
             while True:
@@ -145,13 +196,15 @@ class Client:
                     if remaining <= 0:
                         raise ValueError()
                     self._socket.settimeout(remaining)
-                got = read_json(self._stream, MAX_AUDIO_LINE if payload.get("op") == "say" else MAX_LINE)
+                got = read_json(self._stream, MAX_AUDIO_LINE if on_audio or payload.get("op") == "say" else MAX_LINE)
                 if type(got.get("id")) is not int or got["id"] != self._id:
                     raise ValueError()
                 if asking and "event" in got:
                     if got["event"] == "delta" and isinstance(got.get("text"), str):
                         if on_delta:
                             on_delta(got["text"])
+                    elif got["event"] == "audio" and on_audio and isinstance(got.get("wav_b64"), str):
+                        on_audio(base64.b64decode(got["wav_b64"], validate=True))
                     elif got["event"] == "status" and isinstance(got.get("text"), str):
                         if on_status:
                             on_status(got["text"])
@@ -165,6 +218,8 @@ class Client:
             self.close()
             raise LinkError("The voice link disconnected.") from None
         finally:
+            with self._speech_lock:
+                self._speaking_id = None
             if self._socket is not None:
                 self._socket.settimeout(self.timeout)
         if not got["ok"]:
@@ -175,7 +230,8 @@ class Client:
         return got
 
     def ping(self, *, wake=None):
-        self._request({"op": "ping"} if wake is None else {"op": "ping", "wake": wake})
+        got = self._request({"op": "ping", "features": True, **({"wake": wake} if wake is not None else {})})
+        self.streaming = got.get("streaming") is True
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
@@ -184,6 +240,37 @@ class Client:
             self.close()
             raise LinkError("The voice link sent an invalid reply.")
         return {"text": got["text"], "backend": got["backend"]}
+
+    def dictate_capture(self, capture):
+        if not self.streaming:
+            pcm = b"".join(capture.packets())
+            return self.dictate(wav_bytes(pcm)) if pcm and not capture.cancelled else None
+        with self._request_lock:
+            self._id += 1
+            ident = self._id
+            try:
+                send_json(self._stream, {"op": "dictate_stream", "id": ident})
+                total = 0
+                for packet in capture.packets():
+                    send_json(self._stream, {"pcm": base64.b64encode(packet).decode("ascii")})
+                    total += len(packet)
+                cancel = capture.cancelled or not total
+                send_json(self._stream, {"end": "cancel" if cancel else "commit"})
+                got = read_json(self._stream)
+                if type(got.get("id")) is not int or got["id"] != ident or type(got.get("ok")) is not bool:
+                    raise ValueError()
+                if not got["ok"]:
+                    error = got.get("error")
+                    raise LinkError(error if isinstance(error, str) and error in ERRORS
+                                    else "The voice request failed.")
+                if cancel and got.get("cancelled") is True:
+                    return None
+                if cancel or not isinstance(got.get("text"), str) or got.get("backend") not in ("local", "cloud"):
+                    raise ValueError()
+                return got
+            except (ValueError, OSError):
+                self.close()
+                raise LinkError("The voice link disconnected.") from None
 
     def route(self, text, source):
         got = self._request({"op": "route", "text": text, "source": source})
@@ -211,6 +298,23 @@ class Client:
         got = self._request({"op": "ask", "text": text}, on_delta, on_status)
         if got.get("done") is not True or not isinstance(got.get("text"), str):
             self.close()
+            raise LinkError("The voice link sent an invalid reply.")
+        return got["text"]
+
+    def interrupt_speech(self):
+        with self._speech_lock:
+            if self._speaking_id is not None and self._socket is not None:
+                try:
+                    self._socket.sendall(json_line({"op": "interrupt", "id": self._speaking_id}))
+                except OSError:
+                    pass
+                self._speaking_id = None
+
+    def ask_spoken(self, text, on_delta, on_audio, cancelled=None, *, defer_speech=False):
+        with self._request_lock:
+            payload = {"op": "ask", "text": text, "speech": True, "defer_speech": defer_speech}
+            got = self._exchange(payload, on_delta, None, on_audio, cancelled)
+        if got.get("done") is not True or not isinstance(got.get("text"), str):
             raise LinkError("The voice link sent an invalid reply.")
         return got["text"]
 

@@ -60,7 +60,7 @@ class VoiceChat:
         # even if the process dies before set_title or the id file.
         return self.daemon.open_thread(project.id, "chat", "fast", {}, title="Voice")
 
-    def ask(self, text, on_delta, *, cancelled=lambda: False, timeout=180.0):
+    def ask(self, text, on_delta, *, cancelled=lambda: False, timeout=180.0, on_reset=None):
         from .daemon import DaemonError
         deadline = time.monotonic() + timeout
 
@@ -108,8 +108,12 @@ class VoiceChat:
                     except queue.Empty:
                         pass
             deltas, full = [], []
+            proposing = False
+            receipt_deadline = None
             while True:
                 check()
+                if receipt_deadline is not None and time.monotonic() >= receipt_deadline:
+                    return "I couldn't confirm that task was opened."
                 try:
                     event = q.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
                 except queue.Empty:
@@ -118,16 +122,29 @@ class VoiceChat:
                     raise RuntimeError()  # never silently return a partial stream
                 if event.get("kind") == "shutdown":
                     raise ConnectionError()
+                data = event.get("data") or {}
+                if event.get("kind") == "proposal_reply" and data.get("turn_id") == turn:
+                    if on_reset:
+                        on_reset()
+                    if re.fullmatch(r"[0-9a-f]{8}", str(data.get("task_id") or "")):
+                        return "I opened a task for that."
+                    return data.get("reply") or "I couldn't open that task."
                 if event.get("turn_id") != turn:
                     continue
                 kind, data = event.get("kind"), event.get("data") or {}
+                if kind == "tool_started":
+                    if on_reset:
+                        on_reset()
+                    if data.get("name") == "task_propose":
+                        proposing = True
                 if kind in ("text_delta", "text"):
                     piece = data.get("text")
                     if not isinstance(piece, str):
                         raise ValueError()
                     if kind == "text_delta":
                         deltas.append(piece)
-                        on_delta(piece)
+                        if not proposing:
+                            on_delta(piece)
                     else:
                         full.append(piece)
                 elif kind == "error" and data.get("fatal", True):
@@ -135,7 +152,10 @@ class VoiceChat:
                 elif kind == "turn_finished":
                     if data.get("stop") in ("error", "cancelled", "interrupted"):
                         raise RuntimeError()
-                    return "".join(full or deltas)
+                    if data.get("proposal"):
+                        receipt_deadline = min(deadline, time.monotonic() + 5)
+                    else:
+                        return "".join(full or deltas)
         finally:
             if q is not None:
                 self.daemon.bus.unsubscribe(q)

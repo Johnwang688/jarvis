@@ -31,6 +31,10 @@ class Samples(list):
     def __truediv__(self, divisor):
         return Samples(value / divisor for value in self)
 
+    def __getitem__(self, index):
+        value = super().__getitem__(index)
+        return Samples(value) if isinstance(index, slice) else value
+
     def __mul__(self, other):
         return Samples(a * b for a, b in zip(self, other))
 

@@ -310,6 +310,7 @@ class WakeListener:
             self.on_level(rms)
             result = _feed_audio(endpoint, pcm, np)
             if result:
+                self.speech_end = captured - endpoint.quiet_frames / RATE if endpoint.spoken else None
                 clip = wav_bytes(b"".join(chunks), RATE) if result != "timeout" else None
                 endpoint, chunks = None, []
                 if not self._done.is_set() and not self.busy() and stamp == self._epoch:

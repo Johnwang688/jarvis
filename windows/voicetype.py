@@ -201,6 +201,7 @@ class Typer:
         self.clock = clock
         self.last = None
         self.on_scratch = on_scratch
+        self.on_insert = None
 
     def category(self):
         try:
@@ -216,6 +217,9 @@ class Typer:
                     hwnd = self.backend.foreground()
                     self.last = None
                     self.backend.text(text)
+                    if self.on_insert:
+                        callback, self.on_insert = self.on_insert, None
+                        callback(self.clock())
                     self.last = (text, hwnd, self.clock(), step[2] if len(step) > 2 else "raw")
             elif step[0] == "key":
                 self.last = None  # Enter can move to a different line or field.

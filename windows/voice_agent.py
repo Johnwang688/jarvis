@@ -14,13 +14,13 @@ import time
 import wave
 
 if __package__:
-    from .voicewire import Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from .voicewire import Capture, Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     from .voicetype import Typer
     from .voiceactions import Actions
     from .voiceflow import Flow
     from . import voiceui, voicewake
 else:
-    from voicewire import Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from voicewire import Capture, Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     try:
         from voicetype import Typer
         from voiceactions import Actions
@@ -39,6 +39,16 @@ RATE = 16000
 MAX_FRAMES = 120 * RATE
 
 
+def first_signal_frame(data, width, channels):
+    """First frame exceeding -50 dBFS, ignoring leading PCM silence."""
+    threshold = (1 << (width * 8 - 1)) * 0.00316
+    for pos in range(0, len(data), width):
+        value = int.from_bytes(data[pos:pos + width], "little", signed=width != 1)
+        if abs(value - (128 if width == 1 else 0)) >= threshold:
+            return pos // (width * channels)
+    return None
+
+
 class Player:
     """Blocking playback on the worker; stop is callable from the hotkey thread.
 
@@ -50,6 +60,7 @@ class Player:
         self.cancelled = threading.Event()
         self.lock = threading.Lock()
         self.stream = None
+        self.on_output = None
 
     def begin(self):
         self.cancelled.clear()
@@ -73,7 +84,13 @@ class Player:
                             data = audio.readframes(max(1, audio.getframerate() // 20))
                             if not data:
                                 break
+                            start = time.monotonic()
                             stream.write(data)
+                            if self.on_output and not self.cancelled.is_set():
+                                frame = first_signal_frame(data, audio.getsampwidth(), audio.getnchannels())
+                                if frame is not None:
+                                    callback, self.on_output = self.on_output, None
+                                    callback(start + stream.latency + frame / audio.getframerate())
                     except sd.PortAudioError:
                         if not self.cancelled.is_set():
                             raise
@@ -120,6 +137,9 @@ class Agent:
         self.generation_lock = threading.Lock()
         self.capture_lock = threading.Lock()
         self.capture_online = False
+        self.packet_ready = False
+        self.upload = None
+        self.client = None
         self.capture = None
         self.tapped = False
         self.chunks = []
@@ -155,12 +175,12 @@ class Agent:
             return "starting"
         return wake.status()
 
-    def enqueue(self, wav, source, generation):
+    def enqueue(self, wav, source, generation, *, speech_end=None):
         if hasattr(self, "online") and not self.online.is_set():
             self.show(generation, "Jarvis isn't running", True)
             return
         try:
-            self.clips.put_nowait((generation, wav, source))
+            self.clips.put_nowait((generation, wav, source, speech_end) if speech_end is not None else (generation, wav, source))
         except queue.Full:
             self.show(generation, "Jarvis is busy — try again", True)
 
@@ -168,7 +188,7 @@ class Agent:
         if self.done.is_set() or self.busy():
             return
         generation = self.next_generation()
-        self.enqueue(wav, "wake", generation)
+        self.enqueue(wav, "wake", generation, speech_end=getattr(getattr(self, "wake", None), "speech_end", None))
 
     def wake_state(self, state, text=None):
         if not self.busy():
@@ -181,14 +201,21 @@ class Agent:
             count = min(frames, MAX_FRAMES - self.frames)
             if count > 0:
                 pcm = indata[:count].tobytes()
-                self.chunks.append(pcm)
+                upload = getattr(self, "upload", None)
+                if upload is None:
+                    self.chunks.append(pcm)
+                else:
+                    upload.append(pcm)
                 self.frames += count
             else:
                 pcm = b""
         if pcm and hasattr(self, "overlay"):
             import numpy as np
             samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-            self.overlay.push_level(float(np.sqrt(np.mean(samples * samples))))
+            level = float(np.sqrt(np.mean(samples * samples)))
+            if upload is not None and level > 0.01:
+                upload.speech_end = time.monotonic()
+            self.overlay.push_level(level)
 
     def start_capture(self):
         import sounddevice as sd
@@ -196,6 +223,12 @@ class Agent:
         with self.capture_lock:
             self.chunks, self.frames, self.audio_bad = [], 0, False
             self.capture_online = not hasattr(self, "online") or self.online.is_set()
+            if getattr(self, "packet_ready", False) and self.capture_online:
+                self.upload = Capture()
+                try:
+                    self.clips.put_nowait((self.generation, self.upload, "hotkey"))
+                except queue.Full:
+                    self.upload = None
         # A second stream on the mic fails to start while the wake listener's
         # runs, so borrow that one when it is live.
         wake = getattr(self, "wake", None)
@@ -213,6 +246,7 @@ class Agent:
         self.overlay.set_state("listening")
 
     def finish_capture(self, cancel=False):
+        release_at = time.monotonic()
         if getattr(self, "tapped", False):
             self.tapped = False
             self.wake.tap(None)
@@ -237,6 +271,15 @@ class Agent:
             valid = (not hasattr(self, "online")
                      or (getattr(self, "capture_online", False) and online))
             self.capture_online = False
+            upload = getattr(self, "upload", None)
+            if upload is not None:
+                self.upload = None
+                commit = valid and not cancel and not bad and self.frames > 0
+                if commit:
+                    self.show(self.generation, "Transcribing…")
+                upload.finish(cancel=not commit, release_at=release_at)
+                if commit:
+                    return
             if cancel:
                 self.show(self.generation, None)
             elif not valid:
@@ -264,6 +307,9 @@ class Agent:
                 held = bool(self.user32.GetAsyncKeyState(VK_RCONTROL) & 0x8000)
                 if held and not previous:
                     self.player.stop()  # barge-in even on a Ctrl chord
+                    client = getattr(self, "client", None)
+                    if client is not None:
+                        client.interrupt_speech()
                 previous = held
                 other = any(self.user32.GetAsyncKeyState(k) & 0x8000 for k in others)
                 for action in machine.feed(time.monotonic_ns() // 1_000_000, held, other):
@@ -287,6 +333,9 @@ class Agent:
     def discard_clips(self, message):
         with self.capture_lock:
             self.capture_online = False
+            self.packet_ready = False
+            if getattr(self, "upload", None) is not None:
+                self.upload.finish(cancel=True)
             try:
                 while True:
                     item = self.clips.get_nowait()
@@ -329,6 +378,8 @@ class Agent:
                             client.ping()
                         else:
                             client.ping(wake=wake)
+                        self.client = client
+                        self.packet_ready = client.streaming is True
                         last_ping, reported_wake = time.monotonic(), wake
                     except LinkError:
                         if hasattr(self, "online"):
@@ -350,6 +401,13 @@ class Agent:
                         if source == "wake" and self.recording.is_set():
                             continue
                         self.flow_running.set()
+                        transcript = None
+                        capture = clip if isinstance(clip, Capture) else None
+                        if capture is not None:
+                            got = client.dictate_capture(capture)
+                            if got is None:
+                                continue
+                            transcript = got["text"]
                         # Toggle-stop can enqueue while Right Ctrl is still down.
                         # Let the physical modifier up before any synthetic typing.
                         while self.user32.GetAsyncKeyState(VK_RCONTROL) & 0x8000:
@@ -357,9 +415,19 @@ class Agent:
                                 break
                         if self.done.is_set():
                             break
-                        self.player.begin()
+                        if generation == self.generation:
+                            self.player.begin()
                         flow = Flow(client, typer, actions, _FlowUI(self, generation), self.player)
-                        flow.on_clip(clip, source)
+                        speech_end = capture.speech_end if capture else item[3] if len(item) > 3 else None
+                        def metric(label, start, end):
+                            if start is not None and generation == self.generation:
+                                self.overlay.timing(label, max(0, round(1000 * (end - start))))
+                        self.player.on_output = lambda end: metric("Voice end to estimated audio", speech_end, end)
+                        typer.on_insert = lambda end: metric("Capture stop to text input", capture.release_at if capture else None, end)
+                        if transcript is None:
+                            flow.on_clip(clip, source)
+                        else:
+                            flow.on_clip(None, source, transcript=transcript)
                         if flow.link_error is not None:
                             raise flow.link_error
                     last_ping = time.monotonic()

@@ -88,6 +88,8 @@ class Overlay:
                                                  outline="#294553", smooth=True, splinesteps=24)
         self.canvas.create_text(16, 15, text="Voice Anywhere", anchor="w",
                                 fill="#a4beca", font=("Segoe UI", 9))
+        self.metric = self.canvas.create_text(144, 15, text="", anchor="w",
+                                              fill="#a4beca", font=("Segoe UI", 9))
         self.close_bg = self.canvas.create_rectangle(0, 0, 0, 0, fill=PANEL, outline="",
                                                      tags="close")
         self.close_icon = self.canvas.create_text(0, 0, text="×", fill=INK, tags="close",
@@ -135,6 +137,9 @@ class Overlay:
         if state not in STATES:
             raise ValueError("Unknown voice state")
         self.events.put(("state", state, text))
+
+    def timing(self, label, milliseconds):
+        self.events.put(("timing", label, milliseconds))
 
     def push_level(self, rms):
         self.events.put(("level", float(rms), None))
@@ -232,11 +237,15 @@ class Overlay:
                 kind, value, text = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "level":
+            if kind == "timing":
+                self.canvas.itemconfigure(self.metric, text=f"{value}: {text} ms")
+            elif kind == "level":
                 self.levels.append(value)
             else:
                 if not self.display.set(value, text):
                     continue
+                if value == "listening":
+                    self.canvas.itemconfigure(self.metric, text="")
                 if value in ("listening", "hidden"):
                     self.levels.clear()
                     self.heights = [0.0] * 24

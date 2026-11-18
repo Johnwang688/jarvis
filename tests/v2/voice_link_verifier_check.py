@@ -551,6 +551,9 @@ class WindowsGlueProbes(TempCase):
                     pass
                 def connect(self):
                     pass
+                streaming = False
+                def ping(self):
+                    pass
                 def dictate(self, data):
                     agent.done.set()
                     return {"text": "private fake transcript", "backend": "local"}
