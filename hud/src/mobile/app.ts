@@ -309,6 +309,7 @@ export class PhoneApp {
   private readonly topBar: HTMLElement;
   private readonly tabBar: HTMLElement;
   private readonly sheetHost: HTMLElement;
+  private readonly chatViewport: ResizeObserver | null;
   /** The view the main area last drew, and (while the approval sheet is open) the one it keeps under the sheet. */
   private drawnKey: string | null = null;
   private held: string | null = null;
@@ -390,6 +391,10 @@ export class PhoneApp {
     this.main = el("main", "main");
     this.rowScroll = new RowScroll(this.main);
     this.main.dataset.testid = "m-main";
+    this.main.addEventListener("scroll", () => this.syncLatestButton(), { passive: true });
+    this.main.addEventListener("toggle", () => this.syncLatestButton(), { capture: true });
+    this.chatViewport = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => this.syncLatestButton());
+    this.chatViewport?.observe(this.main);
     const nav = el("nav", "tabs");
     nav.setAttribute("aria-label", "Sections");
     const make = (tab: "inbox" | "chats" | "settings", label: string, icon: () => SVGSVGElement) => {
@@ -478,6 +483,7 @@ export class PhoneApp {
     this.stopped = true;
     this.unsubscribeFolds();
     this.rowScroll.stop();
+    this.chatViewport?.disconnect();
     this.clearFirstOpenTimer();
     if (this.recoverTimer !== null) this.clearTimer(this.recoverTimer);
     this.recoverTimer = null;
@@ -1374,7 +1380,12 @@ export class PhoneApp {
       edit: (text) => { this.composeDrafts.set(threadId, text); },
       mic: this.talk.view(threadId),
       // The box grew a line: the newest message stays in view if it was.
-      around: (change) => { const end = this.nearEnd(); change(); if (end) this.scrollToEnd(); },
+      around: (change) => {
+        const end = this.nearEnd();
+        change();
+        if (end) this.scrollToEnd();
+        else this.syncLatestButton();
+      },
     };
   }
 
@@ -1801,6 +1812,7 @@ export class PhoneApp {
     open.list.querySelector('[data-testid="m-empty"]')?.remove();
     for (const row of rows) open.list.append(logRow(row, ownerChat(open.meta)));
     if (atEnd) this.scrollToEnd();
+    else this.syncLatestButton();
   }
 
   loadTasks(): Promise<void> {
@@ -2071,8 +2083,8 @@ export class PhoneApp {
     // Under the filter strip, at the list header; transcript updates keep the same log and scroll.
     const surface = this.main.firstElementChild;
     if (surface?.classList.contains("view")) {
-      const strip = surface.querySelector(":scope > .m-strip");
-      if (strip) strip.after(...warnings); else surface.prepend(...warnings);
+      const header = surface.querySelector(":scope > .m-strip, :scope > .m-chat-header");
+      if (header) header.after(...warnings); else surface.prepend(...warnings);
     } else this.main.prepend(...warnings);
   }
 
@@ -2627,10 +2639,14 @@ export class PhoneApp {
         // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
         if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const thread = this.thread;
+        const backLabel = this.threadBack === "inbox" ? "Inbox" : this.threadBack === "review" ? "Review" : "Chats";
         const built = transcriptView(thread.meta, thread.rows, thread.older, () => this.goBack(),
-          this.composer(thread.id), { loaded: thread.loaded, online: this.online, read: thread.hasRead });
-        const back = built.view.querySelector('[data-testid="m-back"]');
-        if (back) back.textContent = this.threadBack === "inbox" ? "‹ Inbox" : this.threadBack === "review" ? "‹ Review" : "‹ Chats";
+          this.composer(thread.id), { loaded: thread.loaded, online: this.online, read: thread.hasRead }, {
+            backLabel,
+            projectName: this.projects?.find((project) => project.id === thread.meta?.project_id)?.name
+              ?? this.entries?.find((entry) => entry.thread_id === thread.id)?.project,
+            latest: () => this.scrollToEnd(),
+          });
         thread.list = built.list;
         view = built.view;
         // PX-4 (§3.4): this chat's rank 1 to 5 rows, in a tray under the header.
@@ -2710,6 +2726,7 @@ export class PhoneApp {
     if (keep === "end") this.scrollToEnd();
     else if (keep !== null) this.main.scrollTop = keep;
     else this.main.scrollTop = redraw ? top : this.mem.top(key);
+    this.syncLatestButton();
     this.drawnKey = key;
     if (!redraw) this.returnToRow(key);
   }
@@ -2816,6 +2833,24 @@ export class PhoneApp {
 
   private scrollToEnd(): void {
     this.main.scrollTop = this.main.scrollHeight;
+    this.syncLatestButton();
+  }
+
+  private syncLatestButton(): void {
+    const open = this.thread;
+    if (this.stopped || this.tab !== "chats" || !open?.list?.isConnected) return;
+    const latest = this.main.querySelector<HTMLButtonElement>('[data-testid="m-chat-latest"]');
+    if (!latest) return;
+    const hidden = !open.rows.length || this.nearEnd();
+    if (latest.hidden === hidden) return;
+    if (hidden && document.activeElement === latest) {
+      const last = open.list.lastElementChild;
+      if (last instanceof HTMLElement) {
+        last.tabIndex = -1;
+        last.focus({ preventScroll: true });
+      }
+    }
+    latest.hidden = hidden;
   }
 }
 

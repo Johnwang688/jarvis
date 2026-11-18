@@ -1,30 +1,48 @@
 /* P-5: writing from the phone (write.ts). Aurora-glass tokens from mobile.css;
    nothing here uses url(). Every control at least 48 px (3rem) tall; Cancel in
    amber, never the default. */
-/* The message box (the owner's chat layout, 2026-10-28): one slim bar pinned
-   above the tab bar (sticky at the bottom of the scrolling view), its notes
-   above it. The box grows from one line to five (write.ts fitLines); Send is
-   a round arrow, lit only when there is something to send. */
-.m-compose {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+/* The dock holds the composer against the tabs, or against the open keyboard. */
+.transcript-view { min-height: 100%; }
+.m-chat-dock {
   position: sticky;
-  bottom: calc(-1 * var(--m-gutter-b));
+  bottom: 0;
   z-index: 2;
-  margin: 0 calc(-1 * var(--m-gutter)) calc(-1 * var(--m-gutter-b));
-  padding: 0.5rem var(--m-gutter) 0.75rem;
-  background: var(--m-sheen), var(--m-glass-sticky);
+  margin: auto calc(-1 * var(--m-gutter)) calc(-1 * var(--m-gutter-b));
+}
+.tap.m-chat-latest {
+  position: absolute;
+  right: max(var(--m-gutter), calc((100% - var(--chat-width)) / 2));
+  bottom: calc(100% + 0.5rem);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.875rem;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--m-r-pill);
+  background: var(--m-glass-sticky);
+  color: var(--accent);
+  box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.35);
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+.tap.m-chat-latest[hidden] { display: none; }
+.m-chat-latest::before { content: ""; width: 0.4375rem; height: 0.4375rem; border: solid currentColor;
+  border-width: 0 2px 2px 0; transform: translateY(-1px) rotate(45deg); }
+.m-compose {
+  display: grid;
+  justify-content: center;
+  grid-template-columns: minmax(0, var(--chat-width));
+  gap: 0.25rem;
+  padding: 0.625rem var(--m-gutter) 0.75rem;
+  background: var(--m-glass-sticky);
   border-top: 1px solid var(--m-rim);
 }
-/* A short chat still has its bar on the tab bar: the view fills the screen, the bar at its foot. */
-.transcript-view { min-height: 100%; }
-.transcript-view > .m-compose { margin-top: auto; }
+.m-chat-dock > .center { padding: 0.5rem var(--m-gutter); background: var(--m-glass-sticky); }
 .m-compose .m-notice { font-size: 0.875rem; margin: 0 0.25rem; }
 .m-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem; }
 .m-sheet .m-text { resize: vertical; width: 100%; }
 .m-text.m-compose-text {
-  flex: 1;
+  flex: 1 1 7rem;
   min-width: 0;
   min-height: 3rem;
   resize: none;
@@ -32,7 +50,7 @@
   padding: 0.625rem 0.875rem;
   line-height: 1.45;
   border-radius: 1.5rem;
-  background: var(--bg-inset);
+  background: var(--bg-1);
 }
 .m-text.m-compose-text:focus { outline: none; border-color: var(--accent); }
 /* Sending: the box takes no typing (write.ts, a beforeinput guard), and looks it. */
