@@ -945,6 +945,50 @@ class DaemonClaude(Daemonised):
         session = self.session(chat)
         return session is None or session.worker is None
 
+    def test_a_self_started_turn_on_an_unasked_paid_tier_is_stopped(self):
+        """Follow-up 2 (2026-11-17, Opus review of #409): a Fast turn ends with
+        a background sub-agent still running; the owner switches the chip to
+        Standard; when the sub-agent finishes, the CLI starts its own turn on
+        the old Fast client. Jarvis stops that turn and closes the session,
+        and the next owner message runs at Standard."""
+        import json as _json
+        from jarvis.v2 import router, thread_model, claude_catalog
+        table = {m: {**e, "speeds": claude_catalog.FAST_SPEED} for m, e in router.CLI_MODELS["claude"].items()}
+        self.stack.enter_context(patch.dict(router.CLI_MODELS, {"claude": table}))
+        model = thread_model.default_model(PN.CLAUDE)
+        rows = R.rows("one_default")
+        at = next(i for i, r in enumerate(rows) if r["src"] == "cli" and r["data"].get("type") == "result")
+        PausingClient.pause_at, PausingClient.release = at + 1, threading.Event()
+        PausingClient.paused = threading.Event()
+        self.addCleanup(PausingClient.release.set)
+        R.ReplayClient.instances = []
+        self.stack.enter_context(patch.object(claude, "_client_factory", lambda o: PausingClient(o, rows)))
+        self.stack.enter_context(patch.object(claude, "resolve_cli", lambda: None))
+        self.daemon.providers[PN.CLAUDE] = claude.ClaudeProvider()
+        chat = self.daemon.open_thread(self.project.id, Role.CHAT, PN.CLAUDE,
+                                       {"model": model, "speed": "fast"}).id
+        self.daemon.send(chat, UserMessage(text="turn 1"))
+        wait_for(lambda: PausingClient.paused.is_set() and self.idle_now(chat),
+                 what="the owner's turn done, the CLI's own turn pending")
+        fast_client = R.ReplayClient.instances[-1]
+        self.assertTrue(_json.loads(fast_client.options.settings)["fastMode"])
+        self.daemon.set_thread_model(chat, {"speed": None, "speed_model": model})
+        PausingClient.release.set()
+        wait_for(lambda: self.session(chat) is None or self.session(chat).lost,
+                 what="the self-started turn to be stopped and the session closed")
+        self.assertGreaterEqual(fast_client.interrupts, 1, "the CLI's own turn is interrupted")
+        self.assertFalse([r for r in self.log(chat) if r.get("kind") == "turn_finished"
+                          and r.get("self_started") and (r.get("data") or {}).get("status") == "ok"],
+                         "no self-started turn completes on the unasked tier")
+        self.assertTrue(any("started by itself was stopped" in _json.dumps(r) for r in self.log(chat)),
+                        "the chat says why")
+        # The owner's next message resumes the conversation, at Standard.
+        self.daemon.send(chat, UserMessage(text="turn 2"))
+        wait_for(lambda: len(R.ReplayClient.instances) >= 2, what="the session to resume")
+        resumed = R.ReplayClient.instances[-1]
+        self.assertIsNot(resumed, fast_client)
+        self.assertFalse(_json.loads(resumed.options.settings)["fastMode"], "the resumed session is Standard")
+
     def test_the_clis_own_turn_is_a_turn_of_the_thread(self):
         chat = self.chat("one_default")
         bus = self.daemon.bus.subscribe()
