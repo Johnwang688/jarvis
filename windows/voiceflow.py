@@ -1,12 +1,29 @@
 """Sequential voice workflow; dependencies are injected for pure checks."""
 from __future__ import annotations
 
+import re
+
 if __package__:
     from .voicetype import mentions_command, might_be_command, plan, sanitize
     from .voicewire import LinkError
 else:
     from voicetype import mentions_command, might_be_command, plan, sanitize
     from voicewire import LinkError
+
+
+def _wake_app_intent(text):
+    """Resolve explicit app commands without a model, after wake verification."""
+    words = re.sub(r"^jarvis(?:\s*[,.:]\s*|\s+)", "", sanitize(text), flags=re.I)
+    command = re.fullmatch(r"(?:please )?(open|launch|switch to) (.{1,80})", words.rstrip(".!?"), re.I)
+    if not command:
+        return None
+    verb, target = command.groups()
+    # Windows launch resolves the name in the Start menu index. Leave
+    # sentences and specialized requests such as URLs to the normal router.
+    if not re.fullmatch(r"[\w .'+&()–-]+", target) or len(target.split()) > 5:
+        return None
+    kind = "switch_app" if verb.casefold() == "switch to" else "open_app"
+    return {"kind": kind, "text": text, "target": target}
 
 
 class Flow:
@@ -69,7 +86,9 @@ class Flow:
             else:
                 self.ui.set_state("thinking")
                 try:
-                    intent = self.client.route(text, source)
+                    intent = _wake_app_intent(text) if source == "wake" else None
+                    if intent is None:
+                        intent = self.client.route(text, source)
                 except Exception as exc:
                     # Routing is optional: preserve the utterance on failure.
                     # Retain transport failures so the agent still reconnects.

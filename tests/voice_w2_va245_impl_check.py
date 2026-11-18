@@ -136,6 +136,15 @@ class OverlayTiming(unittest.TestCase):
         self.assertEqual(self.state.state, "hidden")
         self.assertIsNone(self.state.hide_at)
 
+    def test_dismiss_ignores_updates_until_the_next_recording(self):
+        self.state.set("listening")
+        self.state.dismiss()
+        for update in ("transcribing", "thinking", "answering", "done"):
+            self.assertFalse(self.state.set(update, "this turn stays hidden"))
+            self.assertEqual(self.state.state, "hidden")
+        self.assertTrue(self.state.set("listening"))
+        self.assertEqual(self.state.text, "Listening…")
+
     def test_producers_only_queue_and_tk_work_is_deferred(self):
         overlay = voiceui.Overlay.__new__(voiceui.Overlay)
         overlay.events = queue.Queue()

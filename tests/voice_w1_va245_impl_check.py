@@ -346,6 +346,22 @@ class FlowErrors(unittest.TestCase):
         self.typer, self.actions, self.ui, self.player = Mock(), Mock(), Mock(), Mock()
         return voiceflow.Flow(self.client, self.typer, self.actions, self.ui, self.player)
 
+    def test_wake_app_commands_work_with_the_router_offline(self):
+        for spoken, method, target in (
+            ("Jarvis, open Calculator.", "open_app", "Calculator"),
+            ("Switch to Google Chrome.", "switch_app", "Google Chrome"),
+        ):
+            with self.subTest(spoken=spoken):
+                flow = self.make()
+                self.client.dictate.return_value = {"text": spoken}
+                self.client.route.side_effect = LinkError("router unavailable")
+                flow.on_clip(b"fixture", "wake")
+                self.client.dictate.assert_called_once_with(b"fixture", source="wake")
+                getattr(self.actions, method).assert_called_once_with(target)
+                self.client.route.assert_not_called()
+                self.typer.run.assert_not_called()
+                self.ui.set_state.assert_called_with("done")
+
     def test_linkerror_outside_routing_surfaces_exact_text(self):
         for stage in ("dictate", "ask", "say"):
             with self.subTest(stage=stage):
