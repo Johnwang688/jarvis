@@ -149,11 +149,11 @@ def main():
             assert page.evaluate("window.__wakeClaims") == 0
 
             page.set_viewport_size({"width": 1280, "height": 500})
-            expect(page.locator("#voice-agent-start.beside")).to_be_visible()
+            expect(page.locator("#orbdock.tight #voice-agent-start")).to_be_visible()
             check_voice_geometry(page)
             page.set_viewport_size({"width": 1280, "height": 800})
             _fold_left(page, until)
-            expect(page.locator("#voice-agent-start.rail")).to_be_visible()
+            expect(page.locator("#orbdock.mini #voice-agent-start")).to_be_visible()
             check_voice_geometry(page)
             button.click()
             until(lambda: len(pending) == 1)

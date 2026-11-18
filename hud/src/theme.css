@@ -677,10 +677,10 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   padding-top: 3px; color: var(--text); font-size: 11px; line-height: 1.3;
 }
 .folded-voice-controls { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.voice-agent-control.rail .voice-agent-header { flex-direction: column; gap: 2px; }
-.voice-agent-control.rail .voice-agent-state { gap: 0; font-size: 8px; }
-.voice-agent-control.rail .voice-agent-state::before, .voice-agent-control.rail #voice-agent-result { display: none; }
-#voice-agent-start.rail { width: 32px; }
+#orbdock.mini .voice-agent-header { flex-direction: column; gap: 2px; }
+#orbdock.mini .voice-agent-state { gap: 0; font-size: 8px; }
+#orbdock.mini .voice-agent-state::before, #orbdock.mini #voice-agent-result { display: none; }
+#orbdock.mini #voice-agent-start { width: 32px; }
 #voice-controls-rail { align-items: center; }
 :is(#dictation, .dictation) { display: flex; gap: 0; flex: 0 0 auto; justify-content: center; }
 :is(#dictation, .dictation) button {
@@ -1596,7 +1596,7 @@ body.resizing.resizing-rows, body.resizing.resizing-rows * { cursor: row-resize 
 body.resizing iframe { pointer-events: none; }
 
 /* What a folded pane leaves behind. */
-.rail:is(.left, .right) {
+.rail {
   flex: 0 0 36px; background: var(--glass-sheen), var(--glass-pane); display: flex; flex-direction: column;
   align-items: center; gap: 6px; padding: 10px 0 48px; min-width: 0;
 }

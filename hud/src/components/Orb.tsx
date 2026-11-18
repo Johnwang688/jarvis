@@ -163,12 +163,11 @@ export function Orb(props: {
     starting || connected || stopping ? "working" : "idle";
   const shortLabel = { error: "Error", ready: "Ready", working: "Wait", idle: voiceLabel }[voiceTone];
   const voiceControl = (
-    <div className={`voice-agent-control${props.compact ? " rail" : props.tight ? " beside" : ""}`}>
+    <div className="voice-agent-control">
       <div className="voice-agent-header">
         <button
           type="button"
           id="voice-agent-start"
-          className={props.compact ? "rail" : props.tight ? "beside" : undefined}
           disabled={props.blocked || !!props.voiceAction || stopping || (!canStop && (starting || voiceReady || connected || wakeError || unavailable))}
           title={voiceDetail}
           aria-label={launchLabel}
