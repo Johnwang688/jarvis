@@ -62,6 +62,7 @@ def main():
             keys.add(0x01)   # transient primary mouse button; Right Ctrl remains physically down
             checks.append(("held+click", pump(0.16)))
             keys.discard(0x01)
+            keys.update((0xA2, 0xE7))  # mirrored left Ctrl and an input-method packet
             checks.append(("still held", pump(5.25)))
             keys.clear()
             checks.append(("released", pump(0.12)))

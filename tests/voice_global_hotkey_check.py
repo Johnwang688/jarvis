@@ -51,6 +51,33 @@ class Poll(unittest.TestCase):
         events, _ = self.run_poll(frames)
         self.assertEqual(events, [("start", 0), ("stop", 5)])
 
+    def test_a_mirrored_ctrl_or_device_signal_is_not_a_shortcut(self):
+        right = {voice.VK_RCONTROL, voice.VK_CONTROL}
+        for extra in (voice.VK_LCONTROL, 0x10, 0xA5, 0x5B, 0x90, 0x86, 0xB3, 0xC3, 0xE5, 0xE7, 0xFE):
+            with self.subTest(vk=extra):
+                frames = [(0, right, False, False), (35, right | {extra}, False, False),
+                          (6000, right | {extra}, False, False), (6100, {extra}, False, False)]
+                events, recorder = self.run_poll(frames)
+                self.assertEqual(events, [("start", 0), ("stop", 3)])
+                recorder.show.assert_not_called()
+        self.assertEqual(self.run_poll([(0, right | {voice.VK_LCONTROL}, False, False),
+                                        (650, set(), False, False)])[0], [("start", 0), ("stop", 1)])
+
+    def test_key_first_seen_after_release_does_not_cancel_completed_hold(self):
+        right = {voice.VK_RCONTROL, voice.VK_CONTROL}
+        frames = [(0, right, False, False), (500, right, False, False),
+                  (550, {ord("C")}, False, False)]
+        self.assertEqual(self.run_poll(frames)[0], [("start", 0), ("stop", 2)])
+
+    def test_real_shortcuts_cancel_as_soon_as_the_action_key_is_seen(self):
+        right = {voice.VK_RCONTROL, voice.VK_CONTROL}
+        for key in (ord("C"), 0x73, 0x25, 0xBA, 0x6B):
+            with self.subTest(vk=key):
+                frames = [(0, right, False, False), (30, right | {0x10}, False, False),
+                          (45, right | {0x10, key}, False, False), (60, right, False, False),
+                          (700, set(), False, False)]
+                self.assertEqual(self.run_poll(frames)[0], [("start", 0), ("cancel", 2)])
+
     def test_right_ctrl_tap_toggles_until_another_clean_tap(self):
         right = {voice.VK_RCONTROL, voice.VK_CONTROL}
         frames = [(0, right, False, False), (150, set(), False, False),
@@ -179,6 +206,11 @@ class PrivateDesktop(unittest.TestCase):
                 def __getattr__(self, name):
                     return getattr(user, name)
             key = voice.DesktopTalkKey(Api(), warning)
+            # RegisterHotKey is session-wide even on this private desktop. The
+            # running owner helper keeps Ctrl+D. Exercise Win32 ownership and
+            # collision handling on a separate chord without taking that key.
+            self.assertEqual(key.MODS, 0x4002)
+            key.MODS |= 0x0001 | 0x0004  # also require Alt and Shift in this probe
 
             class WindowClass(ctypes.Structure):
                 _fields_ = [("style", w.UINT), ("proc", ctypes.c_void_p),
@@ -225,7 +257,7 @@ class PrivateDesktop(unittest.TestCase):
                     # Deliver a message only to this test thread; never synthesize
                     # keystrokes or activate any physical desktop/window.
                     self.assertTrue(user.PostThreadMessageW(kernel.GetCurrentThreadId(), key.WM_HOTKEY,
-                                                            key.HOTKEY_ID, (voice.VK_D << 16) | 2))
+                                                            key.HOTKEY_ID, (voice.VK_D << 16) | (key.MODS & 0xff)))
                     self.assertTrue(key.poll())
                     self.assertFalse(key.poll())
                     user.SetActiveWindow(browser)

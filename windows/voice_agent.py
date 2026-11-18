@@ -36,6 +36,19 @@ else:
 
 VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_D = 0x11, 0xA2, 0xA3, ord("D")
 
+# GetAsyncKeyState also exposes device and IME signals (and both Ctrl aliases).
+# Only an ordinary shortcut key held together with Ctrl can cancel dictation.
+SHORTCUT_KEYS = (
+    0x08, 0x09, 0x0D, 0x1B, *range(0x20, 0x29), 0x2C, 0x2D, 0x2E,
+    *range(ord("0"), ord("9") + 1), *range(ord("A"), ord("Z") + 1),
+    *range(0x60, 0x70),  # numpad and arithmetic
+    *range(0x70, 0x7C),  # F1–F12
+    *range(0xBA, 0xC1), *range(0xDB, 0xE0), 0xE2,  # layout-specific punctuation
+)
+CTRL_D_OTHER_KEYS = tuple(key for key in SHORTCUT_KEYS if key != VK_D)
+# AltGr, Shift+Ctrl+D and Windows shortcuts must not start global Ctrl+D.
+EXTRA_MODIFIERS = (0x10, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA4, 0xA5)
+
 
 class DesktopTalkKey:
     """Own Ctrl+D on this worker's message queue while another app has focus."""
@@ -384,10 +397,6 @@ class Agent:
         desktop = getattr(self, "desktop_key", None)
         ctrl_d = block_right = desktop_capture = False
         previous = False
-        # VK_LBUTTON through VK_XBUTTON2 describe pointer input. A touchpad
-        # click or a mouse drag while talking must never end dictation.
-        right_others = [k for k in range(0x08, 255) if k not in (VK_RCONTROL, VK_CONTROL)]
-        chord_others = [k for k in right_others if k not in (VK_D, VK_LCONTROL)]
         def down(vk):
             return bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
         try:
@@ -404,14 +413,17 @@ class Agent:
                     # A fast tap can already be up by the time WM_HOTKEY is
                     # dequeued. Give the machine one down edge in that case.
                     held = press or (down(VK_D) and down(VK_CONTROL))
-                    others = chord_others
+                    others = CTRL_D_OTHER_KEYS
                     if not held:
                         ctrl_d = False
                         block_right = right
                 else:
                     held = right and not block_right
-                    others = right_others
-                other = (held or previous) and any(down(k) for k in others)
+                    others = SHORTCUT_KEYS
+                # Sample chords only during physical overlap. A key first seen
+                # on release belongs to the foreground app's next gesture.
+                shortcut = next((k for k in others if down(k)), None) if held else None
+                other = shortcut is not None or (held and not previous and any(down(k) for k in EXTRA_MODIFIERS))
                 if desktop_capture and desktop.hud and machine.state in ("hold", "toggle"):
                     # A desktop gesture cannot finish as dictation into the HUD.
                     self.finish_capture(cancel=True)
@@ -436,7 +448,10 @@ class Agent:
                             desktop_capture = False
                             self.finish_capture(cancel=action == "cancel")
                             if action == "cancel" and not (desktop is not None and desktop.hud and down(VK_D)):
-                                self.show(self.generation, "Keyboard shortcut pressed. Dictation canceled.", True)
+                                label = (f"Ctrl+{chr(shortcut)} shortcut" if shortcut is not None
+                                         and (ord("0") <= shortcut <= ord("9") or ord("A") <= shortcut <= ord("Z"))
+                                         else "Keyboard shortcut")
+                                self.show(self.generation, f"{label} pressed. Dictation canceled.", True)
                     except Exception:
                         machine.state = "wait" if held else "idle"
                         try:
