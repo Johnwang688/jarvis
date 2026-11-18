@@ -558,10 +558,12 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   when the current model offers no tiers; it is labelled not active on this model.
   Pinning for a speed keeps the effort the chat inherited from the default.
   `model: null` with a paid speed is a 400 (choose a model, or Standard).
-  A refused model switch never writes speed back, and its rollback never
-  leaves a tier effective that was not before it. If a refused switch leaves
-  the provider on a paid tier the thread no longer asks for, the message is
-  not sent; the next message retries the switch.
+  A refused model switch never restores or sets a tier: its rollback may only
+  clear one (a pin it makes for a default-following chat always clears speed),
+  and never leaves a tier effective that was not before it. If the provider
+  may still be on a paid tier the thread no longer asks for, a message or a
+  compaction is not sent and the session is closed (the next message resumes
+  it at the tier the record asks for), and a steer waits for the next turn.
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default

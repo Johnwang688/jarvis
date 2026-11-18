@@ -1334,23 +1334,35 @@ class Daemon:
                 session.announced = want
                 self._model_line(session.thread, want, "follows the default")
 
-    def _refuse_unasked_tier(self, session):
-        """Fail closed on cost: after `_apply_choice`, a provider still on a
-        paid tier the thread's record does not ask for (a refused switch
-        kept the old client) gets no message. The next message retries the
-        switch (review of #409, round 3)."""
+    def _tier_unasked(self, session) -> bool:
+        """Under or outside the lock: the provider may still run a paid tier
+        the thread's record no longer asks for. Uncertain counts as yes."""
         from . import thread_model
         if session.applied is None or session.applied_speed is None:
-            return
+            return False
         with self._lock:
             try:
                 asked = thread_model.effective_speed(session.thread, session.applied[0])
             except Exception:
-                asked = None
-        if asked != session.applied_speed:
-            raise DaemonError(f"this chat is still on the {session.applied_speed} tier, which it no "
-                              "longer asks for, and switching it back was refused; the message was "
-                              "not sent. Send again to retry.")
+                return True
+        return asked != session.applied_speed
+
+    def _refuse_unasked_tier(self, session):
+        """Fail closed on cost: a provider that may still be on a paid tier
+        the record no longer asks for (a refused switch kept the old client)
+        gets no message and no compaction. The session is ended, so the next
+        message resumes it fresh from the record, at the tier the record asks
+        for: never a retry loop on a client that keeps refusing (review of
+        #409, rounds 3 and 4)."""
+        if not self._tier_unasked(session):
+            return
+        tier = session.applied_speed
+        with self._lock:
+            session.lost = True
+            self._retire_drive(session)
+        raise DaemonError(f"this chat was still on the {tier} tier, which it no longer asks for; "
+                          "the message was not sent and the session was closed. Send again to "
+                          "resume it at the speed it asks for.")
 
     def _switch_ended_subagents(self, session):
         """After a model switch, refused or not: a child the provider no
@@ -1395,9 +1407,10 @@ class Daemon:
             rollback = (asked == want and
                         thread_model.effective_speed(thread, want[0]) == wanted_speed)
             if rollback:
-                # Speed fields are owner-only: a rollback never writes them
-                # back, and a rollback may never leave a paid tier effective
-                # that was not effective before it (review of #409, round 3).
+                # Speed fields are owner-only: a rollback never restores or
+                # sets a tier; it may only clear one, and it may never leave a
+                # paid tier effective that was not effective before it
+                # (review of #409, rounds 3 and 4).
                 try:
                     tier_before = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
                 except Exception:
@@ -1410,8 +1423,11 @@ class Daemon:
                     still = None
                 if still != applied:
                     # A default thread whose default moved on: pin it to what
-                    # it runs, or every message would retry the switch.
+                    # it runs, or every message would retry the switch. That
+                    # pin is not the owner's choice, so it never carries a
+                    # tier, now or after a later catalog refresh.
                     thread.model, thread.effort = applied
+                    thread.speed, thread.speed_model = None, None
                 try:
                     tier_after = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
                 except Exception:
@@ -1531,8 +1547,10 @@ class Daemon:
                     if speed:
                         if thread.model is None and effort is None:
                             # Pinning for a speed keeps what the chat ran:
-                            # the effort it inherited from the default too.
-                            effort = thread_model.effective(thread)[1]
+                            # the effort it inherited from the default too
+                            # (an explicit `effort: null` drops the override).
+                            probe = replace(thread, effort=None) if "effort" in body else thread
+                            effort = thread_model.effective(probe)[1]
                         model = current_model
             except thread_model.ChoiceRefused as exc:
                 raise APIError(400, str(exc)) from exc
@@ -1773,6 +1791,11 @@ class Daemon:
         waits instead, and a `steer_queued` record says so."""
         thread_id = session.thread.id
         steer = getattr(provider, "steer", None)
+        if self._tier_unasked(session):
+            # The running turn may be on a paid tier the owner has since
+            # turned off: the message waits for the next turn, whose start
+            # reconciles the tier (review of #409, round 4).
+            steer = None
         if not callable(steer):
             with self._lock:
                 waiting = self._queues.setdefault(thread_id, deque())
@@ -2864,6 +2887,7 @@ class Daemon:
                 self._desk_images(session, worker, turn_id, desk_slot)
                 source = session.provider.send(session.handle, message)
             elif compact:
+                self._refuse_unasked_tier(session)
                 source = session.provider.compact(session.handle)
             else:
                 source = session.provider.adopt(session.handle)

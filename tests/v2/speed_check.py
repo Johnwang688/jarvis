@@ -1,4 +1,5 @@
 """Free speed capability, choice and Claude SDK option checks. No CLI or network."""
+import inspect
 import json
 from pathlib import Path
 import tempfile
@@ -362,8 +363,12 @@ class LockedWrites(unittest.TestCase):
         # Round-3 review, HIGH 2: the owner's Standard stands; a rollback never
         # writes speed back, and the provider still on the paid tier gets no message.
         self.assertEqual((self.saved().speed, self.saved().speed_model), (None, None))
+        retired = []
+        self.daemon._retire_drive = retired.append
         with self.assertRaises(DaemonError):
             self.daemon._refuse_unasked_tier(session)
+        self.assertTrue(session.lost, "the session closes so the next message resumes from the record")
+        self.assertEqual(retired, [session])
 
     def _refusing_session(self, thread, applied, applied_speed):
         session = _Session(thread, Brief(Role.CHAT, "/tmp"), SimpleNamespace())
@@ -394,6 +399,61 @@ class LockedWrites(unittest.TestCase):
         self.assertIsNone(TM.effective_speed(saved, "gpt-a"))
         self.assertEqual((saved.speed, saved.speed_model), (None, None))
         self.daemon._refuse_unasked_tier(session)     # standard on both sides: sends
+
+    def test_rollback_pin_clears_speed_so_a_catalog_refresh_cannot_wake_it(self):
+        """Round-4 review, HIGH 1: the tier was unavailable at rollback, the
+        pin kept the pair, and a later catalog refresh made it effective."""
+        thread = self.saved()
+        thread.model, thread.effort = None, None
+        thread.speed, thread.speed_model = "ultrafast", "gpt-a"
+        self.stores.threads.save(thread)
+        tierless = {m: {**e, "speeds": ()} for m, e in router.CLI_MODELS["codex"].items()}
+        session = self._refusing_session(self.saved(), ("gpt-a", "high"), None)
+        with patch.dict(router.CLI_MODELS, {"codex": tierless}), \
+                patch.object(TM, "default_choice", return_value=("gpt-b", "high")):
+            self.daemon._apply_choice(session)
+        saved = self.saved()
+        self.assertEqual(saved.model, "gpt-a")
+        self.assertEqual((saved.speed, saved.speed_model), (None, None))
+        # The catalog offers the tier again: still nothing to wake.
+        self.assertIsNone(TM.effective_speed(saved, "gpt-a"))
+
+    def test_steer_onto_an_unasked_paid_tier_waits_for_the_next_turn(self):
+        """Round-4 review, HIGH 3: a steer reached a Fast client after the
+        owner saved Standard."""
+        self.write({"speed": None, "speed_model": "gpt-a"})
+        session = _Session(self.saved(), Brief(Role.CHAT, "/tmp"), SimpleNamespace())
+        session.applied, session.applied_speed = ("gpt-a", "high"), "ultrafast"
+        steered, queued = [], []
+        provider = SimpleNamespace(steer=lambda handle, message: steered.append(message))
+        self.daemon._queues = {}
+        self.daemon._enqueue = lambda session, waiting, message, data: queued.append(message) or message
+        self.daemon._queued_reply = lambda session, item: {"status": "queued"}
+        self.daemon._drain = lambda thread_id: None
+        session.worker = object()
+        self.daemon._log_user = lambda *a, **k: None
+        message = SimpleNamespace(text="more please", desk=False, origin="owner")
+        reply = self.daemon._steer(session, provider, object(), message, {})
+        self.assertEqual(steered, [], "nothing reaches the possibly-paid client")
+        self.assertEqual((reply, queued), ({"status": "queued"}, [message]))
+
+    def test_the_turn_guards_send_and_compaction(self):
+        """Round-4 review: removing the guard call from `_turn` survived the
+        unit tests, so its placement is pinned here."""
+        source = inspect.getsource(Daemon._turn)
+        send = source.index("source = session.provider.send(")
+        compact = source.index("source = session.provider.compact(")
+        guards = [i for i in range(len(source)) if source.startswith("self._refuse_unasked_tier(session)", i)]
+        self.assertTrue(any(i < send and i > source.index("self._apply_choice(session)") for i in guards))
+        self.assertTrue(any(send < i < compact for i in guards))
+
+    def test_explicit_effort_reset_is_honoured_when_pinning_for_speed(self):
+        thread = self.saved()
+        thread.model, thread.effort, thread.speed, thread.speed_model = None, "low", None, None
+        self.stores.threads.save(thread)
+        with patch.object(TM, "default_choice", return_value=("gpt-a", "high")):
+            self.write({"effort": None, "speed": "ultrafast", "speed_model": "gpt-a"})
+        self.assertEqual((self.saved().model, self.saved().effort), ("gpt-a", "high"))
 
     def test_speed_pick_on_a_default_chat_keeps_its_inherited_effort(self):
         """Round-3 review, MED: pinning for a speed kept effort null, so the
