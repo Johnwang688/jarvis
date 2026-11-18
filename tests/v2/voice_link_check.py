@@ -20,6 +20,7 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -201,6 +202,28 @@ class HudLaunch(Base):
                 for click_thread in clicks:
                     click_thread.join(timeout=5)
 
+    def test_systemd_launch_uses_wsl_interop_system_socket(self):
+        import socket
+        bridge = self.root / "bridge"
+        scripts = bridge / "venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "pythonw.exe").touch()
+        (bridge / "voice-link.key").touch()
+        endpoint = self.root / "interop"
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(endpoint))
+            def converted(args, **kwargs):
+                return SimpleNamespace(stdout=str(bridge) if args[1] == "-u" else "windows-path")
+            self.start()
+            with patch.dict(os.environ, {"WSL_INTEROP": ""}), \
+                 patch.object(voice_link, "WSL_INTEROP_SOCKET", endpoint), \
+                 patch("jarvis.voice_link_setup.windows_folder_closed", return_value=True), \
+                 patch("subprocess.run", side_effect=converted), \
+                 patch("subprocess.Popen") as spawn:
+                self.link._launch_windows_process()
+            self.assertEqual(spawn.call_args.kwargs["env"]["WSL_INTEROP"], str(endpoint))
+            self.assertEqual(spawn.call_args.args[0][2:4], ["127.0.0.1", str(self.link.port)])
+
     def test_early_process_exit_is_reported_and_can_be_retried(self):
         self.start()
         child = Mock()
@@ -211,6 +234,7 @@ class HudLaunch(Base):
                 self.assertEqual(status, 503)
                 self.assertIn("exited before connecting", body["error"])
             self.assertEqual(spawn.call_count, 2)
+            self.assertEqual(self.status(self.d.face_port)[1]["state"], "launch_failed")
 
 
 class DeskPath(Base):

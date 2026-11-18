@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -28,6 +29,9 @@ import unicodedata
 from jarvis import config
 from windows import voicewire as wire
 from . import remote_stt, dictation_guard, dictation_rules
+
+LOG = logging.getLogger(__name__)
+WSL_INTEROP_SOCKET = Path("/run/WSL/1_interop")
 
 HANDSHAKE_TIMEOUT_S = 5.0
 MAX_UNAUTHENTICATED = 4
@@ -128,6 +132,7 @@ class VoiceLink:
         self._launch_lock = threading.Lock()
         self._launched_agent = None
         self._launch_deadline = 0.0
+        self._launch_issue = ""
         self._agent_wake = None
         self._key = None
         self._cleanup_counts = {name: {"typed": 0, "scratched": 0} for name in CLEAN_PASSES}
@@ -142,6 +147,8 @@ class VoiceLink:
                     if time.monotonic() < self._launch_deadline:
                         return {"state": "starting", "detail": "Waiting for the Windows agent to connect…"}
                     return {"state": "connect_failed", "detail": "The Windows agent hasn’t connected. Check pairing and retry."}
+                if self._launch_issue:
+                    return {"state": "launch_failed", "detail": self._launch_issue}
                 return {"state": "off", "detail": "Start Voice Anywhere to use the wake word in other apps."}
             wake = self._agent_wake
             if wake is None:
@@ -157,22 +164,29 @@ class VoiceLink:
                     raise APIError(409, "Voice link is offline. Check voice-link setup and the daemon.")
                 if self._active is not None:
                     return
-            child = self._launched_agent
-            if child is None or child.poll() is not None:
-                child = self._launch_windows_process()
-                self._launched_agent = child
-            # A manual launcher connects through the same authenticated socket.
-            # Keep a slow-starting child so another click checks that process.
-            deadline = self._launch_deadline = time.monotonic() + 8
-            while True:
+            self._launch_issue = ""
+            try:
+                child = self._launched_agent
+                if child is None or child.poll() is not None:
+                    child = self._launch_windows_process()
+                    self._launched_agent = child
+                # A manual launcher can also connect through the same socket.
+                deadline = self._launch_deadline = time.monotonic() + 8
+                while True:
+                    with self._lock:
+                        if self._active is not None:
+                            return
+                    code = child.poll()
+                    if code is not None:
+                        LOG.warning("Voice Anywhere helper exited before connecting (status %s)", code)
+                        raise APIError(503, "The Windows voice agent exited before connecting. Try starting it again.")
+                    if time.monotonic() >= deadline:
+                        raise APIError(503, "The Windows voice agent hasn’t connected. Check pairing and retry.")
+                    time.sleep(0.1)
+            except APIError as exc:
                 with self._lock:
-                    if self._active is not None:
-                        return
-                if child.poll() is not None:
-                    raise APIError(503, "The Windows voice agent exited before connecting.")
-                if time.monotonic() >= deadline:
-                    raise APIError(503, "Voice agent opened but has not connected. Check its window and retry.")
-                time.sleep(0.1)
+                    self._launch_issue = str(exc)
+                raise
 
     def _launch_windows_process(self):
         from jarvis.voice_link_setup import windows_folder_closed
@@ -191,9 +205,17 @@ class VoiceLink:
             if not python.is_file() or not key.is_file():
                 raise APIError(409, "Voice agent setup is missing. Run jarvis voice-link setup.")
             script = convert("-w", config.REPO_ROOT / "windows" / "voice_agent.py")
+            env = os.environ.copy()
+            interop = env.get("WSL_INTEROP")
+            # The service manager does not inherit an interactive WSL shell.
+            # Use WSL's system interop socket when that shell socket is absent.
+            if not interop or not Path(interop).is_socket():
+                if not WSL_INTEROP_SOCKET.is_socket():
+                    raise APIError(503, "Windows launch is unavailable. Open WSL and retry.")
+                env["WSL_INTEROP"] = str(WSL_INTEROP_SOCKET)
             return subprocess.Popen(
                 [str(python), script, "127.0.0.1", str(self.port), convert("-w", key)],
-                cwd=bridge, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                cwd=bridge, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True)
         except (OSError, subprocess.SubprocessError):
             raise APIError(503, "Could not start the Windows voice agent. Check Windows interop.") from None
@@ -539,6 +561,7 @@ class VoiceLink:
                     return
                 old, self._active = self._active, conn
                 self._agent_wake = None
+                self._launch_issue = ""
                 self._pending -= 1
                 pending = False
                 if old:

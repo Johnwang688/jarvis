@@ -143,26 +143,42 @@ export function Orb(props: {
   const voiceStarting = props.voiceAgentStarting || voiceState === "starting";
   const voiceConnected = voiceState === "connected";
   const voiceUnavailable = voiceState === "unavailable";
-  const connectFailed = voiceState === "connect_failed";
+  const connectFailed = voiceState === "connect_failed" || voiceState === "launch_failed";
   const wakeError = voiceState === "microphone_unavailable" || voiceState === "recognizer_unavailable";
   const launchLabel = voiceReady ? "Voice Anywhere ready" : voiceStarting ? "Starting Voice Anywhere…" :
     voiceConnected ? "Voice Anywhere connected" : wakeError || voiceUnavailable ? "Voice Anywhere unavailable" :
     "Start Voice Anywhere";
-  const voiceDetail = props.voiceAgentError || props.voiceAgentStatus?.detail || launchLabel;
-  const launchButton = (
-    <button
-      type="button"
-      id="voice-agent-start"
-      className={props.compact ? "rail" : props.tight ? "beside" : undefined}
-      disabled={props.blocked || voiceStarting || voiceReady || voiceConnected || wakeError || voiceUnavailable}
-      data-ready={voiceReady || undefined}
-      title={voiceDetail}
-      aria-label={launchLabel}
-      onMouseDown={noPointerFocus}
-      onClick={props.onStartVoiceAgent}
-    >
-      {props.compact ? (voiceReady ? "✓" : voiceStarting ? "…" : "▶") : launchLabel}
-    </button>
+  const voiceDetail = voiceStarting && voiceState !== "starting" ? "Waiting for the Windows helper…" :
+    props.voiceAgentError || props.voiceAgentStatus?.detail || launchLabel;
+  const failed = !voiceStarting && (!!props.voiceAgentError || wakeError || voiceUnavailable || connectFailed);
+  const voiceLabel = failed ? "Needs attention" : voiceReady ? "Ready" : voiceStarting ? "Starting" :
+    voiceConnected ? "Connecting mic" : voiceState === "off" ? "Off" : "Checking";
+  const voiceTone = failed ? "error" : voiceReady ? "ready" :
+    voiceStarting || voiceConnected ? "working" : "idle";
+  const shortLabel = { error: "Error", ready: "Ready", working: "Wait", idle: voiceLabel }[voiceTone];
+  const voiceControl = (
+    <div className={`voice-agent-control${props.compact ? " rail" : props.tight ? " beside" : ""}`}>
+      <div className="voice-agent-header">
+        <button
+          type="button"
+          id="voice-agent-start"
+          className={props.compact ? "rail" : props.tight ? "beside" : undefined}
+          disabled={props.blocked || voiceStarting || voiceReady || voiceConnected || wakeError || voiceUnavailable}
+          title={voiceDetail}
+          aria-label={launchLabel}
+          onMouseDown={noPointerFocus}
+          onClick={props.onStartVoiceAgent}
+        >
+          {props.compact ? (voiceReady ? "✓" : voiceStarting ? "…" : "▶") :
+            voiceReady || voiceStarting || voiceConnected ? "Voice Anywhere" : launchLabel}
+        </button>
+        <span className="voice-agent-state" data-tone={voiceTone} role="status" title={voiceDetail}>
+          {props.compact ? shortLabel : voiceLabel}
+        </span>
+      </div>
+      <div id="voice-agent-result" className={failed ? "err" : undefined}
+        title={voiceDetail}>{!props.blocked && (failed || (!props.compact && (voiceStarting || voiceConnected || voiceReady))) ? voiceDetail : null}</div>
+    </div>
   );
   return (
     <>
@@ -189,7 +205,7 @@ export function Orb(props: {
           ))}
         </div>
         <div className="mic-tools">
-          {folded ? null : launchButton}
+          {folded ? null : voiceControl}
           <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
             <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
           </div>
@@ -228,12 +244,8 @@ export function Orb(props: {
       </div>
     </div>
     {props.compact ? (
-      <div id="voice-controls-rail">{props.speechRail}{launchButton}</div>
-    ) : props.tight ? launchButton : null}
-    <div id="voice-agent-result" className={props.voiceAgentError || wakeError || voiceUnavailable || connectFailed ? "err" : undefined}
-      data-compact={props.compact || undefined} role="status">
-      {!props.blocked && (props.voiceAgentError || wakeError || voiceUnavailable || connectFailed) ? voiceDetail : null}
-    </div>
+      <div id="voice-controls-rail">{props.speechRail}{voiceControl}</div>
+    ) : props.tight ? voiceControl : null}
     {folded ? (
       // The dock is scaled down to a 36px mini orb, and so would a strip inside
       // it be; a short window has no room above the orb for it. Either way the

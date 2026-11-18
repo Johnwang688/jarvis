@@ -78,7 +78,7 @@ const patch = (body: unknown): RequestInit => ({ ...json(body), method: "PATCH" 
 const put = (body: unknown): RequestInit => ({ ...json(body), method: "PUT" });
 
 export type VoiceAgentStatus = {
-  state: "off" | "starting" | "connect_failed" | "connected" | "ready" | "unavailable" | "microphone_unavailable" | "recognizer_unavailable";
+  state: "off" | "starting" | "connect_failed" | "launch_failed" | "connected" | "ready" | "unavailable" | "microphone_unavailable" | "recognizer_unavailable";
   detail: string;
 };
 

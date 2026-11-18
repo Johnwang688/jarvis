@@ -38,9 +38,12 @@ def main():
             button = page.get_by_role("button", name="Start Voice Anywhere")
             result = page.locator("#voice-agent-result")
             expect(page.locator("#micstrip #voice-agent-start")).to_be_visible()
+            indicator = page.locator(".voice-agent-state")
+            expect(indicator).to_have_text("Off")
 
             button.click()
             expect(page.get_by_role("button", name="Starting Voice Anywhere…")).to_be_disabled()
+            expect(indicator).to_have_text("Starting")
             until(lambda: len(pending) == 1)
             assert requests == [{}]
             pending.pop().fulfill(json={"connected": True})
@@ -48,6 +51,7 @@ def main():
             expect(page.get_by_role("button", name="Voice Anywhere connected")).to_be_disabled()
             status.update(state="ready", detail="Say Jarvis, then a command.")
             expect(page.get_by_role("button", name="Voice Anywhere ready")).to_be_disabled()
+            expect(indicator).to_have_text("Ready")
             page.evaluate("""() => {
                 const capture = window.__hud.capture;
                 const realWake = capture.onWake.bind(capture);
@@ -58,6 +62,7 @@ def main():
             assert page.evaluate("window.__wakeClaims") == 0
             status.update(state="microphone_unavailable", detail="The microphone is unavailable.")
             expect(result).to_have_text("The microphone is unavailable.")
+            expect(indicator).to_have_text("Needs attention")
             status.update(state="off", detail="Start Voice Anywhere")
             expect(button).to_be_enabled()
 
