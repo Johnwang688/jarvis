@@ -1334,6 +1334,24 @@ class Daemon:
                 session.announced = want
                 self._model_line(session.thread, want, "follows the default")
 
+    def _refuse_unasked_tier(self, session):
+        """Fail closed on cost: after `_apply_choice`, a provider still on a
+        paid tier the thread's record does not ask for (a refused switch
+        kept the old client) gets no message. The next message retries the
+        switch (review of #409, round 3)."""
+        from . import thread_model
+        if session.applied is None or session.applied_speed is None:
+            return
+        with self._lock:
+            try:
+                asked = thread_model.effective_speed(session.thread, session.applied[0])
+            except Exception:
+                asked = None
+        if asked != session.applied_speed:
+            raise DaemonError(f"this chat is still on the {session.applied_speed} tier, which it no "
+                              "longer asks for, and switching it back was refused; the message was "
+                              "not sent. Send again to retry.")
+
     def _switch_ended_subagents(self, session):
         """After a model switch, refused or not: a child the provider no
         longer runs (Claude switches by reconnecting, and the old CLI takes
@@ -1377,10 +1395,15 @@ class Daemon:
             rollback = (asked == want and
                         thread_model.effective_speed(thread, want[0]) == wanted_speed)
             if rollback:
+                # Speed fields are owner-only: a rollback never writes them
+                # back, and a rollback may never leave a paid tier effective
+                # that was not effective before it (review of #409, round 3).
+                try:
+                    tier_before = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
+                except Exception:
+                    tier_before = None
                 restored = session.applied_record or (None, None)
                 thread.model, thread.effort = restored
-                thread.speed = session.applied_record_speed
-                thread.speed_model = session.applied_record_speed_model
                 try:
                     still = thread_model.effective(thread)
                 except Exception:
@@ -1389,6 +1412,12 @@ class Daemon:
                     # A default thread whose default moved on: pin it to what
                     # it runs, or every message would retry the switch.
                     thread.model, thread.effort = applied
+                try:
+                    tier_after = thread_model.effective_speed(thread, thread_model.effective(thread)[0])
+                except Exception:
+                    tier_after = None
+                if tier_after is not None and tier_after != tier_before:
+                    thread.speed, thread.speed_model = None, None
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
                 session.announced = applied
@@ -1470,6 +1499,8 @@ class Daemon:
             if provider is not None and not hasattr(provider, "set_model"):
                 raise APIError(409, f"the {thread.provider.value} provider cannot change model mid-thread")
             if "speed" in body:
+                if "model" in body and body["model"] in (None, "") and body["speed"] not in (None, ""):
+                    raise APIError(400, "a paid speed needs a pinned model; choose a model, or Standard")
                 current_model = thread_model.effective(thread)[0]
                 if (body.get("speed_model") != current_model or current_model is None
                         or ("model" in body and
@@ -1485,11 +1516,7 @@ class Daemon:
                 effort = body.get("effort", thread.effort)
             try:
                 if "model" in body or "effort" in body:
-                    if "speed" in body and model in (None, ""):
-                        _, effort = thread_model.check(thread.provider, current_model, effort, current=thread.model)
-                        model = None
-                    else:
-                        model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+                    model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
                 speed, speed_model = thread.speed, thread.speed_model
                 if "model" in body:
                     if model is None:
@@ -1502,6 +1529,10 @@ class Daemon:
                     speed = thread_model.check_speed(thread.provider, current_model, body["speed"])
                     speed_model = current_model if speed else None
                     if speed:
+                        if thread.model is None and effort is None:
+                            # Pinning for a speed keeps what the chat ran:
+                            # the effort it inherited from the default too.
+                            effort = thread_model.effective(thread)[1]
                         model = current_model
             except thread_model.ChoiceRefused as exc:
                 raise APIError(400, str(exc)) from exc
@@ -2829,6 +2860,7 @@ class Daemon:
                 return
             if message is not None:
                 self._apply_choice(session)
+                self._refuse_unasked_tier(session)
                 self._desk_images(session, worker, turn_id, desk_slot)
                 source = session.provider.send(session.handle, message)
             elif compact:

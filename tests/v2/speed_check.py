@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from jarvis import config
-from jarvis.v2.daemon import APIError, Daemon, _Session
+from jarvis.v2.daemon import APIError, Daemon, DaemonError, _Session
 from jarvis.v2.stores import Stores
 from jarvis.v2 import claude_catalog as C, codex_catalog as X, router, thread_model as TM
 from jarvis.v2.model import ProviderName as P, Role, Thread, from_json, to_json
@@ -355,9 +355,64 @@ class LockedWrites(unittest.TestCase):
         def fail_reconnect(*args, **kwargs):
             raise ValueError("failed; provider restored the previous Fast client")
         session.provider.set_model = fail_reconnect
+        self.daemon._system_line = lambda *a, **k: None
+        self.daemon._switch_ended_subagents = lambda session: None
         self.daemon._apply_choice(session)
         self.assertEqual(session.applied_speed, "ultrafast")
-        self.assertEqual((self.saved().speed, self.saved().speed_model), ("ultrafast", "gpt-a"))
+        # Round-3 review, HIGH 2: the owner's Standard stands; a rollback never
+        # writes speed back, and the provider still on the paid tier gets no message.
+        self.assertEqual((self.saved().speed, self.saved().speed_model), (None, None))
+        with self.assertRaises(DaemonError):
+            self.daemon._refuse_unasked_tier(session)
+
+    def _refusing_session(self, thread, applied, applied_speed):
+        session = _Session(thread, Brief(Role.CHAT, "/tmp"), SimpleNamespace())
+        session.applied = session.announced = applied
+        session.applied_speed = applied_speed
+        session.applied_record = (thread.model, thread.effort)
+        session.applied_record_speed, session.applied_record_speed_model = thread.speed, thread.speed_model
+        def refuse(*args, **kwargs):
+            raise ValueError("refused")
+        session.provider.set_model = refuse
+        self.daemon._sessions[thread.id] = session
+        self.daemon._system_line = lambda *a, **k: None
+        self.daemon._switch_ended_subagents = lambda session: None
+        return session
+
+    def test_rollback_pin_never_activates_a_dormant_legacy_tier(self):
+        """Round-3 review, HIGH 1: a non-owner default change refused by the
+        provider made rollback pin the bound model and wake the tier."""
+        thread = self.saved()
+        thread.model, thread.effort = None, None
+        thread.speed, thread.speed_model = "ultrafast", "gpt-a"      # legacy, dormant
+        self.stores.threads.save(thread)
+        session = self._refusing_session(self.saved(), ("gpt-a", "high"), None)
+        with patch.object(TM, "default_choice", return_value=("gpt-b", "high")):
+            self.daemon._apply_choice(session)
+        saved = self.saved()
+        self.assertEqual(saved.model, "gpt-a", "rollback still pins what the provider runs")
+        self.assertIsNone(TM.effective_speed(saved, "gpt-a"))
+        self.assertEqual((saved.speed, saved.speed_model), (None, None))
+        self.daemon._refuse_unasked_tier(session)     # standard on both sides: sends
+
+    def test_speed_pick_on_a_default_chat_keeps_its_inherited_effort(self):
+        """Round-3 review, MED: pinning for a speed kept effort null, so the
+        next turn ran at the model's default instead of the inherited one."""
+        thread = self.saved()
+        thread.model, thread.effort, thread.speed, thread.speed_model = None, None, None, None
+        self.stores.threads.save(thread)
+        with patch.object(TM, "default_choice", return_value=("gpt-a", "low")):
+            self.write({"speed": "ultrafast", "speed_model": "gpt-a"})
+        self.assertEqual((self.saved().model, self.saved().effort), ("gpt-a", "low"))
+
+    def test_unpin_with_a_paid_speed_is_refused_and_standard_unpin_checks_the_new_default(self):
+        with self.assertRaises(APIError) as error:
+            self.write({"model": None, "speed": "ultrafast", "speed_model": "gpt-a"})
+        self.assertEqual(error.exception.status, 400)
+        self.assertEqual((self.saved().model, self.saved().speed), ("gpt-a", "ultrafast"))
+        with patch.object(TM, "default_choice", return_value=("gpt-b", "high")):
+            self.write({"model": None, "speed": None, "speed_model": "gpt-a"})
+        self.assertEqual((self.saved().model, self.saved().speed, self.saved().speed_model), (None, None, None))
 
 
 if __name__ == "__main__":

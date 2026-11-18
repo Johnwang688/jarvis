@@ -556,6 +556,12 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   activate it on a default-following thread or move a pinned thread.
   A saved dormant speed remains clearable through the enabled HUD chip even
   when the current model offers no tiers; it is labelled not active on this model.
+  Pinning for a speed keeps the effort the chat inherited from the default.
+  `model: null` with a paid speed is a 400 (choose a model, or Standard).
+  A refused model switch never writes speed back, and its rollback never
+  leaves a tier effective that was not before it. If a refused switch leaves
+  the provider on a paid tier the thread no longer asks for, the message is
+  not sent; the next message retries the switch.
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default

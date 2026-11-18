@@ -66,6 +66,23 @@ def main():
         ("model write binds an unbound legacy tier", daemon.Daemon, "set_thread_model", daemon,
          'elif speed_model is not None and speed in', 'elif speed in',
          speed_check.LockedWrites("test_owner_model_write_does_not_bind_legacy_speed")),
+        ("rollback pin may wake a tier (guard removed)", daemon.Daemon, "_switch_refused", daemon,
+         'if tier_after is not None and tier_after != tier_before:', 'if False:',
+         speed_check.LockedWrites("test_rollback_pin_never_activates_a_dormant_legacy_tier")),
+        ("rollback writes the speed snapshot back", daemon.Daemon, "_switch_refused", daemon,
+         ('restored = session.applied_record or (None, None)\n',
+          'if tier_after is not None and tier_after != tier_before:'),
+         ('restored = session.applied_record or (None, None)\n'
+          '            thread.speed = session.applied_record_speed\n'
+          '            thread.speed_model = session.applied_record_speed_model\n',
+          'if False:'),
+         speed_check.LockedWrites("test_reconnect_rollback_uses_the_snapshot_applied_to_provider")),
+        ("an unasked paid tier is still sent", daemon.Daemon, "_refuse_unasked_tier", daemon,
+         'if asked != session.applied_speed:', 'if False:',
+         speed_check.LockedWrites("test_reconnect_rollback_uses_the_snapshot_applied_to_provider")),
+        ("speed pin drops the inherited effort", daemon.Daemon, "set_thread_model", daemon,
+         'if thread.model is None and effort is None:', 'if False:',
+         speed_check.LockedWrites("test_speed_pick_on_a_default_chat_keeps_its_inherited_effort")),
     ]
     killed = 0
     for name, target, attr, module, old, new, test in mutants:
