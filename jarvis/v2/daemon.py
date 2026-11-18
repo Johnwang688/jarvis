@@ -1356,6 +1356,11 @@ class Daemon:
         #409, rounds 3 and 4)."""
         if not self._tier_unasked(session):
             return
+        self._close_for_unasked_tier(session, what)
+
+    def _close_for_unasked_tier(self, session, what):
+        """The refusal itself, for a caller that has already decided (one
+        decision for the interrupt and the close, never two that can differ)."""
         tier = session.applied_speed
         with self._lock:
             session.lost = True
@@ -2902,7 +2907,7 @@ class Daemon:
                         session.provider.interrupt(session.handle)
                     except Exception:  # noqa: BLE001 — closing the session stops it anyway
                         LOG.warning("Cannot interrupt the self-started turn of %s", session.thread.id)
-                    self._refuse_unasked_tier(session, "the turn Claude started by itself was stopped")
+                    self._close_for_unasked_tier(session, "the turn Claude started by itself was stopped")
                 source = session.provider.adopt(session.handle)
             cancel_forwarded = False
             # Closed the moment the loop ends (a break, a raise), never left

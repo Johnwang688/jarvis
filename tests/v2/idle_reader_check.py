@@ -978,8 +978,11 @@ class DaemonClaude(Daemonised):
                  what="the self-started turn to be stopped and the session closed")
         self.assertGreaterEqual(fast_client.interrupts, 1, "the CLI's own turn is interrupted")
         self.assertFalse([r for r in self.log(chat) if r.get("kind") == "turn_finished"
-                          and r.get("self_started") and (r.get("data") or {}).get("status") == "ok"],
+                          and r.get("self_started") and (r.get("data") or {}).get("stop") == "end"],
                          "no self-started turn completes on the unasked tier")
+        self.assertTrue([r for r in self.log(chat) if r.get("kind") == "turn_finished"
+                         and r.get("self_started") and (r.get("data") or {}).get("stop") == "error"],
+                        "the self-started turn ends as an error")
         self.assertTrue(any("started by itself was stopped" in _json.dumps(r) for r in self.log(chat)),
                         "the chat says why")
         # The owner's next message resumes the conversation, at Standard.
