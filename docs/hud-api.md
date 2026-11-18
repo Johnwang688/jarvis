@@ -564,6 +564,14 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   may still be on a paid tier the thread no longer asks for, a message or a
   compaction is not sent and the session is closed (the next message resumes
   it at the tier the record asks for), and a steer waits for the next turn.
+  The boundary, like a model change's, is the turn: a speed change applies
+  from the next turn. A turn already running finishes on the tier it
+  started with, including the provider's own recovery inside it (Claude's
+  overflow `/compact` and resend). Steers, the owner's or a peer chat's
+  reply, are not added to such a turn once the owner has turned its tier
+  off: they wait for the next turn. A provider that fell back to Standard
+  after a refused switch is still treated as possibly paid, so that one
+  message is refused and the session reopens at Standard (fail closed).
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default

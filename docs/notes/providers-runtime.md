@@ -1734,3 +1734,13 @@ incompatible bound pair, and leave unbound legacy tiers dormant. Choosing
 `model: null` clears both speed fields. Default and route writes never touch
 speed, cannot activate unpinned tiers, and cannot move pins. Speed changes
 billing and latency only, never permissions.
+
+The boundary is the turn, as for a model change: a speed change applies from
+the next turn, and a running turn finishes on the tier it started with
+(Claude's in-turn overflow recovery included). A refused switch's rollback
+may only clear a tier (its pin of a default-following chat always does) and
+never makes one effective. If the provider may still be on a paid tier the
+record no longer asks for, a new turn or compaction is refused and the
+session closed (the next message resumes at the recorded tier), and steers,
+the owner's or a peer chat's reply, wait for the next turn
+(`Daemon._tier_unasked`, `_refuse_unasked_tier`, `_steer`, `ChatRelay._hand_over`).

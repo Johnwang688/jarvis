@@ -1148,6 +1148,27 @@ class Replies(Harness):
                 self.assertEqual(self.item(mid).delivery, "turn")
                 self.assertEqual(len([m for m in self.reply_turns(sender) if answer in m.text]), 1)
 
+    def test_a_reply_never_steers_into_an_unasked_paid_tier(self):
+        """Review of #409, round 5: a peer reply reached a Fast client after the
+        owner saved Standard. Like the owner's own steer, it waits instead."""
+        sender, target = self.chat(), self.chat()
+        answer = mark("PAID-TIER")
+        self.fake(target).reply[target.id] = answer
+        self.turn(sender)
+        session = self.session(sender)
+        unasked = lambda s: s.thread.id == sender.id
+        with patch.object(self.d, "_tier_unasked", side_effect=unasked):
+            mid = self.sent(self.send(sender, target, "q"))
+            self.idle(target)
+            until(lambda: [i.message_id for i in self.svc.held.get(sender.id, ())] == [mid],
+                  "the reply to wait in held")
+            self.assertEqual(self.reply_steers(sender), [], "nothing steered into the paid turn")
+            self.assertIsNone(self.item(mid).delivery)
+        self.release(sender)
+        until(lambda: self.reply_turns(sender), "the held reply's own turn")
+        self.idle(sender)
+        self.assertEqual(self.item(mid).delivery, "turn")
+
     def test_an_unconfirmed_steer_counts_as_delivered(self):
         sender, target = self.chat(), self.chat(CODEX)
         answer = mark("UNCONFIRMED")
