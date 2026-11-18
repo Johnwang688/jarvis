@@ -67,6 +67,7 @@ class RpcProcess:
         self.cwd = cwd
         self.env = None if env is None else dict(env)
         self.stop = stop
+        self.refresh_chat_login = None
         self.process: subprocess.Popen | None = None
         self._ids = itertools.count()
         self._incoming: queue.Queue[dict | RpcError] = queue.Queue(config.CODEX_RPC_QUEUE_LIMIT)
@@ -232,6 +233,15 @@ class RpcProcess:
                 continue
             if isinstance(message, RpcError):
                 raise message
+            if (self.refresh_chat_login is not None and "id" in message
+                    and message.get("method") == "account/chatgptAuthTokens/refresh"):
+                try:
+                    grant = self.refresh_chat_login(message.get("params"))
+                except Exception:
+                    self.reply(message["id"], error={"code": -32000, "message": "ChatGPT login refresh failed"})
+                    raise RpcError("Codex ChatGPT login refresh failed") from None
+                self.reply(message["id"], grant)
+                continue
             return message
 
     def next_message(

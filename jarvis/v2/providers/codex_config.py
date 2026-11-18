@@ -1,6 +1,8 @@
 """Private native-tool config; preparation adapted from the trading firm."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -141,8 +143,25 @@ def chat_worktrees_dir() -> Path:
         raise BriefRefused("Unsafe Codex chat worktrees directory") from exc
 
 
+_startup_roots: ContextVar[tuple[Brief, tuple[str, ...]] | None] = ContextVar(
+    "codex_startup_git_roots", default=None)
+
+
+@contextmanager
+def startup_git_roots(brief: Brief):
+    """Share the result of the full Git metadata validation for one startup."""
+    token = _startup_roots.set((brief, tuple(git_roots(brief))))
+    try:
+        yield
+    finally:
+        _startup_roots.reset(token)
+
+
 def git_roots(brief: Brief) -> list[str]:
     """Chats alone may write verified git metadata and their worktree root."""
+    cached = _startup_roots.get()
+    if cached is not None and cached[0] is brief:
+        return list(cached[1])
     if brief.role != Role.CHAT or brief.task_id is not None:
         return []
     root = chat_worktrees_dir()
@@ -887,7 +906,7 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
             _WRITTEN[Path(home).resolve()] = dict(table)
             _NOTES[Path(home).resolve()] = notes
     values = dict(model_provider="openai", forced_login_method="chatgpt",
-                  cli_auth_credentials_store="file", default_permissions=PROFILE,
+                  cli_auth_credentials_store="ephemeral", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
                   web_search="live", check_for_update_on_startup=False)
     if brief.model is not None:
@@ -1166,9 +1185,11 @@ def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
     if link.is_symlink():
         if link.resolve() != auth.resolve():
             raise BriefRefused("Codex auth link points to a different login")
+        if sandbox:
+            link.unlink()  # Migrate a managed-login home to external access tokens.
     elif link.exists():
         raise BriefRefused("Codex private auth must link to the owner's login")
-    else:
+    elif not sandbox:
         link.symlink_to(auth.resolve())
     # Preserve installed skills without importing personal config or plugins.
     link_skills = skills
@@ -1191,6 +1212,8 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
     PATH lookup that could land on the Windows shim.
     """
     validate(brief)
+    if thread_id in {"_login", "_metadata", "_titles"}:
+        raise BriefRefused("Reserved Codex private thread directory id")
     roots = git_roots(brief)
     if roots:
         root = Path(roots[-1])
@@ -1214,6 +1237,11 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
         finally:
             os.close(fd)
     return _prepare_home(thread_id, lambda home: config_text(brief, home), binary, sandbox=True)
+
+
+def prepare_login(binary: str):
+    """A managed credential peer with no skills or project configuration."""
+    return _prepare_home("_login", metadata_config_text(), binary, skills=False)
 
 
 def prepare_metadata(binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:

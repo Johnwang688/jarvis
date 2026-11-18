@@ -1263,7 +1263,11 @@ class Lifecycle(Base):
         auth.mkdir()
         (auth / "auth.json").write_text("FAKE AUTH")
         target = self.root / "codex-env.json"
+        work = self.root / "codex-project"
+        work.mkdir()
         def rpc(argv, **kwargs):
+            if Path(kwargs["cwd"]).name == "_login":
+                return brain.rpc(argv, **kwargs)
             fake = FakeRpc(brain, argv, **kwargs)
             fake.argv = [sys.executable, "-B", "-u", str(Path(__file__).resolve()), "--codex-peer",
                          *fake.argv[5:], str(target)]
@@ -1273,7 +1277,7 @@ class Lifecycle(Base):
              patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fixture")):
             provider = codex.CodexProvider()
             handle = provider.start(Thread("envcodex", "p", Role.IMPLEMENTER, PN.CODEX),
-                                    Brief(Role.IMPLEMENTER, str(self.root), origin_tag=self.tag), lambda *_: Decision.DENY)
+                                    Brief(Role.IMPLEMENTER, str(work), origin_tag=self.tag), lambda *_: Decision.DENY)
             try:
                 self.assertEqual(brain.rpcs[0].env["JARVIS_ORIGIN_TAG"], self.tag)
                 self.assertEqual(json.loads(target.read_text())["tag"], self.tag)

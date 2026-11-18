@@ -1330,7 +1330,7 @@ class CodexProviderChecks(unittest.TestCase):
         with self.assertRaises(BriefRefused):
             self.start(thread_id="mcpcx009")
         path = config.V2_DATA_DIR / "codex" / "mcpcx009" / "config.toml"
-        self.assertTrue(self.brain.calls("account/read"), "it got as far as the app-server")
+        self.assertTrue(self.brain.calls("config/read"), "it got as far as the app-server")
         if path.exists():
             text = path.read_text()
             self.assertNotIn(PLACEHOLDER, text)
