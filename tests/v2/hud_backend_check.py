@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 from datetime import datetime, timezone
 import http.client
 import inspect
@@ -215,12 +216,14 @@ class Backend(unittest.TestCase):
         self.addCleanup(routing.stop)
         # A HUD read saves the Codex catalog it got: never over the owner's
         # file, and never leaking one test's catalog into the next.
-        saved_catalog = patch.object(config, "CODEX_CATALOG_PATH", self.root / "codex-models.json")
-        saved_catalog.start()
-        self.addCleanup(saved_catalog.stop)
-        from jarvis.v2 import router as _router
-        codex_table = _router.CLI_MODELS["codex"]
-        self.addCleanup(lambda: _router.CLI_MODELS.__setitem__("codex", codex_table))
+        for provider in ("codex", "claude"):
+            saved_catalog = patch.object(config, f"{provider.upper()}_CATALOG_PATH",
+                                         self.root / f"{provider}-models.json")
+            saved_catalog.start()
+            self.addCleanup(saved_catalog.stop)
+            from jarvis.v2 import router as _router
+            table = _router.CLI_MODELS[provider]
+            self.addCleanup(lambda p=provider, t=table: _router.CLI_MODELS.__setitem__(p, t))
         always = patch.object(config, "V2_ALWAYS_ASK", self.root / "always-ask.json")
         always.start()
         self.addCleanup(always.stop)
@@ -1046,6 +1049,71 @@ class Backend(unittest.TestCase):
     def refreshed(self):
         """Wait for the background refresh the last read started."""
         self.assertTrue(self.daemon.router.ledger.wait_codex_refresh(5), "refresh still running")
+
+    def test_session_capture_publishes_once_and_hud_reads_do_not_refresh(self):
+        from jarvis.v2 import router
+        from jarvis.v2.providers import claude
+        rows = [{"value": "claude-session-catalog", "displayName": "Session catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        generation = self.daemon._claude_catalog_generation = router.claude_catalog_begin()
+        self.addCleanup(router.claude_catalog_end, generation)
+
+        class Client:
+            async def connect(self):
+                pass
+
+            async def get_server_info(self):
+                return {"models": rows}
+
+        for _ in range(2):
+            asyncio.run(claude._connect_session(Client()))
+            with router._CLAUDE_QUEUE_LOCK:
+                self.assertTrue(router._CLAUDE_QUEUE_LOCK.wait_for(
+                    lambda: router._claude_pending is None and not router._claude_busy, 5))
+        self.request("GET", "/thread-models")
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "claude_metadata"],
+                         [{"kind": "claude_metadata", "data": {"provider": "claude"}}])
+
+    def test_claude_shutdown_during_save_and_new_daemon_generation(self):
+        from jarvis.v2 import router, claude_catalog
+        entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+        rows = [{"value": "claude-shutdown-catalog"}]
+        # Only `main()` switches capture on; this test daemon stands in for it.
+        self.daemon._claude_catalog_generation = router.claude_catalog_begin()
+        saves = []
+        def save(table):
+            saves.append(table)
+            entered.set()
+            release.wait(5)
+        def stop():
+            try:
+                self.daemon.stop()
+            finally:
+                stopped.set()
+        with patch.object(claude_catalog, "save", side_effect=save):
+            try:
+                router.offer_claude_rows(rows)
+                self.assertTrue(entered.wait(2))
+                router.offer_claude_rows([{"value": "claude-ended-pending"}])
+                worker = threading.Thread(target=stop, daemon=True)
+                worker.start()
+                self.assertTrue(stopped.wait(1), "shutdown must not wait for catalog save")
+                other = Daemon(self.stores, self.providers, lambda *_: lambda *_: Decision.DENY, 0)
+                self.addCleanup(other.stop)
+                # An embedded daemon captures nothing; a new generation never
+                # revives the ended one.
+                self.assertIsNone(other._claude_catalog_generation)
+                fresh = router.claude_catalog_begin()
+                self.addCleanup(router.claude_catalog_end, fresh)
+                self.assertNotEqual(fresh, self.daemon._claude_catalog_generation)
+            finally:
+                release.set()
+                with router._CLAUDE_QUEUE_LOCK:
+                    self.assertTrue(router._CLAUDE_QUEUE_LOCK.wait_for(
+                        lambda: router._claude_pending is None and not router._claude_busy, 5))
+            worker.join(1)
+        self.assertEqual(saves, [claude_catalog.parse(rows)])
+        self.assertEqual(router.CLI_MODELS["claude"], claude_catalog.parse(rows))
 
     def test_codex_metadata_refreshes_in_the_background_and_fills_both_halves(self):
         from jarvis.v2 import router

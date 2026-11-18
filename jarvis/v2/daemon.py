@@ -640,6 +640,13 @@ class Daemon:
         from .router import Router
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
+        # Capture of Claude Code's model list is switched on by `main()` only
+        # (`claude_catalog_begin`), so an embedded or test daemon never
+        # writes the owner's catalog cache. The listener is harmless without it.
+        from .router import add_claude_catalog_listener
+        self._claude_catalog_generation = None
+        self._remove_claude_catalog_listener = add_claude_catalog_listener(lambda: self.bus.publish(
+            {"kind": "claude_metadata", "data": {"provider": "claude"}}))
         self.schedules = Schedules(self)
         # Where a permanent delete goes (decisions B2). Only Jarvis's own
         # entries in it are ever purged: `owned` is this daemon's data root.
@@ -3213,6 +3220,7 @@ class Daemon:
         return len(released)
 
     def stop(self):
+        self._end_claude_catalog()
         voice_link = getattr(self, "voice_link", None)
         if voice_link is not None:
             voice_link.stop()
@@ -3323,6 +3331,15 @@ class Daemon:
             LOG.exception("phone: the last save of an unsaved revocation failed")
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
+
+    def _end_claude_catalog(self) -> None:
+        """End this generation immediately, including while a cache save blocks."""
+        from .router import claude_catalog_end
+        claude_catalog_end(getattr(self, "_claude_catalog_generation", None))
+        remove = getattr(self, "_remove_claude_catalog_listener", None)
+        if remove is not None:
+            remove()
+            self._remove_claude_catalog_listener = None
 
     def _stop_codex_metadata(self, deadline: float) -> None:
         """Shutdown for the background Codex models/quota refresh (PR #20
@@ -4074,6 +4091,23 @@ def load_codex_catalog_at_start() -> bool:
     return bool(loaded)
 
 
+def load_claude_catalog_at_start() -> bool:
+    """Install the saved Claude catalog, or keep the built-in table. Nothing
+    about that file may stop the daemon from starting (PR #20 re-review):
+    under systemd a crash here is a crash loop, so every failure — a
+    MemoryError included — is one log line and the fallback."""
+    from .router import load_claude_catalog
+    try:
+        loaded = load_claude_catalog()
+    except Exception as exc:
+        LOG.warning("Claude model catalog not loaded (%s); using the built-in table",
+                    type(exc).__name__)
+        return False
+    if loaded:
+        LOG.info("Claude model catalog loaded from %s", config.CLAUDE_CATALOG_PATH)
+    return bool(loaded)
+
+
 def _log_hud_served() -> None:
     """Say at start-up which HUD is served, and warn when it is not today's
     (review of PR #44, L6): dev mode, nothing installed or intact, or a
@@ -4118,12 +4152,15 @@ def main() -> int:
     from .runner import TaskRunner
 
     configure_logging()
-    # The Codex models the account offered last time, before anything reads
+    # The native models the account offered last time, before anything reads
     # routing (PR #20 review): a restart, or a Discord-only daemon no HUD ever
     # reads, routes and offers against them rather than the built-in fallback.
     # Missing or corrupt leaves the fallback. Here and not in `Daemon.start`,
     # so no embedded or test daemon reads the owner's file.
     load_codex_catalog_at_start()
+    load_claude_catalog_at_start()
+    from .router import claude_catalog_begin
+    claude_generation = claude_catalog_begin()
 
     remote = discord_connected()
     approvals = None
@@ -4139,6 +4176,7 @@ def main() -> int:
                 holder["daemon"]._approval_resolved(request, decision, resolution))
     daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals,
                     dev_proc_root="/proc", dev_cgroup_root="/sys/fs/cgroup")
+    daemon._claude_catalog_generation = claude_generation   # ended at shutdown
     if approvals is not None:
         holder["daemon"] = daemon
     # The owner's Browser switches (`browser.json`): here, not in the

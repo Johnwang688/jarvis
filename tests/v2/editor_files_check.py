@@ -206,6 +206,7 @@ class World(unittest.TestCase):
                                 MODELS_PATH=cj / "models.json", PROVIDER_DEFAULTS_PATH=cj / "provider_defaults.json",
                                 DISCORD_GUILD_PATH=cj / "discord_guild.json", ROUTING_PATH=cj / "routing.json",
                                 CODEX_CATALOG_PATH=cj / "codex-models.json", REPO_ROOT=self.repo,
+                                CLAUDE_CATALOG_PATH=cj / "claude-models.json",
                                 HUD_DIST=self.repo / "hud" / "dist", V2_ALWAYS_ASK=self.root / "always.json",
                                 DISCORD_TOKEN_PATH=cj / "discord_token.json").items():
             guard = patch.object(config, name, value)

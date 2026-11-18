@@ -44,7 +44,8 @@ class Fixture(unittest.TestCase):
         self.providers = {p.value: Fake() for p in P}
         self.router = R.Router(self.stores, self.providers, self.ledger, clock=lambda: self.now, health_cache=self.cache)
         for target, value in [("ROUTING_PATH", Path(self.tmp.name) / "routing.json"),
-                              ("CODEX_CATALOG_PATH", Path(self.tmp.name) / "codex-models.json")]:
+                              ("CODEX_CATALOG_PATH", Path(self.tmp.name) / "codex-models.json"),
+                              ("CLAUDE_CATALOG_PATH", Path(self.tmp.name) / "claude-models.json")]:
             patcher = patch.object(config, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)

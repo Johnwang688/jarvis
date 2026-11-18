@@ -227,6 +227,24 @@ lacks (it still runs — there is nothing to fall back to). Tests point
 
 <!-- claude-source:000646-000778:end -->
 
+Claude's model list comes from Claude Code's SDK server info at every session
+connect or reconnect. There is no background reader. Session capture validates
+rows before offering the newest usable table to one daemon worker, which swaps,
+saves and notifies open HUDs in order. Only the owner's real daemon
+(`daemon.main`) switches capture on, so an embedded or test daemon never
+writes the cache. A session reads the capture generation before it connects,
+so a connect that outlives its daemon is dropped; offers keep arrival order.
+Shutdown ends the daemon's generation without waiting for an install; a cache
+write already in progress may finish. A failed save still tells the HUD.
+The last good list replaces the table whole and
+is saved atomically to `config.CLAUDE_CATALOG_PATH` (`JARVIS_CLAUDE_CATALOG`,
+default `~/.local/share/jarvis/claude-models.json`), then reloaded at daemon
+startup. Missing or unusable cache data leaves `CLAUDE_FALLBACK`, including
+Fable 5.2. Saved model choices degrade without being rewritten. This cache
+file is protected permission state, with the same agent-write refusal and
+capped, no-follow reader as the Codex catalog.
+
+
 ## Original CLAUDE.md lines 939–997
 
 <!-- claude-source:000939-000997:begin -->

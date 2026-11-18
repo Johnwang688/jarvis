@@ -335,6 +335,7 @@ def _protected_state_paths() -> set[Path]:
     # they resolve to on disk is never kept (`_resolve_all`).
     key = (str(config.ALLOWLIST_PATH), str(config.MODELS_PATH), str(config.PROVIDER_DEFAULTS_PATH),
            str(config.DISCORD_GUILD_PATH), str(config.ROUTING_PATH), str(config.CODEX_CATALOG_PATH),
+           str(config.CLAUDE_CATALOG_PATH),
            str(config.VEX_PATH), str(config.BROWSER_SETTINGS_PATH), str(config.STT_SETTINGS_PATH),
            str(config.SPEAKER_DIR), str(config.V2_DATA_DIR), os.environ.get("HOME", ""),
            RECORD_TREES, RECORD_FILES)
@@ -346,7 +347,8 @@ def _protected_state_paths() -> set[Path]:
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
              config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
-             config.CODEX_CATALOG_PATH.expanduser(), config.VEX_PATH.expanduser(),
+             config.CODEX_CATALOG_PATH.expanduser(), config.CLAUDE_CATALOG_PATH.expanduser(),
+             config.VEX_PATH.expanduser(),
              config.BROWSER_SETTINGS_PATH.expanduser(), config.STT_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     # The speaker store's two files that switch the voice check off (V12, V-12b,

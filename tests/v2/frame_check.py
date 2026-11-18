@@ -153,6 +153,7 @@ class Base(unittest.TestCase):
                                 PROVIDER_DEFAULTS_PATH=self.root / "provider_defaults.json",
                                 ROUTING_PATH=self.root / "routing.json",
                                 CODEX_CATALOG_PATH=self.root / "codex-models.json",
+                                CLAUDE_CATALOG_PATH=self.root / "claude-models.json",
                                 V2_ALWAYS_ASK=self.root / "always-ask.json",
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
                                 AVATAR_ENV="",
