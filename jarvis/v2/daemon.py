@@ -1347,7 +1347,7 @@ class Daemon:
                 return True
         return asked != session.applied_speed
 
-    def _refuse_unasked_tier(self, session):
+    def _refuse_unasked_tier(self, session, what="the message was not sent"):
         """Fail closed on cost: a provider that may still be on a paid tier
         the record no longer asks for (a refused switch kept the old client)
         gets no message and no compaction. The session is ended, so the next
@@ -1356,12 +1356,17 @@ class Daemon:
         #409, rounds 3 and 4)."""
         if not self._tier_unasked(session):
             return
+        self._close_for_unasked_tier(session, what)
+
+    def _close_for_unasked_tier(self, session, what):
+        """The refusal itself, for a caller that has already decided (one
+        decision for the interrupt and the close, never two that can differ)."""
         tier = session.applied_speed
         with self._lock:
             session.lost = True
             self._retire_drive(session)
         raise DaemonError(f"this chat was still on the {tier} tier, which it no longer asks for; "
-                          "the message was not sent and the session was closed. Send again to "
+                          f"{what} and the session was closed. Send again to "
                           "resume it at the speed it asks for.")
 
     def _switch_ended_subagents(self, session):
@@ -2890,6 +2895,19 @@ class Daemon:
                 self._refuse_unasked_tier(session)
                 source = session.provider.compact(session.handle)
             else:
+                if self._tier_unasked(session):
+                    # A turn the CLI started by itself (SV-6) on a paid tier
+                    # the owner has since turned off: it began inside the CLI
+                    # before Jarvis saw it, so it is stopped at once and the
+                    # session closed; the next message resumes the
+                    # conversation at the tier the record asks for, with the
+                    # sub-agent's result in its history (follow-up 2,
+                    # 2026-11-17).
+                    try:
+                        session.provider.interrupt(session.handle)
+                    except Exception:  # noqa: BLE001 — closing the session stops it anyway
+                        LOG.warning("Cannot interrupt the self-started turn of %s", session.thread.id)
+                    self._close_for_unasked_tier(session, "the turn Claude started by itself was stopped")
                 source = session.provider.adopt(session.handle)
             cancel_forwarded = False
             # Closed the moment the loop ends (a break, a raise), never left

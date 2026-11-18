@@ -92,7 +92,7 @@ def main():
         ("steer ignores an unasked paid tier", daemon.Daemon, "_steer", daemon,
          'if self._tier_unasked(session):', 'if False:',
          speed_check.LockedWrites("test_steer_onto_an_unasked_paid_tier_waits_for_the_next_turn")),
-        ("guard keeps a refusing session", daemon.Daemon, "_refuse_unasked_tier", daemon,
+        ("guard keeps a refusing session", daemon.Daemon, "_close_for_unasked_tier", daemon,
          '        session.lost = True\n', '',
          speed_check.LockedWrites("test_reconnect_rollback_uses_the_snapshot_applied_to_provider")),
         ("explicit effort reset ignored when pinning", daemon.Daemon, "set_thread_model", daemon,
