@@ -25,7 +25,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { flushSync } from "react-dom";
 import { CaptureDrafts } from "./lib/captureDraft";
 import type { CaptureDestination } from "./components/BrowserCapture";
-import { api, subscribe } from "./api";
+import { api, subscribe, type VoiceAgentStatus } from "./api";
 import { browserSound } from "./state/browserSoundClient";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState, turnOrb,
@@ -3490,16 +3490,58 @@ export default function App() {
     return () => { document.removeEventListener("visibilitychange", again); clearInterval(backstop); clearInterval(unknown); };
   }, []);
 
-  const onWakeHit = useCallback(() => {
-    if (crashedRef.current) return;
+  const [voiceAgentStatus, setVoiceAgentStatus] = useState<VoiceAgentStatus | null>(null);
+  const voiceAgentState = useRef<VoiceAgentStatus["state"] | null>(null);
+  const [voiceAgentStarting, setVoiceAgentStarting] = useState(false);
+  const voiceAgentRequest = useRef(false);
+  const [voiceAgentError, setVoiceAgentError] = useState("");
+  useEffect(() => {
+    let gone = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      const status = await api.voiceAgentStatus().catch(() => null);
+      if (gone) return;
+      voiceAgentState.current = status?.state ?? null;
+      setVoiceAgentStatus(status);
+      if (status?.state === "ready") setVoiceAgentError("");
+      timer = setTimeout(refresh, 1000);
+    };
+    void refresh();
+    return () => { gone = true; clearTimeout(timer); };
+  }, []);
+  const startVoiceAgent = async () => {
+    if (blockedNow.current || settingsNow.current || voiceAgentRequest.current ||
+        voiceAgentState.current === "ready") return;
+    voiceAgentRequest.current = true;
+    setVoiceAgentStarting(true);
+    setVoiceAgentError("");
+    try {
+      await api.startVoiceAgent();
+    } catch (error) {
+      setVoiceAgentError(error instanceof Error ? error.message : "Could not start Voice Anywhere.");
+    } finally {
+      voiceAgentRequest.current = false;
+      setVoiceAgentStarting(false);
+    }
+  };
+  const windowsOwnsWake = useCallback(() => voiceAgentState.current === "ready", []);
+
+  const onWakeHit = useCallback(async () => {
+    if (crashedRef.current || windowsOwnsWake()) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
     // The window knows what he is saying: while a sentence that contains the wake word is sounding (or just did),
     // a hit may be the recognizer hearing him say it. It claims nothing; the talk key pauses him (V9).
     if (speech.controller.sayingOwnName()) { voiceDiagnostics.add(0, "wake", "self_voice"); return; }
+    // A desktop agent may have become ready since the last status poll.
+    // Check ownership again before claiming a caught wake word.
+    const agent = await api.voiceAgentStatus(300).catch(() => null);
+    if (crashedRef.current || windowsOwnsWake() || agent?.state === "ready" ||
+        live.current.approvals.length || live.current.picker || chipOverlay.current || settingsNow.current) return;
+    if (speech.controller.sayingOwnName()) return;
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capture, speech, voiceDiagnostics]);
+  }, [capture, speech, voiceDiagnostics, windowsOwnsWake]);
 
   // ---- push to talk -------------------------------------------------------
 
@@ -3663,10 +3705,11 @@ export default function App() {
       if (hisOwnWord(speech.selfVoice.audibleWithin(WAKE_LAG_MS), ownerOverHim.within(WAKE_LAG_MS, performance.now()))) return;
       commands.fromLocal(c, { card: live.current.approvals.length > 0 });
     },
-    active: () => !isMuted(live.current.dictation) && !crashedRef.current,
+    active: () => !isMuted(live.current.dictation) && !crashedRef.current &&
+      (!windowsOwnsWake() || live.current.approvals.length > 0),
     sensitivity: () => loadSensitivity(),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [commands, onWakeHit, speech, ownerOverHim]);
+  }), [commands, onWakeHit, speech, ownerOverHim, windowsOwnsWake]);
   useEffect(() => { wakeStage.setSensitivity(wakeSensitivity); }, [wakeStage, wakeSensitivity]);
   // The card decides which keyword set listens: the wake word is meaningless under one (onWakeHit refuses
   // it), so its recognizer becomes the command recognizer, only if the owner has that switched on.
@@ -3896,31 +3939,6 @@ export default function App() {
   }, [capture, dispatch, onWakeHit, pushMicFrame, wakeStage, reconcileBusy, splitFrom]);
 
   // ---- actions ------------------------------------------------------------
-
-  const [voiceAgentStarting, setVoiceAgentStarting] = useState(false);
-  const voiceAgentRequest = useRef(false);
-  const [voiceAgentResult, setVoiceAgentResult] = useState<{ text: string; error: boolean } | null>(null);
-  useEffect(() => {
-    if (!voiceAgentResult) return;
-    const timeout = window.setTimeout(() => setVoiceAgentResult(null), 8000);
-    return () => window.clearTimeout(timeout);
-  }, [voiceAgentResult]);
-  const startVoiceAgent = async () => {
-    if (blockedNow.current || settingsNow.current || voiceAgentRequest.current) return;
-    voiceAgentRequest.current = true;
-    setVoiceAgentStarting(true);
-    setVoiceAgentResult(null);
-    try {
-      await api.startVoiceAgent();
-      setVoiceAgentResult({ text: "Windows voice agent connected.", error: false });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : "Could not start the Windows voice agent.";
-      setVoiceAgentResult({ text, error: true });
-    } finally {
-      voiceAgentRequest.current = false;
-      setVoiceAgentStarting(false);
-    }
-  };
 
   const setMode = (mode: DictationMode) => {
     const wasMuted = isMuted(live.current.dictation);
@@ -5095,7 +5113,8 @@ export default function App() {
         mode={state.dictation}
         onModeChange={setMode}
         voiceAgentStarting={voiceAgentStarting}
-        voiceAgentResult={voiceAgentResult}
+        voiceAgentStatus={voiceAgentStatus}
+        voiceAgentError={voiceAgentStatus?.state === "ready" ? "" : voiceAgentError}
         onStartVoiceAgent={() => { void startVoiceAgent(); }}
         onPress={press}
         onRelease={release}

@@ -114,6 +114,34 @@ class HudLaunch(Base):
         finally:
             conn.close()
 
+    def status(self, port, *, owner=True):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+        try:
+            headers = {"Sec-Fetch-Site": "same-origin"} if owner else {}
+            conn.request("GET", "/voice-agent/status", headers=headers)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read())
+        finally:
+            conn.close()
+
+    def test_ready_requires_authenticated_wake_status_and_clears_on_replacement(self):
+        self.start()
+        self.assertEqual(self.status(self.d.port)[0], 403)
+        self.assertEqual(self.status(self.d.face_port, owner=False)[0], 403)
+        self.assertEqual(self.status(self.d.face_port)[1]["state"], "off")
+        c = self.client()
+        self.assertEqual(self.status(self.d.face_port)[1]["state"], "connected")
+        for wake in ("starting", "ready", "microphone_unavailable", "recognizer_unavailable"):
+            c.ping(wake=wake)
+            self.assertEqual(self.status(self.d.face_port)[1]["state"], wake)
+        c.ping(wake="ready")
+        with self.assertRaises(wire.LinkError):
+            c.ping(wake="posted credentials should never enter status")
+        c = self.client()
+        self.assertEqual(self.status(self.d.face_port)[1]["state"], "connected")
+        c.ping()
+        self.assertEqual(self.status(self.d.face_port)[1]["state"], "connected")
+
     def test_only_owner_can_launch_with_empty_parameters(self):
         self.start()
         with patch.object(self.link, "start_windows_agent") as start:
@@ -348,7 +376,7 @@ class Connections(Base):
         self.start()
         c = self.client()
         with patch.object(self.link, "transcribe") as transcribe:
-            for payload in ({"op": "other", "id": 1}, {"op": "dictate", "id": 2, "wav_b64": "â˜ƒ"},
+            for payload in ({"op": "other", "id": 1}, {"op": "dictate", "id": 2, "wav_b64": "☃"},
                             {"op": "dictate", "id": 3, "wav_b64": []}, {"op": "ping", "id": True}):
                 wire.send_json(c._stream, payload)
                 self.assertIs(wire.read_json(c._stream)["ok"], False)

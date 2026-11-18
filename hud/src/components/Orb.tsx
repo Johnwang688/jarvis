@@ -17,6 +17,7 @@
 // so a button that had focus when the card came up cannot be pressed by an
 // Enter or a Space behind it (review of PR #29).
 
+import type { VoiceAgentStatus } from "../api";
 import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
 import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
@@ -49,7 +50,8 @@ export function Orb(props: {
   mode: DictationMode;
   onModeChange: (m: DictationMode) => void;
   voiceAgentStarting: boolean;
-  voiceAgentResult: { text: string; error: boolean } | null;
+  voiceAgentStatus: VoiceAgentStatus | null;
+  voiceAgentError: string;
   onStartVoiceAgent: () => void;
   /** Folded into the left rail's foot while the sidebar is hidden. */
   compact?: boolean;
@@ -136,19 +138,30 @@ export function Orb(props: {
 
   const next = nextMode(props.mode);
   const folded = !!props.compact || !!props.tight;
-  const launchLabel = props.voiceAgentStarting ? "Starting voice agent…" : "Start voice agent";
+  const voiceState = props.voiceAgentStatus?.state;
+  const voiceReady = voiceState === "ready";
+  const voiceStarting = props.voiceAgentStarting || voiceState === "starting";
+  const voiceConnected = voiceState === "connected";
+  const voiceUnavailable = voiceState === "unavailable";
+  const connectFailed = voiceState === "connect_failed";
+  const wakeError = voiceState === "microphone_unavailable" || voiceState === "recognizer_unavailable";
+  const launchLabel = voiceReady ? "Voice Anywhere ready" : voiceStarting ? "Starting Voice Anywhere…" :
+    voiceConnected ? "Voice Anywhere connected" : wakeError || voiceUnavailable ? "Voice Anywhere unavailable" :
+    "Start Voice Anywhere";
+  const voiceDetail = props.voiceAgentError || props.voiceAgentStatus?.detail || launchLabel;
   const launchButton = (
     <button
       type="button"
       id="voice-agent-start"
       className={props.compact ? "rail" : props.tight ? "beside" : undefined}
-      disabled={props.blocked || props.voiceAgentStarting}
-      title={launchLabel}
+      disabled={props.blocked || voiceStarting || voiceReady || voiceConnected || wakeError || voiceUnavailable}
+      data-ready={voiceReady || undefined}
+      title={voiceDetail}
       aria-label={launchLabel}
       onMouseDown={noPointerFocus}
       onClick={props.onStartVoiceAgent}
     >
-      {props.compact ? (props.voiceAgentStarting ? "…" : "▶") : launchLabel}
+      {props.compact ? (voiceReady ? "✓" : voiceStarting ? "…" : "▶") : launchLabel}
     </button>
   );
   return (
@@ -217,9 +230,9 @@ export function Orb(props: {
     {props.compact ? (
       <div id="voice-controls-rail">{props.speechRail}{launchButton}</div>
     ) : props.tight ? launchButton : null}
-    <div id="voice-agent-result" className={props.voiceAgentResult?.error ? "err" : undefined}
+    <div id="voice-agent-result" className={props.voiceAgentError || wakeError || voiceUnavailable || connectFailed ? "err" : undefined}
       data-compact={props.compact || undefined} role="status">
-      {props.blocked ? null : props.voiceAgentResult?.text}
+      {!props.blocked && (props.voiceAgentError || wakeError || voiceUnavailable || connectFailed) ? voiceDetail : null}
     </div>
     {folded ? (
       // The dock is scaled down to a 36px mini orb, and so would a strip inside

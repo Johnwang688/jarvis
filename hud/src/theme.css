@@ -661,6 +661,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   flex: 0 0 auto; height: 18px; padding: 0 4px; font: 9px var(--mono);
   white-space: nowrap; word-spacing: normal;
 }
+#voice-agent-start[data-ready] { color: var(--accent); opacity: 1; }
 #voice-agent-start.rail, #voice-agent-start.beside { height: 20px; }
 #voice-agent-start.rail { width: 32px; }
 #voice-agent-start.beside { position: fixed; left: 146px; bottom: 42px; z-index: 40; }

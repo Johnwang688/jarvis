@@ -109,7 +109,6 @@ class Agent:
     def __init__(self, host, port, key_path):
         import ctypes
         import tkinter as tk
-        from ctypes import wintypes
 
         self.host, self.port, self.key_path = host, port, key_path
         self.done = threading.Event()
@@ -129,8 +128,6 @@ class Agent:
         self.user32 = ctypes.windll.user32
         self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         self.user32.GetAsyncKeyState.restype = ctypes.c_short
-        self.user32.GetForegroundWindow.restype = wintypes.HWND
-        self.user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = voiceui.Overlay(self.root)
@@ -152,11 +149,11 @@ class Agent:
     def busy(self):
         return self.recording.is_set() or self.player.playing.is_set() or self.flow_running.is_set()
 
-    def hud_in_front(self):
-        import ctypes
-        title = ctypes.create_unicode_buffer(1024)
-        self.user32.GetWindowTextW(self.user32.GetForegroundWindow(), title, len(title))
-        return "J.A.R.V.I.S." in title.value.upper()
+    def wake_status(self):
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return "starting"
+        return wake.status()
 
     def enqueue(self, wav, source, generation):
         if hasattr(self, "online") and not self.online.is_set():
@@ -168,13 +165,13 @@ class Agent:
             self.show(generation, "Jarvis is busy — try again", True)
 
     def on_wake(self, wav):
-        if self.done.is_set() or self.busy() or self.hud_in_front():
+        if self.done.is_set() or self.busy():
             return
         generation = self.next_generation()
         self.enqueue(wav, "wake", generation)
 
     def wake_state(self, state, text=None):
-        if not self.busy() and not self.hud_in_front():
+        if not self.busy():
             self.overlay.set_state(state, text)
 
     def audio(self, indata, frames, timing, status):
@@ -299,7 +296,7 @@ class Agent:
 
     def network(self):
         client = None
-        delay, last_ping = 1.0, 0.0
+        delay, last_ping, reported_wake = 1.0, 0.0, None
         # These objects and every Client call belong to this one worker.
         typer = Typer() if hasattr(self, "overlay") else None
         actions = Actions() if typer is not None else None
@@ -309,7 +306,7 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
-                        delay, last_ping = 1.0, time.monotonic()
+                        delay, last_ping, reported_wake = 1.0, 0.0, None
                         if hasattr(self, "online"):
                             # Drop anything captured during the failed/offline interval.
                             self.discard_clips("Jarvis isn't running")
@@ -325,19 +322,24 @@ class Agent:
                         self.done.wait(delay)
                         delay = min(30.0, delay * 2)
                         continue
+                wake = self.wake_status() if typer is not None else None
+                if wake != reported_wake or time.monotonic() - last_ping >= 3:
+                    try:
+                        if wake is None:
+                            client.ping()
+                        else:
+                            client.ping(wake=wake)
+                        last_ping, reported_wake = time.monotonic(), wake
+                    except LinkError:
+                        if hasattr(self, "online"):
+                            self.online.clear()
+                        client.close()
+                        client = None
+                        self.discard_clips("Jarvis isn't running")
+                        continue
                 try:
                     item = self.clips.get(timeout=0.2)
                 except queue.Empty:
-                    if time.monotonic() - last_ping >= 3:
-                        try:
-                            client.ping()
-                            last_ping = time.monotonic()
-                        except LinkError:
-                            if hasattr(self, "online"):
-                                self.online.clear()
-                            client.close()
-                            client = None
-                            self.discard_clips("Jarvis isn't running")
                     continue
                 generation, clip = item[:2]
                 source = item[2] if len(item) > 2 else "hotkey"
@@ -345,7 +347,7 @@ class Agent:
                     if typer is None:  # VA-1 headless recorder compatibility
                         self.show(generation, client.dictate(clip)["text"] or "No speech heard", True)
                     else:
-                        if source == "wake" and (self.hud_in_front() or self.recording.is_set()):
+                        if source == "wake" and self.recording.is_set():
                             continue
                         self.flow_running.set()
                         # Toggle-stop can enqueue while Right Ctrl is still down.

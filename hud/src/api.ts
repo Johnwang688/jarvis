@@ -77,6 +77,11 @@ const json = (body: unknown): RequestInit => ({
 const patch = (body: unknown): RequestInit => ({ ...json(body), method: "PATCH" });
 const put = (body: unknown): RequestInit => ({ ...json(body), method: "PUT" });
 
+export type VoiceAgentStatus = {
+  state: "off" | "starting" | "connect_failed" | "connected" | "ready" | "unavailable" | "microphone_unavailable" | "recognizer_unavailable";
+  detail: string;
+};
+
 export const api = {
   // --- status / config ----------------------------------------------------
   status: () => req<any>("/status"),
@@ -501,6 +506,7 @@ export const api = {
     return { text: body.text || "", backend: body.backend, fellBack: typeof body.fallback === "string" && body.fallback !== "" };
   },
   /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
+  voiceAgentStatus: (timeout = 2500) => req<VoiceAgentStatus>("/voice-agent/status", { signal: AbortSignal.timeout(timeout) }),
   startVoiceAgent: () => req<{ connected: true }>("/voice-agent/start", json({})),
   sttSettings: () => req<unknown>("/stt/settings").then(parseSttSettings),
   setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean; dictation_cleanup?: "off" | "rules" }) =>

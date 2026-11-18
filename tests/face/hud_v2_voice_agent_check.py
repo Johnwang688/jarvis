@@ -30,19 +30,39 @@ def main():
                 requests.append(route.request.post_data_json)
                 pending.append(route)
 
+            status = {"state": "off", "detail": "Start Voice Anywhere"}
             page.route(url + "/voice-agent/start", hold)
+            page.route(url + "/voice-agent/status", lambda route: route.fulfill(json=status))
             page.goto(url)
             page.locator("#orb").wait_for(state="visible")
-            button = page.get_by_role("button", name="Start voice agent")
+            button = page.get_by_role("button", name="Start Voice Anywhere")
             result = page.locator("#voice-agent-result")
             expect(page.locator("#micstrip #voice-agent-start")).to_be_visible()
 
             button.click()
-            expect(page.get_by_role("button", name="Starting voice agent…")).to_be_disabled()
+            expect(page.get_by_role("button", name="Starting Voice Anywhere…")).to_be_disabled()
             until(lambda: len(pending) == 1)
             assert requests == [{}]
             pending.pop().fulfill(json={"connected": True})
-            expect(result).to_have_text("Windows voice agent connected.")
+            status.update(state="connected", detail="Waiting for the wake listener.")
+            expect(page.get_by_role("button", name="Voice Anywhere connected")).to_be_disabled()
+            status.update(state="ready", detail="Say Jarvis, then a command.")
+            expect(page.get_by_role("button", name="Voice Anywhere ready")).to_be_disabled()
+            page.evaluate("""() => {
+                const capture = window.__hud.capture;
+                const realWake = capture.onWake.bind(capture);
+                window.__wakeClaims = 0;
+                capture.onWake = (...args) => { window.__wakeClaims++; return realWake(...args); };
+                window.__hud.mic.wake();
+            }""")
+            assert page.evaluate("window.__wakeClaims") == 0
+            status.update(state="microphone_unavailable", detail="The microphone is unavailable.")
+            expect(result).to_have_text("The microphone is unavailable.")
+            status.update(state="off", detail="Start Voice Anywhere")
+            expect(button).to_be_enabled()
+
+            page.evaluate("window.__hud.mic.wake()")
+            assert page.evaluate("window.__wakeClaims") == 1
 
             page.set_viewport_size({"width": 1280, "height": 500})
             expect(page.locator("#voice-agent-start.beside")).to_be_visible()

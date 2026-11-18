@@ -276,6 +276,22 @@ class Worker(unittest.TestCase):
         self.assertGreaterEqual(self.spotter.resets, 1)
         self.assertGreaterEqual(len(self.spotter.streams), 2)
 
+    def test_late_keyword_detection_keeps_an_already_spoken_command(self):
+        self.spotter.hit_at = {9}
+        get_result = self.spotter.get_result
+
+        def native_result(stream):
+            keyword = get_result(stream)
+            return SimpleNamespace(keyword=keyword, timestamps=[0.32]) if keyword else ""
+
+        self.spotter.keyword_spotter = SimpleNamespace(get_result=native_result)
+        self.run_script([self.chunk()] * 4 + [self.chunk(6000)] * 5 + [self.chunk()] * 12)
+        self.assertEqual(self.states, ["listening"])
+        self.assertEqual(len(self.clips), 1)
+        with wave.open(io.BytesIO(self.clips[0])) as wav:
+            audio = wav.readframes(wav.getnframes())
+        self.assertIn(self.chunk(6000)[2] * 5, audio)
+
     def test_wake_word_alone_times_out_without_delivering_audio(self):
         self.run_script([self.chunk(20000)] + [self.chunk()] * 40)
         self.assertEqual(self.states, ["listening", "hidden"])

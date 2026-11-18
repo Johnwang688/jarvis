@@ -174,8 +174,8 @@ class Client:
                             else "The voice request failed.")
         return got
 
-    def ping(self):
-        self._request({"op": "ping"})
+    def ping(self, *, wake=None):
+        self._request({"op": "ping"} if wake is None else {"op": "ping", "wake": wake})
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),

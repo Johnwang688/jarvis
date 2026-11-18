@@ -78,7 +78,8 @@ class Flow:
                 raise ValueError("Unknown voice source")
             self.ui.set_state("transcribing")
             text = self.client.dictate(wav, source=source)["text"]
-            if not sanitize(text):
+            clean = sanitize(text)
+            if not clean or (source == "wake" and clean.rstrip(".,!?").casefold() == "jarvis"):
                 self.ui.set_state("done", "No speech heard")
                 return
             if source == "hotkey" and not might_be_command(text):
@@ -115,6 +116,9 @@ class Flow:
                     if not getattr(self.actions, kind)(target):
                         self.ui.set_state("error", f"Could not find {target}.")
                         return
+                    action = "Opened" if kind == "open_app" else "Switched to"
+                    self.ui.set_state("done", f"{action} {target}.")
+                    return
                 elif kind == "search":
                     self.actions.search(target or words)
                 elif kind == "read_selection":

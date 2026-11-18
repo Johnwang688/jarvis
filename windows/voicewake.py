@@ -1,7 +1,9 @@
 """Local Jarvis KWS and bounded in-memory utterances; no device imports on import."""
 from __future__ import annotations
 
+from collections import deque
 import hashlib
+import math
 import json
 from pathlib import Path
 import queue
@@ -10,6 +12,7 @@ import threading
 import time
 
 RATE, CHUNK = 16000, 1600
+WAKE_LOOKBACK_CHUNKS = 20
 WAKE_PIECES = ("▁JA", "R", "VI", "S")  # hud/src/lib/wake/keywords.ts
 MODEL_DIR = Path(__file__).resolve().parents[1] / "hud" / "vendor" / "kws-zipformer-gigaspeech-3.3M"
 
@@ -81,6 +84,19 @@ class Endpointer:
         return self.result
 
 
+def _feed_audio(endpoint, pcm, np):
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    # A chunk may straddle the grace boundary. Its wake tail must not
+    # count as speech in the suffix.
+    grace = endpoint.grace_frames - endpoint.frames
+    if 0 < grace < len(samples):
+        endpoint.feed(rms, grace)
+        samples = samples[grace:]
+        rms = float(np.sqrt(np.mean(samples * samples)))
+    return endpoint.feed(rms, len(samples))
+
+
 class WakeListener:
     def __init__(self, on_utterance, on_level, busy, on_state=None, model_dir=None, threshold=0.25):
         self.on_utterance, self.on_level, self.busy = on_utterance, on_level, busy
@@ -93,6 +109,20 @@ class WakeListener:
         self._epoch = 0
         self._stream = self._thread = self._spotter = self._temp = None
         self._tap = None
+        self._stream_started_at = None
+        self._last_audio_at = None
+
+    def status(self):
+        if self.reason:
+            return "microphone_unavailable" if "microphone" in self.reason else "recognizer_unavailable"
+        if self._thread is None or not self._thread.is_alive():
+            return "starting"
+        last_audio = self._last_audio_at
+        if last_audio is not None and time.monotonic() - last_audio < 3.0:
+            return "ready"
+        if self._stream_started_at is not None and time.monotonic() - self._stream_started_at >= 3.0:
+            return "microphone_unavailable"
+        return "starting"
 
     def tap(self, callback):
         """Lend the open wake stream to the hotkey capture.
@@ -156,6 +186,8 @@ class WakeListener:
                 dtype="int16", blocksize=CHUNK,
                 extra_settings=sd.WasapiSettings(exclusive=False, auto_convert=True),
                 callback=self._audio)
+            self._last_audio_at = None
+            self._stream_started_at = time.monotonic()
             self._stream.start()
             self.reason = ""
             self._thread = threading.Thread(target=self._run, name="voice-wake", daemon=True)
@@ -171,6 +203,7 @@ class WakeListener:
         # queued audio AND a partial utterance, even if the worker was in a callback.
         if self._done.is_set():
             return
+        captured = self._last_audio_at = time.monotonic()
         tap = self._tap
         if tap is not None:
             try:
@@ -181,7 +214,7 @@ class WakeListener:
             self._epoch += 1
             return
         try:
-            self._audio_queue.put_nowait((self._epoch, time.monotonic(), indata.tobytes()))
+            self._audio_queue.put_nowait((self._epoch, captured, indata.tobytes()))
         except queue.Full:
             self._epoch += 1
 
@@ -208,6 +241,11 @@ class WakeListener:
 
         spotter, np = self._spotter, self._np
         stream = spotter.create_stream()
+        # The wrapper's string accessor consumes the hit and drops token
+        # timestamps. Read the native result once to keep both.
+        result_reader = getattr(spotter, "keyword_spotter", spotter)
+        recent = deque(maxlen=WAKE_LOOKBACK_CHUNKS)
+        seen = 0
         epoch = self._epoch
         endpoint, chunks = None, []
         while not self._done.is_set():
@@ -219,46 +257,58 @@ class WakeListener:
                 break
             if self.busy() or stamp != self._epoch or time.monotonic() - captured > 0.5:
                 stream = spotter.create_stream()
-                endpoint, chunks = None, []
+                endpoint, chunks, seen = None, [], 0
+                recent.clear()
                 epoch = self._epoch
                 continue
             if stamp != epoch:
                 stream = spotter.create_stream()
-                endpoint, chunks = None, []
+                endpoint, chunks, seen = None, [], 0
+                recent.clear()
                 epoch = stamp
             samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             rms = float(np.sqrt(np.mean(samples * samples)))
             if endpoint is None:
                 stream.accept_waveform(RATE, samples)
-                hit = False
+                recent.append(pcm)
+                seen += len(samples)
+                hit = None
                 while spotter.is_ready(stream):
                     spotter.decode_stream(stream)
-                    result = spotter.get_result(stream)
+                    result = result_reader.get_result(stream)
                     word = result if isinstance(result, str) else getattr(result, "keyword", "")
                     if word:
-                        hit = True
+                        hit = result
                         spotter.reset_stream(stream)
                         break
-                if not hit:
+                if hit is None:
                     continue
                 if self._done.is_set() or self.busy() or stamp != self._epoch:
                     stream = spotter.create_stream()
+                    recent.clear()
+                    seen = 0
                     continue
                 self.on_state("listening")
                 endpoint, chunks = Endpointer(grace_ms=250), []
-                # Retain audio after the hit, including any wake tail. The grace
-                # counts toward timeout but cannot alone establish question speech.
+                times = getattr(hit, "timestamps", ())
+                if times and math.isfinite(times[-1]) and 0 <= times[-1] <= seen / RATE:
+                    # The detector can report the wake several hundred ms
+                    # after the last token. Retain audio just around that
+                    # token, including words already spoken during the delay.
+                    after_wake = max(0, round((times[-1] - 0.05) * RATE))
+                    count = seen - after_wake
+                    if count > 0:
+                        prefix = b"".join(recent)[-2 * count:]
+                        endpoint = Endpointer(grace_ms=180)
+                        for offset in range(0, len(prefix), 2 * CHUNK):
+                            part = prefix[offset:offset + 2 * CHUNK]
+                            chunks.append(part)
+                            _feed_audio(endpoint, part, np)
+                recent.clear()
                 continue
             chunks.append(pcm)
             self.on_level(rms)
-            # A chunk may straddle the grace boundary: classify only its suffix
-            # so a loud tail confined to the grace cannot supply its RMS.
-            grace = endpoint.grace_frames - endpoint.frames
-            if 0 < grace < len(samples):
-                endpoint.feed(rms, grace)
-                samples = np.frombuffer(pcm[grace * 2:], dtype="<i2").astype(np.float32) / 32768.0
-                rms = float(np.sqrt(np.mean(samples * samples)))
-            result = endpoint.feed(rms, len(samples))
+            result = _feed_audio(endpoint, pcm, np)
             if result:
                 clip = wav_bytes(b"".join(chunks), RATE) if result != "timeout" else None
                 endpoint, chunks = None, []
@@ -268,6 +318,7 @@ class WakeListener:
                     else:
                         self.on_utterance(clip)
                 stream = spotter.create_stream()
+                seen = 0
 
     def _close_resources(self):
         # Only the worker closes after it starts; stop() joins before cleanup.

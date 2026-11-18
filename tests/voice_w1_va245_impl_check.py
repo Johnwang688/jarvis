@@ -360,7 +360,8 @@ class FlowErrors(unittest.TestCase):
                 getattr(self.actions, method).assert_called_once_with(target)
                 self.client.route.assert_not_called()
                 self.typer.run.assert_not_called()
-                self.ui.set_state.assert_called_with("done")
+                action = "Opened" if method == "open_app" else "Switched to"
+                self.ui.set_state.assert_called_with("done", f"{action} {target}.")
 
     def test_linkerror_outside_routing_surfaces_exact_text(self):
         for stage in ("dictate", "ask", "say"):
@@ -459,7 +460,6 @@ class AgentGlue(unittest.TestCase):
         a.capture_lock = threading.Lock()
         a.capture, a.chunks, a.frames, a.audio_bad = None, [], 0, False
         a.clips = queue.Queue(maxsize=4)
-        a.hud_in_front = Mock(return_value=False)
         a.host, a.port, a.key_path = "unused", 0, "unused"
         a.user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
         return a
@@ -472,11 +472,8 @@ class AgentGlue(unittest.TestCase):
             self.assertTrue(a.busy())
             event.clear()
 
-    def test_wake_skips_hud_busy_and_offline_and_passes_source(self):
+    def test_wake_skips_busy_and_offline_and_passes_source_without_a_foreground_check(self):
         a = self.bare()
-        a.hud_in_front.return_value = True
-        a.on_wake(b"wav")
-        a.hud_in_front.return_value = False
         a.recording.set()
         a.on_wake(b"wav")
         a.recording.clear()
@@ -485,6 +482,9 @@ class AgentGlue(unittest.TestCase):
         a.online.set()
         a.on_wake(b"wav")
         self.assertEqual(a.clips.get_nowait(), (3, b"wav", "wake"))
+        a.overlay.reset_mock()
+        a.wake_state("listening")
+        a.overlay.set_state.assert_called_once_with("listening", None)
 
     def test_offline_hotkey_clip_is_discarded(self):
         a = self.bare()

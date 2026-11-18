@@ -56,6 +56,14 @@ to change this schema or invent a different kind. No tools or shell commands.
 """
 
 
+WAKE_STATUS = {
+    "starting": "Starting the Windows wake listener…",
+    "ready": "Say Jarvis, then a command.",
+    "microphone_unavailable": "The Windows wake listener cannot use the microphone.",
+    "recognizer_unavailable": "The Windows wake recognizer is unavailable.",
+}
+
+
 class NotOwner(Exception):
     pass
 
@@ -114,8 +122,26 @@ class VoiceLink:
         self._lock = threading.Lock()
         self._launch_lock = threading.Lock()
         self._launched_agent = None
+        self._launch_deadline = 0.0
+        self._agent_wake = None
         self._key = None
         self._cleanup_counts = {name: {"typed": 0, "scratched": 0} for name in CLEAN_PASSES}
+
+    def agent_status(self):
+        with self._lock:
+            if self._server is None:
+                return {"state": "unavailable", "detail": self.status}
+            if self._active is None:
+                child = self._launched_agent
+                if child is not None and child.poll() is None:
+                    if time.monotonic() < self._launch_deadline:
+                        return {"state": "starting", "detail": "Waiting for the Windows agent to connect…"}
+                    return {"state": "connect_failed", "detail": "The Windows agent hasn’t connected. Check pairing and retry."}
+                return {"state": "off", "detail": "Start Voice Anywhere to use the wake word in other apps."}
+            wake = self._agent_wake
+            if wake is None:
+                return {"state": "connected", "detail": "Connected; waiting for wake listener status."}
+            return {"state": wake, "detail": WAKE_STATUS[wake]}
 
     def start_windows_agent(self):
         """Only the local HUD's explicit start button calls this."""
@@ -132,7 +158,7 @@ class VoiceLink:
                 self._launched_agent = child
             # A manual launcher connects through the same authenticated socket.
             # Keep a slow-starting child so another click checks that process.
-            deadline = time.monotonic() + 8
+            deadline = self._launch_deadline = time.monotonic() + 8
             while True:
                 with self._lock:
                     if self._active is not None:
@@ -391,6 +417,7 @@ class VoiceLink:
                 if self._server is not server:
                     return
                 old, self._active = self._active, conn
+                self._agent_wake = None
                 self._pending -= 1
                 pending = False
                 if old:
@@ -407,7 +434,14 @@ class VoiceLink:
                 ident = request.get("id")
                 reply = {"id": ident if type(ident) is int else None, "ok": False, "error": BAD_REQUEST}
                 if type(ident) is int and request.get("op") == "ping":
-                    reply = {"id": ident, "ok": True}
+                    wake = request.get("wake")
+                    if "wake" not in request or (isinstance(wake, str) and wake in WAKE_STATUS):
+                        with self._lock:
+                            if self._active is not conn:
+                                return
+                            if wake is not None:
+                                self._agent_wake = wake
+                        reply = {"id": ident, "ok": True}
                 elif type(ident) is int and request.get("op") == "clean":
                     text = request.get("text")
                     if isinstance(text, str) and len(text) <= CLEAN_CHARS:
@@ -494,3 +528,4 @@ class VoiceLink:
                     self._pending -= 1
                 if self._active is conn:
                     self._active = None
+                    self._agent_wake = None
