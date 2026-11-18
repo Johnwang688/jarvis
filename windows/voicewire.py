@@ -306,6 +306,8 @@ class Client:
 
     def route(self, text, source, *, with_receipt=False):
         request = {"op": "route", "text": text, "source": source}
+        if source == "hotkey":
+            request["exact_open"] = True  # unaddressed launches check the local Start catalog
         if with_receipt and self.action_receipts:
             request["receipt"] = True
         got = self._request(request)

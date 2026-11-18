@@ -7,7 +7,8 @@ from functools import lru_cache
 from math import log, sqrt
 import re
 
-from windows.voicetype import JARVIS_ADDRESS, sanitize
+from windows.voicetype import (JARVIS_ADDRESS, NARRATIVE_VERB, OPEN_APP_FRAME, POLITE_PREFIX,
+                               app_name, sanitize, shortcut_open_target)
 
 # Examples intentionally use varied slots. The token features include leading
 # words and adjacent pairs so "open Calendar" differs from "when I open Calendar".
@@ -68,7 +69,6 @@ _TRAIN = {
 }
 
 _FLAGS = re.IGNORECASE
-_POLITE = re.compile(r"^(?:(?:(?:could|can|would|will) you(?: please)?|I(?:[’\']d| would) like you to|please|kindly)[,\s]+)+", _FLAGS)
 _LITERAL = re.compile(
     r"^(?:type(?: out)?|dictate|insert)(?:\s+(?:the )?(?:words?|phrase|sentence|text)"
     r"(?=[:,\s]))?(?:\s+(?:literally|verbatim))?(?:\s*[:,]\s*|\s+)(.+)$", _FLAGS)
@@ -83,7 +83,6 @@ _SEND_IN_SENTENCE = re.compile(
     r"\w+['’](?:t|ll|d))\s+send it[.!?]*$", _FLAGS)
 _WAKE_REQUEST = re.compile(r"^(?:let['’]s|I(?:['’]d| would) like to)\s+", _FLAGS)
 _EDIT_WORDS = re.compile(r"\b(?:scratch that|new line|send it)\b", _FLAGS)
-_OPEN = re.compile(r"(?:open(?: up)?|launch|start(?: up)?|fire up|pull up|bring up) (.+)", _FLAGS)
 _SWITCH = re.compile(r"(?:switch(?: over| back| me back| me)? to|go back to|return to|take me back to|focus|go to) (.+)|"
                      r"bring (.+) to the (?:front|foreground)|give (.+) focus", _FLAGS)
 _SEARCH = re.compile(r"(?:search (?:the (?:web|internet) )?for|search the web|google|look up|"
@@ -92,19 +91,6 @@ _SEARCH = re.compile(r"(?:search (?:the (?:web|internet) )?for|search the web|go
 _READ = re.compile(r"(?:read(?: back| aloud)?|say|speak) (?:(?:(?:the|this|my|current) )*"
                    r"(?:(?:selected|highlighted)(?: text| words| paragraph| passage)?|selection|highlight)"
                    r"|what I(?: have|'ve)? (?:selected|highlighted))(?: out loud| aloud| to me)?", _FLAGS)
-_APP_SLOT = re.compile(r"[\w .'+&()–-]{1,80}", _FLAGS)
-_APP_CLAUSE = re.compile(
-    r"\b(?:and|then|when|tomorrow|after|before|if|instead|because|unless|without|"
-    r"in|into|on|about|source|door|doors|file|files|folder|account|accounts|"
-    r"window when|settings for|is|are|was|were|will|would|should|not|don't|later|"
-    r"tab|tabs|website|browser history|my|your|their|please don't)\b|\w\.\w", _FLAGS)
-# Ambiguous imperative/company names such as "Google" and "Focus" are also
-# subjects in ordinary dictated statements. Require the longer explicit search
-# frame for a query that itself looks like a declarative sentence.
-_NARRATIVE = re.compile(
-    r"\b(?:was|were|is|are|has|have|had|announced|reported|acquired|says|seems|"
-    r"became|went|help|helps|keeps|kept|worked|works|decided|released|bought|"
-    r"needs|need|changed|took|takes)\b", _FLAGS)
 _QUERY_WORDS = re.compile(r"^(?:how|when|where|why|what|which|who|whether|does)\b", _FLAGS)
 _TYPE_NOUN = re.compile(r"^type (?:[0-9]+|one|two|three|i|ii|iii|safety|checking|"
                         r"system|inference|error|theory|of)\b", _FLAGS)
@@ -153,7 +139,7 @@ def _scores(text):
 def _slot(kind, body):
     if kind == "read_selection":
         return "" if _READ.fullmatch(body) else None
-    match = {"open_app": _OPEN, "switch_app": _SWITCH, "search": _SEARCH}[kind].fullmatch(body)
+    match = {"open_app": OPEN_APP_FRAME, "switch_app": _SWITCH, "search": _SEARCH}[kind].fullmatch(body)
     if not match:
         return None
     target = next(group for group in match.groups() if group is not None).strip()
@@ -162,17 +148,13 @@ def _slot(kind, body):
             return None
         if re.match(r"^look up (?:from|at|to)\b", body, _FLAGS):
             return None
-        if _NARRATIVE.search(target) and not _QUERY_WORDS.match(target):
+        if NARRATIVE_VERB.search(target) and not _QUERY_WORDS.match(target):
             return None
         return target
-    target = re.sub(r"^the ", "", target, flags=_FLAGS)
-    target = re.sub(r" (?:app|application|window)$", "", target, flags=_FLAGS)
+    target = app_name(target)
     if target.casefold() == "sender" and kind == "switch_app":
         return None
-    if (_APP_SLOT.fullmatch(target) and not _APP_CLAUSE.search(target)
-            and not _NARRATIVE.search(target) and len(target.split()) <= 5):
-        return target
-    return None
+    return target or None
 
 
 def _unquote(payload):
@@ -187,7 +169,7 @@ def addressed(text):
 
 
 def route(text, source):
-    """An unaddressed hotkey dictates. Wake and explicitly addressed speech ask or act."""
+    """An unaddressed hotkey dictates or opens a named app. Addressed speech can ask or act."""
     words = sanitize(text)[:2000]
     def result(kind, target="", content=words):
         return {"kind": kind, "text": content, "target": target}
@@ -196,8 +178,8 @@ def route(text, source):
     body = JARVIS_ADDRESS.sub("", words, count=1)
     if source == "wake" or addressed:
         body = _WAKE_REQUEST.sub("", body, count=1)
-    polite = bool(_POLITE.match(body))
-    body = _POLITE.sub("", body, count=1).strip()
+    polite = bool(POLITE_PREFIX.match(body))
+    body = POLITE_PREFIX.sub("", body, count=1).strip()
     fallback = "ask" if source == "wake" or addressed else "dictate"
     literal = _LITERAL.fullmatch(body)
     if literal and not _TYPE_NOUN.match(body):
@@ -210,6 +192,11 @@ def route(text, source):
             return result("dictate", "literal")
 
         if not addressed:
+            target = shortcut_open_target(words)
+            if target:
+                scores = _scores(body)
+                if scores["open_app"] >= max(0.10, scores["dictate"]):
+                    return result("open_app", target)
             return result("dictate")
 
     # Embedded commands, quoted requests and questions about an action never
@@ -217,7 +204,7 @@ def route(text, source):
     if not body or (body.endswith("?") and not polite) or _QUESTION.match(body):
         return result(fallback)
     body = re.sub(r"[,\s]+please[.!?]*$", "", body, flags=_FLAGS).strip().rstrip(".!?").strip()
-    if _OPEN.fullmatch(body) or _SWITCH.fullmatch(body):
+    if OPEN_APP_FRAME.fullmatch(body) or _SWITCH.fullmatch(body):
         body = re.sub(r" for me$", "", body, flags=_FLAGS)
     scores = _scores(body)
     for kind in ("open_app", "switch_app", "search", "read_selection"):

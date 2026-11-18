@@ -12,8 +12,10 @@ import time
 from urllib.parse import quote_plus
 
 if __package__:
+    from .desktopwire import launch_name
     from .voicetype import WindowsInput
 else:
+    from desktopwire import launch_name
     from voicetype import WindowsInput
 
 
@@ -30,19 +32,18 @@ def _sound(text):
     return re.sub(r"cks|ks|cs", "x", text)
 
 
-def exact_start_app(name, apps):
-    """An exact Start display name or known alias. Never choose between different AppIDs."""
-    names = [name.casefold()]
-    alias = ALIASES.get(names[0])
-    if alias and alias != names[0]:
-        names.append(alias)
-    for candidate in names:
-        matches = {app["id"]: app for app in apps if app["name"].casefold() == candidate}
-        if matches:
-            if len(matches) != 1:
-                raise ValueError("Multiple Start apps have this name. Use a different display name.")
-            return next(iter(matches.values()))
-    return None
+def exact_start_app(name, apps, *, reject_alias_conflicts=False):
+    """Resolve Start display names and known aliases, preserving the indexed AppID."""
+    label = name.casefold()
+    matches = {app["id"]: app for app in apps if app["name"].casefold() == label}
+    alias = ALIASES.get(label)
+    # A named request to the desktop bridge prefers the given display name.
+    # An unaddressed shortcut must also exclude an alias for a different app.
+    if alias and (reject_alias_conflicts or not matches):
+        matches.update((app["id"], app) for app in apps if app["name"].casefold() == alias)
+    if len(matches) > 1:
+        raise ValueError("Multiple Start apps have this name. Use a different display name.")
+    return next(iter(matches.values()), None)
 
 
 def match_app(name, apps):
@@ -296,9 +297,17 @@ class Actions:
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # keep the previous index if PowerShell is temporarily unavailable
 
-    def open_app(self, target):
+    def open_app(self, target, *, exact=False):
+        if exact and launch_name(target) is None:
+            return False
         self.refresh_apps()
-        app = match_app(target, self.apps)
+        if exact:
+            try:
+                app = exact_start_app(target, self.apps, reject_alias_conflicts=True)
+            except ValueError:
+                return False
+        else:
+            app = match_app(target, self.apps)
         if app is None:
             return False
         self.launcher(["explorer.exe", "shell:AppsFolder\\" + app["id"]],

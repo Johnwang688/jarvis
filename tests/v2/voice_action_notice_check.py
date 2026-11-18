@@ -68,13 +68,13 @@ class ConfirmedAction(fixture.Base):
         self.ask_local("read the selection")
         self.ask_local("type the words Jarvis open Chrome", "hotkey")
         self.typer.run.assert_called_once_with([("text", "Jarvis open Chrome")])
-        self.assertNotIn("receipt", self.route("open Chrome", "hotkey"))
+        self.assertNotIn("receipt", self.route("how do I open Chrome?", "hotkey"))
         self.assertNotIn("receipt", self.route("I am making a shopping list", "hotkey"))
         self.assertNotIn("receipt", self.route("Jarvis, how does Chrome work?", "hotkey"))
         self.assertEqual(self.notices(), [])
 
-    def test_held_shortcut_types_unaddressed_commands_and_preserves_edit_controls(self):
-        phrases = ["open Chrome", "could you search for maps?", "she said Jarvis open Chrome",
+    def test_held_shortcut_types_other_unaddressed_commands_and_preserves_edit_controls(self):
+        phrases = ["how do I open Chrome?", "could you search for maps?", "she said Jarvis open Chrome",
                    "would you please switch to Teams?", "Jarvis's shortcut opens the app"]
         for words in phrases:
             self.ask_local(words, "hotkey")
@@ -118,6 +118,35 @@ class ConfirmedAction(fixture.Base):
             self.ask_local("open Chrome")
         self.assertEqual(len(self.notices()), 1)
         self.assertEqual(self.notices(other), [])
+
+    def test_unaddressed_open_can_confirm_only_against_its_original_chat(self):
+        other = self.d.open_thread(self.chosen.project_id, "chat", "fast", {})
+        route = self.link.route_model
+        def switch_while_routing(text, source):
+            self.select(other.id)
+            return route(text, source)
+        with patch.object(self.link, "route_model", side_effect=switch_while_routing):
+            got = self.route("Open Google Chrome for me.", "hotkey")
+        self.assertEqual((got["kind"], got["target"]), ("open_app", "Google Chrome"))
+        self.assertEqual(self.notices(), [])
+        self.assertTrue(self.wire.confirm_action(got["receipt"]))
+        self.assertFalse(self.wire.confirm_action(got["receipt"]))
+        self.assertEqual([r["data"]["text"] for r in self.notices()], ["Jarvis voice opened Google Chrome."])
+        self.assertEqual(self.notices(other), [])
+        self.select(None)
+        self.assertEqual(self.route("Open Google Chrome for me.", "hotkey"),
+                         {"kind": "open_app", "text": "Open Google Chrome for me.", "target": "Google Chrome"})
+
+    def test_unaddressed_launch_requires_exact_catalog_capability_and_matching_words(self):
+        phrase = "Open Google Chrome for me."
+        for flag in ({}, {"exact_open": False}, {"exact_open": 1}):
+            response = self.wire._request({"op": "route", "source": "hotkey", "text": phrase,
+                                           "receipt": True, **flag})
+            self.assertEqual(response["intent"], {"kind": "dictate", "target": "literal", "text": phrase})
+            self.assertNotIn("receipt", response)
+        with patch.object(self.link, "route_model", return_value={"kind": "open_app", "target": "Paint"}):
+            mismatched = self.route(phrase, "hotkey")
+        self.assertEqual(mismatched, {"kind": "dictate", "target": "literal", "text": phrase})
 
     def test_scope_is_paired_connection_and_active_owner_selected_chat(self):
         ticket = self.route("open Chrome")["receipt"]

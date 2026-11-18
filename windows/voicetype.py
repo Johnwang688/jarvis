@@ -12,6 +12,22 @@ from typing import Literal
 JARVIS_ADDRESS = re.compile(r"^(?:(?:hey|okay|ok)[,\s]+)?jarvis(?=$|[,.:!?\s-])[,.:!?\s-]*", re.I)
 
 
+POLITE_PREFIX = re.compile(r"^(?:(?:(?:could|can|would|will) you(?: please)?|I(?:[’\']d| would) like you to|please|kindly)[,\s]+)+", re.I)
+OPEN_APP_FRAME = re.compile(r"(?:open(?: up)?|launch|start(?: up)?|fire up|pull up|bring up) (.+)", re.I)
+_APP_SLOT = re.compile(r"[\w .'+&()–-]{1,80}", re.I)
+_APP_CLAUSE = re.compile(
+    r"\b(?:and|then|when|tomorrow|after|before|if|instead|because|unless|without|"
+    r"in|into|on|about|source|door|doors|file|files|folder|account|accounts|"
+    r"window when|settings for|is|are|was|were|will|would|should|not|don't|later|"
+    r"tab|tabs|website|browser history|my|your|their|please don't)\b|\w\.\w", re.I)
+# Ambiguous imperative/company names such as "Google" and "Focus" are also
+# subjects in ordinary dictated statements. Require the longer explicit search
+# frame for a query that itself looks like a declarative sentence.
+NARRATIVE_VERB = re.compile(
+    r"\b(?:was|were|is|are|has|have|had|announced|reported|acquired|says|seems|"
+    r"became|went|help|helps|keeps|kept|worked|works|decided|released|bought|"
+    r"needs|need|changed|took|takes)\b", re.I)
+
 _TERMINALS = frozenset("windowsterminal cmd powershell pwsh wsl wslhost conhost openconsole "
                       "mintty bash alacritty wezterm-gui hyper putty kitty code cursor windsurf "
                       "zed idea64 pycharm64 webstorm64 clion64 goland64 rider64 studio64 devenv "
@@ -39,6 +55,35 @@ def sanitize(text):
     text = "".join(" " if c in boundaries else c for c in text
                    if c in boundaries or unicodedata.category(c) not in {"Cc", "Cf"})
     return re.sub(" +", " ", text).strip()
+
+
+def app_name(target):
+    """Extract one bounded spoken app name from a complete imperative."""
+    target = re.sub(r"^the ", "", target.strip(), flags=re.I)
+    target = re.sub(r" (?:app|application|window)$", "", target, flags=re.I)
+    if (not _APP_SLOT.fullmatch(target) or _APP_CLAUSE.search(target)
+            or NARRATIVE_VERB.search(target) or len(target.split()) > 5
+            or target.startswith("'") or target.endswith("'")):
+        return ""
+    return target
+
+
+def shortcut_open_target(text):
+    """An unaddressed held shortcut may open one exactly named installed app."""
+    words = sanitize(text)
+    if len(words) > 2000 or JARVIS_ADDRESS.match(words):
+        return ""
+    polite = POLITE_PREFIX.match(words)
+    body = words[polite.end():] if polite else words
+    if body.endswith("?") and not polite and not re.search(r"\b(?:for me|please)\?$", body, re.I):
+        return ""
+    # Strip courtesy words only at the end, so reported or compound clauses
+    # cannot be truncated to a name the app catalog would accept.
+    body = re.sub(r"(?:[,\s]+(?:please|for me)){0,2}[.!?]*$", "", body, count=1, flags=re.I)
+    match = OPEN_APP_FRAME.fullmatch(body.strip())
+    if not match or re.search(r"(?:^|\s)-+\w|\b(?:search for|look up|tell me)\b", match[1], re.I):
+        return ""
+    return app_name(match[1])
 
 
 def _words(text):

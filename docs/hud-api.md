@@ -395,8 +395,10 @@ every one of these routes asks (`kind`):
   Use **Start voice** beside the HUD orb. Ready means the helper is connected and the HUD
   has received native audio. **Stop voice** releases the microphone and global Ctrl+D.
   Outside the HUD, hold Ctrl+D or Right Ctrl to dictate into the focused app. A pointer click or
-  drag during the hold keeps recording. Tapping either shortcut toggles dictation. Unaddressed
-  speech such as “open Chrome” types those words. “Jarvis, open Chrome” requests an app launch.
+  drag during the hold keeps recording. Tapping either shortcut toggles dictation. While holding
+  either key, “open Google Chrome for me” launches the installed app. Ordinary sentences go to
+  the focused field. Say “type open Chrome” to enter those exact words. Hands-free use still
+  starts with “Jarvis”, as in “Jarvis, open Chrome”.
   Inside the HUD, Ctrl+D still uses the HUD composer. Enable voice to reserve Ctrl+D outside
   the HUD, including in apps where it normally bookmarks a page or signals end-of-input.
   The Windows helper must load the

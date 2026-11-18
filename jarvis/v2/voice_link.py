@@ -795,16 +795,25 @@ class VoiceLink:
                         if op == "route":
                             pending_action = None
                             snapshot = None
-                            if (request.get("receipt") is True and self._voice_chat
-                                    and (source == "wake" or voice_intent.addressed(text))):
+                            addressed = source == "wake" or voice_intent.addressed(text)
+                            shortcut_target = (voice_intent.shortcut_open_target(text)
+                                               if not addressed and request.get("exact_open") is True else "")
+                            if request.get("receipt") is True and self._voice_chat and (addressed or shortcut_target):
                                 snapshot = self._voice_chat.selected()
                             try:
                                 raw = self.route_model(text[:2000], source)
                             except Exception:
                                 raw = None
                             intent = parse_intent(raw, source, text)
-                            reply = {"id": ident, "ok": True, "intent": intent}
                             kind = intent["kind"]
+                            exact_open = (kind == "open_app" and shortcut_target
+                                          and shortcut_target.casefold() == intent["target"].casefold())
+                            if not addressed and kind != "dictate" and not exact_open:
+                                # Legacy helpers can fuzzy-match an app. Only a helper
+                                # promising exact catalog resolution gets an unaddressed action.
+                                kind = "dictate"
+                                intent = {"kind": kind, "text": _clean(text, 2000), "target": "literal"}
+                            reply = {"id": ident, "ok": True, "intent": intent}
                             if snapshot and kind in ("open_app", "switch_app", "search", "read_selection"):
                                 token = wire.new_nonce()
                                 target = intent["target"] if kind in ("open_app", "switch_app") else ""

@@ -5,10 +5,10 @@ import queue
 import threading
 
 if __package__:
-    from .voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize
+    from .voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize, shortcut_open_target
     from .voicewire import LinkError, VoiceQuestionError
 else:
-    from voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize
+    from voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize, shortcut_open_target
     from voicewire import LinkError, VoiceQuestionError
 
 
@@ -143,12 +143,18 @@ class Flow:
                     self.link_error = exc
                 intent = {"kind": "ask" if addressed else "dictate",
                           "text": text, "target": "" if addressed else "literal"}
-            if not addressed and intent["kind"] != "dictate":
-                # A previous daemon could route an unaddressed shortcut to an
-                # action. Preserve the original words literally in the focused app.
-                intent = {"kind": "dictate", "text": text, "target": "literal"}
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
+            if not addressed and kind != "dictate":
+                # Check the original speech even with a daemon that guesses a
+                # target from prose. Only a unique exact Windows app may launch.
+                candidate = shortcut_open_target(text) if kind == "open_app" else ""
+                if (candidate and candidate.casefold() == target.casefold()
+                        and self.actions.open_app(candidate, exact=True)):
+                    self._confirm_action(intent)
+                    self.ui.set_state("done", f"Opened {candidate}.")
+                    return
+                kind, words, target = "dictate", text, "literal"
             if kind == "dictate" and source == "hotkey":
                 if target == "literal":
                     self.typer.run([("text", words)])

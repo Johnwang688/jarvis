@@ -278,6 +278,26 @@ class ActionGlue(unittest.TestCase):
         a.refresh_apps()
         self.assertEqual(self.runner.call_count, 2)
 
+    def test_exact_launch_accepts_display_or_alias_but_no_fuzzy_or_ambiguous_match(self):
+        a = self.make()
+        for name in ("Google Chrome", "CHROME"):
+            self.assertTrue(a.open_app(name, exact=True))
+            self.launcher.assert_called_once_with(
+                ["explorer.exe", "shell:AppsFolder\\chrome-id"],
+                creationflags=getattr(actions.subprocess, "CREATE_NO_WINDOW", 0))
+            self.launcher.reset_mock()
+        for name in ("Chrom", "Chrome Canary", "Notpad", "Visual", "Chrome.exe --incognito"):
+            self.assertFalse(a.open_app(name, exact=True))
+        for unsafe in ("PowerShell (Administrator)", "Elevated Windows Terminal", "C:/Windows/System32/cmd.exe"):
+            a.apps.append({"name": unsafe, "id": "unsafe-id"})
+            self.assertFalse(a.open_app(unsafe, exact=True))
+        a.apps.append({"name": "Chrome", "id": "different-id"})
+        self.assertFalse(a.open_app("chrome", exact=True))
+        a.apps.append({"name": "GOOGLE CHROME", "id": "duplicate-name-id"})
+        self.assertFalse(a.open_app("Google Chrome", exact=True))
+        self.launcher.assert_not_called()
+        self.assertEqual(self.runner.call_count, 1)
+
     def test_failed_refresh_keeps_cache_and_is_throttled(self):
         a = self.make()
         self.runner.side_effect = OSError()
@@ -350,6 +370,7 @@ class FlowErrors(unittest.TestCase):
         for source, spoken, payload in (
                 ("wake", "Open Chrome was what she said.", "Open Chrome was what she said."),
                 ("hotkey", "Type the words send it", "send it"),
+                ("hotkey", "Type the words open Google Chrome for me", "open Google Chrome for me"),
                 ("hotkey", 'She said "scratch that"', 'She said "scratch that"')):
             with self.subTest(source=source, spoken=spoken):
                 flow = self.make()
@@ -365,13 +386,54 @@ class FlowErrors(unittest.TestCase):
                 else:
                     self.typer.run.assert_not_called()
 
-    def test_hotkey_ignores_an_older_daemons_unaddressed_app_route(self):
+    def test_shortcut_exact_launch_acknowledges_once_without_typing(self):
+        spoken = "Open Google Chrome for me."
         flow = self.make("open_app")
-        self.client.dictate.return_value = {"text": "open enrollment send it"}
+        self.client.route.return_value = {"kind": "open_app", "text": spoken,
+                                         "target": "google chrome", "receipt": "ticket"}
         self.actions.open_app.return_value = True
-        flow.on_clip(b"fixture", "hotkey")
-        self.actions.open_app.assert_not_called()
-        self.typer.run.assert_called_once_with([("text", "open enrollment send it")])
+        self.client.confirm_action.side_effect = LinkError("Lost acknowledgement")
+        flow.on_clip(None, "hotkey", transcript=spoken)
+        self.actions.open_app.assert_called_once_with("Google Chrome", exact=True)
+        self.client.confirm_action.assert_called_once_with("ticket")
+        self.typer.run.assert_not_called()
+        self.ui.set_state.assert_called_with("done", "Opened Google Chrome.")
+        self.assertIsNotNone(flow.link_error)
+
+    def test_shortcut_exact_miss_types_original_words_without_edit_or_receipt(self):
+        flow = self.make("open_app")
+        spoken = "Open Chrome Canary for me!"
+        self.client.route.return_value = {"kind": "open_app", "text": "modified",
+                                         "target": "Chrome Canary", "receipt": "ticket"}
+        self.actions.open_app.return_value = False
+        flow.on_clip(None, "hotkey", transcript=spoken)
+        self.actions.open_app.assert_called_once_with("Chrome Canary", exact=True)
+        self.typer.run.assert_called_once_with([("text", spoken)])
+        self.client.clean.assert_not_called()
+        self.client.confirm_action.assert_not_called()
+
+    def test_shortcut_os_launch_failure_shows_error_without_typing_or_receipt(self):
+        flow = self.make("open_app")
+        self.client.route.return_value = {"kind": "open_app", "text": "open Chrome", "target": "Chrome", "receipt": "ticket"}
+        self.actions.open_app.side_effect = OSError("launcher unavailable")
+        flow.on_clip(None, "hotkey", transcript="Open Chrome.")
+        self.actions.open_app.assert_called_once_with("Chrome", exact=True)
+        self.ui.set_state.assert_called_with("error", "The voice action could not be completed.")
+        self.typer.run.assert_not_called()
+        self.client.confirm_action.assert_not_called()
+
+    def test_unaddressed_prose_and_mismatched_daemon_target_stay_literal(self):
+        for spoken in ("open enrollment send it", "Open Google Chrome was what she said.",
+                       "I use open source software", "Open Chrome on my phone.",
+                       "She said “open Chrome”", "Open Notepad."):
+            with self.subTest(spoken=spoken):
+                flow = self.make("open_app")
+                self.client.route.return_value = {"kind": "open_app", "text": "different words",
+                                                 "target": "Chrome", "receipt": "ticket"}
+                flow.on_clip(None, "hotkey", transcript=spoken)
+                self.actions.open_app.assert_not_called()
+                self.typer.run.assert_called_once_with([("text", spoken)])
+                self.client.confirm_action.assert_not_called()
 
     def test_linkerror_outside_routing_surfaces_exact_text(self):
         for stage in ("dictate", "ask", "say"):
