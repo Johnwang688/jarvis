@@ -2494,3 +2494,27 @@ snapshot and takes no new entries).
 - **WS-3 (§11).** The rainbow Inbox row is the In progress list's header and folds it; a "Needs you" line with
   its count (0 included) is always at the top of the unfolded list and opens the page; today's Inbox page is
   renamed "Needs you" and lists every row (ranks 1 to 8), grouped under its thread with a link to open it.
+
+## Per-chat speed (2026-11-17)
+
+The input bar's separate ⚡ speed chip offers Standard and the current model's
+catalog tiers, including future Codex tiers. A selected tier lights the cyan
+glass badge and its tooltip shows the catalog's cost description; Claude Fast
+says “billed as extra usage beyond your subscription.” Models without tiers
+have a grey disabled chip only when nothing is saved. A saved dormant tier
+keeps Standard available to clear it and is labelled “not active on this model.”
+The native select reserves its widest option and keeps keyboard events local.
+Compose choices ride the first message: picking speed captures the displayed
+model and sends it as an explicit `model` with `speed` and `speed_model`.
+A default-following draft resets to Standard if the displayed default moves
+before send. Existing chats use the owner-checked PATCH with `speed_model`
+as the effective-model precondition; a speed choice pins a default-following
+thread in that same locked write, preserving effort. Standard clears speed
+and binding without pinning. Paid speed is effective only when the thread
+has an explicit model equal to its binding and the current catalog still
+offers the tier; a default-following thread always runs Standard. Model
+changes rebind only already bound compatible tiers, keep unbound legacy
+tiers dormant, and clear incompatible bound pairs. Choosing “follow default”
+clears both speed fields. Default and route writes never touch speed or move
+pins. There is no speed default, confirmation, auto-off, phone control,
+Discord command or agent/MCP tool.

@@ -2202,7 +2202,10 @@ def route(handler, daemon, parts, query):
         body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
         _refresh_codex_metadata(daemon)
         try:
-            thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
+            # Serialize the default snapshot with per-thread speed preconditions;
+            # this route keeps its existing caller access.
+            with daemon._lock:
+                thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
         except thread_model.ChoiceRefused as exc:
             fail(400, str(exc))
         payload = thread_model.describe()
@@ -2215,9 +2218,9 @@ def route(handler, daemon, parts, query):
         return 200, payload
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
-        body = _object(handler._body(), ("title", "project_id", "model", "effort"))
+        body = _object(handler._body(), ("title", "project_id", "model", "effort", "speed", "speed_model"))
         kinds = [k for k, keys in (("rename", {"title"}), ("move", {"project_id"}),
-                                   ("model", {"model", "effort"})) if body.keys() & keys]
+                                   ("model", {"model", "effort", "speed", "speed_model"})) if body.keys() & keys]
         if len(kinds) != 1:
             fail(400, "rename, move and model change are separate requests" if kinds
                  else "missing fields: title, project_id, or model/effort")
@@ -2227,7 +2230,8 @@ def route(handler, daemon, parts, query):
         if kinds == ["model"]:
             # A chat thread's model and effort, from its next message on.
             # Never its provider: a session cannot change provider.
-            return 200, daemon.set_thread_model(parts[1], body)
+            return 200, daemon.set_thread_model(
+                parts[1], body, owner_check=lambda: _projects.owner_only(handler, daemon))
         with daemon._lock:
             daemon._active()
             thread = daemon.require(stores.threads, parts[1])

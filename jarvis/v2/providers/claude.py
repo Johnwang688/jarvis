@@ -1117,6 +1117,14 @@ class ClaudeProvider:
             kwargs["model"] = brief.model
         if brief.effort:
             kwargs["effort"] = brief.effort
+        from ..thread_model import speeds_of
+        fast = brief.speed == "fast" and any(t[0] == "fast" for t in speeds_of("claude", brief.model))
+        if fast or kwargs.get("settings"):
+            settings = json.loads(kwargs.get("settings") or "{}")
+            settings.pop("fastMode", None)
+            if fast:
+                settings["fastMode"] = True
+            kwargs["settings"] = json.dumps(settings)
         if brief.max_turns is not None:
             kwargs["max_turns"] = brief.max_turns
         if brief.allowed_tools is not None:
@@ -2816,7 +2824,7 @@ class ClaudeProvider:
 
     # -- control
 
-    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None, *, speed: str | None = None) -> None:
         """Move this conversation onto another model or effort (decisions A1).
 
         Called between turns only — the daemon calls it at the start of the
@@ -2845,7 +2853,7 @@ class ClaudeProvider:
             raise ValueError("a turn is running; the model changes at the next one")
         try:
             old_brief, old_client = session.brief, session.client
-            brief = replace(old_brief, model=model, effort=effort)
+            brief = replace(old_brief, model=model, effort=effort, speed=speed)
             resume = session.resumable
 
             def connect(target: Brief) -> Any:

@@ -19,6 +19,7 @@ from .stores import StoreError, _write_bytes
 
 LOG = logging.getLogger(__name__)
 CACHE_VERSION = 1
+FAST_SPEED = (("fast", "Fast", "Faster output, billed as extra usage beyond your subscription"),)
 
 
 def _cache_path(path=None) -> Path:
@@ -54,6 +55,7 @@ def parse(rows) -> dict[str, dict]:
         parsed[model_id] = {
             "name": name[:MAX_NAME] or model_id,
             "efforts": tuple(efforts),
+            "speeds": FAST_SPEED if row.get("supportsFastMode") is True else (),
             # Claude Code reports no input modalities; every model it lists
             # takes images. A wrong yes costs an API error, not a boundary.
             "vision": True,
@@ -67,6 +69,7 @@ def rows_of(table: dict[str, dict]) -> list[dict]:
     """Cache the SDK row shape so disk reads pass through the same parser."""
     return [{"value": model, "resolvedModel": model, "displayName": None if entry["name"] == model else entry["name"],
              "supportsEffort": bool(entry["efforts"]),
+             "supportsFastMode": any(t[0] == "fast" for t in entry.get("speeds", ())),
              "supportedEffortLevels": list(entry["efforts"])}
             for model, entry in table.items()]
 

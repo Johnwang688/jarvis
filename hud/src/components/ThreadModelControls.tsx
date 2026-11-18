@@ -16,12 +16,13 @@ import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow } from "../types";
 import {
-  chipState, defaultBody, patchBody, PROVIDER_LABELS, PROVIDERS, providerRefusal, visionNote,
+  applyModel, chipState, defaultBody, patchBody, PROVIDER_LABELS, PROVIDERS, providerRefusal, visionNote,
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import type { ProviderName } from "../types";
 import { PANE_NOS, type PaneNo } from "../lib/workspace";
 import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
+import { SpeedChip } from "./SpeedChip";
 import { refusal, rosterIds } from "../lib/roster";
 
 /** The chips' view of one pane's conversation (lib/threadmodel `chipState`),
@@ -55,6 +56,20 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   // Clicks read the state as it is when they land, never a render's closure.
   const now = useRef(state);
   now.current = state;
+
+  // A default-following draft must never transfer a paid choice to a new
+  // displayed default. The send body pins the captured binding instead.
+  useEffect(() => {
+    if (!models) return;
+    for (const pane of PANE_NOS) {
+      const { composing, choice } = paneChips(state, pane);
+      const compose = state.chats[pane].compose;
+      if (composing && compose && choice?.model === null && choice.speed &&
+          choice.speed_model !== models.providers[choice.provider]?.default) {
+        dispatch({ type: "chat", pane, patch: { compose: { ...compose, speed: null, speed_model: null } } });
+      }
+    }
+  }, [models, state.chats, dispatch]);
 
   const reloadSequence = useRef(0);
   const reload = useCallback(async () => {
@@ -95,6 +110,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   // of the latest one whose success has been drawn.
   const latest = useRef<Record<string, number>>({});
   const landed = useRef<Record<string, number>>({});
+  const pendingChoices = useRef<Record<string, number>>({});
+  const [, redrawPending] = useState(0);
   /** `from`: the conversation an effort move was made on (the chip's key when
    * it started). The pane showing another by now drops it — never onto a
    * thread or compose row it was not made on (review of PR #30). */
@@ -111,12 +128,16 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         // Composing: kept here, sent with the first message, nothing before.
         dispatch({
           type: "chat", pane,
-          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort } },
+          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort,
+            speed: next.speed ?? null, speed_model: next.speed_model ?? null } },
         });
         return;
       }
       if (!targetId || !choice) return;
-      const body = patchBody(choice, next);
+      const body = patchBody(choice, next, models);
+      // Also guard the callback: a second event can arrive before React draws
+      // the disabled select, or through a callback from an earlier render.
+      if (body && "speed" in body && pendingChoices.current[targetId]) return;
       if (!body) return;
       const key = keyOf(cs);
       // An older answer must not undo a newer one: the effort slider can send
@@ -127,6 +148,11 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       // `thread_updated` to put it right; review of PR #30). Only the latest
       // change's refusal is said. The SSE `thread_updated` still carries every
       // change, in the order the daemon made them.
+      const pendingChoice = "model" in body || "effort" in body;
+      if (pendingChoice) {
+        pendingChoices.current[targetId] = (pendingChoices.current[targetId] || 0) + 1;
+        redrawPending((n) => n + 1);
+      }
       const n = (latest.current[targetId] = (latest.current[targetId] || 0) + 1);
       const isLatest = () => latest.current[targetId] === n;
       return api
@@ -147,7 +173,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           if (holder !== undefined && row)
             dispatch({
               type: "chat", pane: holder,
-              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null } },
+              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null,
+                speed: record.speed ?? null, speed_model: record.speed_model ?? null } },
             });
         })
         .catch((e) => {
@@ -156,9 +183,15 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           const s2 = now.current;
           const at = PANE_NOS.find((p) => keyOf(paneChips(s2, p)) === key);
           if (at !== undefined) setErrors((all) => ({ ...all, [at]: { key, text: `Could not change model: ${e.message}` } }));
+        })
+        .finally(() => {
+          if (pendingChoice) {
+            pendingChoices.current[targetId] -= 1;
+            redrawPending((n) => n + 1);
+          }
         });
     },
-    [dispatch],
+    [dispatch, models],
   );
 
   const openCatalog = useCallback((mode: "thread" | "roster" = "thread", pane: PaneNo = 1) => {
@@ -229,6 +262,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
     const err = errors[pane];
     return (
+      <>
       <ModelChip
         models={models}
         choice={cs.choice}
@@ -247,6 +281,21 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         pane={pane}
         zoom={zoom}
       />
+      <SpeedChip models={models} choice={cs.choice}
+        composing={cs.composing}
+        pending={!!(cs.targetId && pendingChoices.current[cs.targetId])}
+        disabled={!cs.editable.model || state.approvals.length > 0}
+        onChange={(speed) => {
+          if (cs.targetId && pendingChoices.current[cs.targetId]) return;
+          const current = paneChips(now.current, pane).choice;
+          if (!current) return;
+          // A callback from an older render remains a speed write with its
+          // original model precondition, even if an SSE moved the model on.
+          return change(pane, { ...current, speed,
+            speed_model: speed ? cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null
+              : cs.composing ? null : cs.choice!.model || models?.providers[cs.choice!.provider]?.default || null }, keyOf(cs));
+        }} />
+      </>
     );
   };
 
@@ -283,7 +332,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           .then(() => {
             setCatalogOpen(false);
             const { choice } = paneChips(now.current, catalogPane);
-            if (choice) change(catalogPane, { ...choice, model: id, effort: null });
+            if (choice) change(catalogPane, applyModel(choice, id, models));
           })
           .catch((e) => setCatalogError(e.message))
       }

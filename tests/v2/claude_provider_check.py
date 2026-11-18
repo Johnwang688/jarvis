@@ -1989,6 +1989,27 @@ def secrets_checks() -> None:
 # --- main -------------------------------------------------------------------
 
 
+def speed_reconnect_checks() -> None:
+    from unittest.mock import patch
+    from jarvis.v2 import router, claude_catalog
+    provider = claude.ClaudeProvider()
+    entry = dict(router.CLI_MODELS["claude"]["claude-fable-5-2"], speeds=claude_catalog.FAST_SPEED)
+    with patch.dict(router.CLI_MODELS["claude"], {"claude-fable-5-2": entry}), fake([result_message()]):
+        handle = provider.start(thread(), brief(model="claude-fable-5-2"), allow)
+        original = FakeClient.instances[-1]
+        drain(provider, handle, "one")
+        provider.set_model(handle, "claude-fable-5-2", None, speed="fast")
+        faster = FakeClient.instances[-1]
+        check(faster is not original and original.disconnects == 1, "speed: enabling reconnects")
+        eq(json.loads(faster.options.settings), {"fastMode": True}, "speed: Fast opts in")
+        eq(faster.options.resume, SESSION_ID, "speed: reconnect keeps the conversation")
+        provider.set_model(handle, "claude-fable-5-2", None, speed=None)
+        standard = FakeClient.instances[-1]
+        check(standard is not faster and faster.disconnects == 1, "speed: reset reconnects")
+        eq(standard.options.settings, None, "speed: Standard omits fastMode")
+        provider.close(handle)
+
+
 def set_model_checks() -> None:
     """Decisions A1: a chat thread's model or effort changes between turns by
     resuming the same session with new options — and keeps the gate."""
@@ -3441,6 +3462,7 @@ def main() -> int:
     skill_checks()
     secrets_checks()
     set_model_checks()
+    speed_reconnect_checks()
     if _failures:
         print(f"\n{len(_failures)} check(s) FAILED:")
         for label in _failures:

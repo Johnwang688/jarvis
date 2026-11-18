@@ -513,10 +513,9 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   `strict`), `always_ask` must keep every one of the project's commands
   (adding more is fine), and `mcp_servers` must be empty. Anything else is a
   400 naming the field. The HUD sends none of these.
-- `PATCH /threads/{id}` `{model?, effort?}` → the thread record. This is one
+- `PATCH /threads/{id}` `{model?, effort?, speed?, speed_model?}` → the thread record. This is one
   of the route's three request shapes, and they are mutually exclusive: a
-  rename `{title}`, a move `{project_id}`, or a model change `{model?,
-  effort?}`. Fields from two shapes in one body are a 400 ("rename, move and
+  rename `{title}`, a move `{project_id}`, or a model/effort/speed change. Fields from two shapes in one body are a 400 ("rename, move and
   model change are separate requests"), and so is a body with none. `model: null` returns to the
   default and resets the effort — unpinning is a choice of model like any
   other, so it clears a stored effort too (`{model: null, effort}` keeps
@@ -530,13 +529,56 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   thread or one in an archived project ("restore the thread before changing
   its model"). There is no
   `provider` field: a session cannot change provider.
+- A speed PATCH is owner-only and must include `speed_model`, the current
+  effective model shown when the tier was chosen (also when resetting with
+  `speed: null`). A stale or missing model precondition returns 409 without
+  writing. Change model first, then choose speed after its response. A tier
+  must be offered by that model or the request returns 400. Selecting speed
+  on a default-following thread pins its current effective model and stores
+  `speed` and `speed_model` in the same locked write, preserving effort.
+  Standard clears both speed fields and never pins a model.
+  Creation with speed also resolves the model once under the lock and pins
+  that same validated model; compose sends explicit `model`, `speed` and
+  `speed_model`. An optional creation `speed_model` must match that model or
+  creation returns 409. A default-following draft resets to Standard when
+  its displayed default changes before send, rather than rebinding speed.
+  Model writes on a thread with a saved speed require the owner under the
+  write lock. They rebind an already bound compatible tier, clear both fields
+  for an incompatible bound tier, and leave an unbound legacy tier dormant.
+  Choosing `model: null` clears both speed fields in that write. Effort writes
+  leave them untouched.
+  At turn start a tier applies only when `Thread.model` is explicitly pinned,
+  equals `Thread.speed_model` and the current catalog still offers the tier.
+  A thread with `model: null` always runs Standard, regardless of saved speed
+  fields. An unavailable tier runs Standard with the saved pair preserved.
+  Legacy speeds without a binding stay dormant until the owner selects speed
+  again. Provider-default and route writes never touch speed and cannot
+  activate it on a default-following thread or move a pinned thread.
+  A saved dormant speed remains clearable through the enabled HUD chip even
+  when the current model offers no tiers; it is labelled not active on this model.
+  Pinning for a speed keeps the effort the chat inherited from the default.
+  `model: null` with a paid speed is a 400 (choose a model, or Standard).
+  A refused model switch never restores or sets a tier: its rollback may only
+  clear one (a pin it makes for a default-following chat always clears speed),
+  and never leaves a tier effective that was not before it. If the provider
+  may still be on a paid tier the thread no longer asks for, a message or a
+  compaction is not sent and the session is closed (the next message resumes
+  it at the tier the record asks for), and a steer waits for the next turn.
+  The boundary, like a model change's, is the turn: a speed change applies
+  from the next turn. A turn already running finishes on the tier it
+  started with, including the provider's own recovery inside it (Claude's
+  overflow `/compact` and resend). Steers, the owner's or a peer chat's
+  reply, are not added to such a turn once the owner has turned its tier
+  off: they wait for the next turn. A provider that fell back to Standard
+  after a refused switch is still treated as possibly paid, so that one
+  message is refused and the session reopens at Standard (fail closed).
 - Every change writes a `model_set` record to the thread's log (`data.text`,
   e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
   `effort → high (default model: X)` for an effort-only change on a default
   thread (`effort → default · high (…)` when it is cleared); or
   `(follows the default)` when a default thread's turn starts on a new global
   model, naming the re-clamped effort) and publishes it, then `thread_updated {…thread, thread_id,
-  changed: ["model", "effort"], effective_model, effective_effort}`. A
+  changed: ["model", "effort", "speed", "speed_model"], effective_model, effective_effort}`. A
   rename's `thread_updated` carries `changed: ["title"]` and no record; the
   HUD patches in place when the record is there and refetches otherwise. `GET /threads/{id}/transcript` returns `model_set`
   records as `role: "system"`.
