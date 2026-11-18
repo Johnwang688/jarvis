@@ -7,6 +7,7 @@ import math
 import json
 from pathlib import Path
 import queue
+from statistics import median
 import tempfile
 import threading
 import time
@@ -109,6 +110,7 @@ class WakeListener:
         self._epoch = 0
         self._stream = self._thread = self._spotter = self._temp = None
         self._tap = None
+        self.on_pcm = None
         self._stream_started_at = None
         self._last_audio_at = None
 
@@ -210,11 +212,16 @@ class WakeListener:
                 tap(indata, frames, timing, status)
             except Exception:
                 pass
+        # Keep hands-free wake and HUD microphone consumers on a single
+        # device. The asynchronous relay never touches a socket on this thread.
+        pcm = indata.tobytes() if not status else b""
+        if pcm and self.on_pcm is not None:
+            self.on_pcm(pcm)
         if status or self.busy():
             self._epoch += 1
             return
         try:
-            self._audio_queue.put_nowait((self._epoch, captured, indata.tobytes()))
+            self._audio_queue.put_nowait((self._epoch, captured, pcm))
         except queue.Full:
             self._epoch += 1
 
@@ -270,8 +277,8 @@ class WakeListener:
             rms = float(np.sqrt(np.mean(samples * samples)))
             if endpoint is None:
                 stream.accept_waveform(RATE, samples)
-                recent.append(pcm)
                 seen += len(samples)
+                recent.append((seen, pcm, rms))
                 hit = None
                 while spotter.is_ready(stream):
                     spotter.decode_stream(stream)
@@ -298,8 +305,15 @@ class WakeListener:
                     after_wake = max(0, round((times[-1] - 0.05) * RATE))
                     count = seen - after_wake
                     if count > 0:
-                        prefix = b"".join(recent)[-2 * count:]
+                        prefix = b"".join(block for _, block, _ in recent)[-2 * count:]
                         endpoint = Endpointer(grace_ms=180)
+                        # A fast command may already fill the entire suffix. Use
+                        # the room level before the first wake token so speech
+                        # cannot teach the endpoint that speech is background.
+                        ambient = [level for end, _, level in recent
+                                   if end / RATE <= times[0] - 0.1]
+                        if ambient:
+                            endpoint.noise_floor = median(ambient)
                         for offset in range(0, len(prefix), 2 * CHUNK):
                             part = prefix[offset:offset + 2 * CHUNK]
                             chunks.append(part)

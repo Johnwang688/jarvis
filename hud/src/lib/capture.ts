@@ -273,6 +273,20 @@ export class Capture {
     this.closeContinuation();
   }
 
+  /** Changing devices or stopping voice ends the old timeline. Never join a
+   * held key or its look-back to audio from a later microphone session. */
+  disconnectInput() {
+    this.stopRecording(true, true);
+    this.ptt = null;
+    this.segClaimed = false;
+    this.wakeHitAt = -1e9;
+    this.vad.reset();
+    this.blockedVad.reset();
+    this.closeFollowUp();
+    this.markUnmute();
+    this.hooks.onLevel(0);
+  }
+
   /** A claimed message is being recorded (chunks may already have left). */
   recording() {
     return this.rec !== null;

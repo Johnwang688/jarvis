@@ -19,9 +19,31 @@ def main():
     url = f"http://127.0.0.1:{mock.port}"
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+            browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
+            ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
             guard(ctx)
+            ctx.add_init_script("""
+                window.testMics = [];
+                const get = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+                navigator.mediaDevices.getUserMedia = async constraints => {
+                    const stream = await get(constraints).catch(e => { window.testMicError = e.name; throw e; });
+                    window.testMics.push(...stream.getAudioTracks());
+                    return stream;
+                };
+                const fetchOriginal = window.fetch.bind(window);
+                window.fetch = (path, options) => {
+                    if (path !== '/voice-agent/microphone') return fetchOriginal(path, options);
+                    return Promise.resolve(new Response(new ReadableStream({
+                        start(controller) {
+                            const timer = setInterval(() => controller.enqueue(new Uint8Array(3200)), 50);
+                            options.signal.addEventListener('abort', () => {
+                                clearInterval(timer);
+                                controller.close();
+                            }, {once: true});
+                        },
+                    }), {headers:{'Content-Type':'application/octet-stream'}}));
+                };
+            """)
             page = ctx.new_page()
             requests = []
             pending = []
@@ -32,18 +54,35 @@ def main():
 
             status = {"state": "off", "detail": "Start Voice Anywhere"}
             page.route(url + "/voice-agent/start", hold)
-            page.route(url + "/voice-agent/status", lambda route: route.fulfill(json=status))
+            stops = []
+            def stop(route):
+                stops.append(route.request.post_data_json)
+                status.update(state="off", detail="Voice stopped.", hud_mic_paused=True, can_stop=False, shared_mic=False)
+                route.fulfill(json={"stopped": True})
+            page.route(url + "/voice-agent/stop", stop)
+            polls = []
+            def read_status(route):
+                polls.append(True)
+                if len(polls) < 2:
+                    route.fulfill(status=503, json={"error": "Restarting"})
+                else:
+                    route.fulfill(json=status)
+            page.route(url + "/voice-agent/status", read_status)
             page.goto(url)
             page.locator("#orb").wait_for(state="visible")
             button = page.get_by_role("button", name="Start Voice Anywhere")
             result = page.locator("#voice-agent-result")
             expect(page.locator("#micstrip #voice-agent-start")).to_be_visible()
             indicator = page.locator(".voice-agent-state")
+            assert until(lambda: len(polls) >= 1)
+            assert page.evaluate("window.testMics.length") == 0
             expect(indicator).to_have_text("Off")
             meter = page.locator("#level").bounding_box()
             assert meter and meter["width"] > 20 and 0 < meter["height"] < 10
 
+            assert until(lambda: page.evaluate("window.testMics.some(t => t.readyState === 'live')")), page.evaluate("[window.testMicError,window.testMics.map(t => t.readyState)]")
             button.click()
+            assert until(lambda: page.evaluate("window.testMics.every(t => t.readyState === 'ended')"))
             expect(page.get_by_role("button", name="Starting Voice Anywhere…")).to_be_disabled()
             expect(indicator).to_have_text("Starting")
             until(lambda: len(pending) == 1)
@@ -62,6 +101,20 @@ def main():
                 window.__hud.mic.wake();
             }""")
             assert page.evaluate("window.__wakeClaims") == 0
+            status.update(can_stop=True, shared_mic=True)
+            expect(page.get_by_role("button", name="Stop Voice Anywhere")).to_be_enabled()
+            expect(result).to_contain_text("share one mic")
+            assert page.evaluate("window.testMics.every(t => t.readyState === 'ended')")
+            page.get_by_role("button", name="Stop Voice Anywhere").click()
+            expect(indicator).to_have_text("Off")
+            assert stops == [{}]
+            page.reload()
+            expect(indicator).to_have_text("Off")
+            assert page.evaluate("window.testMics.length") == 0
+            page.evaluate("""() => {
+                window.__wakeClaims = 0;
+                window.__hud.capture.onWake = () => { window.__wakeClaims++; };
+            }""")
             status.update(state="microphone_unavailable", detail="The microphone is unavailable.")
             expect(result).to_have_text("The microphone is unavailable.")
             expect(indicator).to_have_text("Needs attention")
@@ -69,7 +122,7 @@ def main():
             expect(button).to_be_enabled()
 
             page.evaluate("window.__hud.mic.wake()")
-            assert page.evaluate("window.__wakeClaims") == 1
+            assert page.evaluate("window.__wakeClaims") == 0
 
             page.set_viewport_size({"width": 1280, "height": 500})
             expect(page.locator("#voice-agent-start.beside")).to_be_visible()

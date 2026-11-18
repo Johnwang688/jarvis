@@ -346,22 +346,31 @@ class FlowErrors(unittest.TestCase):
         self.typer, self.actions, self.ui, self.player = Mock(), Mock(), Mock(), Mock()
         return voiceflow.Flow(self.client, self.typer, self.actions, self.ui, self.player)
 
-    def test_wake_app_commands_work_with_the_router_offline(self):
-        for spoken, method, target in (
-            ("Jarvis, open Calculator.", "open_app", "Calculator"),
-            ("Switch to Google Chrome.", "switch_app", "Google Chrome"),
-        ):
-            with self.subTest(spoken=spoken):
+    def test_windows_does_not_override_classified_mentions_or_literal_dictation(self):
+        for source, spoken, payload in (
+                ("wake", "Open Chrome was what she said.", "Open Chrome was what she said."),
+                ("hotkey", "Type the words send it", "send it"),
+                ("hotkey", 'She said "scratch that"', 'She said "scratch that"')):
+            with self.subTest(source=source, spoken=spoken):
                 flow = self.make()
                 self.client.dictate.return_value = {"text": spoken}
-                self.client.route.side_effect = LinkError("router unavailable")
-                flow.on_clip(b"fixture", "wake")
-                self.client.dictate.assert_called_once_with(b"fixture", source="wake")
-                getattr(self.actions, method).assert_called_once_with(target)
-                self.client.route.assert_not_called()
-                self.typer.run.assert_not_called()
-                action = "Opened" if method == "open_app" else "Switched to"
-                self.ui.set_state.assert_called_with("done", f"{action} {target}.")
+                self.client.route.return_value = {"kind": "dictate", "text": payload, "target": "literal"}
+                flow.on_clip(b"fixture", source)
+                self.client.route.assert_called_once_with(spoken, source)
+                self.actions.open_app.assert_not_called()
+                self.client.ask.assert_not_called()
+                self.client.clean.assert_not_called()
+                if source == "hotkey":
+                    self.typer.run.assert_called_once_with([("text", payload)])
+                else:
+                    self.typer.run.assert_not_called()
+
+    def test_hotkey_app_miss_preserves_unaddressed_dictation_literally(self):
+        flow = self.make("open_app")
+        self.client.dictate.return_value = {"text": "open enrollment send it"}
+        self.actions.open_app.return_value = False
+        flow.on_clip(b"fixture", "hotkey")
+        self.typer.run.assert_called_once_with([("text", "open enrollment send it")])
 
     def test_linkerror_outside_routing_surfaces_exact_text(self):
         for stage in ("dictate", "ask", "say"):
@@ -389,7 +398,7 @@ class FlowErrors(unittest.TestCase):
                     self.actions.open_app.assert_not_called()
                     if source == "hotkey":
                         self.typer.run.assert_called_once_with(
-                            [("text", "open the report"), ("key", "enter")])
+                            [("text", text)])
                         self.client.ask.assert_not_called()
                         self.player.play.assert_not_called()
                     else:
@@ -403,6 +412,8 @@ class FlowErrors(unittest.TestCase):
         f = self.make()
         self.client.route.side_effect = LinkError("Route failed")
         f.on_clip(b"wav", "hotkey")
+        self.client.route.side_effect = None
+        self.client.route.return_value = {"kind": "dictate", "text": "plain dictation", "target": ""}
         self.client.dictate.return_value = {"text": "plain dictation"}
         f.on_clip(b"wav", "hotkey")
         self.assertIsNone(f.link_error)
@@ -548,7 +559,8 @@ class AgentGlue(unittest.TestCase):
         a = self.bare()
         client = Mock()
         client.dictate.return_value = {"text": "hello"}
-        client.route.return_value = {"kind": "ask", "text": "q", "target": ""}
+        client.route.side_effect = lambda text, source: {"kind": "ask" if source == "wake" else "dictate",
+                                                         "text": text, "target": ""}
         client.ask.return_value, client.say.return_value = "answer", wav_bytes(b"\0\0")
         typer, action = Mock(), Mock()
         def dictate(wav, source):
@@ -602,6 +614,7 @@ class AgentGlue(unittest.TestCase):
         timeout = threading.Timer(2, agent.done.set)
         timeout.start()
         self.addCleanup(timeout.cancel)
+        client.route.side_effect = lambda text, source: {"kind": "dictate", "text": text, "target": ""}
         client.dictate_capture.side_effect = transcript
         with patch.object(agentmod, "Client", return_value=client), \
                 patch.object(agentmod, "load_key", return_value=b"key"), \

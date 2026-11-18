@@ -110,7 +110,7 @@ describe("in the window, placing a transcript calls no approval function", () =>
   });
 
   it("a wake hit is dropped while his sentence says his name, before the capture is asked to claim anything (L-b)", () => {
-    const hit = strip(appSource).match(/const onWakeHit = useCallback\(\(\) => \{([\s\S]*?)\}, \[capture/);
+    const hit = strip(appSource).match(/const onWakeHit = useCallback\((?:async )?\(\) => \{([\s\S]*?)\}, \[capture/);
     expect(hit).not.toBeNull();
     const text = hit![1];
     const own = text.indexOf("speech.controller.sayingOwnName()");

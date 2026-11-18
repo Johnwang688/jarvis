@@ -196,6 +196,8 @@ class Agent:
         # per-thread choice, decisions A4). None — every v1 surface — keeps
         # v1's resolution per call (`models.effort_for`); "" sends no effort.
         self.effort: str | None = None
+        # A surface may supply its own completion transport for this turn.
+        self.completion: Callable[..., llm.Reply] | None = None
         # `None` means "everything worth sending", not literally everything:
         # a deferred tool group (tools.ToolGroup) keeps its bulk out of the
         # request until `load_tools` asks for it, and keeps it out entirely on a
@@ -750,7 +752,7 @@ class Agent:
             self._refresh_system(step + 1)
 
             try:
-                reply = llm.chat(
+                reply = (self.completion or llm.chat)(
                     self.model,
                     self.messages,
                     volatile_tail=self._volatile_tail(),
@@ -947,7 +949,7 @@ class Agent:
             return ""
         self.messages.append({"role": "user", "content": HANDOFF_PROMPT})
         try:
-            reply = llm.chat(
+            reply = (self.completion or llm.chat)(
                 self.model, self.messages, stream=False,
                 volatile_tail=self._volatile_tail(),
                 cache_points=self._cache_points(),

@@ -100,6 +100,7 @@ import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads, speechSilencedByMic } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
 import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
+import { microphoneSource, startSharedMic } from "./lib/sharedMic";
 import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
@@ -3492,42 +3493,77 @@ export default function App() {
 
   const [voiceAgentStatus, setVoiceAgentStatus] = useState<VoiceAgentStatus | null>(null);
   const voiceAgentState = useRef<VoiceAgentStatus["state"] | null>(null);
-  const [voiceAgentStarting, setVoiceAgentStarting] = useState(false);
+  const [voiceAction, setVoiceAction] = useState<"start" | "stop" | null>(null);
   const voiceAgentRequest = useRef(false);
+  const voiceRevision = useRef(0);
+  const [voiceChecked, setVoiceChecked] = useState(false);
+  const [voicePaused, setVoicePaused] = useState(() => {
+    try { return localStorage.getItem("jarvis.voiceAnywhereStopped") === "1"; } catch { return false; }
+  });
+  const [sharedMicLive, setSharedMicLive] = useState(false);
   const [voiceAgentError, setVoiceAgentError] = useState("");
+  const releaseBrowserMic = useRef<(() => void) | null>(null);
+  const failedVoiceAction = useRef<"start" | "stop" | null>(null);
+  const acceptVoiceStatus = useCallback((status: VoiceAgentStatus) => {
+    const recovered = (failedVoiceAction.current === "start" && status.state === "ready") ||
+      (failedVoiceAction.current === "stop" && status.state === "off" && status.hud_mic_paused);
+    if (recovered) {
+      failedVoiceAction.current = null;
+      setVoiceAgentError("");
+    }
+    voiceAgentState.current = status.state;
+    setVoiceAgentStatus(status);
+  }, []);
   useEffect(() => {
     let gone = false;
     let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
+      const revision = voiceRevision.current;
       const status = await api.voiceAgentStatus().catch(() => null);
       if (gone) return;
-      voiceAgentState.current = status?.state ?? null;
-      setVoiceAgentStatus(status);
-      if (status?.state === "ready") setVoiceAgentError("");
+      // A delayed poll must never undo a newer Start or Stop response.
+      if (revision === voiceRevision.current && !voiceAgentRequest.current) {
+        if (status) { acceptVoiceStatus(status); setVoiceChecked(true); }
+      }
       timer = setTimeout(refresh, 1000);
     };
+    const storage = (e: StorageEvent) => {
+      if (e.key === "jarvis.voiceAnywhereStopped") setVoicePaused(e.newValue === "1");
+    };
+    window.addEventListener("storage", storage);
     void refresh();
-    return () => { gone = true; clearTimeout(timer); };
-  }, []);
-  const startVoiceAgent = async () => {
-    if (blockedNow.current || settingsNow.current || voiceAgentRequest.current ||
-        voiceAgentState.current === "ready") return;
+    return () => { gone = true; clearTimeout(timer); window.removeEventListener("storage", storage); };
+  }, [acceptVoiceStatus]);
+  const toggleVoiceAgent = async () => {
+    if (blockedNow.current || settingsNow.current || voiceAgentRequest.current) return;
+    const stop = voiceAgentStatus?.state === "stopping" || !!voiceAgentStatus?.can_stop;
+    releaseBrowserMic.current?.();
+    failedVoiceAction.current = null;
     voiceAgentRequest.current = true;
-    setVoiceAgentStarting(true);
+    voiceRevision.current++;
+    setVoiceAction(stop ? "stop" : "start");
     setVoiceAgentError("");
     try {
-      await api.startVoiceAgent();
+      if (stop) await api.stopVoiceAgent(); else await api.startVoiceAgent();
+      setVoicePaused(stop);
+      try { localStorage.setItem("jarvis.voiceAnywhereStopped", stop ? "1" : "0"); } catch { /* session only */ }
+      const status = await api.voiceAgentStatus();
+      acceptVoiceStatus(status);
+      setVoiceChecked(true);
     } catch (error) {
-      setVoiceAgentError(error instanceof Error ? error.message : "Could not start Voice Anywhere.");
+      failedVoiceAction.current = stop ? "stop" : "start";
+      setVoiceAgentError(error instanceof Error ? error.message : "Voice Anywhere could not change state.");
     } finally {
+      voiceRevision.current++;
       voiceAgentRequest.current = false;
-      setVoiceAgentStarting(false);
+      setVoiceAction(null);
     }
   };
+  const micSource = microphoneSource(voiceAgentStatus, voiceChecked, !!voiceAction, voicePaused);
   const windowsOwnsWake = useCallback(() => voiceAgentState.current === "ready", []);
 
   const onWakeHit = useCallback(async () => {
-    if (crashedRef.current || windowsOwnsWake()) return;
+    if (crashedRef.current || windowsOwnsWake() || micSource === "stopped" || micSource === "waiting") return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
     // The window knows what he is saying: while a sentence that contains the wake word is sounding (or just did),
@@ -3541,7 +3577,7 @@ export default function App() {
     if (speech.controller.sayingOwnName()) return;
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capture, speech, voiceDiagnostics, windowsOwnsWake]);
+  }, [capture, speech, voiceDiagnostics, windowsOwnsWake, micSource]);
 
   // ---- push to talk -------------------------------------------------------
 
@@ -3549,6 +3585,10 @@ export default function App() {
     if (crashedRef.current) return; // nothing on screen to talk to
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
+    if (micSource === "stopped" || micSource === "waiting") {
+      dispatch({ type: "patch", patch: { error: micSource === "stopped" ? "Start Voice Anywhere beside the orb to use the microphone." : "The microphone is connecting." } });
+      return;
+    }
     // Push-to-talk and the orb act on the selected chat (decisions W-6): with
     // no chat pane on screen there is no turn to interrupt and nobody to
     // talk to, and the window says so rather than recording for nobody.
@@ -3564,7 +3604,7 @@ export default function App() {
     // Talking over him pauses him, and he resumes when the utterance is over
     // (decision V-7): `onListening` begins the barge-in, `onUtteranceEnd` ends it.
     capture.press();
-  }, [capture, chatPatch, dispatch]);
+  }, [capture, chatPatch, dispatch, micSource]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -3733,56 +3773,77 @@ export default function App() {
   // V12's recorder read (`micInput.addFrameListener`).
   const micInput = useRef<MicInput | null>(null);
   useEffect(() => {
+    if (micSource !== "browser" && micSource !== "windows") {
+      voiceDiagnostics.microphone("unavailable");
+      voiceDiagnostics.capturePath("unknown");
+      return;
+    }
+    let gone = false;
     let input: MicInput | null = null;
     let stream: MediaStream | null = null;
-    let gone = false;
-    // This run's token for the VAD stage: a stale run's cleanup cannot stop the live one.
     let vadRun: number | null = null;
-    let wakeRun: number | null = null; // (the same token for the wake worker: a stale run's cleanup cannot stop the live one)
-    (async () => {
+    let wakeRun: number | null = null;
+    const startStages = () => {
+      vadRun = vadStage.start();
+      wakeRun = wakeStage.start();
+    };
+    let released = false;
+    const releaseDevice = () => { released = true; stream?.getTracks().forEach(t => t.stop()); };
+    if (micSource === "browser") releaseBrowserMic.current = releaseDevice;
+    const deliver = (frame: Float32Array) => { if (!gone && !released) pushMicFrame(frame); };
+    const open = async () => {
+      if (micSource === "windows") {
+        startStages();
+        input = startSharedMic(deliver, live => {
+          if (gone) return;
+          setSharedMicLive(live);
+          voiceDiagnostics.microphone(live ? "available" : "unavailable");
+          voiceDiagnostics.capturePath(live ? "windows_shared" : "unknown");
+          if (!live) capture.disconnectInput();
+        });
+        micInput.current = input;
+        return;
+      }
       try {
         stream = await openMicrophone(constraints => navigator.mediaDevices.getUserMedia(constraints));
+        if (gone || released) { releaseDevice(); return; }
         let settings: unknown;
         try { settings = stream.getAudioTracks()[0]?.getSettings?.(); } catch { /* readback unavailable */ }
         voiceDiagnostics.microphone("available", settings);
-        // An AudioWorklet resamples to 16 kHz mono in 512-sample frames (V4).
-        // Without one the same resampler runs behind the old ScriptProcessor,
-        // and the window says so rather than quietly capturing worse.
-        // The frames go through the VAD stage (V5): Silero scores each in a worker and
-        // the stage hands it on, in order, to the capture; until the worker is ready,
-        // or if it cannot run, the capture judges by energy and the diagnostics say so.
-        const fellBack = (path: string, why: string) => {
-          voiceDiagnostics.capturePath(path as "script_processor", why);
+        const fellBack = (why: string) => {
+          voiceDiagnostics.capturePath("script_processor", why);
           dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${why}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
         };
-        if (gone) { stream.getTracks().forEach((t) => t.stop()); return; }
-        vadRun = vadStage.start();
-        wakeRun = wakeStage.start();
+        startStages();
         input = await startMicInput({
-          stream, onFrame: pushMicFrame, workletUrl: micWorkletUrl,
-          onPathChange: (path, why) => { if (!gone) fellBack(path, why); },
+          stream, onFrame: deliver, workletUrl: micWorkletUrl,
+          onPathChange: (_, why) => { if (!gone) fellBack(why); },
         });
-        if (gone) { input.stop(); vadStage.stop(vadRun); wakeStage.stop(wakeRun); return; }
+        if (gone) { input.stop(); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
-        if (input.path !== "worklet") fellBack(input.path, input.fallbackReason);
+        if (input.path === "script_processor") fellBack(input.fallbackReason);
       } catch {
+        stream?.getTracks().forEach(t => t.stop());
+        if (gone) return;
         if (vadRun !== null) vadStage.stop(vadRun);
-        if (wakeRun !== null) wakeStage.stop(wakeRun); // (started above, before startMicInput could throw: no worker is left listening to nothing)
+        if (wakeRun !== null) wakeStage.stop(wakeRun);
         voiceDiagnostics.microphone("unavailable");
-        // A window without a mic grant still types; every other affordance
-        // stays exactly as it was.
       }
-    })();
+    };
+    void open();
     return () => {
       gone = true;
+      if (releaseBrowserMic.current === releaseDevice) releaseBrowserMic.current = null;
       micInput.current = null;
-      stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
+      stream?.getTracks().forEach(t => t.stop());
       if (vadRun !== null) vadStage.stop(vadRun);
       if (wakeRun !== null) wakeStage.stop(wakeRun);
+      capture.disconnectInput();
+      setSharedMicLive(false);
     };
-  }, [capture, vadStage, wakeStage, pushMicFrame]);
+  }, [micSource, capture, vadStage, wakeStage, pushMicFrame, voiceDiagnostics]);
 
   // ---- files dropped on the window -----------------------------------------
 
@@ -5112,10 +5173,11 @@ export default function App() {
         status={orbStatus}
         mode={state.dictation}
         onModeChange={setMode}
-        voiceAgentStarting={voiceAgentStarting}
+        voiceAction={voiceAction}
+        sharedMicLive={sharedMicLive}
         voiceAgentStatus={voiceAgentStatus}
-        voiceAgentError={voiceAgentStatus?.state === "ready" ? "" : voiceAgentError}
-        onStartVoiceAgent={() => { void startVoiceAgent(); }}
+        voiceAgentError={voiceAgentError}
+        onToggleVoiceAgent={() => { void toggleVoiceAgent(); }}
         onPress={press}
         onRelease={release}
       />

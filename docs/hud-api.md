@@ -385,6 +385,13 @@ every one of these routes asks (`kind`):
   successful POST, and when a read finds the resolved value changed by itself, the
   daemon publishes `{kind: "stt_settings", data: <the GET body>}` on `/events`.
   Dictation cleanup defaults to Rules and is read on each Windows link `clean` request.
+- `GET /voice-agent/status` reports the paired Windows helper's state and a human-readable detail.
+  `can_stop` means Windows can acknowledge release, `shared_mic` means the native input and
+  authenticated relay are ready, and `hud_mic_paused` records the owner's explicit Stop.
+  `POST /voice-agent/start {}` connects the helper. `POST /voice-agent/stop {}` waits for
+  device release. `GET /voice-agent/microphone` is a no-store binary stream of signed little-endian
+  16-bit mono PCM at 16 kHz. It ends on device or pairing loss. All four routes are owner-only
+  on the local HUD listener. Slow readers receive recent audio with a bounded queue.
 - `GET /stt/cleanup` → `{off, rules, raw, model}`, each `{typed, scratched}`.
   Owner-only, read-only counts since daemon startup, with no dictation text.
 - `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one

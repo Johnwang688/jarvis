@@ -189,10 +189,10 @@ def flow(**kw):
 
 
 class Flow(unittest.TestCase):
-    def test_hotkey_plain_dictation_types_without_routing(self):
+    def test_hotkey_plain_dictation_types_after_local_classification(self):
         f, c, t, a, ui, p = flow(client=FakeClient("hello there"))
         f.on_clip(b"wav", "hotkey")
-        self.assertEqual(c.calls, [("dictate", "hotkey")])
+        self.assertEqual(c.calls, [("dictate", "hotkey"), ("route", "hello there", "hotkey")])
         self.assertEqual(t.runs, [[("text", "hello there")]])
         self.assertIn("transcribing", [s for s, _ in ui.states])
 
@@ -200,7 +200,7 @@ class Flow(unittest.TestCase):
         f, c, t, a, ui, p = flow(client=FakeClient("fix the tests send it"))
         f.on_clip(b"wav", "hotkey")
         self.assertEqual(t.runs, [[("text", "fix the tests"), ("key", "enter")]])
-        self.assertNotIn("route", [x[0] for x in c.calls])
+        self.assertIn(("route", "fix the tests send it", "hotkey"), c.calls)
 
     def test_hotkey_command_routes_and_acts(self):
         intent = {"kind": "open_app", "text": "jarvis open slack", "target": "Slack"}
@@ -270,7 +270,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(p.played, [b"WAV"])
 
     def test_app_not_found_is_an_error_naming_it(self):
-        f, c, t, a, ui, p = flow(client=FakeClient("open zork", intent={"kind": "open_app", "text": "open zork", "target": "Zork"}),
+        f, c, t, a, ui, p = flow(client=FakeClient("Jarvis, open zork", intent={"kind": "open_app", "text": "open zork", "target": "Zork"}),
                                  actions=FakeActions(found=False))
         f.on_clip(b"wav", "hotkey")
         self.assertEqual(ui.states[-1][0], "error")

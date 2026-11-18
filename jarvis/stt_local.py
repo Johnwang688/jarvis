@@ -384,6 +384,25 @@ class Engine:
             raise job.error
         return job.text
 
+    def prewarm(self) -> None:
+        """Overlap the first local model load with voice startup or an active key hold."""
+        if self.loaded or not self._lock.acquire(blocking=False):
+            return
+        def load():
+            try:
+                self._load()  # same integrity checks and retry interval as normal dictation
+                with self._state:
+                    self._last_used = self._clock()
+                self._arm()
+            except LocalSTTError:
+                pass  # the normal dictation path reports a failure when speech arrives
+            finally:
+                self._lock.release()
+        try:
+            threading.Thread(target=load, name="stt-prewarm", daemon=True).start()
+        except RuntimeError:
+            self._lock.release()
+
     def _run(self, job: _Job) -> None:
         try:
             if not self._acquire(job):
@@ -532,6 +551,13 @@ def set_engine(replacement: Engine | None) -> Engine | None:
     with _engine_lock:
         previous, _engine = _engine, replacement
     return previous
+
+
+def prewarm_for_voice() -> None:
+    """An explicit Windows voice start or hotkey capture may warm the local engine."""
+    from . import stt_settings
+    if stt_settings.load()["backend"] in ("local", "auto") and available():
+        engine().prewarm()
 
 
 def available() -> bool:

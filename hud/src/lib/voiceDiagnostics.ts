@@ -7,7 +7,7 @@ export type ClaimSource = "wake" | "follow_up" | "continuation" | "ptt" | "uncla
 export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_chat" | "unplaced" | "command" | "send_word" | "cancel_word";
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
-export type CapturePathName = "unknown" | "worklet" | "script_processor";
+export type CapturePathName = "unknown" | "worklet" | "script_processor" | "windows_shared";
 /** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
@@ -61,7 +61,7 @@ export class VoiceDiagnostics {
   }
   /** Which capture path is live, and why it is the fallback when it is. Never audio, never a device name. */
   capturePath(path: CapturePathName, note = "") {
-    this.value = { ...this.value, path: ["unknown", "worklet", "script_processor"].includes(path) ? path : "unknown", pathNote: String(note).slice(0, 200) };
+    this.value = { ...this.value, path: ["unknown", "worklet", "script_processor", "windows_shared"].includes(path) ? path : "unknown", pathNote: String(note).slice(0, 200) };
     this.publish();
   }
   /** Which detector is live and why it is the fallback when it is (V5). A sentence from a closed set, never engine text. */

@@ -49,10 +49,11 @@ export function Orb(props: {
   /** The dictation mode, and its change. */
   mode: DictationMode;
   onModeChange: (m: DictationMode) => void;
-  voiceAgentStarting: boolean;
+  voiceAction: "start" | "stop" | null;
+  sharedMicLive: boolean;
   voiceAgentStatus: VoiceAgentStatus | null;
   voiceAgentError: string;
-  onStartVoiceAgent: () => void;
+  onToggleVoiceAgent: () => void;
   /** Folded into the left rail's foot while the sidebar is hidden. */
   compact?: boolean;
   /** A short window: the strip folds into the one cycling button, beside the
@@ -140,21 +141,26 @@ export function Orb(props: {
   const folded = !!props.compact || !!props.tight;
   const voiceState = props.voiceAgentStatus?.state;
   const voiceReady = voiceState === "ready";
-  const voiceStarting = props.voiceAgentStarting || voiceState === "starting";
-  const voiceConnected = voiceState === "connected";
-  const voiceUnavailable = voiceState === "unavailable";
-  const connectFailed = voiceState === "connect_failed" || voiceState === "launch_failed";
+  const retryStop = voiceState === "stopping" && !!props.voiceAgentError && !props.voiceAction;
+  const stopping = props.voiceAction === "stop" || (voiceState === "stopping" && !retryStop);
+  const starting = props.voiceAction === "start" || voiceState === "starting";
+  const canStop = !!props.voiceAgentStatus?.can_stop;
+  const connected = voiceState === "connected";
+  const unavailable = voiceState === "unavailable";
   const wakeError = voiceState === "microphone_unavailable" || voiceState === "recognizer_unavailable";
-  const launchLabel = voiceReady ? "Voice Anywhere ready" : voiceStarting ? "Starting Voice Anywhere…" :
-    voiceConnected ? "Voice Anywhere connected" : wakeError || voiceUnavailable ? "Voice Anywhere unavailable" :
-    "Start Voice Anywhere";
-  const voiceDetail = voiceStarting && voiceState !== "starting" ? "Waiting for the Windows helper…" :
-    props.voiceAgentError || props.voiceAgentStatus?.detail || launchLabel;
-  const failed = !voiceStarting && (!!props.voiceAgentError || wakeError || voiceUnavailable || connectFailed);
-  const voiceLabel = failed ? "Needs attention" : voiceReady ? "Ready" : voiceStarting ? "Starting" :
-    voiceConnected ? "Connecting mic" : voiceState === "off" ? "Off" : "Checking";
-  const voiceTone = failed ? "error" : voiceReady ? "ready" :
-    voiceStarting || voiceConnected ? "working" : "idle";
+  const failed = !stopping && !starting && (!!props.voiceAgentError || unavailable || wakeError ||
+    voiceState === "connect_failed" || voiceState === "launch_failed" || voiceState === "stop_unconfirmed");
+  const launchLabel = retryStop ? "Retry Stop" : stopping ? "Stopping Voice Anywhere…" : props.voiceAction === "start" ? "Starting Voice Anywhere…" :
+    canStop ? "Stop Voice Anywhere" : starting ? "Starting Voice Anywhere…" : voiceReady ? "Voice Anywhere ready" :
+    connected ? "Voice Anywhere connected" : unavailable || wakeError ? "Voice Anywhere unavailable" : "Start Voice Anywhere";
+  const voiceDetail = (voiceState === "stop_unconfirmed" && props.voiceAgentStatus?.detail) || props.voiceAgentError || (stopping ? "Releasing the microphone…" : props.voiceAction === "start" ?
+    "Waiting for the Windows helper…" : voiceReady && props.voiceAgentStatus?.shared_mic ?
+      (props.sharedMicLive ? "HUD and Voice Anywhere share one mic. Say “Jarvis, open Chrome.”" :
+        "Windows is listening. Connecting the HUD to its microphone…") : props.voiceAgentStatus?.detail || launchLabel);
+  const voiceLabel = stopping ? "Stopping" : starting ? "Starting" : failed ? "Needs attention" : voiceReady ? "Ready" :
+    connected ? "Connecting mic" : voiceState === "off" ? "Off" : "Checking";
+  const voiceTone = failed ? "error" : voiceReady && !stopping ? "ready" :
+    starting || connected || stopping ? "working" : "idle";
   const shortLabel = { error: "Error", ready: "Ready", working: "Wait", idle: voiceLabel }[voiceTone];
   const voiceControl = (
     <div className={`voice-agent-control${props.compact ? " rail" : props.tight ? " beside" : ""}`}>
@@ -163,21 +169,20 @@ export function Orb(props: {
           type="button"
           id="voice-agent-start"
           className={props.compact ? "rail" : props.tight ? "beside" : undefined}
-          disabled={props.blocked || voiceStarting || voiceReady || voiceConnected || wakeError || voiceUnavailable}
+          disabled={props.blocked || !!props.voiceAction || stopping || (!canStop && (starting || voiceReady || connected || wakeError || unavailable))}
           title={voiceDetail}
           aria-label={launchLabel}
           onMouseDown={noPointerFocus}
-          onClick={props.onStartVoiceAgent}
+          onClick={props.onToggleVoiceAgent}
         >
-          {props.compact ? (voiceReady ? "✓" : voiceStarting ? "…" : "▶") :
-            voiceReady || voiceStarting || voiceConnected ? "Voice Anywhere" : launchLabel}
+          {props.compact ? (stopping || props.voiceAction ? "…" : canStop ? "■" : "▶") : launchLabel}
         </button>
         <span className="voice-agent-state" data-tone={voiceTone} role="status" title={voiceDetail}>
           {props.compact ? shortLabel : voiceLabel}
         </span>
       </div>
       <div id="voice-agent-result" className={failed ? "err" : undefined}
-        title={voiceDetail}>{!props.blocked && (failed || (!props.compact && (voiceStarting || voiceConnected || voiceReady))) ? voiceDetail : null}</div>
+        title={voiceDetail}>{!props.blocked && (failed || (!props.compact && (starting || stopping || connected || voiceReady))) ? voiceDetail : null}</div>
     </div>
   );
   return (
@@ -190,7 +195,7 @@ export function Orb(props: {
       {props.tight && !props.compact ? props.speech : null}
       <div id="micstrip">
         {folded ? null : props.speech}
-        <div id="dictation" data-testid="dictation" title="What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes the mic">
+        <div id="dictation" data-testid="dictation" title={voiceReady ? "HUD dictation: AUTO sends, REVIEW puts words in the box, OFF pauses HUD dictation. Stop Voice Anywhere to release the microphone." : "What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes HUD dictation"}>
           {DICTATION_MODES.map((m) => (
             <button
               type="button"

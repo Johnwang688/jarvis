@@ -931,11 +931,17 @@ class FastPathProvider:
 
         # Which model answers is decided here, once per turn, never mid-turn:
         # a default handle follows the global picker; a pinned one stays put.
-        native.agent.model = native.model or models.tier("orchestrator")
-        # Only OpenRouter's own ladder goes on the wire: an effort it lacks
-        # (Codex's `ultra`) is dropped here, whatever handed it over, and the
-        # model's v1 default applies (PR #20 review).
-        effort = native.effort
+        from .. import voice_model
+        voice_turn = message.via == "voice" and message.origin == "owner" and message.spoken
+        if voice_turn:
+            native.agent.model = voice_model.MODEL
+            native.agent.completion = voice_model.completion_for(native.stop)
+            effort = voice_model.EFFORT
+        else:
+            native.agent.model = native.model or models.tier("orchestrator")
+            native.agent.completion = None
+            effort = native.effort
+        # The ordinary OpenRouter path only accepts its own effort ladder.
         if effort and effort not in models.EFFORT_LADDER:
             effort = None
         native.agent.effort = effort

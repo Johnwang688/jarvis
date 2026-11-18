@@ -155,6 +155,41 @@ class HudLaunch(Base):
             self.assertEqual(self.post(self.d.face_port), (200, {"connected": True}))
             start.assert_called_once_with()
 
+    def test_mic_and_stop_are_owner_only_and_pcm_is_never_cached(self):
+        self.start()
+        stop_path = "/voice-agent/stop"
+        pcm_path = "/voice-agent/microphone"
+        def get(port, path=pcm_path, site="same-origin"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+            try:
+                conn.request("GET", path, headers={"Sec-Fetch-Site": site})
+                resp = conn.getresponse()
+                return resp.status, resp.getheaders(), resp.read()
+            finally:
+                conn.close()
+        packets = queue.Queue()
+        packets.put(bytes(range(256)) * 8)
+        packets.put(None)
+        with patch.object(self.link, "subscribe_microphone", return_value=packets) as subscribe, \
+                patch.object(self.link, "unsubscribe_microphone") as unsubscribe, \
+                patch.object(self.link, "stop_windows_agent") as stop:
+            for port in (self.d.port, self.d.workshop_port):
+                self.assertIn(get(port)[0], (403, 404))
+                self.assertIn(self.post(port, stop_path)[0], (403, 404))
+            self.assertEqual(get(self.d.face_port, site="cross-site")[0], 403)
+            self.assertEqual(get(self.d.face_port, pcm_path + "?sink=1")[0], 400)
+            self.assertEqual(self.post(self.d.face_port, pcm_path)[0], 405)
+            self.assertEqual(self.post(self.d.face_port, stop_path, origin=False)[0], 403)
+            self.assertEqual(self.post(self.d.face_port, stop_path, {"pid": 1})[0], 400)
+            subscribe.assert_not_called()
+            stop.assert_not_called()
+            status, headers, data = get(self.d.face_port)
+            self.assertEqual((status, data), (200, bytes(range(256)) * 8))
+            self.assertEqual(dict(headers)["Cache-Control"], "no-store")
+            unsubscribe.assert_called_once_with(packets)
+            self.assertEqual(self.post(self.d.face_port, stop_path), (200, {"stopped": True}))
+            stop.assert_called_once_with()
+
     def test_unpaired_owner_gets_offline_message(self):
         self.key.unlink()
         self.d.start()

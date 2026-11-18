@@ -832,15 +832,22 @@ class CodexProvider:
 
     def one_shot(self, text: str, *, model: str, effort: str | None = None,
                  instructions: str = "", deadline_s: float = ONE_SHOT_DEADLINE_S,
-                 on_usage=None, cancel: threading.Event | None = None) -> str:
+                 on_usage=None, cancel: threading.Event | None = None,
+                 service_tier: str = "default", output_schema: dict | None = None,
+                 external_login: bool = False) -> str:
         """One tool-less model turn on a short-lived app-server, for the chat
         titler (titles.py): `text` in, the final agent message out.
 
         `account_metadata`'s shape, for the same reason — it holds
         `_auth_lock`, which chat login and refresh also use: `MetadataBusy`
         at once if the lock is held (before the probe), one deadline for the
-        whole session, the lock released whatever `close()` does, and
+        managed-login session, the lock released whatever `close()` does, and
         `cancel_metadata()` ends it at the transport's next poll.
+
+        Voice inference uses external_login and an ephemeral credential store:
+        ChatLogin holds the account lock only to attach or refresh, allowing
+        HUD chats to start while a voice answer runs. The voice request pins
+        its service tier and verifies the thread receipt before starting a turn.
 
         And as little as a turn can be: a private home with no MCP servers
         and no skills (`codex_config.prepare_title`), a fresh empty temporary
@@ -877,24 +884,27 @@ class CodexProvider:
         stop = _Either
         if stop.is_set():
             raise RpcCancelled("Codex one-shot cancelled (shutting down)")
-        if _auth_lock.locked():
+        if not external_login and _auth_lock.locked():
             raise MetadataBusy("a Codex session holds the login lock")
         binary, reason = self._probe()
         if binary is None:
             raise BriefRefused(reason)
         if stop.is_set():
             raise RpcCancelled("Codex one-shot cancelled (shutting down)")
-        if not _auth_lock.acquire(blocking=False):
+        if not external_login and not _auth_lock.acquire(blocking=False):
             raise MetadataBusy("a Codex session holds the login lock")
         try:
             rpc = None
             cwd = None
             try:
                 deadline = time.monotonic() + deadline_s
-                argv, env, home = codex_config.prepare_title(binary, model, effort)
+                prepare = codex_config.prepare_voice if external_login else codex_config.prepare_title
+                argv, env, home = prepare(binary, model, effort)
                 cwd = tempfile.mkdtemp(prefix="cwd-", dir=home / "tmp")
                 rpc = RpcProcess(argv, cwd=cwd, env=env, stop=stop.is_set)
                 rpc.start().initialize(deadline=deadline)
+                if external_login:
+                    codex_login.ChatLogin(binary, RpcProcess).attach(rpc)
                 account = rpc.request("account/read", {"refreshToken": False}, deadline=deadline)
                 if not isinstance(account, dict) or not isinstance(account.get("account"), dict) \
                         or account["account"].get("type") != "chatgpt":
@@ -905,7 +915,11 @@ class CodexProvider:
                           "ephemeral": True, "environments": [],
                           "allowProviderModelFallback": False}
                 if instructions:
-                    params["developerInstructions"] = instructions
+                    # Voice supplies the Jarvis prompt and tool descriptions
+                    # itself. Do not include the native coding-agent prompt.
+                    params["baseInstructions" if external_login else "developerInstructions"] = instructions
+                if external_login:
+                    params["serviceTier"] = service_tier
                 if effort:
                     params["config"] = {"model_reasoning_effort": effort}
                 started = rpc.request("thread/start", params, deadline=deadline)
@@ -914,28 +928,33 @@ class CodexProvider:
                 granted = started.get("sandbox") if isinstance(started, dict) else None
                 if (not isinstance(native, str) or not native
                         or started.get("model") != model
+                        or (external_login and (started.get("serviceTier") != service_tier
+                                                or started.get("reasoningEffort") != effort))
                         or started.get("modelProvider", "openai") != "openai"
                         or started.get("approvalPolicy") != "never"
                         or not isinstance(granted, dict) or granted.get("type") != "readOnly"
                         or granted.get("networkAccess")):
-                    raise BriefRefused("Codex did not honour the title turn's model or sandbox")
+                    raise BriefRefused("Codex did not honour the requested inference settings or sandbox")
                 turn = {"threadId": native, "input": [{"type": "text", "text": text}],
                         "approvalPolicy": "never", "sandboxPolicy": sandbox, "environments": []}
                 if effort:
                     turn["effort"] = effort
-                turn["serviceTierForTurn"] = "default"
+                turn["serviceTierForTurn"] = service_tier
+                if output_schema is not None:
+                    turn["outputSchema"] = output_schema
                 request = rpc.send("turn/start", turn, deadline=deadline)
-                return self._one_shot_reply(rpc, native, request, deadline, on_usage)
+                return self._one_shot_reply(rpc, native, request, deadline, on_usage, external_login=external_login)
             finally:
                 if rpc is not None:
                     rpc.close()
                 if cwd is not None:
                     shutil.rmtree(cwd, ignore_errors=True)
         finally:
-            _auth_lock.release()
+            if not external_login:
+                _auth_lock.release()
 
     @staticmethod
-    def _one_shot_reply(rpc, native: str, request, deadline: float, on_usage=None) -> str:
+    def _one_shot_reply(rpc, native: str, request, deadline: float, on_usage=None, *, external_login=False) -> str:
         """Read one turn to its end: the final agent message, or an error."""
         text, turn_id = None, None
         while True:
@@ -959,8 +978,10 @@ class CodexProvider:
                 raise RpcError("Codex asked for something during a one-shot turn")
             if method == "model/rerouted":
                 raise RpcError("Codex substituted the requested model")
-            if method == "account/updated" and params.get("authMode") not in (None, "chatgpt"):
-                raise RpcError("Codex changed away from ChatGPT authentication")
+            if method == "account/updated":
+                expected_mode = "chatgptAuthTokens" if external_login else "chatgpt"
+                if params.get("authMode") not in (None, expected_mode):
+                    raise RpcError("Codex changed away from ChatGPT authentication")
             if params.get("threadId") not in (None, native):
                 continue
             if method == "thread/tokenUsage/updated" and on_usage is not None:

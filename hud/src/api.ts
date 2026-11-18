@@ -78,8 +78,12 @@ const patch = (body: unknown): RequestInit => ({ ...json(body), method: "PATCH" 
 const put = (body: unknown): RequestInit => ({ ...json(body), method: "PUT" });
 
 export type VoiceAgentStatus = {
-  state: "off" | "starting" | "connect_failed" | "launch_failed" | "connected" | "ready" | "unavailable" | "microphone_unavailable" | "recognizer_unavailable";
+  state: "off" | "starting" | "stopping" | "stop_unconfirmed" | "connect_failed" | "launch_failed" | "connected" | "ready" | "unavailable" | "microphone_unavailable" | "recognizer_unavailable";
   detail: string;
+  shared_mic?: boolean;
+  shared_capable?: boolean;
+  can_stop?: boolean;
+  hud_mic_paused?: boolean;
 };
 
 export const api = {
@@ -507,6 +511,7 @@ export const api = {
   },
   /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
   voiceAgentStatus: (timeout = 2500) => req<VoiceAgentStatus>("/voice-agent/status", { signal: AbortSignal.timeout(timeout) }),
+  stopVoiceAgent: () => req<{ stopped: true }>("/voice-agent/stop", json({})),
   startVoiceAgent: () => req<{ connected: true }>("/voice-agent/start", json({})),
   sttSettings: () => req<unknown>("/stt/settings").then(parseSttSettings),
   setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean; dictation_cleanup?: "off" | "rules" }) =>

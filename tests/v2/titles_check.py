@@ -61,6 +61,9 @@ def peer(script_path, log_path):
                 continue
             result = {"thread": {"id": native}, "model": p.get("model") if mode != "wrong_model" else "other",
                       "modelProvider": "openai", "approvalPolicy": p.get("approvalPolicy"),
+                      "serviceTier": "default" if mode == "wrong_tier" else p.get("serviceTier"),
+                      "reasoningEffort": "high" if mode == "wrong_effort" else
+                                         (p.get("config") or {}).get("model_reasoning_effort"),
                       "sandbox": {"type": "workspaceWrite" if mode == "wide" else "readOnly",
                                   "networkAccess": False}}
         elif method == "turn/start":
@@ -641,6 +644,26 @@ class OneShot(unittest.TestCase):
                          ({"type": "readOnly", "networkAccess": False}, "never", [], "low"))
         self.assertFalse(Path(setup["cwd"]).exists(), "the temporary cwd is removed")
         self.assertFalse(codex._auth_lock.locked())
+
+    def test_external_voice_turn_pins_tier_and_validates_receipt(self):
+        schema = {"type": "object"}
+        with patch.object(codex.codex_login.ChatLogin, "attach"):
+            options = dict(service_tier="ultrafast", output_schema=schema, external_login=True)
+            self.shot(**options)
+            for mode in ("wrong_tier", "wrong_effort", "wrong_model", "wide"):
+                with self.subTest(mode=mode), self.assertRaises(BriefRefused):
+                    self.shot(mode, **options)
+        calls = self.calls()
+        start = next(c["params"] for c in calls if c.get("method") == "thread/start")
+        turn = next(c["params"] for c in calls if c.get("method") == "turn/start")
+        self.assertEqual((start["serviceTier"], start["environments"], start["approvalPolicy"]),
+                         ("ultrafast", [], "never"))
+        self.assertEqual((turn["serviceTierForTurn"], turn["outputSchema"]), ("ultrafast", schema))
+        cfg = calls[0]["config"]
+        self.assertEqual(cfg["cli_auth_credentials_store"], "ephemeral")
+        for feature in ("apps", "plugins", "browser_use", "computer_use", "image_generation", "shell_tool"):
+            self.assertIs(cfg["features"][feature], False)
+        self.assertFalse((self.root / "v2/codex/_voice/auth.json").is_symlink())
 
     def test_a_tool_a_question_or_a_failed_turn_is_an_error(self):
         # `text_then_*`: agent text came before the tool's sign, and none of

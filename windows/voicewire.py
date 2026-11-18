@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import re
+import queue
 import secrets
 import socket
 import threading
@@ -102,6 +103,17 @@ PACKET_BYTES = 4096  # 128 ms of mono 16 kHz signed 16-bit PCM
 MAX_PCM = MAX_CLIP_S * 32000
 
 
+# Native WASAPI delivers exactly 100 ms at 16 kHz, mono, signed little-endian.
+MIC_PACKET_BYTES = 3200
+MIC_STATES = {"starting": b"S", "ready": b"R", "microphone_unavailable": b"M",
+              "recognizer_unavailable": b"K"}
+
+
+def microphone_key(key, session):
+    # Purpose and parent connection are part of BOTH directions of authentication.
+    return hmac.digest(key, b"hud-microphone/1|" + session.encode("ascii"), "sha256")
+
+
 class Capture:
     """The audio callback only appends. One network worker drains complete packets."""
     def __init__(self):
@@ -146,27 +158,35 @@ class Client:
         self._socket = self._stream = None
         self._id = 0
         self.streaming = False
+        self.session = None
+        self.shared_capable = False
         self._request_lock = threading.Lock()
         self._speech_lock = threading.Lock()
         self._speaking_id = None
 
-    def connect(self):
+    def connect(self, *, microphone_session=None):
         self.close()
         try:
             self._socket = socket.create_connection((self.host, self.port), min(self.timeout, 5.0))
             self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self._stream = self._socket.makefile("rwb")
             a = new_nonce()
-            send_json(self._stream, {"hello": "jarvis-voice-agent", "v": 1, "nonce_a": a})
+            hello = {"hello": "jarvis-voice-agent", "v": 1, "nonce_a": a}
+            proof_key = self.key
+            if microphone_session is not None:
+                hello.update(hello="jarvis-hud-microphone", session=microphone_session)
+                proof_key = microphone_key(self.key, microphone_session)
+            send_json(self._stream, hello)
             got = read_json(self._stream, 4096)
             d, proof = got.get("nonce_d"), got.get("proof")
             if (got.get("hello") != "jarvis-voice-link" or type(got.get("v")) is not int
                     or got["v"] != 1 or not isinstance(d, str) or not HEX64.fullmatch(d)
                     or not isinstance(proof, str) or not HEX64.fullmatch(proof)
-                    or not hmac.compare_digest(daemon_proof(self.key, a, d), proof)):
+                    or not hmac.compare_digest(daemon_proof(proof_key, a, d), proof)):
                 raise NotJarvis("That wasn't Jarvis — refused")
-            send_json(self._stream, {"proof": agent_proof(self.key, d, a)})
+            send_json(self._stream, {"proof": agent_proof(proof_key, d, a)})
             self._socket.settimeout(self.timeout)
+            self.session = d
         except Exception as exc:
             self.close()
             if isinstance(exc, NotJarvis):
@@ -229,9 +249,11 @@ class Client:
                             else "The voice request failed.")
         return got
 
-    def ping(self, *, wake=None):
-        got = self._request({"op": "ping", "features": True, **({"wake": wake} if wake is not None else {})})
+    def ping(self, *, wake=None, instance=None):
+        got = self._request({"op": "ping", "features": True, **({"wake": wake} if wake is not None else {}),
+                             **({"instance": instance} if instance is not None else {})})
         self.streaming = got.get("streaming") is True
+        self.shared_capable = got.get("shared_mic") is True
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
@@ -329,6 +351,7 @@ class Client:
             raise LinkError("The voice link sent an invalid reply.") from None
 
     def close(self):
+        self.session = None
         sock, stream = self._socket, self._stream
         self._socket = self._stream = None
         if sock:
@@ -343,6 +366,75 @@ class Client:
                 pass
         if sock:
             sock.close()
+
+
+class MicrophoneRelay:
+    """Demand-only PCM feed on a second paired connection, independent of STT/TTS."""
+
+    def __init__(self, client, wake_status, stop_requested, released):
+        self.host, self.port, self.key = client.host, client.port, client.key
+        self.session = client.session
+        self.wake_status, self.stop_requested, self.released = wake_status, stop_requested, released
+        self.done = threading.Event()
+        self.frames = None
+        self.thread = threading.Thread(target=self._run, daemon=True, name="voice-hud-microphone")
+
+    def start(self):
+        self.thread.start()
+
+    def offer(self, pcm):
+        # The audio callback never performs I/O, waits for capacity or retains
+        # sound from before a HUD subscriber requested it.
+        frames = self.frames
+        if frames is None or len(pcm) != MIC_PACKET_BYTES:
+            return
+        try:
+            frames.put_nowait(pcm)
+        except queue.Full:
+            pass
+
+    def close(self):
+        self.done.set()
+        self.frames = None
+
+    def _run(self):
+        while not self.done.is_set():
+            peer = Client(self.host, self.port, self.key, timeout=3)
+            try:
+                peer.connect(microphone_session=self.session)
+                stream = peer._stream
+                frame = b""
+                while not self.done.is_set():
+                    state = MIC_STATES.get(self.wake_status(), b"S")
+                    stream.write((b"A" if frame else b"P") + state + frame)
+                    stream.flush()
+                    command = stream.read(1)
+                    frame = b""
+                    if command == b"X":
+                        self.frames = None
+                        self.stop_requested.set()
+                        if self.released.wait(8):
+                            stream.write(b"X")
+                            stream.flush()
+                        return
+                    if command == b"A":
+                        if self.frames is None:
+                            self.frames = queue.Queue(maxsize=2)
+                        try:
+                            frame = self.frames.get(timeout=0.25)
+                        except queue.Empty:
+                            pass
+                    elif command == b"I":
+                        self.frames = None
+                        self.done.wait(0.25)
+                    else:
+                        break
+            except (LinkError, OSError, ValueError):
+                pass
+            finally:
+                self.frames = None
+                peer.close()
+            self.done.wait(0.25)
 
 
 class HotkeyMachine:

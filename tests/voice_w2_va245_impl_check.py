@@ -292,6 +292,17 @@ class Worker(unittest.TestCase):
             audio = wav.readframes(wav.getnframes())
         self.assertIn(self.chunk(6000)[2] * 5, audio)
 
+    def test_fast_quiet_command_uses_room_level_before_the_wake(self):
+        self.spotter.hit_at = {14}
+        original = self.spotter.get_result
+        self.spotter.keyword_spotter = SimpleNamespace(
+            get_result=lambda stream: SimpleNamespace(keyword="JARVIS", timestamps=[0.52, 0.83])
+            if original(stream) else "")
+        self.run_script([self.chunk(100)] * 5 + [self.chunk(2400)] * 4
+                        + [self.chunk(1600)] * 5 + [self.chunk(100)] * 12)
+        self.assertEqual(self.states, ["listening"])
+        self.assertEqual(len(self.clips), 1)
+
     def test_wake_word_alone_times_out_without_delivering_audio(self):
         self.run_script([self.chunk(20000)] + [self.chunk()] * 40)
         self.assertEqual(self.states, ["listening", "hidden"])

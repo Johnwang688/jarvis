@@ -7,6 +7,7 @@ import json
 import ntpath
 import os
 import subprocess
+import threading
 import time
 from urllib.parse import quote_plus
 
@@ -239,15 +240,25 @@ class WindowsDesktop:
 
 class Actions:
     def __init__(self, desktop=None, clock=time.monotonic, sleep=time.sleep,
-                 runner=subprocess.run, launcher=subprocess.Popen, opener=None):
+                 runner=subprocess.run, launcher=subprocess.Popen, opener=None, *, warm_in_background=False):
         self.desktop = desktop if desktop is not None else WindowsDesktop()
         self.clock, self.sleep = clock, sleep
         self.runner, self.launcher = runner, launcher
         self.opener = opener
         self.apps, self.refreshed = [], None
-        self.refresh_apps()
+        self._index_lock = threading.Lock()
+        if warm_in_background:
+            threading.Thread(target=self.refresh_apps, name="voice-app-index", daemon=True).start()
+        else:
+            self.refresh_apps()
 
     def refresh_apps(self):
+        # Never hold up pairing on PowerShell startup. An immediate open joins
+        # the in-flight index, so its target is resolved exactly once.
+        with self._index_lock:
+            self._refresh_apps()
+
+    def _refresh_apps(self):
         now = self.clock()
         if self.refreshed is not None and now - self.refreshed < 600:
             return

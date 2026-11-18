@@ -71,7 +71,7 @@ describe("approvals: no hit reaches one", () => {
 
   it("in the window, the stage's hits are the capture's wake path and four playback commands", () => {
     const a = appSource.indexOf("const wakeStage = useMemo(() => new WakeStage({");
-    const b = appSource.indexOf("}), [commands, onWakeHit, speech, ownerOverHim]);");
+    const b = appSource.indexOf("}), [commands, onWakeHit,", a);
     expect(a).toBeGreaterThan(0);
     expect(b).toBeGreaterThan(a);
     const block = strip(appSource.slice(a, b)).replace(/\s+/g, " ");

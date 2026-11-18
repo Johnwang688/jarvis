@@ -14,6 +14,7 @@ import logging
 import math
 import mimetypes
 import os
+import queue
 from pathlib import Path
 import re
 import threading
@@ -2024,7 +2025,40 @@ def route(handler, daemon, parts, query):
         return 200, link.agent_status() if link else {
             "state": "unavailable", "detail": "Voice link is offline. Check voice-link setup and the daemon.",
         }
-    if parts == ["voice-agent", "start"]:
+    if parts == ["voice-agent", "microphone"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if method != "GET":
+            fail(405, "method not allowed")
+        _object(query, ())
+        link = getattr(daemon, "voice_link", None)
+        if link is None:
+            fail(409, "Voice link is offline.")
+        packets = link.subscribe_microphone()
+        try:
+            handler._streaming = True
+            handler.close_connection = True
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/octet-stream")
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            # Fixed-format PCM16LE at 16 kHz. No cached bytes, headers or
+            # keepalives interleaved with samples. A stalled feed ends cleanly.
+            while True:
+                try:
+                    packet = packets.get(timeout=3)
+                except queue.Empty:
+                    break
+                if packet is None:
+                    break
+                handler.wfile.write(packet)
+        finally:
+            link.unsubscribe_microphone(packets)
+        return 200, None
+    if parts in (["voice-agent", "start"], ["voice-agent", "stop"]):
         from .projects import owner_only
         owner_only(handler, daemon)
         if method != "POST":
@@ -2034,7 +2068,12 @@ def route(handler, daemon, parts, query):
         link = getattr(daemon, "voice_link", None)
         if link is None:
             fail(409, "Voice link is offline. Check voice-link setup and the daemon.")
+        if parts[-1] == "stop":
+            link.stop_windows_agent()
+            return 200, {"stopped": True}
         link.start_windows_agent()
+        from jarvis import stt_local
+        stt_local.prewarm_for_voice()
         return 200, {"connected": True}
     if parts == ["stt", "settings"]:
         return stt_settings_route(handler, daemon, query)

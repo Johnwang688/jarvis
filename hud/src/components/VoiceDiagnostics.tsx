@@ -87,7 +87,7 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
       <ol>{value.detectorLog.map((c, i) => <li key={i}>{(c.at / 1000).toFixed(1)} s after the window opened · {c.detector === "silero" ? "Silero" : "energy"} · {c.phase} · {c.note || "—"}</li>)}</ol>
     </details> : null}
     <p data-testid="voice-end-pause">Message ends after {(meter.pause / 1000).toFixed(1)} s of quiet · segments are cut at {(SEGMENT_GAP_MS / 1000).toFixed(1)} s gaps · speech within {(CONTINUE_MS / 1000).toFixed(0)} s of a message continues it</p>
-    <p data-testid="voice-capture-path">Capture: {value.path === "worklet" ? "AudioWorklet · 16 kHz mono, 512-sample frames" : value.path === "script_processor" ? `older ScriptProcessor path — ${value.pathNote || "AudioWorklet unavailable"}` : "not started"}</p>
+    <p data-testid="voice-capture-path">Capture: {value.path === "windows_shared" ? "Shared Windows microphone · 16 kHz mono, 512-sample frames" : value.path === "worklet" ? "AudioWorklet · 16 kHz mono, 512-sample frames" : value.path === "script_processor" ? `older ScriptProcessor path — ${value.pathNote || "AudioWorklet unavailable"}` : "not started"}</p>
     <p data-testid="voice-live-level">Level {muted ? "0.0000" : Number.isFinite(meter.rms) ? meter.rms.toFixed(4) : "—"} · Noise floor {Number.isFinite(meter.floor) ? meter.floor.toFixed(4) : "—"}</p>
     <p data-testid="voice-mic-settings">Echo cancellation: {setting(value.settings.echoCancellation)} · Noise suppression: {setting(value.settings.noiseSuppression)} · Automatic gain: {setting(value.settings.autoGainControl)}</p>
     <p>Requested: echo cancellation, noise suppression and automatic gain. Values above are the browser's readback.</p>

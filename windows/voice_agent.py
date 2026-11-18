@@ -14,13 +14,13 @@ import time
 import wave
 
 if __package__:
-    from .voicewire import Capture, Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from .voicewire import Capture, Client, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     from .voicetype import Typer
     from .voiceactions import Actions
     from .voiceflow import Flow
     from . import voiceui, voicewake
 else:
-    from voicewire import Capture, Client, HotkeyMachine, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from voicewire import Capture, Client, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     try:
         from voicetype import Typer
         from voiceactions import Actions
@@ -129,6 +129,10 @@ class Agent:
 
         self.host, self.port, self.key_path = host, port, key_path
         self.done = threading.Event()
+        self.instance = new_nonce()
+        self.stop_requested = threading.Event()
+        self.mic_released = threading.Event()
+        self.relay = None
         self.online = threading.Event()
         self.recording = threading.Event()
         self.flow_running = threading.Event()
@@ -153,6 +157,11 @@ class Agent:
         self.overlay = voiceui.Overlay(self.root)
         self.player = Player()
         self.wake = None
+
+    def share_frame(self, pcm):
+        relay = self.relay
+        if relay is not None:
+            relay.offer(pcm)
 
     def next_generation(self):
         with self.generation_lock:
@@ -310,8 +319,10 @@ class Agent:
                     client = getattr(self, "client", None)
                     if client is not None:
                         client.interrupt_speech()
+                # Only the Right Ctrl press, hold or release can be a chord.
+                # While idle scan one key instead of polling the whole keyboard.
+                other = (held or previous) and any(self.user32.GetAsyncKeyState(k) & 0x8000 for k in others)
                 previous = held
-                other = any(self.user32.GetAsyncKeyState(k) & 0x8000 for k in others)
                 for action in machine.feed(time.monotonic_ns() // 1_000_000, held, other):
                     try:
                         if action == "start":
@@ -348,10 +359,13 @@ class Agent:
         delay, last_ping, reported_wake = 1.0, 0.0, None
         # These objects and every Client call belong to this one worker.
         typer = Typer() if hasattr(self, "overlay") else None
-        actions = Actions() if typer is not None else None
+        actions = Actions(warm_in_background=True) if typer is not None else None
         try:
             while not self.done.is_set():
                 if client is None:
+                    if getattr(self, "relay", None) is not None:
+                        self.relay.close()
+                        self.relay = None
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
@@ -377,7 +391,14 @@ class Agent:
                         if wake is None:
                             client.ping()
                         else:
-                            client.ping(wake=wake)
+                            if hasattr(self, "instance"):
+                                client.ping(wake=wake, instance=self.instance)
+                                if client.shared_capable and self.relay is None:
+                                    self.relay = MicrophoneRelay(client, self.wake_status,
+                                                                 self.stop_requested, self.mic_released)
+                                    self.relay.start()
+                            else:
+                                client.ping(wake=wake)
                         self.client = client
                         self.packet_ready = client.streaming is True
                         last_ping, reported_wake = time.monotonic(), wake
@@ -451,15 +472,24 @@ class Agent:
                 actions.close()
 
     def run(self):
-        threading.Thread(target=self.poll, name="voice-hotkey", daemon=True).start()
+        hotkey = threading.Thread(target=self.poll, name="voice-hotkey", daemon=True)
+        hotkey.start()
         threading.Thread(target=self.network, name="voice-network", daemon=True).start()
         try:
             self.wake = voicewake.WakeListener(self.on_wake, self.overlay.push_level,
                                               self.busy, on_state=self.wake_state)
+            self.wake.on_pcm = self.share_frame
             if not self.wake.start():
                 self.overlay.set_state("error", self.wake.reason)
         except Exception:
             self.overlay.set_state("error", "Wake word unavailable; Right Ctrl still works.")
+        def check_stop():
+            if self.stop_requested.is_set():
+                self.root.quit()
+            else:
+                self.root.after(100, check_stop)
+        if hasattr(self, "stop_requested"):
+            self.root.after(100, check_stop)
         try:
             self.root.mainloop()
         finally:
@@ -467,13 +497,39 @@ class Agent:
             self.player.stop()
             if self.wake:
                 self.wake.stop()
+            hotkey.join()
+            if hasattr(self, "mic_released"):
+                self.mic_released.set()
+                relay = self.relay
+                if relay:
+                    relay.close()
+                    relay.thread.join(2)
 
 
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8409
     key = Path(sys.argv[3]) if len(sys.argv) > 3 else Path(sys.executable).resolve().parents[2] / "voice-link.key"
-    Agent(host, port, key).run()
+    # One helper per port in this logged-in Windows session, including launches
+    # from a shortcut during a WSL reconnect. Windows releases this on exit.
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateMutexW(None, False, f"Local\\JarvisVoiceAnywhere-{port}")
+    if not handle:
+        raise OSError("Could not open the Windows voice session.")
+    try:
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            return
+        agent = Agent(host, port, key)
+        if len(sys.argv) > 4 and len(sys.argv[4]) == 64:
+            agent.instance = sys.argv[4]
+        agent.run()
+    finally:
+        kernel.CloseHandle(handle)
 
 
 if __name__ == "__main__":

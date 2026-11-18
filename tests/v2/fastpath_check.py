@@ -918,6 +918,45 @@ def guarded_text(path: Path) -> str:
     return text
 
 
+def voice_transport_checks() -> None:
+    """Voice uses Sol only for inference; tool execution still belongs here."""
+    from unittest.mock import patch
+    from jarvis.v2.providers.codex import CodexProvider
+
+    provider = FastPathProvider()
+    h = provider.start(thread(), brief(allowed_tools=["get_datetime"]), allow_all)
+    steps = [
+        {"answer": "", "tool": "get_datetime", "arguments_json": "{}"},
+        {"answer": "Checked the local clock.", "tool": "", "arguments_json": "{}"},
+    ]
+    def infer(text, **kw):
+        payload = json.loads(text)
+        assert kw["model"] == "gpt-6.2-sol" and kw["effort"] == "medium" and kw["service_tier"] == "ultrafast"
+        assert kw["external_login"] and kw["cancel"] is h.native.stop
+        assert [tool["name"] for tool in payload["tools"]] == ["get_datetime"]
+        if len(steps) == 1:
+            assert payload["messages"][-1]["role"] == "tool"
+        return json.dumps(steps.pop(0))
+
+    voice = UserMessage("What time is it?", origin="owner", via="voice", spoken=True, desk=False)
+    with patch.object(CodexProvider, "one_shot", side_effect=infer) as sol:
+        events = list(provider.send(h, voice))
+        assert one(events, EventKind.TEXT).data["text"] == "Checked the local clock.", kinds(events)
+        assert EventKind.TOOL_STARTED in kinds(events) and not steps
+        assert_wire_valid(h.native.agent.messages)
+        # A typed follow-up returns to this ordinary chat's selected provider.
+        with scripted(lambda *args, **kwargs: reply("typed follow up")):
+            assert one(drain(provider, h, "hello"), EventKind.TEXT).data["text"] == "typed follow up"
+        assert sol.call_count == 2
+    # A fabricated request for an unoffered tool is refused before dispatch.
+    forbidden = json.dumps({"answer": "", "tool": "run_command", "arguments_json": "{}"})
+    with patch.object(CodexProvider, "one_shot", return_value=forbidden):
+        events = list(provider.send(h, voice))
+        assert EventKind.TOOL_STARTED not in kinds(events) and EventKind.ERROR in kinds(events)
+    provider.close(h)
+    print("ok  voice: Sol medium ultrafast answers; Jarvis dispatches only supplied tools; typed turns use their normal model")
+
+
 def no_self_switch_checks() -> None:
     """The agent has no lever on its own model or provider (decisions A1).
 
@@ -1362,6 +1401,7 @@ def main() -> int:
     usage_checks()
     isolation_checks()
     model_checks()
+    voice_transport_checks()
     no_self_switch_checks()
     failed = chat_tools_checks()
     failed += compact_checks()

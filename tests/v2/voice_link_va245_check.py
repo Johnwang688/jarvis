@@ -119,7 +119,7 @@ class Route(Case):
             self.calls.route_reply, self.calls.route_error = reply, error
             with self.subTest(reply=reply, error=error):
                 self.assertEqual(self.client.route("open the pod bay doors", "hotkey"),
-                                 {"kind": "dictate", "text": "open the pod bay doors", "target": ""})
+                                 {"kind": "dictate", "text": "open the pod bay doors", "target": "literal"})
                 self.assertEqual(self.client.route("what time is it", "wake"),
                                  {"kind": "ask", "text": "what time is it", "target": ""})
 

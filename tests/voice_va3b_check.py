@@ -27,7 +27,8 @@ class CleanupFlow(unittest.TestCase):
         self.client, self.ui = Mock(), Mock()
         self.client.dictate.return_value = {'text': text}
         self.client.clean.side_effect = lambda t, app: {'text': t.upper(), 'pass': 'rules'}
-        self.client.route.return_value = {'kind': 'dictate', 'text': 'clean me send it'}
+        self.client.route.side_effect = lambda t, source: {
+            'kind': 'dictate', 'text': 'clean me send it' if t == 'Jarvis type this' else t}
         self.backend = Backend()
         self.typer = Typer(self.backend, clock=lambda: 10)
         self.flow = Flow(self.client, self.typer, Mock(), self.ui, Mock())
@@ -55,6 +56,7 @@ class CleanupFlow(unittest.TestCase):
 
     def test_focus_change_during_cleanup_types_raw(self):
         self.client, self.ui = Mock(), Mock()
+        self.client.route.side_effect = lambda t, source: {'kind': 'dictate', 'text': t}
         self.client.dictate.return_value = {'text': 'um echo hello world'}
         self.client.clean.side_effect = lambda t, app: {'text': 'Echo hello world.', 'pass': 'rules'}
         self.backend = Backend()
@@ -128,6 +130,7 @@ class CleanupFlow(unittest.TestCase):
 
     def test_fake_typer_receives_cleaned_steps_and_injected_scratch_callback(self):
         client, typer = Mock(), Mock()
+        client.route.side_effect = lambda t, source: {'kind': 'dictate', 'text': t}
         client.dictate.return_value = {'text': 'um keep this send it'}
         client.clean.return_value = {'text': 'Keep this', 'pass': 'rules'}
         typer.category.side_effect = OSError('private window title')

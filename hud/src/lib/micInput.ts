@@ -10,7 +10,7 @@
 
 import { MIC_PROCESSOR, MicFramer } from "./resample";
 
-export type CapturePath = "worklet" | "script_processor";
+export type CapturePath = "worklet" | "script_processor" | "windows_shared";
 
 export interface MicInput {
   path: CapturePath;

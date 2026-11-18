@@ -247,6 +247,29 @@ class EngineChecks(Base):
         self.assertEqual(eng.transcribe(wav_bytes(), timeout=5), "local words")
         self.assertEqual((eng.built, eng.loads, eng.decodes), ([2], 1, 2))
 
+    def test_voice_prewarm_loads_once_without_decoding_and_unloads_when_idle(self):
+        clock = Clock()
+        entered, release = threading.Event(), threading.Event()
+        backend = FakeBackend()
+        def factory(_threads):
+            entered.set()
+            release.wait(3)
+            return backend
+        eng = stt_local.Engine(factory, idle_s=60, clock=clock, schedule=False)
+        stt_local.set_engine(eng)
+        with mock.patch.object(stt_local, "available", return_value=True):
+            stt_local.prewarm_for_voice()  # this test's setting starts at cloud
+            self.assertFalse(entered.is_set())
+            self.write(backend="local", cloud_fallback=False)
+            stt_local.prewarm_for_voice()
+            self.assertTrue(entered.wait(1))
+            stt_local.prewarm_for_voice()
+            release.set()
+            self.assertEqual(eng.transcribe(wav_bytes(), timeout=3), "local words")
+            self.assertEqual((eng.loads, eng.decodes), (1, 1))
+        clock.t += 61
+        self.assertTrue(eng.reap())
+
     def test_default_threads_are_pinned_between_one_and_four(self):
         self.assertEqual(config.STT_LOCAL_THREADS, 2)
         env = {"JARVIS_STT_LOCAL_THREADS": "24"}

@@ -661,12 +661,12 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .voice-agent-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
 #voice-agent-start {
   flex: 0 1 auto; min-width: 0; height: 23px; padding: 0 6px;
-  font: 10px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 10px var(--mono); word-spacing: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #voice-agent-start:disabled { opacity: 0.8; }
 .voice-agent-state {
   flex: none; display: inline-flex; align-items: center; gap: 5px;
-  color: var(--text); font: 10px var(--mono); white-space: nowrap;
+  color: var(--text); font: 10px var(--mono); word-spacing: normal; white-space: nowrap;
 }
 .voice-agent-state::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor;

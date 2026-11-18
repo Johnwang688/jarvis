@@ -1039,18 +1039,26 @@ def metadata_config_text() -> str:
     return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
 
 
-def title_config_text(model: str, effort: str | None) -> str:
+def title_config_text(model: str, effort: str | None, *, external_login: bool = False) -> str:
     """The chat titler's one-turn config (titles.py): read-only sandbox,
     never asks, no web search, no MCP servers, nothing trusted. Each of
     these is also requested on `thread/start`/`turn/start` and checked in
     the reply (`CodexProvider.one_shot`)."""
     values = dict(model_provider="openai", forced_login_method="chatgpt",
-                  cli_auth_credentials_store="file", sandbox_mode="read-only",
+                  cli_auth_credentials_store="ephemeral" if external_login else "file", sandbox_mode="read-only",
                   approval_policy="never", web_search="disabled",
                   check_for_update_on_startup=False, model=model)
     if effort is not None:
         values["model_reasoning_effort"] = effort
-    return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
+    lines = [f"{k} = {_value(v)}" for k, v in values.items()]
+    if external_login:
+        # Voice has its own dispatcher. Avoid advertising unused native
+        # integrations (and their schemas) even before the reply checks.
+        lines.append("[features]")
+        lines.extend(f"{name} = false" for name in
+                     ("apps", "plugins", "browser_use", "computer_use", "image_generation",
+                      "multi_agent", "shell_tool", "skill_search", "sleep_tool"))
+    return "\n".join(lines) + "\n"
 
 
 def owner_home() -> Path:
@@ -1160,7 +1168,7 @@ def _home_of(name: str) -> Path:
 
 
 def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
-                  sandbox: bool = False) -> tuple[list[str], dict[str, str], Path]:
+                  sandbox: bool = False, external_login: bool = False) -> tuple[list[str], dict[str, str], Path]:
     """`text` is the config, or a function of the home that returns it.
     `sandbox` also makes the commands' HOME (`sandbox_home`)."""
     _home_of(name)
@@ -1185,11 +1193,11 @@ def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
     if link.is_symlink():
         if link.resolve() != auth.resolve():
             raise BriefRefused("Codex auth link points to a different login")
-        if sandbox:
+        if sandbox or external_login:
             link.unlink()  # Migrate a managed-login home to external access tokens.
     elif link.exists():
         raise BriefRefused("Codex private auth must link to the owner's login")
-    elif not sandbox:
+    elif not sandbox and not external_login:
         link.symlink_to(auth.resolve())
     # Preserve installed skills without importing personal config or plugins.
     link_skills = skills
@@ -1212,7 +1220,7 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
     PATH lookup that could land on the Windows shim.
     """
     validate(brief)
-    if thread_id in {"_login", "_metadata", "_titles"}:
+    if thread_id in {"_login", "_metadata", "_titles", "_voice"}:
         raise BriefRefused("Reserved Codex private thread directory id")
     roots = git_roots(brief)
     if roots:
@@ -1253,3 +1261,9 @@ def prepare_title(binary: str, model: str, effort: str | None) -> tuple[list[str
     """The chat titler's private home: its own config (`title_config_text`),
     the owner's login linked as every session's is, and no skills."""
     return _prepare_home("_titles", title_config_text(model, effort), binary, skills=False)
+
+
+def prepare_voice(binary: str, model: str, effort: str | None) -> tuple[list[str], dict[str, str], Path]:
+    """Voice inference borrows the managed login only during attachment."""
+    return _prepare_home("_voice", title_config_text(model, effort, external_login=True),
+                         binary, skills=False, external_login=True)
