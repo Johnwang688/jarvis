@@ -159,6 +159,8 @@ def peer(script_path, log_path, thread_name):
             result = {"userAgent": "fake-codex"}
         elif method == "initialized":
             continue
+        elif method == "account/login/start":
+            result = {"type": p["type"]}
         elif method == "account/read":
             result = {"account": {"type": script.get("account", "chatgpt")}}
         elif method == "model/list":
@@ -299,6 +301,10 @@ def peer(script_path, log_path, thread_name):
                     time.sleep(0.05)
                     sys.exit(2)
                 continue
+            if mode == "login_refresh":
+                emit({"id": "special", "method": "account/chatgptAuthTokens/refresh",
+                      "params": {"reason": "unauthorized", "previousAccountId": "fixture"}})
+                continue
             if mode == "scripted":
                 # One server request built by the test; the turn ends when
                 # its reply arrives (the `method is None` branch below).
@@ -412,14 +418,43 @@ def peer(script_path, log_path, thread_name):
         emit({"id": m["id"], "result": result})
 
 
+class FixtureLoginPeer:
+    """Managed-login protocol fixture. Its JWT contains only a test account."""
+    def __init__(self, brain):
+        self.brain = brain
+
+    def start(self):
+        return self
+
+    def initialize(self, **kwargs):
+        pass
+
+    def request(self, method, params, **kwargs):
+        import base64
+        assert method == "getAuthStatus"
+        if params["refreshToken"]:
+            self.brain.rotations += 1
+        claims = {"generation": self.brain.rotations, "https://api.openai.com/auth": {
+            "chatgpt_account_id": self.brain.script.get("account_id", "fixture")}}
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        return {"authMethod": self.brain.script.get("account", "chatgpt"),
+                "authToken": "fixture." + payload + ".fixture"}
+
+    def close(self):
+        pass
+
+
 class Brain:
     def __init__(self, root):
         self.root = root
         self.log = root / "protocol.jsonl"
         self.script = {"mode": "normal"}
         self.rpcs = []
+        self.rotations = 0
 
     def rpc(self, argv, **kwargs):
+        if Path(kwargs["cwd"]).name == "_login":
+            return FixtureLoginPeer(self)
         fake = FakeRpc(self, argv, **kwargs)
         self.rpcs.append(fake)
         return fake
@@ -521,7 +556,8 @@ class Checks(unittest.TestCase):
         self.assertEqual(cfg["features"], {"exec_permission_approvals": True})
         self.assertNotIn("project_doc_max_bytes", cfg)
         self.assertEqual(cfg["projects"][str(self.work)]["trust_level"], "trusted")
-        self.assertEqual((home / "auth.json").resolve(), self.auth / "auth.json")
+        self.assertFalse(os.path.lexists(home / "auth.json"))
+        self.assertEqual(cfg["cli_auth_credentials_store"], "ephemeral")
         # A real folder (mounted back writable inside the denied home, so the
         # model can read its skills), one link per installed skill.
         self.assertFalse((home / "skills").is_symlink())
@@ -1780,11 +1816,8 @@ class Checks(unittest.TestCase):
         self.assertNotIn("model", cfg)
         self.assertNotIn("mcp_servers", cfg)
 
-    def test_account_metadata_holds_the_login_lock_and_never_waits_on_a_turn(self):
-        """PR #20 review: the metadata peer shares Codex's login lock with
-        session start-up; a turn holds that lock for its whole length, so a
-        HUD read during one is refused at once (`MetadataBusy`), before the
-        CLI is probed or anything is spawned."""
+    def test_account_metadata_holds_the_login_lock_and_never_waits_for_it(self):
+        """Account metadata defers immediately when managed login is busy."""
         seen, original = [], self.brain.rpc
 
         def factory(argv, **kwargs):
@@ -3452,21 +3485,24 @@ print(json.dumps(out))
             with self.assertRaises(ValueError):
                 self.provider.answer(h, "not-pending", "text")
 
-    def test_interrupt_and_waiting_session_cancel(self):
+    def test_interrupt_is_scoped_to_one_running_session(self):
         h = self.start("hold")
-        h2 = self.start(thread=replace(self.thread, id="second"))
+        h2 = self.start("hold", thread=replace(self.thread, id="second"))
         with ThreadPoolExecutor(2) as pool:
             first = pool.submit(self.send, h)
-            self.brain.wait_call("turn/start")
             second = pool.submit(self.send, h2)
-            time.sleep(0.1)
-            self.provider.interrupt(h2)
-            self.assertEqual(second.result(2)[-1].data, {"stop": "interrupted"})
-            self.provider.interrupt(h)
-            events = first.result(2)
-            self.assertEqual(events[-1].data, {"stop": "interrupted"})
+            try:
+                self._running(h)
+                self._running(h2)
+                self.provider.interrupt(h2)
+                self.assertEqual(second.result(2)[-1].data, {"stop": "interrupted"})
+                self.assertFalse(first.done())
+            finally:
+                self.provider.interrupt(h)
+                self.provider.interrupt(h2)
+            self.assertEqual(first.result(2)[-1].data, {"stop": "interrupted"})
             self.assertEqual(self.provider.usage(h).input_tokens, 100)
-        self.assertEqual(len(self.brain.calls("turn/start")), 1)
+        self.assertEqual(len(self.brain.calls("turn/start")), 2)
 
     # -- steering (2026-10-08) ------------------------------------------------
 
@@ -3675,20 +3711,63 @@ print(json.dumps(out))
             with self.assertRaises(RpcError):
                 accounting.update({"total": raw, "last": last})
 
-    def test_two_open_sessions_serialize_turns(self):
-        h1 = self.start("hold")
-        h2 = self.start(thread=replace(self.thread, id="second"))
-        self.assertTrue(all(r.process.poll() is None for r in self.brain.rpcs))
+    def test_second_chat_starts_and_finishes_while_first_is_running(self):
+        h1 = self.start("hold", brief=self.chat())
+        def run_second():
+            return self.send(self.start(thread=replace(self.thread, id="second"), brief=self.chat()))
+
         with ThreadPoolExecutor(2) as pool:
             first = pool.submit(self.send, h1)
-            self.brain.wait_call("turn/start")
-            second = pool.submit(self.send, h2)
-            time.sleep(0.15)
-            self.assertEqual(len(self.brain.calls("turn/start")), 1)
-            self.provider.interrupt(h1)
+            try:
+                self.brain.wait_call("turn/start")
+                second = pool.submit(run_second)
+                self.assertEqual(second.result(5)[-1].data["stop"], "end")
+                self.assertFalse(first.done())
+            finally:
+                self.provider.interrupt(h1)
             self.assertEqual(first.result(2)[-1].data["stop"], "interrupted")
-            self.assertEqual(second.result(2)[-1].data["stop"], "end")
-        self.assertEqual(len(self.brain.calls("turn/start")), 2)
+
+    def test_worker_answers_native_refresh_on_its_own_transport(self):
+        h = self.start("login_refresh", lambda *_: self.fail("login is not a tool request"))
+        events = self.send(h)
+        self.assertEqual(events[-1].data["stop"], "end")
+        grant, = [reply["result"] for reply in h.native.rpc.replies if reply["id"] == "special"]
+        self.assertEqual(grant["chatgptAccountId"], "fixture")
+        self.assertNotIn(grant["accessToken"], repr(events))
+        self.assertEqual(self.brain.rotations, 1)
+
+    def test_two_workers_refresh_the_same_expired_login_once(self):
+        workers = [self.start(thread=replace(self.thread, id=name)).native.rpc
+                   for name in ("first", "second")]
+        request = {"reason": "unauthorized", "previousAccountId": "fixture"}
+        with ThreadPoolExecutor(2) as pool:
+            grants = list(pool.map(lambda w: w.refresh_chat_login(request), workers))
+        self.assertEqual(self.brain.rotations, 1)
+        self.assertEqual(grants[0], grants[1])
+        self.brain.script["account_id"] = "different"
+        with self.assertRaises(RpcError):
+            workers[0].refresh_chat_login(request)
+        self.assertEqual(self.brain.rotations, 1)
+
+    def test_git_discovery_once_per_start_and_fresh_on_resume(self):
+        brief = self.chat()
+        with patch.object(codex_config, "git_dirs", wraps=codex_config.git_dirs) as discover:
+            h = self.start(brief=brief)
+            self.assertEqual(discover.call_count, 1)
+            opening = self.brain.calls("thread/start")[0]["params"]["developerInstructions"]
+            self.assertIn("No writable repository git metadata", opening)
+            self.provider.close(h)
+            self.repo()
+            # A chat saved by the previous provider still has the managed-login symlink.
+            link = h.native.home / "auth.json"
+            link.symlink_to(self.auth / "auth.json")
+            self.handles.append(self.provider.resume(
+                replace(self.thread, provider_session_id=h.provider_session_id), brief, lambda *_: Decision.ALLOW))
+            self.assertEqual(discover.call_count, 2)
+            resumed = self.brain.calls("thread/resume")[0]["params"]["developerInstructions"]
+            self.assertIn("Validated repository git metadata", resumed)
+            self.assertFalse(os.path.lexists(link))
+            self.assertTrue((self.auth / "auth.json").is_file())
 
     def test_transport_death_questions_and_cleanup(self):
         for mode in ("death", "malformed", "question_death", "approval_death"):

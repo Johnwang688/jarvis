@@ -280,6 +280,8 @@ def peer(script_path, log_path):
             result = {"userAgent": "fake-codex/0.161.0"}
         elif method == "initialized":
             continue
+        elif method == "account/login/start":
+            result = {"type": p["type"]}
         elif method == "account/read":
             result = {"account": {"type": "chatgpt"}}
         elif method == "config/read":
@@ -321,8 +323,12 @@ class Brain:
         self.log = root / "protocol.jsonl"
         self.script = {}
         self.rpcs = []
+        self.rotations = 0
 
     def rpc(self, argv, **kwargs):
+        if Path(kwargs["cwd"]).name == "_login":
+            from codex_provider_check import FixtureLoginPeer
+            return FixtureLoginPeer(self)
         fake = FakeRpc(self, argv, **kwargs)
         self.rpcs.append(fake)
         return fake

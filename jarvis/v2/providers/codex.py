@@ -92,7 +92,7 @@ from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
 from ..redact import scrub_text
-from . import codex_cli, codex_config
+from . import codex_cli, codex_config, codex_login
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
@@ -117,10 +117,10 @@ _STALE_STEERS = 64
 NO_COMPACT = "This Codex has no thread/compact/start; update Codex to compact."
 COMPACT_REASON_CAP = 200
 # One deadline for a whole account-metadata session, which holds `_auth_lock`
-# and so keeps every Codex turn from starting while it runs.
+# and so may delay a chat login or refresh.
 METADATA_DEADLINE_S = 10.0
 # The same, for a one-shot turn (`one_shot`, the chat titler): it holds the
-# lock as long, so no Codex turn waits behind it for more than this.
+# lock until the title or its deadline.
 ONE_SHOT_DEADLINE_S = 20.0
 # The only items a one-shot turn may produce; any other is a tool.
 _ONE_SHOT_ITEMS = frozenset({"userMessage", "agentMessage", "reasoning"})
@@ -130,8 +130,9 @@ _ONE_SHOT_ITEMS = frozenset({"userMessage", "agentMessage", "reasoning"})
 _ONE_SHOT_ITEM_METHODS = frozenset({"started", "completed"}) | _ONE_SHOT_ITEMS
 MODEL_PAGE_LIMIT = 100
 MODEL_PAGE_CAP = 20
-# Held while a session prepares and starts, and by `send` for a whole turn.
-_auth_lock = threading.Lock()
+# Managed credential users share the refresh lock. Worker turns have private transports.
+_auth_lock = codex_login.managed_lock
+_open_lock = threading.Lock()
 _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
 
@@ -292,9 +293,7 @@ def _mcp_approval(params, depth: int = 0) -> bool:
 
 
 class MetadataBusy(RuntimeError):
-    """A Codex session holds the login lock (a turn runs, or one is
-    starting): account metadata is not read now. The HUD backs off and keeps
-    its last snapshot."""
+    """The managed login is busy. The HUD backs off and keeps its last snapshot."""
 
 
 @dataclass
@@ -735,15 +734,13 @@ class CodexProvider:
         """Read the logged-in account's model catalog and quota snapshot.
 
         A short-lived app-server, never a model turn. It prepares and talks to
-        the account under `_auth_lock`, the lock session startup takes — and
-        `send` holds that lock for a whole turn — so:
+        the account under `_auth_lock`, also used to load or refresh a chat login:
 
         - a held lock is `MetadataBusy` at once, **before** the probe (no
-          `codex --version` / `login status` spawned behind a running turn),
+          `codex --version` / `login status` spawned for a deferred read),
           and the caller backs off (`HUDLedger`, ~30 s);
         - once it has the lock, the whole session has one deadline
-          (`deadline_s`, ~10 s), so a stalled app-server cannot keep a turn
-          from starting for longer than that;
+          (`deadline_s`, ~10 s), bounding how long a chat login waits;
         - the lock is released whatever `close()` does;
         - `cancel_metadata()` (daemon shutdown) ends a read in flight at the
           transport's next poll, and refuses a new one.
@@ -840,7 +837,7 @@ class CodexProvider:
         titler (titles.py): `text` in, the final agent message out.
 
         `account_metadata`'s shape, for the same reason — it holds
-        `_auth_lock`, which every Codex turn needs to start: `MetadataBusy`
+        `_auth_lock`, which chat login and refresh also use: `MetadataBusy`
         at once if the lock is held (before the probe), one deadline for the
         whole session, the lock released whatever `close()` does, and
         `cancel_metadata()` ends it at the transport's next poll.
@@ -1008,8 +1005,8 @@ class CodexProvider:
         binary, reason = self._probe()
         if binary is None:
             raise BriefRefused(reason)
-        # Also serialize preparation, account inspection and refresh-prone startup.
-        with _auth_lock:
+        # Reserve private session homes during setup; active turns never take this lock.
+        with _open_lock, codex_config.startup_git_roots(brief):
             candidate = (Path(config.V2_DATA_DIR) / "codex" / thread.id).resolve()
             with _state_lock:
                 if candidate in _open_homes:
@@ -1025,19 +1022,18 @@ class CodexProvider:
             rpc = RpcProcess(argv, cwd=brief.cwd, env=env)
             try:
                 rpc.start().initialize()
-                account = rpc.request("account/read", {"refreshToken": False}).get("account") or {}
-                if account.get("type") != "chatgpt":
-                    raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
                 effective = rpc.request("config/read", {"includeLayers": False, "cwd": brief.cwd})["config"]
                 codex_config.validate_mcp(brief, effective)
                 reviewer = codex_config.approvals_reviewer(brief)
                 required = {"forced_login_method": "chatgpt", "model_provider": "openai",
+                            "cli_auth_credentials_store": "ephemeral",
                             "approval_policy": "on-request", "approvals_reviewer": reviewer}
                 if any(effective.get(k) != v for k, v in required.items()):
                     raise BriefRefused("Codex effective config changed authentication or permissions")
                 # The permission profile (CG phase 2): reads of credentials
                 # denied, network off, per-command network approvals on.
                 codex_config.check_effective(brief, effective, home)
+                codex_login.ChatLogin(binary, RpcProcess).attach(rpc)
                 # No `sandbox` field: it would select a legacy mode over the
                 # profile `default_permissions` names (verified on 0.161 for
                 # start and resume).
@@ -1108,24 +1104,28 @@ class CodexProvider:
 
     def _cooldown(self, model, *, failed=False, success=False):
         """Shared durable model backoff; the ledger can consume retry_at from ERROR."""
-        path = Path(config.V2_DATA_DIR) / "codex" / "cooldown.json"
-        try:
-            values = json.loads(path.read_text())
-        except FileNotFoundError:
-            values = {}
-        except (OSError, ValueError) as exc:
-            raise RpcError("Codex cooldown state unreadable") from exc
-        key = model or "default"
-        old = values.get(key, {})
-        if success:
-            values.pop(key, None)
-        elif failed:
-            attempts = old.get("attempts", 0) + 1
-            values[key] = {"attempts": attempts, "retry_at": time.time() + min(900 * 2 ** min(attempts - 1, 3), 7200)}
-        if failed or success:
-            codex_config.atomically_write(path, json.dumps(values))
-        value = values.get(key, {})
-        return value if value.get("retry_at", 0) > time.time() else None
+        with _state_lock:
+            path = Path(config.V2_DATA_DIR) / "codex" / "cooldown.json"
+            try:
+                values = json.loads(path.read_text())
+            except FileNotFoundError:
+                values = {}
+            except (OSError, ValueError) as exc:
+                raise RpcError("Codex cooldown state unreadable") from exc
+            key = model or "default"
+            old = values.get(key, {})
+            if success and old.get("retry_at", 0) > time.time():
+                # An overlapping turn saw capacity exhaustion after this one started.
+                return old
+            if success:
+                values.pop(key, None)
+            elif failed:
+                attempts = old.get("attempts", 0) + 1
+                values[key] = {"attempts": attempts, "retry_at": time.time() + min(900 * 2 ** min(attempts - 1, 3), 7200)}
+            if failed or success:
+                codex_config.atomically_write(path, json.dumps(values))
+            value = values.get(key, {})
+            return value if value.get("retry_at", 0) > time.time() else None
 
     def send(self, h: SessionHandle, message: UserMessage) -> Iterator[Event]:
         yield from self._drive(h, "turn/start", lambda: {"threadId": h.native.thread_id,
@@ -1151,7 +1151,7 @@ class CodexProvider:
         (plan 2026-10-19 §1, recorded on 0.161.0 in
         tests/v2/fixtures/compact/). One `thread/compact/start {threadId}`
         (its params hold nothing else), driven by `send`'s loop: the reader
-        handshake, `_auth_lock`, accounting and cooldown are the same. Yields
+        handshake, accounting and cooldown are the same. Yields
         TURN_STARTED, a `compact` TOOL_STARTED/TOOL_FINISHED pair, any USAGE,
         then TURN_FINISHED {"stop", "compacted", "reason"} last.
         `interrupt(h)` ends it (with the compaction's turn id once Codex
@@ -1184,7 +1184,7 @@ class CodexProvider:
         s = h.native
         if not s.sending.acquire(blocking=False):
             raise ValueError("Codex session already has an active send")
-        acquired, submitted, completed, reading = False, False, False, False
+        submitted, completed, reading = False, False, False
         call_id, compacted = None, False
 
         def finished(stop, reason=None):
@@ -1218,15 +1218,9 @@ class CodexProvider:
             if not reading:
                 yield finished("interrupted")
                 return
-            while not acquired:
-                if s.closed.is_set():
-                    raise RpcError("Codex session is closed")
-                if s.cancelled.is_set():
-                    yield finished("interrupted")
-                    return
-                acquired = _auth_lock.acquire(timeout=0.05)
-            if s.closed.is_set():
-                raise RpcError("Codex session is closed")
+            if s.cancelled.is_set():
+                yield finished("interrupted")
+                return
             if not s.accounting.complete:
                 raise RpcError("Codex previous turn accounting incomplete; start a fresh thread")
             # A compaction is the owner's button on a chat, not one of a
@@ -1521,8 +1515,7 @@ class CodexProvider:
             if compaction:
                 yield finished("error", "Codex failed while compacting; its session was closed.")
         finally:
-            # A consumer abandoning the iterator must not leave a model mutating
-            # files while another session acquires the shared-login lock.
+            # Stop the native turn if its consumer abandons the iterator.
             if submitted and not completed:
                 self.close(h)
             with s.mutex:
@@ -1546,8 +1539,6 @@ class CodexProvider:
             s.interrupt_at = None
             s.mcp_items.clear()
             s.cancelled.clear()
-            if acquired:
-                _auth_lock.release()
             if reading:
                 with s.reader_cv:
                     s.reader = None
@@ -1566,7 +1557,7 @@ class CodexProvider:
         s = h.native
         if method == "model/rerouted" and s.brief.model:
             raise RpcError("Codex substituted the requested model")
-        if method == "account/updated" and p.get("authMode") not in (None, "chatgpt"):
+        if method == "account/updated" and p.get("authMode") not in (None, "chatgptAuthTokens"):
             raise RpcError("Codex changed away from ChatGPT authentication")
         if method == "account/rateLimits/updated":
             # Verified from generate-ts (0.153.4, 0.161.0): AccountRateLimitsUpdatedNotification
