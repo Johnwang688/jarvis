@@ -152,6 +152,9 @@ class Choices(unittest.TestCase):
         options = self.options("fast", settings={"theme": "dark", "nested": {"keep": True}})
         self.assertEqual(json.loads(options.settings),
                          {"theme": "dark", "nested": {"keep": True}, "fastMode": True})
+        # A supported Fast choice overrides an incoming `false` too (review of #411).
+        self.assertEqual(json.loads(self.options("fast", settings={"fastMode": False, "theme": "dark"}).settings),
+                         {"theme": "dark", "fastMode": True})
         self.assertEqual(json.loads(self.options(None, settings={"theme": "dark"}).settings),
                          {"theme": "dark", "fastMode": False})
         for speed, model in ((None, "claude-a"), ("fast", "claude-b")):
