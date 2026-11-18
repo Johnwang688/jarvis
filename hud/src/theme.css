@@ -226,10 +226,10 @@ input:focus, textarea:focus, select:focus { outline: none; box-shadow: var(--foc
 
 /* Widths are the window's (lib/layout.ts fits them); the fallbacks are the
    defaults. A folded pane is hidden, never unmounted, so its state survives. */
-.voice-sidebar { flex: 0 0 var(--left-w, 236px); border-right: 1px solid var(--rim); }
+.voice-sidebar { flex: 0 0 var(--left-w, 236px); }
 #shell.left-collapsed .voice-sidebar { flex-basis: 36px; }
 .voice-sidebar > #sidebar, .voice-sidebar > .rail.left {
-  flex: 1 1 auto; min-height: 0; background: transparent; box-shadow: none; border: 0;
+  flex: 1 1 auto; min-height: 0; background: transparent; box-shadow: none; border-right: 1px solid var(--rim);
 }
 .voice-sidebar > .rail.left { padding-bottom: 0; overflow-y: auto; }
 #main { flex: 1 1 auto; }
@@ -707,7 +707,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 /* ---- orb ---- */
 /* The footer takes its own height before the tree gets its scroll area,
    including when a status wraps or the owner changes the HUD zoom. */
-#orbdock { flex: 0 0 auto; min-width: 0; padding: 6px 10px 10px; }
+#orbdock { flex: 0 0 auto; min-width: 0; padding: 6px 10px 10px; border-right: 1px solid var(--rim); }
 .orb-face { width: 132px; max-width: 100%; aspect-ratio: 1; position: relative; }
 #orbdock canvas { display: block; width: 100%; height: 100%; cursor: pointer; touch-action: none; user-select: none; border-radius: 50%; }
 #orbdock img.avatar {
@@ -716,7 +716,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 }
 #orbdock.tight {
   display: grid; grid-template-columns: minmax(58px, 38%) minmax(0, 1fr);
-  align-items: end; gap: 6px; padding: 4px 6px 6px;
+  align-items: end; gap: 6px; padding: 1px 6px 3px;
 }
 #orbdock.tight .folded-voice-controls { align-self: center; }
 #orbdock.mini { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 1px 8px; }
