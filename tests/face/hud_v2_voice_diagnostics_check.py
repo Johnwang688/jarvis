@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright
 from tests.face.hud_v2_mock import MockDaemon
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, until, open_settings
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, watch_csp, until, open_voice_diagnostics
 
 FAKE_MIC = """
 window.__gumCalls = [];
@@ -60,7 +60,7 @@ def main():
             page.wait_for_function("() => window.__hud.voiceDiagnostics().rows.some(r => r.outcome === 'review')")
             check("REVIEW transcript placement logged once", page.evaluate("window.__hud.voiceDiagnostics().rows.filter(r => r.outcome === 'review').length") == 1)
             check("review did not send", not any(path.endswith('/send') for method, path, body in mock.calls))
-            open_settings(page, "Voice")
+            open_voice_diagnostics(page)
             check("Settings shows real diagnostic rows", page.locator('[data-testid="voice-diagnostic-row"]').count() == 1)
             check("readback differs from requested settings", "Noise suppression: off" in page.locator('[data-testid="voice-mic-settings"]').inner_text())
             check("private fields never reach diagnostics", "private" not in page.locator('[data-testid="voice-diagnostics"]').inner_text().lower())
@@ -89,7 +89,7 @@ def main():
             page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.mic.feedMs(1200, .06); window.__hud.mic.feedMs(2800, .0009)")
             check("OFF speech logged as muted", page.evaluate("window.__hud.voiceDiagnostics().rows.at(-1).outcome") == 'muted')
             check("OFF uploaded nothing", len(mock.sent('POST', '/stt')) == before)
-            open_settings(page, 'Voice')
+            open_voice_diagnostics(page)
             check("muted diagnostics say muted and show level zero", 'MIC MUTED' in page.locator('[data-testid="voice-mic-capability"]').inner_text() and 'Level 0.0000' in page.locator('[data-testid="voice-live-level"]').inner_text())
             page.reload(); page.wait_for_function("() => window.__hud && window.__hud.voiceDiagnostics")
             check("reload clears memory metadata", page.evaluate("window.__hud.voiceDiagnostics().rows.length") == 0)
@@ -98,7 +98,7 @@ def main():
             denied = browser.new_context(); denied.route("**/*", route); guard_live(denied, failures.append); watch_csp(denied, failures.append)
             denied.add_init_script("window.__denyMic = true;" + FAKE_RECOGNIZER + FAKE_MIC)
             p = denied.new_page(); p.goto(base); p.wait_for_function("() => window.__hud && window.__hud.voiceDiagnostics().mic === 'unavailable'")
-            open_settings(p, 'Voice')
+            open_voice_diagnostics(p)
             check("permission failure shown with fixed reason", 'unavailable' in p.locator('[data-testid="voice-mic-capability"]').inner_text() and 'private' not in p.locator('[data-testid="voice-diagnostics"]').inner_text())
             check("permission denial was not retried", p.evaluate('window.__gumCalls.length') == 1)
             denied.close(); browser.close()

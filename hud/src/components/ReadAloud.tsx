@@ -4,22 +4,21 @@
 
 export function ReadAloudSetting(props: { on: boolean; onChange: (on: boolean) => void }) {
   return (
-    <section className="read-aloud" data-testid="read-aloud" aria-label="Read aloud">
-      <h3>Read aloud</h3>
-      <label>
+    <div className="settings-row" data-testid="read-aloud">
+      <label className="settings-check">
         <input
           type="checkbox"
           data-testid="read-aloud-toggle"
           checked={props.on}
           onChange={(e) => props.onChange(e.target.checked)}
-        />{" "}
-        Read agent replies aloud, as they are written
+        />
+        <span>Read replies aloud</span>
       </label>
       <p>
-        Code, diffs and tool calls are skipped. Uses the local voice only; nothing is sent to a cloud voice.
-        The microphone&apos;s OFF does not affect this. Only the most recently focused window speaks.
+        The most recently focused window reads reply text using a local voice, even with the microphone off.
+        It skips code, diffs and tool calls.
       </p>
-    </section>
+    </div>
   );
 }
 
@@ -28,23 +27,21 @@ export function ReadAloudSetting(props: { on: boolean; onChange: (on: boolean) =
 // the lowering, under a short lease this window renews only while speech is active.
 export function DuckBrowserSetting(props: { on: boolean; onChange: (on: boolean) => void }) {
   return (
-    <section className="read-aloud" data-testid="duck-browser" aria-label="Browser sound while speaking">
-      <h3>Browser sound</h3>
-      <label>
+    <div className="settings-row" data-testid="duck-browser">
+      <label className="settings-check">
         <input
           type="checkbox"
           data-testid="duck-browser-toggle"
           checked={props.on}
           onChange={(e) => props.onChange(e.target.checked)}
-        />{" "}
-        Lower Browser sound while Jarvis speaks
+        />
+        <span>Lower Browser sound while Jarvis speaks</span>
       </label>
       <p>
-        Remote Browser tabs only, by about 15 dB, and only while a reply is being read. It is put back
-        when he stops, or within seconds if this window closes. Nothing is unmuted, other apps are left
-        alone, and Direct pages are not affected. It needs the Browser&apos;s sound turned on in Browser settings.
+        Lowers Remote tab audio by about 15 dB during read-aloud and restores it afterwards.
+        Requires sound to be enabled in Browser settings.
       </p>
-    </section>
+    </div>
   );
 }
 
@@ -52,21 +49,19 @@ export function DuckBrowserSetting(props: { on: boolean; onChange: (on: boolean)
 // window (localStorage), on by default. Only a count and a status are ever said.
 export function SubagentNoticesSetting(props: { on: boolean; onChange: (on: boolean) => void }) {
   return (
-    <section className="read-aloud" data-testid="subagent-notices" aria-label="Sub-agent notices">
-      <h3>Sub-agent notices</h3>
-      <label>
+    <div className="settings-row" data-testid="subagent-notices">
+      <label className="settings-check">
         <input
           type="checkbox"
           data-testid="subagent-notices-toggle"
           checked={props.on}
           onChange={(e) => props.onChange(e.target.checked)}
-        />{" "}
-        Say when a sub-agent finishes or fails
+        />
+        <span>Announce when sub-agents finish or fail</span>
       </label>
       <p>
-        One short sentence for the chats that are read aloud, such as &ldquo;Two sub-agents finished.&rdquo;
-        Never a sub-agent&apos;s name or words, and nothing when you stopped it yourself. Read-aloud must be on.
+        Read-aloud announces the count and outcome. It skips sub-agents you stop yourself.
       </p>
-    </section>
+    </div>
   );
 }

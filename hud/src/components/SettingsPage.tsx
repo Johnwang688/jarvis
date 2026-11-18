@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { SETTINGS_SECTIONS, type SettingsSection } from "../lib/settings";
+import { SETTINGS_GROUPS, type SettingsSection } from "../lib/settings";
 import { CrashProbe } from "./Boundary";
 
 /** Covers the work without owning its lifetime. Nested dialogs and approval
@@ -9,6 +9,7 @@ export function SettingsPage(props: {
   onClose: () => void; blocked: boolean; nested: boolean; zoom: number; children: ReactNode;
 }) {
   const page = useRef<HTMLElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const nestedWas = useRef(props.nested);
   const [top, setTop] = useState(28);
   // The titlebar can wrap at large zoom. Convert its actual screen edge
@@ -31,6 +32,9 @@ export function SettingsPage(props: {
       page.current?.querySelector<HTMLElement>('[data-testid="model-pin-more"]')?.focus({ preventScroll: true });
     nestedWas.current = props.nested;
   }, [props.nested, props.blocked]);
+  useLayoutEffect(() => {
+    if (content.current) content.current.scrollTop = 0;
+  }, [props.section]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       // Bubble phase lets archive confirmations and catalogue controls own
@@ -49,21 +53,32 @@ export function SettingsPage(props: {
       <CrashProbe where="settings" />
       <header className="settings-heading">
         <h1>Settings</h1>
-        <button type="button" data-testid="settings-close" aria-label="Close Settings"
-          disabled={props.blocked || props.nested} onClick={props.onClose}>×</button>
+        <button type="button" className="settings-close" data-testid="settings-close"
+          aria-label="Close Settings" aria-keyshortcuts="Escape"
+          disabled={props.blocked || props.nested} onClick={props.onClose}>
+          <kbd aria-hidden="true">Esc</kbd><span aria-hidden="true">×</span>
+        </button>
       </header>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings sections">
-          {SETTINGS_SECTIONS.map((section) => (
-            <button type="button" key={section} data-testid={`settings-${section.toLowerCase()}`}
-              aria-current={props.section === section ? "page" : undefined}
-              disabled={props.blocked || props.nested}
-              onClick={() => props.onSection(section)}>{section}</button>
+          {SETTINGS_GROUPS.map(({ label, sections }) => (
+            <div className="settings-nav-group" role="group" aria-label={label} key={label}>
+              <div className="settings-nav-label" aria-hidden="true">{label}</div>
+              {sections.map((section) => (
+                <button type="button" key={section} data-testid={'settings-' + section.toLowerCase()}
+                  aria-current={props.section === section ? "page" : undefined}
+                  disabled={props.blocked || props.nested}
+                  onClick={() => props.onSection(section)}>{section}</button>
+              ))}
+            </div>
           ))}
         </nav>
-        <div className="settings-content" data-testid="settings-content">
-          <h2>{props.section}</h2>
-          {props.children}
+        <div className="settings-content" data-testid="settings-content" ref={content}
+          role="region" aria-labelledby="settings-section-title">
+          <div className="settings-body">
+            <h2 id="settings-section-title">{props.section}</h2>
+            {props.children}
+          </div>
         </div>
       </div>
     </section>

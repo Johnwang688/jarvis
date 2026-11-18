@@ -50,6 +50,29 @@ def settings_page_checks(browser, mock, base, check, until, guard, init_script):
                                   ("Usage", "usage"), ("Routing", "route-table"), ("Archive", "archive-view")]:
             open_settings(page, section)
             check(f"{section} has its existing content", page.locator(f'[data-testid="{interior}"]').count() == 1)
+        nav = page.get_by_role("navigation", name="Settings sections")
+        check("the section list is grouped by purpose",
+              [group.get_attribute("aria-label") for group in nav.get_by_role("group").all()]
+              == ["Workspace", "Assistant", "Activity"])
+        open_settings(page, "Voice")
+        content = page.get_by_test_id("settings-content")
+        check("Voice groups playback, transcription and hands-free settings",
+              content.get_by_role("region", name="Playback", exact=True).count() == 1
+              and content.get_by_role("region", name="Transcription", exact=True).count() == 1
+              and content.get_by_role("region", name="Hands-free conversation", exact=True).count() == 1)
+        diagnostics = page.get_by_test_id("voice-diagnostics-toggle")
+        check("diagnostics are initially collapsed", page.get_by_test_id("voice-diagnostics").count() == 0)
+        diagnostics.press("Space")
+        page.get_by_test_id("voice-diagnostics").wait_for()
+        diagnostics.press("Space")
+        page.get_by_test_id("voice-diagnostics").wait_for(state="detached")
+        check("diagnostics opens and closes from the keyboard",
+              diagnostics.evaluate("(el) => !el.parentElement.open && document.activeElement === el"))
+        open_settings(page, "General")
+        content.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
+        check("General has enough content to scroll", content.evaluate("(el) => el.scrollTop > 0"))
+        open_settings(page, "Voice")
+        check("switching sections returns to the heading", content.evaluate("(el) => el.scrollTop === 0"))
         page.keyboard.press("Escape")
         page.wait_for_selector(PAGE, state="detached")
         check("close restores the same input, text and selection", bool(until(lambda: page.evaluate("""() =>
@@ -208,7 +231,7 @@ def settings_page_checks(browser, mock, base, check, until, guard, init_script):
             check(f"close remains reachable at {width}px/{zoom}%", _reachable(page, '[data-testid="settings-close"]')[0])
             check(f"sections remain reachable at {width}px/{zoom}%", all(
                 _reachable(page, f'[data-testid="settings-{name}"]')[0] for name in
-                ("general", "model", "voice", "avatar", "usage", "routing", "archive")))
+                ("general", "avatar", "browser", "phone", "model", "voice", "routing", "inbox", "usage", "archive")))
             _approval(mock, f"settings-{width}-{zoom}")
             page.wait_for_selector('[data-testid="approval-card"]')
             check(f"approval is above Settings at {width}px/{zoom}%", _reachable(page, '[data-testid="approval-deny"]')[0])

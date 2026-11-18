@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore, type ComponentProps } from "react";
 import type { Capture } from "../lib/capture";
 import type { VoiceDiagnostics } from "../lib/voiceDiagnostics";
 import { CONTINUE_MS, SEGMENT_GAP_MS } from "../lib/vad";
@@ -34,6 +34,16 @@ function cleanupCounts(raw: unknown): CleanupCounts {
   return counts;
 }
 
+export function VoiceDiagnosticsDisclosure(props: ComponentProps<typeof VoiceDiagnosticsPanel>) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="settings-disclosure" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary data-testid="voice-diagnostics-toggle">Microphone diagnostics and audio retries</summary>
+      {open ? <VoiceDiagnosticsPanel {...props} /> : null}
+    </details>
+  );
+}
+
 export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetryDetector, onRetryNoise }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<SttCapture>; onRetryDetector?: () => void; onRetryNoise?: () => void }) {
   const value = useSyncExternalStore(diagnostics.subscribe, diagnostics.snapshot);
   const stats = summarize(value.rows.map(row => row.marks ?? {}));
@@ -55,10 +65,9 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
   }, [capture]);
   const setting = (v: boolean | "unknown") => v === "unknown" ? "not reported" : v ? "on" : "off";
   return <section className="voice-diagnostics" data-testid="voice-diagnostics" aria-label="Microphone diagnostics">
-    <h3>Microphone diagnostics</h3>
     <div data-testid="dictation-cleanup-counts" aria-label="Dictation cleanup counts">
-      <h3>Dictation cleanup</h3>
-      <p>Counts since the daemon started.</p>
+      <h3>Dictation cleanup counts</h3>
+      <p>Since the daemon started.</p>
       {cleanupPasses.map(pass => {
         const row = cleanup[pass];
         return row ? <p key={pass}>{pass} · typed {row.typed} · scratched {row.scratched} · scratch rate {row.typed ? (100 * row.scratched / row.typed).toFixed(1) : "0.0"}%</p> : null;

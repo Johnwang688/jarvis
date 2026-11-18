@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO))
 assert not (REPO / ".env").exists(), "use a credential-free worktree"
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, watch_csp  # noqa: E402
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_voice_diagnostics, watch_csp  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 from tests.face.hud_v2_voice_diagnostics_check import FAKE_MIC  # noqa: E402
 
@@ -252,7 +252,7 @@ def main(argv=None):
                 print(f"     (measured here: ready in {st2['loadMs']:.0f} ms, {st2['frameMs']:.2f} ms per frame, headless Chromium on a shared machine)")
                 check("and was ready within seconds of the page opening", 0 < st2["loadMs"] < 8000, f"{st2['loadMs']:.0f} ms")
                 check("the capture hears probabilities (Vad.ml)", page.evaluate("window.__hud.capture.vad.ml") is True)
-                open_settings(page, "Voice")
+                open_voice_diagnostics(page)
                 shown = page.locator('[data-testid="voice-detector"]').inner_text()
                 check("Settings -> Voice names the detector", "Silero VAD (ML)" in shown and "ms per 32 ms frame" in shown, shown)
                 check("and the timers", "2.5 s" in page.locator('[data-testid="voice-end-pause"]').inner_text()
@@ -438,7 +438,7 @@ def main(argv=None):
                     else:
                         # Frames reach the worker (listen is the stage's neighbour); give the deadline time to pass.
                         check(f"{name}: falls back to energy ('late')", st["detector"] == "energy" and st["code"] == "late", str(st))
-                    open_settings(page, "Voice")
+                    open_voice_diagnostics(page)
                     shown = page.locator('[data-testid="voice-detector"]').inner_text()
                     check(f"{name}: Settings -> Voice says so, in words", "energy fallback" in shown and len(shown) > 40 and "Silero VAD (ML)" not in shown, shown)
                     check(f"{name}: and offers to try again", page.locator('[data-testid="voice-detector-retry"]').count() == 1)
@@ -473,7 +473,7 @@ def main(argv=None):
                 page = open_page(ctx)
                 page.wait_for_function("() => window.__hud.mic.detector().state === 'failed'", timeout=30000)
                 blocked["on"] = False
-                open_settings(page, "Voice")
+                open_voice_diagnostics(page)
                 page.locator('[data-testid="voice-detector-retry"]').click()
                 page.wait_for_function("() => window.__hud.mic.detector().state === 'ready'", timeout=30000)
                 check("'Try the Silero VAD again' restores Silero once the cause is gone",

@@ -1,7 +1,13 @@
 /** Window preferences only; no daemon configuration is written here. */
 import { readKey, writeKey } from "./storage";
-export const SETTINGS_SECTIONS = ["General", "Model", "Voice", "Avatar", "Usage", "Routing", "Browser", "Phone", "Inbox", "Archive"] as const;
-export type SettingsSection = typeof SETTINGS_SECTIONS[number];
+export const SETTINGS_GROUPS = [
+  { label: "Workspace", sections: ["General", "Avatar", "Browser", "Phone"] },
+  { label: "Assistant", sections: ["Model", "Voice", "Routing"] },
+  { label: "Activity", sections: ["Inbox", "Usage", "Archive"] },
+] as const;
+
+export type SettingsSection = typeof SETTINGS_GROUPS[number]["sections"][number];
+export const SETTINGS_SECTIONS = SETTINGS_GROUPS.flatMap(({ sections }) => [...sections]);
 export const SETTINGS_SECTION_KEY = "jarvis.settings.section";
 export function settingsSection(value: unknown): SettingsSection {
   return SETTINGS_SECTIONS.includes(value as SettingsSection) ? value as SettingsSection : "General";

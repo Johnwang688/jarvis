@@ -39,7 +39,7 @@ assert not (Path(__file__).resolve().parents[2] / ".env").exists(), "use a crede
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, until, watch_csp  # noqa: E402
+from tests.face.hud_v2_check import FAKE_RECOGNIZER, guard_live, open_settings, open_voice_diagnostics, until, watch_csp  # noqa: E402
 from tests.face.hud_v2_chunks_check import CHROME_ARGS, SPEECH_MIC  # noqa: E402
 from tests.face.hud_v2_layout_check import _approval  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
@@ -225,7 +225,7 @@ def main() -> int:
             check("the guest's words go through", mock.cloud_uploads == uploads + 1 and mock.speaker["reject_next"] == 1)
             check("the row records the skip, not a score", last_row().get("verify") == "skipped_guest")
             page.locator('[data-testid="input"]').first.fill("")
-            open_settings(page, "Voice")
+            open_voice_diagnostics(page)
             check("the diagnostics say so in words", "verification skipped (guest voice)" in page.locator('[data-testid="voice-diagnostics"]').inner_text())
             check("Settings says it is on", page.locator('[data-testid="speaker-summary"]').inner_text().startswith("Guest voice is ON"))
             page.locator('[data-testid="settings-close"]').click()

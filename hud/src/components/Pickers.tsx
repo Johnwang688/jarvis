@@ -13,7 +13,6 @@ import type { AvatarDesc, RouteView, VoiceEntry } from "../types";
 import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
-import { SparkleSetting } from "./SparkleSetting";
 import { AuroraSetting } from "./AuroraSetting";
 import { api } from "../api";
 import { INSTALL_MENU, type InstallStatus } from "../state/installApp";
@@ -50,16 +49,18 @@ export function GeneralSettings(props: {
 }) {
   return (
     <>
-      <div className="pad" data-testid="install-app">
-        {props.installStatus === "installed" ? <span>Installed</span>
-          : props.installStatus === "available" ? (
-            <button type="button" disabled={props.blocked} onClick={() => {
-              if (!props.blocked) void props.onInstall();
-            }}>Install as app</button>
-          ) : <span className="muted small">{INSTALL_MENU}</span>}
+      <div className="settings-install settings-group">
+        <h3>Desktop app</h3>
+        <div data-testid="install-app">
+          {props.installStatus === "installed" ? <span>Installed</span>
+            : props.installStatus === "available" ? (
+              <button type="button" disabled={props.blocked} onClick={() => {
+                if (!props.blocked) void props.onInstall();
+              }}>Install as app</button>
+            ) : <span className="muted small">{INSTALL_MENU}</span>}
+        </div>
       </div>
-      <div className="pad"><SparkleSetting /></div>
-      <div className="pad"><AuroraSetting /></div>
+      <AuroraSetting />
     </>
   );
 }
@@ -68,7 +69,8 @@ export function RoutingSettings(props: { route: RouteView | null }) {
   const chains = props.route?.table?.chains || {};
   const notes = (props.route?.notes || []).filter((w) => typeof w === "string");
   return (
-    <div className="pad" data-testid="routing-readonly">
+    <div className="settings-group" data-testid="routing-readonly">
+      <h3>Provider chains</h3>
       {notes.length ? (
         // Saved routing that runs differently right now; text only.
         <div className="small" data-testid="route-notes" style={{ marginBottom: 6 }}>
@@ -242,20 +244,20 @@ export function VoicePicker(props: {
       <div
         className={"prow" + (props.override ? "" : " sel")}
         data-testid="voice-default"
-        role="button" tabIndex={0}
+        role="button" aria-pressed={!props.override} tabIndex={0}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onPick(""); }
         }}
         onClick={() => props.onPick("")}
       >
-        <span>AVATAR DEFAULT</span>
+        <span>Use avatar voice</span>
       </div>
       {props.voices.map((v) => (
         <div
           key={v.name}
           className={"prow" + (v.name === props.override ? " sel" : "")}
           data-testid={`voice-${v.name}`}
-          role="button" tabIndex={0}
+          role="button" aria-pressed={v.name === props.override} tabIndex={0}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onPick(v.name); }
           }}
