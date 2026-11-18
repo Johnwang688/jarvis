@@ -1,10 +1,10 @@
 """Owner-started Windows microphone link, jarvis-voice-link/1.
 
-Decision VA-D1/D2: a physical Right Ctrl gesture authorizes dictation with
+A physical dictation shortcut authorizes transcription with
 verify=False, as on the paired phone. The owner may change that decision.
 The existing desk STT switches still decide whether audio may reach cloud.
-Wake clips use the desk's speaker check. Questions use the dedicated Voice chat;
-approvals remain on the owner's existing surfaces.
+Wake clips use the desk's speaker check. Questions go to the selected HUD chat.
+Approvals remain on the owner's existing surfaces.
 Audio and dictation stay in memory. Questions use the normal chat history;
 this transport keeps no transcript or audio log of its own.
 """
@@ -29,6 +29,9 @@ import unicodedata
 from jarvis import config
 from windows import voicewire as wire
 from . import remote_stt, dictation_guard, dictation_rules
+from .stores import StoreError
+from .voice_chat import NoVoiceTarget
+from . import voice_intent
 
 LOG = logging.getLogger(__name__)
 WSL_INTEROP_SOCKET = Path("/run/WSL/1_interop")
@@ -40,12 +43,14 @@ BAD_REQUEST = "The voice request is invalid."
 FAILED = "The clip could not be transcribed."
 NOT_OWNER = "That didn't sound like you."
 ASK_FAILED = "The voice question could not be answered."
-ASK_TIMEOUT = "The voice answer took too long. Please check the Voice chat."
+ASK_NO_TARGET = "Open a chat in the HUD, then ask again."
+ASK_TIMEOUT = "The voice answer took too long. Check the selected chat in the HUD."
 SAY_FAILED = "The text could not be spoken."
 SAY_CHARS = 2000
 CLEAN_CHARS = 2000
 CLEAN_PASSES = ("off", "rules", "raw", "model")
 ASK_TIMEOUT_S = 180.0
+ACTION_RECEIPT_S = 300.0
 KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
 WAKE_STATUS = {
     "starting": "Starting the Windows wake listener…",
@@ -64,8 +69,9 @@ def _clean(text, cap):
 
 
 def parse_intent(raw, source, text):
-    fallback = {"kind": "ask" if source == "wake" else "dictate",
-                "text": _clean(text, 2000), "target": "literal" if source == "hotkey" else ""}
+    addressed = source == "wake" or voice_intent.addressed(text)
+    fallback = {"kind": "ask" if addressed else "dictate",
+                "text": _clean(text, 2000), "target": "" if addressed else "literal"}
     try:
         value = raw
         if isinstance(raw, str):
@@ -104,8 +110,7 @@ class VoiceLink:
         self.route_model = self._route_model if route_model is None else route_model
         self.asker = self._ask if asker is None else asker
         self.speaker = self._speaker if speaker is None else speaker
-        from .voice_chat import VoiceChat
-        self._voice_chat = VoiceChat(daemon)
+        self._voice_chat = getattr(daemon, "voice_chat", None)
         self._context = threading.local()
         self.address = None
         self.status = "Not started."
@@ -160,7 +165,7 @@ class VoiceLink:
                 if (self._lost_instance is not None and self._lost_instance == self._launched_instance
                         and child is not None and child.poll() is not None):
                     return {"state": "launch_failed",
-                            "detail": "The Windows voice helper exited after connecting. Start Voice Anywhere to retry."}
+                            "detail": "The Windows voice helper exited after connecting. Start voice to retry."}
                 return {"state": "connect_failed",
                         "detail": "The Windows voice helper disconnected. Waiting for it to reconnect; retry Start if needed."}
             if child is not None and child.poll() is None and not self._hud_mic_paused:
@@ -169,7 +174,7 @@ class VoiceLink:
                 return {"state": "connect_failed", "detail": "The Windows agent hasn’t connected. Check pairing and retry."}
             if self._launch_issue:
                 return {"state": "launch_failed", "detail": self._launch_issue}
-            return {"state": "off", "detail": "Start Voice Anywhere to use the wake word in other apps."}
+            return {"state": "off", "detail": "Start voice to use the wake word in other apps."}
         wake = self._agent_wake
         if wake is None:
             return {"state": "connected", "detail": "Connected; waiting for wake listener status."}
@@ -270,7 +275,7 @@ class VoiceLink:
                             return
                     code = child.poll()
                     if code is not None:
-                        LOG.warning("Voice Anywhere helper exited before connecting (status %s)", code)
+                        LOG.warning("Jarvis voice helper exited before connecting (status %s)", code)
                         raise APIError(503, "The Windows voice agent exited before connecting. Try starting it again.")
                     if time.monotonic() >= deadline:
                         raise APIError(503, "The Windows voice agent hasn’t connected. Check pairing and retry.")
@@ -352,7 +357,6 @@ class VoiceLink:
                 "backend": got.backend if got else "local"}
 
     def _route_model(self, text, source):
-        from . import voice_intent
         return voice_intent.route(text, source)
 
     def _ask(self, text, on_delta):
@@ -448,6 +452,8 @@ class VoiceLink:
             try:
                 answer = self.asker(text, lambda piece: offer("delta", piece))
                 result = ("done", answer)
+            except NoVoiceTarget:
+                result = ("error", ASK_NO_TARGET)
             except TimeoutError:
                 result = ("error", ASK_TIMEOUT)
             except Exception:
@@ -677,6 +683,9 @@ class VoiceLink:
             if microphone:
                 self._serve_microphone(conn, stream, session_instance)
                 return
+            # One in-flight action per sequential helper, bound to this authenticated
+            # connection. Only a non-sensitive action description survives routing.
+            pending_action = None
             while True:
                 try:
                     request = wire.read_json(stream)
@@ -712,8 +721,21 @@ class VoiceLink:
                         reply = {"id": ident, "ok": True}
                         if request.get("features") is True:
                             reply["streaming"] = True
+                            reply["action_receipts"] = True
                             if self._instance is not None:
                                 reply["shared_mic"] = True
+                elif (type(ident) is int and request.get("op") == "action_done"
+                      and set(request) == {"id", "op", "receipt"}):
+                    recorded = False
+                    if pending_action and pending_action[0] == request["receipt"]:
+                        _, expiry, thread_id, kind, target = pending_action
+                        pending_action = None  # a retry can never append twice
+                        if time.monotonic() < expiry:
+                            try:
+                                recorded = self._voice_chat.note_action(thread_id, kind, target)
+                            except (OSError, StoreError):
+                                pass
+                    reply = {"id": ident, "ok": True, "recorded": recorded}
                 elif type(ident) is int and request.get("op") == "clean":
                     text = request.get("text")
                     if isinstance(text, str) and len(text) <= CLEAN_CHARS:
@@ -771,12 +793,23 @@ class VoiceLink:
                     if (isinstance(text, str) and text.strip()
                             and (op != "route" or source in ("hotkey", "wake"))):
                         if op == "route":
+                            pending_action = None
+                            snapshot = None
+                            if (request.get("receipt") is True and self._voice_chat
+                                    and (source == "wake" or voice_intent.addressed(text))):
+                                snapshot = self._voice_chat.selected()
                             try:
                                 raw = self.route_model(text[:2000], source)
                             except Exception:
                                 raw = None
-                            reply = {"id": ident, "ok": True,
-                                     "intent": parse_intent(raw, source, text)}
+                            intent = parse_intent(raw, source, text)
+                            reply = {"id": ident, "ok": True, "intent": intent}
+                            kind = intent["kind"]
+                            if snapshot and kind in ("open_app", "switch_app", "search", "read_selection"):
+                                token = wire.new_nonce()
+                                target = intent["target"] if kind in ("open_app", "switch_app") else ""
+                                pending_action = (token, time.monotonic() + ACTION_RECEIPT_S, snapshot, kind, target)
+                                reply["receipt"] = token
                         elif op == "ask":
                             reply = self._stream_ask(conn, server, stream, ident, text,
                                                      speak=request.get("speech") is True,

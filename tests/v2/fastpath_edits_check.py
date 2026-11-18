@@ -76,6 +76,7 @@ config.ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 from jarvis import llm, runtime, tools  # noqa: E402
 from jarvis.tools import files as v1_files  # noqa: E402
+from jarvis.v2.desk import DeskState, SelectedVoiceMessage
 from jarvis.v2.approvals import DenyAll, PendingApprovals  # noqa: E402
 from jarvis.v2.model import PermissionProfile, ProviderName, Role, Thread  # noqa: E402
 from jarvis.v2.permissions import PermitContext, build_permit  # noqa: E402
@@ -311,6 +312,64 @@ class Boundary(Base):
 
 
 class Turns(Base):
+    def test_selected_voice_has_desktop_tools_and_ordinary_voice_metadata_cannot_grant_them(self):
+        from unittest.mock import patch
+
+        provider, handle = self.open()
+        for message, eligible in ((SelectedVoiceMessage(text="hi"), True),
+                                  (UserMessage(text="hi", via="voice", spoken=True), False)):
+            script = Script()
+            with patch("jarvis.v2.voice_model.completion_for", return_value=script):
+                self.turn(provider, handle, script, message)
+            self.assertEqual(fastpath.HUD_DESKTOP_TOOLS & script.tools[0],
+                             fastpath.HUD_DESKTOP_TOOLS if eligible else set())
+            self.assertFalse(EDIT & script.tools[0])
+
+    def test_remote_steering_revokes_selected_voice_desktop_authority_in_flight(self):
+        _, handle = self.open()
+        state = DeskState()
+        msg = SelectedVoiceMessage(text="hi")
+        slot = state.begin(handle.native.brief, msg, "first")
+        with runtime.turn_scope(desk=slot):
+            self.assertTrue(runtime.hud_desktop_access())
+            self.assertFalse(runtime.at_desk())
+            local = state.reserve(local_voice=True)
+            self.assertTrue(runtime.hud_desktop_access())
+            remote = state.reserve()
+            self.assertFalse(runtime.hud_desktop_access())
+            state.refused_before_write(local)
+            self.assertFalse(runtime.hud_desktop_access())
+            state.settled(remote)
+            successor = state.begin(handle.native.brief, msg, "second")
+            self.assertFalse(successor["hud_desktop"])
+            state.end()
+            self.assertFalse(runtime.hud_desktop_access())
+
+    def test_desktop_writes_require_the_exact_action_even_with_a_saved_grant(self):
+        tool = tools.REGISTRY["hud_desktop_type"]
+        args = {"app": "settings", "ref": "e1", "text": "fixture text"}
+        self.allowlist({"tool": tool.name})
+        brief = Brief(role=Role.CHAT, cwd=str(self.project), profile=PermissionProfile.AUTO)
+        asker = Asker(Decision.DENY, Decision.ALLOW)
+        permit = build_permit(PermitContext(thread_id="t1", brief=brief, provider="fast"), asker)
+        approve = FastPathProvider._approver(brief, permit)
+        with runtime.turn_scope(desk={"present": False, "hud_desktop": True}):
+            self.assertFalse(approve(tool, args))
+            self.assertTrue(approve(tool, args))
+            strict = Brief(role=Role.CHAT, cwd=str(self.project), profile=PermissionProfile.STRICT)
+            self.assertFalse(FastPathProvider._approver(strict, permit)(tool, args))
+        self.assertEqual(len(asker.asked), 2)
+        for card in asker.asked:
+            self.assertEqual((card.tool, card.args, card.allowlistable), (tool.name, args, False))
+
+    def test_tool_history_omits_typed_desktop_contents(self):
+        import queue
+
+        events = queue.Queue()
+        tracker = fastpath._TurnState("t1", events)
+        tracker.on_event("tool_start", ("hud_desktop_type", '{"text":"private fixture"}'))
+        self.assertEqual(events.get_nowait().data["args"], {})
+
     def test_the_owners_desk_turn_holds_them_with_thirty_steps(self):
         provider, handle = self.open()
         script = Script()

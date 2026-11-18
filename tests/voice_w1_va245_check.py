@@ -259,11 +259,11 @@ class Flow(unittest.TestCase):
             self.assertEqual((t.runs, a.calls), ([], []))
 
     def test_search_and_read_selection(self):
-        f, c, t, a, ui, p = flow(client=FakeClient("search black holes",
+        f, c, t, a, ui, p = flow(client=FakeClient("Jarvis, search black holes",
                                                    intent={"kind": "search", "text": "search black holes", "target": "black holes"}))
         f.on_clip(b"wav", "hotkey")
         self.assertEqual(a.calls, [("search", "black holes")])
-        f, c, t, a, ui, p = flow(client=FakeClient("read this", intent={"kind": "read_selection", "text": "read this", "target": ""}))
+        f, c, t, a, ui, p = flow(client=FakeClient("Jarvis, read this", intent={"kind": "read_selection", "text": "read this", "target": ""}))
         f.on_clip(b"wav", "hotkey")
         self.assertEqual(a.calls, [("read_selection",)])
         self.assertIn(("say", "selected words"), c.calls)

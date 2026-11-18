@@ -51,6 +51,7 @@ export function Orb(props: {
   onModeChange: (m: DictationMode) => void;
   voiceAction: "start" | "stop" | null;
   sharedMicLive: boolean;
+  voiceHasChat: boolean;
   voiceAgentStatus: VoiceAgentStatus | null;
   voiceAgentError: string;
   onToggleVoiceAgent: () => void;
@@ -77,6 +78,7 @@ export function Orb(props: {
   speechRail?: ReactNode;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const keyboardTalk = useRef(false);
   const live = useRef({ state: props.state, level: props.level, rings: props.rings, accent: props.accent, out: props.outputLevel });
   live.current = { state: props.state, level: props.level, rings: props.rings, accent: props.accent, out: props.outputLevel };
 
@@ -140,28 +142,31 @@ export function Orb(props: {
   const next = nextMode(props.mode);
   const folded = !!props.compact || !!props.tight;
   const voiceState = props.voiceAgentStatus?.state;
-  const voiceReady = voiceState === "ready";
+  const awaitingAudio = voiceState === "ready" &&
+    (props.voiceAgentStatus?.shared_capable || props.voiceAgentStatus?.shared_mic) && !props.sharedMicLive;
+  const voiceReady = voiceState === "ready" && !awaitingAudio;
   const retryStop = voiceState === "stopping" && !!props.voiceAgentError && !props.voiceAction;
   const stopping = props.voiceAction === "stop" || (voiceState === "stopping" && !retryStop);
   const starting = props.voiceAction === "start" || voiceState === "starting";
   const canStop = !!props.voiceAgentStatus?.can_stop;
-  const connected = voiceState === "connected";
+  const connected = voiceState === "connected" || !!awaitingAudio;
   const unavailable = voiceState === "unavailable";
   const wakeError = voiceState === "microphone_unavailable" || voiceState === "recognizer_unavailable";
   const failed = !stopping && !starting && (!!props.voiceAgentError || unavailable || wakeError ||
     voiceState === "connect_failed" || voiceState === "launch_failed" || voiceState === "stop_unconfirmed");
-  const launchLabel = retryStop ? "Retry Stop" : stopping ? "Stopping Voice Anywhere…" : props.voiceAction === "start" ? "Starting Voice Anywhere…" :
-    canStop ? "Stop Voice Anywhere" : starting ? "Starting Voice Anywhere…" : voiceReady ? "Voice Anywhere ready" :
-    connected ? "Voice Anywhere connected" : unavailable || wakeError ? "Voice Anywhere unavailable" : "Start Voice Anywhere";
+  const launchLabel = retryStop ? "Retry Stop" : stopping ? "Stopping voice…" : props.voiceAction === "start" ? "Starting voice…" :
+    canStop ? "Stop voice" : starting ? "Starting voice…" : voiceReady ? "Voice ready" :
+    connected ? "Voice connected" : unavailable || wakeError ? "Voice unavailable" : "Start voice";
   const voiceDetail = (voiceState === "stop_unconfirmed" && props.voiceAgentStatus?.detail) || props.voiceAgentError || (stopping ? "Releasing the microphone…" : props.voiceAction === "start" ?
-    "Waiting for the Windows helper…" : voiceReady && props.voiceAgentStatus?.shared_mic ?
-      (props.sharedMicLive ? "HUD and Voice Anywhere share one mic. Say “Jarvis, open Chrome.”" :
-        "Windows is listening. Connecting the HUD to its microphone…") : props.voiceAgentStatus?.detail || launchLabel);
+    "Starting the microphone…" : awaitingAudio ? "Connecting the microphone to the HUD…" :
+    voiceReady && props.sharedMicLive ? "Say “Jarvis, open Chrome” from any app." + (props.voiceHasChat ? "" : " Open a chat for questions.") :
+    props.voiceAgentStatus?.detail || launchLabel);
   const voiceLabel = stopping ? "Stopping" : starting ? "Starting" : failed ? "Needs attention" : voiceReady ? "Ready" :
     connected ? "Connecting mic" : voiceState === "off" ? "Off" : "Checking";
   const voiceTone = failed ? "error" : voiceReady && !stopping ? "ready" :
     starting || connected || stopping ? "working" : "idle";
   const shortLabel = { error: "Error", ready: "Ready", working: "Wait", idle: voiceLabel }[voiceTone];
+  const shortcutHint = "Hold Ctrl+D to talk in the HUD. With voice on, hold Ctrl+D or Right Ctrl to dictate in other apps, or tap to toggle. Begin with “Jarvis” to give a command or ask your selected chat.";
   const voiceControl = (
     <div className="voice-agent-control">
       <div className="voice-agent-header">
@@ -169,7 +174,7 @@ export function Orb(props: {
           type="button"
           id="voice-agent-start"
           disabled={props.blocked || !!props.voiceAction || stopping || (!canStop && (starting || voiceReady || connected || wakeError || unavailable))}
-          title={voiceDetail}
+          title={voiceDetail + " " + shortcutHint}
           aria-label={launchLabel}
           onMouseDown={noPointerFocus}
           onClick={props.onToggleVoiceAgent}
@@ -192,7 +197,7 @@ export function Orb(props: {
     >
       <div id="micstrip">
         {folded ? null : props.speech}
-        <div id="dictation" data-testid="dictation" title={voiceReady ? "HUD dictation: AUTO sends, REVIEW puts words in the box, OFF pauses HUD dictation. Stop Voice Anywhere to release the microphone." : "What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes HUD dictation"}>
+        <div id="dictation" data-testid="dictation" title={voiceReady ? "HUD dictation: AUTO sends, REVIEW puts words in the box, OFF pauses HUD dictation. Stop voice to release the microphone." : "What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes HUD dictation"}>
           {DICTATION_MODES.map((m) => (
             <button
               type="button"
@@ -222,7 +227,32 @@ export function Orb(props: {
           data-state={props.state}
           // Push-to-talk's key since 2026-10-10 (lib/talkkey.ts); in a
           // terminal Ctrl+D is the shell's, and the orb is the way to talk.
-          title="Hold to talk, or hold Ctrl+D"
+          role="button"
+          tabIndex={props.blocked ? -1 : 0}
+          aria-label="Hold to talk"
+          aria-disabled={props.blocked}
+          onKeyDown={e => {
+            if ((e.key !== " " && e.key !== "Enter") || e.altKey || e.ctrlKey || e.metaKey) return;
+            e.preventDefault();
+            if (!props.blocked && !e.repeat && !keyboardTalk.current) {
+              keyboardTalk.current = true;
+              props.onPress();
+            }
+          }}
+          onKeyUp={e => {
+            if ((e.key === " " || e.key === "Enter") && keyboardTalk.current) {
+              e.preventDefault();
+              keyboardTalk.current = false;
+              props.onRelease();
+            }
+          }}
+          onBlur={() => {
+            if (keyboardTalk.current) {
+              keyboardTalk.current = false;
+              props.onRelease();
+            }
+          }}
+          title={"Hold to talk. " + shortcutHint}
           onPointerDown={(e) => {
             e.preventDefault();
             props.onPress();

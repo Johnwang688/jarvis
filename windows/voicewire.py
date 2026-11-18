@@ -24,6 +24,8 @@ HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 ERRORS = frozenset(("The clip could not be transcribed.", "That didn't sound like you.",
                     "The voice request is invalid.", "The text could not be spoken.",
                     "The voice question could not be answered.",
+                    "Open a chat in the HUD, then ask again.",
+                    "The voice answer took too long. Check the selected chat in the HUD.",
                     "The voice answer took too long. Please check the Voice chat.",
                     "The clip must be a 16 kHz mono 16-bit WAV of at most 120 seconds."))
 KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
@@ -31,6 +33,10 @@ KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_s
 
 class LinkError(Exception):
     pass
+
+
+class VoiceQuestionError(LinkError):
+    """The daemon rejected this question while the paired connection was healthy."""
 
 
 class NotJarvis(LinkError):
@@ -160,6 +166,7 @@ class Client:
         self.streaming = False
         self.session = None
         self.shared_capable = False
+        self.action_receipts = False
         self._request_lock = threading.Lock()
         self._speech_lock = threading.Lock()
         self._speaking_id = None
@@ -245,8 +252,10 @@ class Client:
         if not got["ok"]:
             # Never display arbitrary peer exception text or paths.
             error = got.get("error")
-            raise LinkError(error if isinstance(error, str) and error in ERRORS
-                            else "The voice request failed.")
+            message = error if isinstance(error, str) and error in ERRORS else "The voice request failed."
+            if asking:
+                raise VoiceQuestionError(message)
+            raise LinkError(message)
         return got
 
     def ping(self, *, wake=None, instance=None):
@@ -254,6 +263,7 @@ class Client:
                              **({"instance": instance} if instance is not None else {})})
         self.streaming = got.get("streaming") is True
         self.shared_capable = got.get("shared_mic") is True
+        self.action_receipts = got.get("action_receipts") is True
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
@@ -294,8 +304,11 @@ class Client:
                 self.close()
                 raise LinkError("The voice link disconnected.") from None
 
-    def route(self, text, source):
-        got = self._request({"op": "route", "text": text, "source": source})
+    def route(self, text, source, *, with_receipt=False):
+        request = {"op": "route", "text": text, "source": source}
+        if with_receipt and self.action_receipts:
+            request["receipt"] = True
+        got = self._request(request)
         value = got.get("intent")
         if (not isinstance(value, dict) or set(value) != {"kind", "text", "target"}
                 or not isinstance(value["kind"], str) or value["kind"] not in KINDS
@@ -303,7 +316,13 @@ class Client:
                 or not isinstance(value["target"], str) or len(value["target"]) > 80):
             self.close()
             raise LinkError("The voice link sent an invalid reply.")
+        receipt = got.get("receipt")
+        if request.get("receipt") and isinstance(receipt, str) and HEX64.fullmatch(receipt):
+            return {**value, "receipt": receipt}
         return value
+
+    def confirm_action(self, receipt):
+        return self._request({"op": "action_done", "receipt": receipt}).get("recorded") is True
 
     def clean(self, text, app):
         got = self._request({"op": "clean", "text": text, "app": app})
@@ -351,6 +370,7 @@ class Client:
             raise LinkError("The voice link sent an invalid reply.") from None
 
     def close(self):
+        self.action_receipts = False
         self.session = None
         sock, stream = self._socket, self._stream
         self._socket = self._stream = None

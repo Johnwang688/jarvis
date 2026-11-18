@@ -1,4 +1,4 @@
-r"""Owner-started Windows voice agent: Right Ctrl typing and wake questions.
+r"""Owner-started Windows voice agent: system-wide dictation and wake questions.
 
 Audio, transcripts and answers stay in memory. Start with:
 venv\Scripts\python.exe voice_agent.py 127.0.0.1 8409 <key path>
@@ -34,7 +34,77 @@ else:
         from windows.voiceflow import Flow
         from windows import voiceui, voicewake
 
-VK_RCONTROL = 0xA3
+VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_D = 0x11, 0xA2, 0xA3, ord("D")
+
+
+class DesktopTalkKey:
+    """Own Ctrl+D on this worker's message queue while another app has focus."""
+
+    HOTKEY_ID = 0x4A56
+    WM_HOTKEY = 0x0312
+    MODS = 0x4002  # MOD_NOREPEAT | MOD_CONTROL
+
+    def __init__(self, user32, collision):
+        import ctypes
+        from ctypes import wintypes as w
+
+        self.api = user32
+        self.collision = collision
+        self.registered = False
+        self.retry = 0.0
+        self.hud = False
+        self.message = w.MSG()
+        self.title = ctypes.create_unicode_buffer(256)
+        self.window_class = ctypes.create_unicode_buffer(64)
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = w.HWND
+        user32.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+        user32.RegisterHotKey.argtypes = [w.HWND, ctypes.c_int, w.UINT, w.UINT]
+        user32.UnregisterHotKey.argtypes = [w.HWND, ctypes.c_int]
+        user32.PeekMessageW.argtypes = [ctypes.POINTER(w.MSG), w.HWND, w.UINT, w.UINT, w.UINT]
+
+    def outside_hud(self):
+        hwnd = self.api.GetForegroundWindow()
+        if not hwnd:
+            return False
+        # HUD app mode and ordinary Chrome/Edge/Firefox tabs use the same
+        # stable document title. Recheck the title even for an unchanged HWND
+        # because switching browser tabs does not switch top-level windows.
+        if not self.api.GetClassNameW(hwnd, self.window_class, len(self.window_class)):
+            return False
+        if self.window_class.value not in ("Chrome_WidgetWin_1", "MozillaWindowClass"):
+            return True
+        if not self.api.GetWindowTextW(hwnd, self.title, len(self.title)):
+            return False
+        title = self.title.value.casefold()
+        return not (title == "j.a.r.v.i.s." or title.startswith(("j.a.r.v.i.s. - ", "j.a.r.v.i.s. — ")))
+
+    def poll(self):
+        import ctypes
+
+        self.hud = not self.outside_hud()
+        if self.hud:
+            self.close()
+        elif not self.registered and time.monotonic() >= self.retry:
+            self.registered = bool(self.api.RegisterHotKey(None, self.HOTKEY_ID, self.MODS, VK_D))
+            if self.registered:
+                self.retry = 0.0
+            else:
+                if not self.retry:
+                    self.collision()
+                self.retry = time.monotonic() + 5.0
+        pressed = False
+        while self.api.PeekMessageW(ctypes.byref(self.message), None, self.WM_HOTKEY, self.WM_HOTKEY, 1):
+            if self.registered and self.message.wParam == self.HOTKEY_ID:
+                pressed = True
+        return pressed
+
+    def close(self):
+        if self.registered:
+            self.api.UnregisterHotKey(None, self.HOTKEY_ID)
+            self.registered = False
+
 RATE = 16000
 MAX_FRAMES = 120 * RATE
 
@@ -154,7 +224,9 @@ class Agent:
         self.user32.GetAsyncKeyState.restype = ctypes.c_short
         self.root = tk.Tk()
         self.root.withdraw()
-        self.overlay = voiceui.Overlay(self.root)
+        self.overlay = voiceui.Overlay(self.root, recording=self.recording.is_set)
+        self.desktop_key = DesktopTalkKey(self.user32, lambda: self.overlay.set_state(
+            "error", "Ctrl+D is in use by another app. Use Right Ctrl to dictate."))
         self.player = Player()
         self.wake = None
 
@@ -309,27 +381,62 @@ class Agent:
 
     def poll(self):
         machine = HotkeyMachine()
-        others = [k for k in range(1, 255) if k not in (VK_RCONTROL, 0x11)]
+        desktop = getattr(self, "desktop_key", None)
+        ctrl_d = block_right = desktop_capture = False
         previous = False
+        # VK_LBUTTON through VK_XBUTTON2 describe pointer input. A touchpad
+        # click or a mouse drag while talking must never end dictation.
+        right_others = [k for k in range(0x08, 255) if k not in (VK_RCONTROL, VK_CONTROL)]
+        chord_others = [k for k in right_others if k not in (VK_D, VK_LCONTROL)]
+        def down(vk):
+            return bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
         try:
             while not self.done.is_set():
-                held = bool(self.user32.GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-                if held and not previous:
-                    self.player.stop()  # barge-in even on a Ctrl chord
+                press = desktop.poll() if desktop is not None else False
+                right = down(VK_RCONTROL)
+                if not right:
+                    block_right = False
+                if press:
+                    ctrl_d = True
+                    if machine.state == "hold":
+                        desktop_capture = True  # Right Ctrl joined by D
+                if ctrl_d:
+                    # A fast tap can already be up by the time WM_HOTKEY is
+                    # dequeued. Give the machine one down edge in that case.
+                    held = press or (down(VK_D) and down(VK_CONTROL))
+                    others = chord_others
+                    if not held:
+                        ctrl_d = False
+                        block_right = right
+                else:
+                    held = right and not block_right
+                    others = right_others
+                other = (held or previous) and any(down(k) for k in others)
+                if desktop_capture and desktop.hud and machine.state in ("hold", "toggle"):
+                    # A desktop gesture cannot finish as dictation into the HUD.
+                    self.finish_capture(cancel=True)
+                    machine.state = "wait" if held else "idle"
+                    desktop_capture = False
+                if held and not previous and not other:
+                    self.player.stop()
                     client = getattr(self, "client", None)
                     if client is not None:
                         client.interrupt_speech()
-                # Only the Right Ctrl press, hold or release can be a chord.
-                # While idle scan one key instead of polling the whole keyboard.
-                other = (held or previous) and any(self.user32.GetAsyncKeyState(k) & 0x8000 for k in others)
+                if other and held and not previous and machine.state == "toggle":
+                    # A shortcut pressed while toggle-recording is not a stop tap.
+                    machine.held = True
                 previous = held
                 for action in machine.feed(time.monotonic_ns() // 1_000_000, held, other):
                     try:
                         if action == "start":
+                            desktop_capture = ctrl_d
                             self.next_generation()
                             self.start_capture()
                         else:
+                            desktop_capture = False
                             self.finish_capture(cancel=action == "cancel")
+                            if action == "cancel" and not (desktop is not None and desktop.hud and down(VK_D)):
+                                self.show(self.generation, "Keyboard shortcut pressed. Dictation canceled.", True)
                     except Exception:
                         machine.state = "wait" if held else "idle"
                         try:
@@ -339,6 +446,8 @@ class Agent:
                         self.show(self.generation, "Microphone unavailable", True)
                 self.done.wait(0.015)
         finally:
+            if desktop is not None:
+                desktop.close()
             self.finish_capture(cancel=True)
 
     def discard_clips(self, message):
@@ -429,9 +538,9 @@ class Agent:
                             if got is None:
                                 continue
                             transcript = got["text"]
-                        # Toggle-stop can enqueue while Right Ctrl is still down.
+                        # Toggle-stop can enqueue while either Ctrl key is still down.
                         # Let the physical modifier up before any synthetic typing.
-                        while self.user32.GetAsyncKeyState(VK_RCONTROL) & 0x8000:
+                        while self.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000:
                             if self.done.wait(0.015):
                                 break
                         if self.done.is_set():

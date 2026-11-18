@@ -56,7 +56,8 @@ from typing import Any, Iterator
 
 from ... import config, models, sessions, tools
 from ...agent import Agent
-from ..desk import desk_message as _at_desk
+from ..desk import desk_message as _at_desk, local_voice_message
+from ..tools.hud_desktop import HUD_DESKTOP_TOOLS
 from ..model import PermissionProfile, ProviderName, Role, Thread
 from ..provider import (
     Brief,
@@ -269,7 +270,7 @@ def _validate_toolset() -> None:
     A renamed or removed v1 tool must stop the process rather than leave the
     fast path one capability short with nothing said.
     """
-    every = FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS
+    every = FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS | HUD_DESKTOP_TOOLS
     missing = sorted(name for name in every if name not in tools.REGISTRY)
     if missing:
         raise RuntimeError(
@@ -277,9 +278,9 @@ def _validate_toolset() -> None:
             + ", ".join(missing)
             + ". Either the tool was renamed or its module is no longer imported."
         )
-    # A dangerous tool only by name, in EDIT_TOOLS — held only at the desk.
+    # Dangerous tools are enumerated and limited to the owner's local turns.
     unsafe = sorted(name for name in every
-                    if tools.REGISTRY[name].dangerous and name not in EDIT_TOOLS)
+                    if tools.REGISTRY[name].dangerous and name not in EDIT_TOOLS | HUD_DESKTOP_TOOLS)
     if unsafe:
         raise RuntimeError(f"FAST_TOOLS contains dangerous tools: {', '.join(unsafe)}")
     # The edit tools are the desk turn's additions, never the base set every
@@ -328,7 +329,7 @@ def _owners_chat(brief: Brief) -> bool:
 
 
 # Held only on a turn where the owner is at the desk.
-_DESK_ONLY: frozenset[str] = DESK_TOOLS | EDIT_TOOLS
+_LOCAL_TOOLS: frozenset[str] = DESK_TOOLS | EDIT_TOOLS | HUD_DESKTOP_TOOLS
 
 
 def _project_folder(brief: Brief) -> str | None:
@@ -483,7 +484,7 @@ class FastPathProvider:
                 model=brief.model or models.tier("orchestrator"),
                 system=pristine_system,
                 # Off the desk until a turn says otherwise (`_turn_tools`).
-                tool_names=[name for name in tool_names if name not in _DESK_ONLY],
+                tool_names=[name for name in tool_names if name not in _LOCAL_TOOLS],
                 max_steps=FAST_MAX_STEPS,
                 approve=self._approver(brief, permit),
                 on_event=lambda kind, data: None,  # replaced per turn by send()
@@ -530,11 +531,11 @@ class FastPathProvider:
             )
         if brief.mcp_servers:
             raise BriefRefused("the fast path cannot load MCP servers; use a CLI provider")
-        allowed = _available_tools(FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS)
+        allowed = _available_tools(FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS | HUD_DESKTOP_TOOLS)
         if not _owners_chat(brief):
             # A task's thread (or any role but chat) never holds a desk tool,
             # nor an edit tool (decision F-2).
-            if brief.allowed_tools is not None and DESK_TOOLS & set(brief.allowed_tools):
+            if brief.allowed_tools is not None and (DESK_TOOLS | HUD_DESKTOP_TOOLS) & set(brief.allowed_tools):
                 raise BriefRefused(
                     "desk tools are for the owner's own chat at the HUD, never a task's thread")
             if brief.allowed_tools is not None and EDIT_TOOLS & set(brief.allowed_tools):
@@ -546,7 +547,7 @@ class FastPathProvider:
                     "the chat reads are for the owner's own chats, never a task's thread "
                     "or another role")
             allowed = [name for name in allowed
-                       if name not in _DESK_ONLY and name not in CHAT_TOOLS]
+                       if name not in _LOCAL_TOOLS and name not in CHAT_TOOLS]
         if brief.allowed_tools is None:
             return allowed
         asked = set(brief.allowed_tools)
@@ -558,7 +559,7 @@ class FastPathProvider:
             raise BriefRefused(
                 "the fast path's edit tools are pinned all together or not at all: "
                 + ", ".join(sorted(EDIT_TOOLS)))
-        widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS - CHAT_TOOLS)
+        widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS - CHAT_TOOLS - HUD_DESKTOP_TOOLS)
         if widened:
             raise BriefRefused(
                 "the fast path may not hold "
@@ -575,7 +576,8 @@ class FastPathProvider:
         changes (the tools are part of the cached prefix), and the prompt is
         narrowed with it, so the edit wording follows the edit tools.
         Returns the names, which `_take_steering` binds for dispatch."""
-        names = [n for n in native.tool_names if at_desk or n not in _DESK_ONLY]
+        voice_tools = HUD_DESKTOP_TOOLS if native.desk.get("hud_desktop") else ()
+        names = [n for n in native.tool_names if at_desk or n not in _LOCAL_TOOLS or n in voice_tools]
         agent = native.agent
         if names != list(agent._base_tool_names):
             agent._base_tool_names = names
@@ -641,12 +643,17 @@ class FastPathProvider:
 
         def approve(tool: Any, args: dict) -> bool:
             name = getattr(tool, "name", str(tool))
+            if name in HUD_DESKTOP_TOOLS and not runtime.hud_desktop_access():
+                return False
             if name in EDIT_TOOLS and not runtime.at_desk():
                 return False
             from ..permissions import deferral_reason, last_verdict
             last_verdict()              # only this call's verdict is read below
             try:
-                decision = Decision(permit(name, dict(args), asked))
+                if name in HUD_DESKTOP_TOOLS and tools.REGISTRY[name].dangerous:
+                    decision = Decision(permit(name, dict(args), asked, dangerous_tool=True))
+                else:
+                    decision = Decision(permit(name, dict(args), asked))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return False
             if decision is not Decision.ALLOW:
@@ -654,10 +661,10 @@ class FastPathProvider:
                 # code's words (`tools.Refusal`, falsy like False).
                 deferred = deferral_reason(last_verdict())
                 if deferred:
-                    from ... import tools
                     return tools.Refusal(deferred)
                 return False
             return (decision is Decision.ALLOW
+                    and (name not in HUD_DESKTOP_TOOLS or runtime.hud_desktop_access())
                     and (name not in EDIT_TOOLS or runtime.at_desk())
                     and not runtime.should_stop()())
 
@@ -718,6 +725,8 @@ class FastPathProvider:
                 # chat's reply to this turn's own message (P-7, O-2): it
                 # answers this turn's call and takes nothing from it.
                 native.desk["present"] = False
+                if not local_voice_message(native.brief, message):
+                    native.desk["hud_desktop"] = False
             native.inbox.append((message, text, list(message.images)))
 
     def undelivered(self, h: SessionHandle) -> list[UserMessage]:
@@ -748,7 +757,7 @@ class FastPathProvider:
         with native.inbox_lock:
             taken, native.inbox = native.inbox, []
         if (native.desk.get("present") is not True
-                and _DESK_ONLY & set(native.agent._base_tool_names)):
+                and _LOCAL_TOOLS & set(native.agent._base_tool_names)):
             from ... import runtime
 
             names = cls._turn_tools(native, False)
@@ -950,7 +959,8 @@ class FastPathProvider:
         # Is the owner at the desk for this turn? A fresh slot per turn, so a
         # steer that took the last turn off the desk does not linger.
         model_info = models.cached_info(native.agent.model)
-        desk = {"present": _at_desk(native.brief, message),
+        at_desk = _at_desk(native.brief, message)
+        desk = {"present": at_desk, "hud_desktop": at_desk or local_voice_message(native.brief, message),
                 "images": bool(model_info is not None and model_info.vision)}
         native.desk = desk
         names = self._turn_tools(native, desk["present"])
@@ -1165,7 +1175,7 @@ class _TurnState:
         self.pending.append((call_id, name))
         self.emit(
             EventKind.TOOL_STARTED,
-            {"call_id": call_id, "name": name, "args": {} if name in DRIVE_TOOLS else _args(raw)},
+            {"call_id": call_id, "name": name, "args": {} if name in DRIVE_TOOLS or name == "hud_desktop_type" else _args(raw)},
         )
 
     def _on_tool_end(self, data: Any) -> None:

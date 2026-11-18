@@ -32,19 +32,9 @@ from windows import voicewire as wire
 
 
 class References(impl.Base):
-    def test_crash_after_create_before_title_does_not_duplicate_chat(self):
+    def test_restart_with_missing_target_never_creates_a_chat(self):
         self.start()
-
-        class Crash(BaseException):
-            pass
-
-        # open_thread has committed its metadata, but the next persistent write
-        # never happens. A process death has exactly this durable state.
-        with patch.object(self.d.stores.threads, "set_title", side_effect=Crash):
-            with self.assertRaises(Crash):
-                self.link._voice_chat._thread()
-        created = self.d.stores.threads.list()
-        self.assertEqual(len(created), 1)
+        self.select(None)
         self.d.stop()
         other = Daemon(Stores(self.d.stores.root),
                        {p: self.fast if p == PN.FAST else impl.existing.rac.Fake(p) for p in PN},
@@ -52,23 +42,18 @@ class References(impl.Base):
                        0, remote_host=None)
         self.addCleanup(other.stop)
         other.start()
-        recovered = other.voice_link._voice_chat._thread()
-        self.assertEqual(len(other.stores.threads.list()), 1,
-                         "restart created a second chat after create/title crash")
-        self.assertEqual(recovered.id, created[0].id,
-                         "restart created a second chat after create/title crash")
+        with self.assertRaises(voice_link.NoVoiceTarget):
+            other.voice_chat.ask("where is my chat", lambda _: None)
+        self.assertEqual([t.id for t in other.stores.threads.list()], [self.chosen.id])
 
-    def test_reference_to_unrelated_chat_does_not_redirect_voice_question(self):
+    def test_legacy_dedicated_reference_does_not_redirect_speech(self):
         self.start()
-        voice = self.link._voice_chat._thread()
         project = self.d.stores.projects.inbox()
-        unrelated = self.d.open_thread(project.id, "chat", "fast", {})
-        self.d.stores.threads.set_title(unrelated.id, "Private unrelated conversation", "owner")
+        unrelated = self.d.open_thread(project.id, "chat", "fast", {}, title="Voice")
         (self.d.stores.root / "voice-chat.json").write_text(json.dumps(unrelated.id))
-        self.client().ask("voice question belongs only in Voice")
-        received = [r for r in self.d.stores.threads.read_log(unrelated.id) if r["kind"] == "user"]
-        self.assertEqual(len(received), 0, "stored id redirected voice speech into an unrelated chat")
-        self.assertEqual(json.loads((self.d.stores.root / "voice-chat.json").read_text()), voice.id)
+        self.client().ask("voice question belongs in my selected chat")
+        self.assertFalse(any(r["kind"] == "user" for r in self.d.stores.threads.read_log(unrelated.id)))
+        self.assertEqual(json.loads((self.d.stores.root / "voice-target.json").read_text()), self.chosen.id)
 
 
 class AnswerFraming(impl.Base):

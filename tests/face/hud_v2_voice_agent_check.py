@@ -10,7 +10,7 @@ if __package__ in (None, ""):
 from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from tests.face.hud_v2_check import FAILURES, guard, until  # noqa: E402
-from tests.face.hud_v2_declutter_check import _fold_left  # noqa: E402
+from tests.face.hud_v2_declutter_check import _fold_left, _open  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 
 
@@ -58,7 +58,9 @@ def main():
                     if (path !== '/voice-agent/microphone') return fetchOriginal(path, options);
                     return Promise.resolve(new Response(new ReadableStream({
                         start(controller) {
-                            const timer = setInterval(() => controller.enqueue(new Uint8Array(3200)), 50);
+                            const timer = setInterval(() => {
+                                if (window.testRelayLive) controller.enqueue(new Uint8Array(3200));
+                            }, 50);
                             options.signal.addEventListener('abort', () => {
                                 clearInterval(timer);
                                 controller.close();
@@ -75,7 +77,7 @@ def main():
                 requests.append(route.request.post_data_json)
                 pending.append(route)
 
-            status = {"state": "off", "detail": "Start Voice Anywhere"}
+            status = {"state": "off", "detail": "Start voice"}
             page.route(url + "/voice-agent/start", hold)
             stops = []
             def stop(route):
@@ -93,28 +95,57 @@ def main():
             page.route(url + "/voice-agent/status", read_status)
             page.goto(url)
             page.locator("#orb").wait_for(state="visible")
-            button = page.get_by_role("button", name="Start Voice Anywhere")
+            button = page.get_by_role("button", name="Start voice")
             result = page.locator("#voice-agent-result")
             expect(page.locator("#micstrip #voice-agent-start")).to_be_visible()
             indicator = page.locator(".voice-agent-state")
             assert until(lambda: len(polls) >= 1)
             assert page.evaluate("window.testMics.length") == 0
             expect(indicator).to_have_text("Off")
+            target_path = "/voice/chat-target"
+            def target_is(thread):
+                sent = mock.sent("POST", target_path)
+                return bool(sent) and sent[-1] == {"thread_id": thread}
+            assert until(lambda: target_is(None))
+            _open(page, until, "t1")
+            assert until(lambda: target_is("t1"))
+            # Losing desktop focus leaves the selected thread usable globally.
+            other = ctx.new_page()
+            other.goto("about:blank")
+            other.bring_to_front()
+            page.evaluate("window.dispatchEvent(new Event('blur'))")
+            assert target_is("t1")
+            page.bring_to_front()
+            other.close()
+            # Even a selection mutation while blurred must not trample the
+            # foreground HUD. Simulate background focus in headless Chrome.
+            page.evaluate("""() => {
+                window.testHudFocus = true;
+                Object.defineProperty(document, 'hasFocus', {configurable: true, value: () => window.testHudFocus});
+                window.testHudFocus = false;
+                document.querySelector('[data-testid="new-thread"]').click();
+            }""")
+            assert until(lambda: page.evaluate("window.__hud.state().threadId === null"))
+            assert target_is("t1")
+            page.evaluate("""() => { window.testHudFocus = true; window.dispatchEvent(new Event('focus')); }""")
+            assert until(lambda: target_is(None))
+            page.evaluate("delete document.hasFocus")
+
             meter = page.locator("#level").bounding_box()
             assert meter and meter["width"] > 20 and 0 < meter["height"] < 10
 
             assert until(lambda: page.evaluate("window.testMics.some(t => t.readyState === 'live')")), page.evaluate("[window.testMicError,window.testMics.map(t => t.readyState)]")
             button.click()
             assert until(lambda: page.evaluate("window.testMics.every(t => t.readyState === 'ended')"))
-            expect(page.get_by_role("button", name="Starting Voice Anywhere…")).to_be_disabled()
+            expect(page.get_by_role("button", name="Starting voice…")).to_be_disabled()
             expect(indicator).to_have_text("Starting")
             until(lambda: len(pending) == 1)
             assert requests == [{}]
             pending.pop().fulfill(json={"connected": True})
             status.update(state="connected", detail="Waiting for the wake listener.")
-            expect(page.get_by_role("button", name="Voice Anywhere connected")).to_be_disabled()
+            expect(page.get_by_role("button", name="Voice connected")).to_be_disabled()
             status.update(state="ready", detail="Say Jarvis, then a command.")
-            expect(page.get_by_role("button", name="Voice Anywhere ready")).to_be_disabled()
+            expect(page.get_by_role("button", name="Voice ready")).to_be_disabled()
             expect(indicator).to_have_text("Ready")
             page.evaluate("""() => {
                 const capture = window.__hud.capture;
@@ -125,11 +156,14 @@ def main():
             }""")
             assert page.evaluate("window.__wakeClaims") == 0
             status.update(can_stop=True, shared_mic=True)
-            expect(page.get_by_role("button", name="Stop Voice Anywhere")).to_be_enabled()
-            expect(result).to_contain_text("share one mic")
+            expect(page.get_by_role("button", name="Stop voice")).to_be_enabled()
+            expect(indicator).to_have_text("Connecting mic")
+            page.evaluate("window.testRelayLive = true")
+            expect(indicator).to_have_text("Ready")
+            expect(result).to_contain_text("from any app")
             check_voice_geometry(page)
             assert page.evaluate("window.testMics.every(t => t.readyState === 'ended')")
-            page.get_by_role("button", name="Stop Voice Anywhere").click()
+            page.get_by_role("button", name="Stop voice").click()
             expect(indicator).to_have_text("Off")
             assert stops == [{}]
             page.reload()
@@ -142,7 +176,7 @@ def main():
             status.update(state="microphone_unavailable", detail="The microphone is unavailable.")
             expect(result).to_have_text("The microphone is unavailable.")
             expect(indicator).to_have_text("Needs attention")
-            status.update(state="off", detail="Start Voice Anywhere")
+            status.update(state="off", detail="Start voice")
             expect(button).to_be_enabled()
 
             page.evaluate("window.__hud.mic.wake()")

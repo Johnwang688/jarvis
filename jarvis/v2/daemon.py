@@ -37,7 +37,7 @@ from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
                        Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
-from .desk import DeskState, desk_message
+from .desk import DeskState, desk_message, local_voice_message
 from . import running_cost
 from . import worktrees
 
@@ -357,7 +357,7 @@ VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone", "voice")
 # Where a message comes from that never steers a running turn: it waits in
 # the owner's queue behind it (phone design P-5: a phone message queues).
 # Read from the message itself, so no caller can forget it.
-# Voice questions likewise wait; they carry no desk authority.
+# Only a paired question addressed to the selected HUD chat may steer by voice.
 NEVER_STEER = ("phone", "voice")
 
 
@@ -516,6 +516,8 @@ class Daemon:
         self.providers = {ProviderName(k): v for k, v in providers.items()}
         self.port = port
         self.bus = EventBus()
+        from .voice_chat import VoiceChat
+        self.voice_chat = VoiceChat(self)
         # The sidebar's per-thread and per-task status (activity.py), fed by
         # every record this bus carries.
         from .activity import Activity
@@ -1132,8 +1134,8 @@ class Daemon:
                                                speed_model=brief.model if brief.speed else None,
                                                task_id=brief.task_id,
                                                cwd=brief.cwd, cost_recount=recounted,
-                                               # A title fixed at birth (the Voice chat, VA-D4)
-                                               # is in the first metadata write, so a crash
+                                               # A title supplied by the caller
+                                               # goes in the first metadata write, so a crash
                                                # before anything else cannot leave it unnamed.
                                                **({"title": title, "title_source": "owner"} if title else {}))
         try:
@@ -1707,7 +1709,8 @@ class Daemon:
             if not thread_model.is_chat(session.thread):
                 raise DaemonError("a turn is already running on this thread")
             if (session.worker is None or waiting or session.compacting
-                    or message.via in NEVER_STEER or self._waiting_on_owner(session)):
+                    or (message.via in NEVER_STEER and not self.voice_chat.owns(message))
+                    or self._waiting_on_owner(session)):
                 # Behind what already waits, so nothing overtakes it; never
                 # into a turn blocked on the owner, where it could read as the
                 # answer to the question the turn is waiting on; never into a
@@ -1801,26 +1804,34 @@ class Daemon:
             # turned off: the message waits for the next turn, whose start
             # reconciles the tier (review of #409, round 4).
             steer = None
-        if not callable(steer):
-            with self._lock:
+        with self._lock:
+            # A native question owns its exact answer. Do not fasten it to a
+            # turn that closed while deliver was deciding whether to steer,
+            # or one that meanwhile asked the owner for a decision.
+            voice_waits = self.voice_chat.owns(message) and (
+                not session.desk.active or self._waiting_on_owner(session)
+                or self._queues.get(thread_id))
+            if not callable(steer) or voice_waits:
                 waiting = self._queues.setdefault(thread_id, deque())
                 item = self._enqueue(session, waiting, message, data)
                 drain = session.worker is None
                 reply = self._queued_reply(session, item)
+            else:
+                reply = None
+                # Known to the turn before the provider can take it: a turn that
+                # ends meanwhile hands it back (`undelivered`) by identity.
+                item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
+                session.steered.append(item)
+                drive_turn = session.drive_turn
+                drive_worker = session.worker
+                drive_desk = session.desk.slot
+                reservation = (session.desk.reserve(local_voice=local_voice_message(session.brief, message))
+                               if not desk_message(session.brief, message) else None)
+                self._log_user(session.thread, item, steer=True)
+        if reply is not None:
             if drain:
                 self._drain(thread_id)
             return reply
-        with self._lock:
-            # Known to the turn before the provider can take it: a turn that
-            # ends meanwhile hands it back (`undelivered`) by identity.
-            item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
-            session.steered.append(item)
-            drive_turn = session.drive_turn
-            drive_worker = session.worker
-            drive_desk = session.desk.slot
-            reservation = (session.desk.reserve()
-                           if not desk_message(session.brief, message) else None)
-            self._log_user(session.thread, item, steer=True)
         try:
             steer_confirmed = steer(handle, message)
         except SteerRefused as exc:
@@ -1877,7 +1888,7 @@ class Daemon:
                 raise QueueFull(QUEUE_FULL)
             else:
                 drain = session.worker is None
-            self._requeue(session.thread, item, waiting)
+            self._requeue(session.thread, item, waiting, original=message)
             LOG.info("Thread %s: owner message %s (%s)", thread_id,
                      "interrupts the turn" if interrupt else "queued", reason)
             reply = self._queued_reply(session, item)
@@ -1891,12 +1902,13 @@ class Daemon:
             self._drain(thread_id)
         return reply
 
-    def _requeue(self, thread, item, waiting, *, front=False) -> None:
+    def _requeue(self, thread, item, waiting, *, front=False, original=None) -> None:
         """Under the lock: a message already logged as a steer waits instead,
         as its own turn — refused by the provider, or never delivered before
         the turn ended. Same id, a turn id of its own, and one `steer_queued`
         record (and event) rather than a second `user` record."""
         item.turn_id = uuid.uuid4().hex
+        self.voice_chat.assign(original or item.message, thread.id, item.turn_id)
         if front:
             waiting.appendleft(item)
         else:
@@ -1962,6 +1974,7 @@ class Daemon:
         session.questions.clear()
         session.question_detail = {}
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
+        self.voice_chat.assign(message, thread_id, session.turn_id)
         session.desk.begin(session.brief, message, session.turn_id)
         self._retire_drive(session)
         if (session.thread.provider in (ProviderName.CLAUDE, ProviderName.CODEX)
@@ -2309,6 +2322,7 @@ class Daemon:
     def _log_user(self, thread, item, **flags) -> None:
         """Under the lock: the owner's message in the log and on the bus,
         marked `steer` or `queued`, with the id later records refer to."""
+        self.voice_chat.assign(item.message, thread.id, item.turn_id)
         data = {**item.data, "message_id": item.message_id,
                 **{name: True for name, on in flags.items() if on}}
         at = utcnow()
@@ -2707,6 +2721,8 @@ class Daemon:
             record = {**to_json(event), "project_id": thread.project_id,
                       "turn_id": None if idle else session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            if self.voice_chat.speaks(thread.id, record["turn_id"]):
+                record["native_voice_reply"] = True
             if session.self_started and not idle:
                 record["self_started"] = True
             if session.compacting and not idle:
@@ -2970,6 +2986,10 @@ class Daemon:
             with self._lock:
                 leftover = [item for item in session.steered
                             if any(item.message is message for message in returned)]
+                # A provider can hand a steer back unconsumed. Its old turn
+                # had no answer to that question; the queued turn owns playback.
+                for item in leftover:
+                    self.voice_chat.assign(item.message, session.thread.id, None)
                 # How many owner messages run next: the sidebar keeps the
                 # thread working across the gap rather than flashing unread.
                 upcoming = 0 if session.closing or self._stopping else (

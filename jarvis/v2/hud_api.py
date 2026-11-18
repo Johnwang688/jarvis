@@ -2015,6 +2015,18 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
+    if parts == ["voice", "chat-target"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if method != "POST":
+            fail(405, "method not allowed")
+        _object(query, ())
+        body = handler._body()
+        _object(body, ("thread_id",), ("thread_id",))
+        ident = body["thread_id"]
+        if ident is not None and (not isinstance(ident, str) or not re.fullmatch("[0-9a-f]{8}", ident)):
+            fail(400, "invalid chat id")
+        return 200, daemon.voice_chat.select(ident)
     if parts == ["voice-agent", "status"]:
         from .projects import owner_only
         owner_only(handler, daemon)

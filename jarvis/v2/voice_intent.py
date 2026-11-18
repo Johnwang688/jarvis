@@ -7,7 +7,7 @@ from functools import lru_cache
 from math import log, sqrt
 import re
 
-from windows.voicetype import sanitize
+from windows.voicetype import JARVIS_ADDRESS, sanitize
 
 # Examples intentionally use varied slots. The token features include leading
 # words and adjacent pairs so "open Calendar" differs from "when I open Calendar".
@@ -68,7 +68,6 @@ _TRAIN = {
 }
 
 _FLAGS = re.IGNORECASE
-_ADDRESS = re.compile(r"^(?:(?:hey|okay|ok)[,\s]+)?jarvis\b[,.:!?\s-]*", _FLAGS)
 _POLITE = re.compile(r"^(?:(?:(?:could|can|would|will) you(?: please)?|I(?:[’\']d| would) like you to|please|kindly)[,\s]+)+", _FLAGS)
 _LITERAL = re.compile(
     r"^(?:type(?: out)?|dictate|insert)(?:\s+(?:the )?(?:words?|phrase|sentence|text)"
@@ -183,14 +182,18 @@ def _unquote(payload):
     return payload
 
 
+def addressed(text):
+    return bool(JARVIS_ADDRESS.match(sanitize(text)))
+
+
 def route(text, source):
-    """Return a closed intent; uncertain wake asks, uncertain hotkey speech types."""
+    """An unaddressed hotkey dictates. Wake and explicitly addressed speech ask or act."""
     words = sanitize(text)[:2000]
     def result(kind, target="", content=words):
         return {"kind": kind, "text": content, "target": target}
 
-    addressed = bool(_ADDRESS.match(words))
-    body = _ADDRESS.sub("", words, count=1)
+    addressed = bool(JARVIS_ADDRESS.match(words))
+    body = JARVIS_ADDRESS.sub("", words, count=1)
     if source == "wake" or addressed:
         body = _WAKE_REQUEST.sub("", body, count=1)
     polite = bool(_POLITE.match(body))
@@ -205,6 +208,9 @@ def route(text, source):
         if (_unquote(body) != body or (_EDIT_WORDS.search(body) and
                 (_REPORT.search(body) or re.search(r"""["“”‘’]|(?:^|\s)'""", body)))):
             return result("dictate", "literal")
+
+        if not addressed:
+            return result("dictate")
 
     # Embedded commands, quoted requests and questions about an action never
     # satisfy an executable imperative frame. Preserve the original transcript.

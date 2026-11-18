@@ -392,11 +392,22 @@ every one of these routes asks (`kind`):
   device release. `GET /voice-agent/microphone` is a no-store binary stream of signed little-endian
   16-bit mono PCM at 16 kHz. It ends on device or pairing loss. All four routes are owner-only
   on the local HUD listener. Slow readers receive recent audio with a bounded queue.
-  To verify an installation, start Voice Anywhere from the installed HUD and wait for Ready
-  and the message that the HUD and Voice Anywhere share one mic. That message appears after
-  the HUD receives native audio. Stop releases the device. The Windows helper must load the
+  Use **Start voice** beside the HUD orb. Ready means the helper is connected and the HUD
+  has received native audio. **Stop voice** releases the microphone and global Ctrl+D.
+  Outside the HUD, hold Ctrl+D or Right Ctrl to dictate into the focused app. A pointer click or
+  drag during the hold keeps recording. Tapping either shortcut toggles dictation. Unaddressed
+  speech such as “open Chrome” types those words. “Jarvis, open Chrome” requests an app launch.
+  Inside the HUD, Ctrl+D still uses the HUD composer. Enable voice to reserve Ctrl+D outside
+  the HUD, including in apps where it normally bookmarks a page or signals end-of-input.
+  The Windows helper must load the
   ONNX Runtime DLL bundled with Sherpa before importing Sherpa. The WSL service can otherwise
   load the older Windows system DLL and exit during wake detector initialization.
+- `POST /voice/chat-target {thread_id: string | null}` is owner-only on the HUD listener.
+  The foreground HUD publishes its selected chat. Switching to another app retains that
+  selection. Opening an empty pane clears it. Spoken questions use the selected chat's
+  provider, history and approvals. Successful native app shortcuts add a confirmation to the
+  selected chat. If the selection is missing or archived, the helper
+  asks the owner to open a chat.
 - `GET /stt/cleanup` → `{off, rules, raw, model}`, each `{typed, scratched}`.
   Owner-only, read-only counts since daemon startup, with no dictation text.
 - `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one

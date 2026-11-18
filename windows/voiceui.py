@@ -31,16 +31,21 @@ def place(screen_w, screen_h, w, h):
 class _DisplayState:
     """A single deadline avoids old hide callbacks hiding a new recording."""
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, recording=lambda: False):
         self.clock = clock
+        self.recording = recording
         self.state, self.text, self.hide_at = "hidden", "", None
         self.dismissed = False
 
     def dismiss(self):
-        self.set("hidden")
+        self.state, self.text, self.hide_at = "hidden", "", None
         self.dismissed = True
 
     def set(self, state, text=None):
+        # A wake timeout or the previous reply may already be queued when
+        # the hotkey acquires the mic. Only its listening state belongs here.
+        if self.recording() and state != "listening":
+            return False
         if self.dismissed:
             if state != "listening":
                 if state in ("done", "error", "hidden"):
@@ -57,18 +62,17 @@ class _DisplayState:
 
     def expire(self):
         if self.hide_at is not None and self.clock() >= self.hide_at:
-            self.set("hidden")
-            return True
+            return self.set("hidden")
         return False
 
 
 class Overlay:
-    def __init__(self, root):
+    def __init__(self, root, recording=lambda: False):
         import tkinter as tk
 
         self.root = root
         self.events = queue.Queue()
-        self.display = _DisplayState()
+        self.display = _DisplayState(recording=recording)
         self.levels = deque(maxlen=24)
         self.heights = [0.0] * 24
         self.window = tk.Toplevel(root, takefocus=False)
@@ -86,7 +90,7 @@ class Overlay:
         self.canvas.pack()
         self.panel = self.canvas.create_polygon(0, 0, 0, 0, fill=PANEL,
                                                  outline="#294553", smooth=True, splinesteps=24)
-        self.canvas.create_text(16, 15, text="Voice Anywhere", anchor="w",
+        self.canvas.create_text(16, 15, text="Jarvis voice", anchor="w",
                                 fill="#a4beca", font=("Segoe UI", 9))
         self.metric = self.canvas.create_text(144, 15, text="", anchor="w",
                                               fill="#a4beca", font=("Segoe UI", 9))

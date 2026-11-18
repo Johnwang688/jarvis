@@ -1316,7 +1316,7 @@ class ClaudeProvider:
         pending = _Pending()
         with session.mutex:
             session.pending[req_id] = pending
-        private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
+        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type")
         sid, label = self._asker(session, agent_id)
         session.emit(
             EventKind.APPROVAL_REQUESTED,
@@ -2497,7 +2497,7 @@ class ClaudeProvider:
                         EventKind.TOOL_STARTED,
                         session.thread_id,
                         {"call_id": block.id, "name": block.name,
-                         "args": {} if block.name in ("hud_browser_act", "mcp__jarvis__hud_browser_act") else args},
+                         "args": {} if block.name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type") else args},
                     )
                 )
         return out
@@ -2722,7 +2722,7 @@ class ClaudeProvider:
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
         private_read = _private_result(name.removeprefix("mcp__jarvis__"))
-        private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
+        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type")
         summary = self._tool_summary(name, text)
         if private_read:
             if denied:

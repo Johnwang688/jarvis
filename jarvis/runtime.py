@@ -320,6 +320,13 @@ def at_desk() -> bool:
     return bool(slot is not None and slot.get("present") is True)
 
 
+def hud_desktop_access() -> bool:
+    """An active owner HUD chat or paired voice turn may request Windows tools."""
+    slot = _DESK.get()
+    return (slot is not None and depth() == 0 and not should_stop()()
+            and (slot.get("present") is True or slot.get("hud_desktop") is True))
+
+
 def desk_images() -> bool:
     """The current pinned model is known to accept images; never inferred by a tool."""
     slot = _DESK.get()

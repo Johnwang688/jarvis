@@ -8,6 +8,10 @@ import ntpath
 from typing import Literal
 
 
+# Requires a complete address, so "Jarvis's shortcut" can be dictated.
+JARVIS_ADDRESS = re.compile(r"^(?:(?:hey|okay|ok)[,\s]+)?jarvis(?=$|[,.:!?\s-])[,.:!?\s-]*", re.I)
+
+
 _TERMINALS = frozenset("windowsterminal cmd powershell pwsh wsl wslhost conhost openconsole "
                       "mintty bash alacritty wezterm-gui hyper putty kitty code cursor windsurf "
                       "zed idea64 pycharm64 webstorm64 clion64 goland64 rider64 studio64 devenv "

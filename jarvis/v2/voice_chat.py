@@ -1,6 +1,4 @@
-"""The dedicated Voice chat. Only its id is stored here; conversation uses
-the daemon's normal chat history. No model/provider starts until first ask.
-"""
+"""Deliver a paired Windows voice question to the owner's selected HUD chat."""
 from __future__ import annotations
 
 import json
@@ -8,61 +6,111 @@ import queue
 import re
 import threading
 import time
+import uuid
 
-from .model import ProviderName, Role
-from .provider import UserMessage
-from .stores import _write_bytes
+from .desk import SelectedVoiceMessage
+from .model import utcnow
+from .stores import StoreError, _write_bytes
+from .thread_model import is_chat
 
 
-IDLE_REFUSAL_S = 0.5
+class NoVoiceTarget(Exception):
+    pass
 
 
 class VoiceChat:
     def __init__(self, daemon):
         self.daemon = daemon
-        self._lock = threading.Lock()
+        self._selection_lock = threading.Lock()
+        self._ask_lock = threading.Lock()
+        self._playback_lock = threading.Lock()
+        self._message = None
+        self._turn = None
 
-    def _thread(self):
-        d = self.daemon
-        path = d.stores.root / "voice-chat.json"
-        project = d.stores.projects.inbox()
-
-        def is_voice(thread):
-            return (thread is not None and thread.title == "Voice"
-                    and thread.project_id == project.id and not project.archived
-                    and not thread.archived and thread.role == Role.CHAT
-                    and thread.task_id is None and thread.provider == ProviderName.FAST)
-
-        thread = None
+    def _eligible_thread(self, ident):
+        if not isinstance(ident, str) or not re.fullmatch("[0-9a-f]{8}", ident):
+            return None
+        stores = self.daemon.stores
         try:
-            ident = json.loads(path.read_text(encoding="ascii"))
-            if isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{8}", ident):
-                thread = d.stores.threads.get(ident)
-        except (OSError, ValueError):
-            pass
-        if not is_voice(thread):
-            # Recover a creation interrupted before the reference was saved.
-            thread = next((t for t in d.stores.threads.list(project_id=project.id)
-                           if is_voice(t)), None)
-            if thread is None:
-                thread = self._create(project)
-                d.stores.threads.set_title(thread.id, "Voice", "owner")
-                # The thread shares this object with the live session. Publish
-                # the fixed title as well as saving it, as a HUD rename does.
-                thread.title, thread.title_source = "Voice", "owner"
-                from .projects import _title_changed
-                _title_changed(d, thread)
-            _write_bytes(path, (json.dumps(thread.id) + "\n").encode("ascii"))
-        return thread
+            thread = stores.threads.get(ident)
+            if thread is None or thread.archived or not is_chat(thread):
+                return None
+            project = stores.projects.get(thread.project_id)
+            return thread if project is not None and not project.archived else None
+        except (StoreError, ValueError, OSError):
+            return None
 
-    def _create(self, project):
-        # Titled at creation: its first metadata write identifies it as Voice
-        # even if the process dies before set_title or the id file.
-        return self.daemon.open_thread(project.id, "chat", "fast", {}, title="Voice")
+    @property
+    def _path(self):
+        # Never implicitly adopt a previous version's separate Voice conversation.
+        return self.daemon.stores.root / "voice-target.json"
+
+    def select(self, ident):
+        with self._selection_lock:
+            target = ident if self._eligible_thread(ident) else None
+            _write_bytes(self._path, (json.dumps(target) + "\n").encode("ascii"))
+            return {"thread_id": target}
+
+    def _selected(self):
+        with self._selection_lock:
+            try:
+                ident = json.loads(self._path.read_text(encoding="ascii"))
+            except (OSError, ValueError):
+                raise NoVoiceTarget() from None
+            if not self._eligible_thread(ident):
+                if ident is not None:
+                    _write_bytes(self._path, b"null\n")
+                raise NoVoiceTarget()
+            return ident
+
+    def selected(self):
+        """Snapshot the chat for a local Windows shortcut, which can also run by itself."""
+        try:
+            return self._selected()
+        except (NoVoiceTarget, OSError, StoreError):
+            return None
+
+    def note_action(self, thread_id, kind, target):
+        """Record a successful native action without sending a model turn."""
+        if kind in ("open_app", "switch_app"):
+            label = target if re.fullmatch(r"[\w .+#&'()-]{1,80}", target) else "the app"
+            verb = "opened" if kind == "open_app" else "switched to"
+            text = f"Jarvis voice {verb} {label}."
+        elif kind == "search":
+            text = "Jarvis voice opened a web search."
+        elif kind == "read_selection":
+            text = "Jarvis voice read the selected text aloud."
+        else:
+            return False
+        with self.daemon._lock:
+            thread = self._eligible_thread(thread_id)
+            if not thread:
+                return False
+            record = {"kind": "notice", "at": utcnow(), "event_id": uuid.uuid4().hex,
+                      "thread_id": thread.id, "project_id": thread.project_id,
+                      "data": {"text": text}}
+            self.daemon.stores.threads._append(thread.id, "log.jsonl", record)
+            self.daemon.bus.publish(record)
+        return True
+
+    def owns(self, message):
+        with self._playback_lock:
+            return message is self._message and message is not None
+
+    def assign(self, message, thread_id, turn_id):
+        # Called under the daemon lock before start/steer or requeue. Matching
+        # the actual object prevents a different via="voice" caller claiming it.
+        with self._playback_lock:
+            if message is self._message and message is not None:
+                self._turn = (thread_id, turn_id) if turn_id else None
+
+    def speaks(self, thread_id, turn_id):
+        with self._playback_lock:
+            return turn_id is not None and self._turn == (thread_id, turn_id)
 
     def ask(self, text, on_delta, *, cancelled=lambda: False, timeout=180.0, on_reset=None):
-        from .daemon import DaemonError
         deadline = time.monotonic() + timeout
+        thread_id = self._selected()
 
         def check():
             if cancelled():
@@ -70,43 +118,29 @@ class VoiceChat:
             if time.monotonic() >= deadline:
                 raise TimeoutError()
 
-        # Serialize Voice questions, including a previous agent's in-flight ask.
-        # A disconnected waiter releases promptly; no daemon/link lock is held.
-        while not self._lock.acquire(timeout=0.1):
+        while not self._ask_lock.acquire(timeout=0.1):
             check()
         q = None
         try:
             check()
-            thread = self._thread()
+            if not self._eligible_thread(thread_id):
+                raise NoVoiceTarget()
+            q = self.daemon.bus.subscribe({"thread_id": thread_id})
+            message = SelectedVoiceMessage(text)
+            with self._playback_lock:
+                self._message = message
+            try:
+                result = self.daemon.deliver(thread_id, message)
+            except Exception:
+                if not self._eligible_thread(thread_id):
+                    raise NoVoiceTarget() from None
+                raise
             check()
-            q = self.daemon.bus.subscribe({"thread_id": thread.id})
-            message = UserMessage(text, origin="owner", via="voice", desk=False, spoken=True)
-            idle_since = None
-            while True:
-                check()
-                try:
-                    turn = self.daemon.send(thread.id, message)
-                    break
-                except DaemonError:
-                    # `send` never steers; wait behind an existing turn, including
-                    # one held for an approval on the HUD/phone. Other conflicts
-                    # fail instead of hiding a broken session for three minutes.
-                    # Between one turn finishing and a queued message's turn
-                    # starting the thread can look idle for a moment while
-                    # `send` still refuses: only a refusal that stays idle for
-                    # IDLE_REFUSAL_S is a real conflict.
-                    state = self.daemon.thread_json(thread)
-                    if state.get("running") or state.get("queued"):
-                        idle_since = None
-                    else:
-                        now = time.monotonic()
-                        idle_since = now if idle_since is None else idle_since
-                        if now - idle_since >= IDLE_REFUSAL_S:
-                            raise
-                    try:
-                        q.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
-                    except queue.Empty:
-                        pass
+            if result["status"] == "dropped":
+                raise RuntimeError("voice message was stopped")
+            turn = result.get("queued_turn_id") or result["turn_id"]
+            message_id = result.get("message_id")
+            steered = result.get("mode") == "native"
             deltas, full = [], []
             proposing = False
             receipt_deadline = None
@@ -123,16 +157,29 @@ class VoiceChat:
                 if event.get("kind") == "shutdown":
                     raise ConnectionError()
                 data = event.get("data") or {}
-                if event.get("kind") == "proposal_reply" and data.get("turn_id") == turn:
+                if (event.get("kind") == "proposal_reply" and data.get("turn_id") == turn
+                        and (proposing or receipt_deadline is not None)):
                     if on_reset:
                         on_reset()
                     if re.fullmatch(r"[0-9a-f]{8}", str(data.get("task_id") or "")):
                         return "I opened a task for that."
                     return data.get("reply") or "I couldn't open that task."
-                if event.get("turn_id") != turn:
+                kind = event.get("kind")
+                if kind == "queue_cleared" and message_id and any(
+                    row.get("message_id") == message_id for row in data.get("messages", ())
+                ):
+                    raise RuntimeError("voice message was stopped")
+                if kind == "steer_queued" and message_id and data.get("message_id") == message_id:
+                    turn = event["turn_id"]
+                    steered = proposing = False
+                    deltas.clear()
+                    full.clear()
                     continue
-                kind, data = event.get("kind"), event.get("data") or {}
+                if event.get("turn_id") != turn or not event.get("native_voice_reply"):
+                    continue
                 if kind == "tool_started":
+                    deltas.clear()
+                    full.clear()
                     if on_reset:
                         on_reset()
                     if data.get("name") == "task_propose":
@@ -143,7 +190,7 @@ class VoiceChat:
                         raise ValueError()
                     if kind == "text_delta":
                         deltas.append(piece)
-                        if not proposing:
+                        if not proposing and not steered:
                             on_delta(piece)
                     else:
                         full.append(piece)
@@ -155,8 +202,14 @@ class VoiceChat:
                     if data.get("proposal"):
                         receipt_deadline = min(deadline, time.monotonic() + 5)
                     else:
+                        # A live steer can be returned by the provider and run
+                        # later. Speak only after that turn actually accepted it.
+                        if steered and full:
+                            return full[-1]
                         return "".join(full or deltas)
         finally:
+            with self._playback_lock:
+                self._message = self._turn = None
             if q is not None:
                 self.daemon.bus.unsubscribe(q)
-            self._lock.release()
+            self._ask_lock.release()

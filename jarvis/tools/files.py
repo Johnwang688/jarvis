@@ -59,6 +59,7 @@ SELF_PROTECTED = frozenset(
         # VA-2 will type into any app: code holding the owner's microphone,
         # keyboard and pairing is authorization code.
         "jarvis/v2/voice_link.py",
+        "jarvis/v2/voice_chat.py",
         "jarvis/v2/voice_intent.py",
         "jarvis/v2/voice_model.py",
         "windows/voicewire.py",
@@ -95,6 +96,11 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/browser/drive_files.py",
         "jarvis/v2/browser/drive_downloads.py",
         "jarvis/v2/tools/hud_browser_act.py",
+        "jarvis/v2/tools/hud_desktop.py",
+        "jarvis/desktop.py",
+        "windows/desktopwire.py",
+        "windows/bridge.py",
+        "windows/uiatree.py",
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",
@@ -353,6 +359,8 @@ def _protected_state_paths() -> set[Path]:
              config.VEX_PATH.expanduser(),
              config.BROWSER_SETTINGS_PATH.expanduser(), config.STT_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
+    # The owner selects which existing chat receives speech from the paired helper.
+    paths.add(Path(config.V2_DATA_DIR).expanduser() / "voice-target.json")
     # The speaker store's two files that switch the voice check off (V12, V-12b,
     # owner 2026-10-14): `voiceprint.json` (whose voice is the owner's) and
     # `guest.json` (Guest voice). An agent that could rewrite or delete them could turn

@@ -35,6 +35,8 @@ import ctypes
 import ctypes.wintypes as wt
 import io
 import json
+from pathlib import Path
+import secrets
 import socket
 import subprocess
 import sys
@@ -45,6 +47,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from desktopwire import APPS, NAV_KEYS, launch_name, private_key, prove_windows, wire
+from voiceactions import Actions, exact_start_app
+from voicetype import WindowsInput
 
 import comtypes
 import comtypes.client
@@ -58,13 +64,15 @@ from uiatree import (  # noqa: E402  (shared with the tests; no Windows imports)
 comtypes.client.GetModule("oleacc.dll")
 from comtypes.gen import Accessibility as ACC  # noqa: E402
 
-BRIDGE_VERSION = "1"
+BRIDGE_VERSION = "2"
 
 user32 = ctypes.windll.user32
 oleacc = ctypes.windll.oleacc
 
 OBJID_CLIENT = -4
 STATE_UNAVAILABLE = 0x00000001
+STATE_FOCUSED = 0x00000004
+STATE_PROTECTED = 0x20000000
 STATE_FOCUSABLE = 0x00100000
 STATE_INVISIBLE = 0x00008000
 STATE_OFFSCREEN = 0x00010000
@@ -147,6 +155,28 @@ def window_class(hwnd: int) -> str:
     return buf.value
 
 
+def registered_window(hwnd, spec, required_class=None):
+    if not user32.IsWindow(hwnd) or forbidden_title(window_title(hwnd)):
+        return False
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    kernel = ctypes.windll.kernel32
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    proc = kernel.OpenProcess(0x1000, False, pid.value)
+    if not proc:
+        return False
+    try:
+        size = wt.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        return (kernel.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size))
+                and os.path.basename(buf.value).casefold() in spec["processes"]
+                and window_class(hwnd) == (required_class or spec["class"]))
+    finally:
+        kernel.CloseHandle(proc)
+
+
 def find_window(spec: dict) -> int | None:
     """Find a top-level window matching an app spec.
 
@@ -168,7 +198,7 @@ def find_window(spec: dict) -> int | None:
             return True
         if want_class and window_class(hwnd) != want_class:
             return True
-        if forbidden_title(title):
+        if not registered_window(hwnd, spec):
             return True
         hits.append(hwnd)
         return True
@@ -240,9 +270,9 @@ def content_hwnd(spec: dict, frame: int) -> int:
 
     def cb(hwnd, _):
         if hwnd != frame and user32.IsWindowVisible(hwnd):
-            if window_class(hwnd) == "Windows.UI.Core.CoreWindow":
-                if want_title in window_title(hwnd).lower():
-                    candidates.append(hwnd)
+            if (want_title in window_title(hwnd).lower()
+                    and registered_window(hwnd, spec, "Windows.UI.Core.CoreWindow")):
+                candidates.append(hwnd)
         return True
 
     user32.EnumWindows(EnumProc(cb), 0)
@@ -281,6 +311,7 @@ def activate(hwnd: int, maximize: bool, require_foreground: bool = False) -> boo
     user32.ShowWindow(hwnd, SW_MAXIMIZE if maximize else SW_RESTORE)
     raised = _force_foreground(hwnd)
     time.sleep(0.35)
+    raised = raised and user32.GetForegroundWindow() == hwnd
     if require_foreground and not raised:
         raise RuntimeError(
             "could not bring the window to the foreground — another window is "
@@ -312,6 +343,20 @@ def _wait_settled(count_nodes, min_nodes: int, timeout: float) -> int:
     return count_nodes()
 
 
+def _click_control(hwnd, content, rect):
+    x0, y0, x1, y1 = rect
+    if x1 <= x0 or y1 <= y0:
+        raise RuntimeError("Element has no on-screen rectangle.")
+    _require_foreground(hwnd)
+    point = wt.POINT((x0 + x1) // 2, (y0 + y1) // 2)
+    user32.WindowFromPoint.argtypes, user32.WindowFromPoint.restype = [wt.POINT], wt.HWND
+    user32.GetAncestor.argtypes, user32.GetAncestor.restype = [wt.HWND, wt.UINT], wt.HWND
+    hit = user32.WindowFromPoint(point)
+    if not hit or user32.GetAncestor(hit, 2) not in (hwnd, content):
+        raise RuntimeError("Another window covers this control. Nothing was clicked.")
+    auto.Click(point.x, point.y, waitTime=0)
+
+
 def _require_foreground(hwnd: int) -> None:
     """Guard for anything that reaches the app through the screen.
 
@@ -336,7 +381,8 @@ class UIABackend:
         # `hwnd` is the window we activate and screenshot; `root_hwnd` is the
         # one we read. For UWP they are different windows (see content_hwnd).
         self.hwnd = hwnd
-        self.root = auto.ControlFromHandle(root_hwnd or hwnd)
+        self.content = root_hwnd or hwnd
+        self.root = auto.ControlFromHandle(self.content)
 
     def _count(self, cap: int = 60) -> int:
         total = [0]
@@ -366,7 +412,7 @@ class UIABackend:
         ctype = node.ControlTypeName
         value = ""
         try:
-            if ctype in ("EditControl", "ComboBoxControl"):
+            if ctype in ("EditControl", "ComboBoxControl") and not node.IsPassword:
                 value = clean(node.GetValuePattern().Value)
         except Exception:
             pass
@@ -437,8 +483,7 @@ class UIABackend:
                 continue
         # Last resort: a real click at the element's centre. This one goes
         # through the screen, so the window has to genuinely be on top.
-        _require_foreground(self.hwnd)
-        node.Click(simulateMove=False)
+        _click_control(self.hwnd, self.content, self.describe(node)["rect"])
         return "MouseClick"
 
     def set_text(self, node, text: str) -> None:
@@ -447,13 +492,16 @@ class UIABackend:
             return
         except Exception:
             pass
-        _require_foreground(self.hwnd)
-        node.SetFocus()
+        _focus_field(self, node)
         auto.SendKeys("{Ctrl}a{Del}", waitTime=0)
-        auto.SendKeys(_escape_keys(text), waitTime=0)
+        _require_focused_field(self, node)
+        WindowsInput().text(text)
 
     def focus(self, node) -> None:
         node.SetFocus()
+
+    def focused(self, node):
+        return bool(node.HasKeyboardFocus)
 
 
 # ---------------------------------------------------------------------------
@@ -560,11 +608,11 @@ class MSAABackend:
             name = clean(node.acc.accName(node.cid))
         except Exception:
             name = ""
+        state = self._state(node)
         try:
-            value = clean(node.acc.accValue(node.cid))
+            value = "" if state & STATE_PROTECTED else clean(node.acc.accValue(node.cid))
         except Exception:
             value = ""
-        state = self._state(node)
         checked = None
         if role_id in (44, 45) or (state & (STATE_CHECKED | STATE_PRESSED)):
             checked = bool(state & (STATE_CHECKED | STATE_PRESSED))
@@ -600,8 +648,7 @@ class MSAABackend:
         info = self.describe(node)
         x0, y0, x1, y1 = info["rect"]
         if x1 > x0 and y1 > y0:
-            _require_foreground(self.hwnd)
-            auto.Click((x0 + x1) // 2, (y0 + y1) // 2, waitTime=0)
+            _click_control(self.hwnd, self.hwnd, info["rect"])
             return "MouseClick"
         raise RuntimeError("element exposes no default action and has no on-screen rect")
 
@@ -613,20 +660,47 @@ class MSAABackend:
             info = self.describe(node)
             x0, y0, x1, y1 = info["rect"]
             if x1 > x0:
-                _require_foreground(self.hwnd)
-                auto.Click((x0 + x1) // 2, (y0 + y1) // 2, waitTime=0)
+                _click_control(self.hwnd, self.hwnd, info["rect"])
 
     def set_text(self, node: MSAANode, text: str) -> None:
-        _require_foreground(self.hwnd)
-        self.focus(node)
-        time.sleep(0.15)
+        _focus_field(self, node)
         auto.SendKeys("{Ctrl}a{Del}", waitTime=0)
-        auto.SendKeys(_escape_keys(text), waitTime=0)
+        _require_focused_field(self, node)
+        WindowsInput().text(text)
+
+    def focused(self, node):
+        return bool(self._state(node) & STATE_FOCUSED)
 
 
-def _escape_keys(text: str) -> str:
-    """uiautomation.SendKeys treats {} as special — escape literal text."""
-    return text.replace("{", "{{}").replace("}", "{}}")
+def _require_focused_field(backend, node):
+    if user32.GetForegroundWindow() != backend.hwnd or not backend.focused(node):
+        raise RuntimeError("The requested text field lost focus. No further keys were sent.")
+
+
+def _focus_field(backend, node):
+    _require_foreground(backend.hwnd)
+    backend.focus(node)
+    time.sleep(0.10)
+    _require_focused_field(backend, node)
+
+
+_app_actions = None
+
+
+def op_launch_app(req):
+    global _app_actions
+    name = launch_name(req.get("app"))
+    if name is None:
+        raise ValueError("Use a normal Windows Start app display name.")
+    if _app_actions is None:
+        _app_actions = Actions()
+    _app_actions.refresh_apps()
+    installed = exact_start_app(name, _app_actions.apps)
+    if installed is None:
+        raise ValueError(f"{name} is not in the Windows Start menu.")
+    _app_actions.launcher(["explorer.exe", "shell:AppsFolder\\" + installed["id"]],
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+    return {"name": installed["name"]}
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +798,7 @@ def current(app: str) -> dict:
     entry = STATE.get(app)
     if entry is None:
         raise RuntimeError(f"{app} is not open. Call desktop_open first.")
-    if not user32.IsWindow(entry["hwnd"]):
+    if not registered_window(entry["hwnd"], entry["spec"]):
         raise RuntimeError(f"the {app} window was closed. Call desktop_open again.")
     return entry
 
@@ -749,7 +823,7 @@ def refresh_backend(entry: dict) -> None:
 # Operations
 # ---------------------------------------------------------------------------
 
-def take_snapshot(entry: dict, max_elements: int = 150) -> tuple[str, dict]:
+def take_snapshot(entry: dict, max_elements: int = 150, scope=None) -> tuple[str, dict]:
     """Snapshot, retrying once if the tree came back empty.
 
     Chromium can invalidate its accessibility root between the readiness
@@ -758,10 +832,12 @@ def take_snapshot(entry: dict, max_elements: int = 150) -> tuple[str, dict]:
     a window really has no elements.
     """
     backend = entry["backend"]
-    text, refs = snapshot(backend, max_elements)
+    prefix = secrets.token_hex(8) + "-e" if scope else "e"
+    entry["scope"] = scope
+    text, refs = snapshot(backend, max_elements, ref_prefix=prefix)
     if not refs and hasattr(backend, "refresh_root"):
         backend.refresh_root()
-        text, refs = snapshot(backend, max_elements)
+        text, refs = snapshot(backend, max_elements, ref_prefix=prefix)
     return text, refs
 
 
@@ -770,9 +846,11 @@ def op_ping(_req):
 
 
 def op_open(req):
-    spec = req["spec"]
-    entry = attach(spec)
-    text, refs = take_snapshot(entry, req.get("max_elements", 150))
+    name = req.get("app") or req.get("spec", {}).get("name")
+    if name not in APPS:
+        raise ValueError("Unknown registered app.")
+    entry = attach({"name": name, **APPS[name]})
+    text, refs = take_snapshot(entry, req.get("max_elements", 150), req.get("scope"))
     entry["refs"] = refs
     return {"title": window_title(entry["hwnd"]), "backend": entry["backend"].name,
             "snapshot": text}
@@ -781,13 +859,20 @@ def op_open(req):
 def op_snapshot(req):
     entry = current(req["app"])
     refresh_backend(entry)
-    text, refs = take_snapshot(entry, req.get("max_elements", 150))
+    text, refs = take_snapshot(entry, req.get("max_elements", 150), req.get("scope"))
     entry["refs"] = refs
     return {"snapshot": text}
 
 
-def op_click(req):
+def ref_window(req):
     entry = current(req["app"])
+    if req.get("scope") != entry.get("scope"):
+        raise RuntimeError("Another chat has a newer snapshot. Read a fresh snapshot first.")
+    return entry
+
+
+def op_click(req):
+    entry = ref_window(req)
     ref = req["ref"]
     if ref not in entry["refs"]:
         raise RuntimeError(f"unknown ref {ref}. Take a desktop_snapshot first.")
@@ -799,15 +884,17 @@ def op_click(req):
 
 
 def op_type(req):
-    entry = current(req["app"])
+    entry = ref_window(req)
     ref = req["ref"]
     if ref not in entry["refs"]:
         raise RuntimeError(f"unknown ref {ref}. Take a desktop_snapshot first.")
     refresh_backend(entry)
     node = resolve(entry["backend"], entry["refs"][ref])
+    if req.get("scope") and entry["refs"][ref]["role"] not in ("editable", "combobox"):
+        raise RuntimeError("This ref does not identify a text field.")
     entry["backend"].set_text(node, req["text"])
     if req.get("submit"):
-        time.sleep(0.2)
+        _focus_field(entry["backend"], node)
         auto.SendKeys("{Enter}", waitTime=0)
     time.sleep(req.get("settle", 0.6))
     return {"typed_into": entry["refs"][ref]["name"] or ref}
@@ -819,6 +906,8 @@ def op_key(req):
     # would type into the owner's other window. Refuse instead.
     activate(entry["hwnd"], entry["spec"].get("maximize", True),
              require_foreground=True)
+    if req.get("scope") and req["keys"] not in NAV_KEYS.values():
+        raise ValueError("Use a single supported navigation key.")
     auto.SendKeys(req["keys"], waitTime=0)
     time.sleep(req.get("settle", 0.6))
     return {"sent": req["keys"]}
@@ -870,7 +959,7 @@ def op_screenshot(req):
 OPS = {
     "ping": op_ping, "open": op_open, "snapshot": op_snapshot,
     "click": op_click, "type": op_type, "key": op_key,
-    "screenshot": op_screenshot,
+    "screenshot": op_screenshot, "launch_app": op_launch_app,
 }
 
 
@@ -880,12 +969,16 @@ OPS = {
 
 def serve_once(host: str, port: int) -> None:
     conn = socket.create_connection((host, port), timeout=10)
-    conn.settimeout(None)
     print(f"[bridge] connected to {host}:{port}", flush=True)
     stream = conn.makefile("rwb")
-    stream.write((json.dumps({"hello": "jarvis-desktop-bridge",
-                              "version": BRIDGE_VERSION}) + "\n").encode())
-    stream.flush()
+    key_path = Path(sys.prefix).parent / "voice-link.key"
+    paired = key_path.exists()
+    if paired:
+        prove_windows(stream, private_key(key_path))
+    else:
+        wire.send_json(stream, {"hello": "jarvis-desktop-bridge", "version": "1"})
+    conn.settimeout(None)
+    STATE.clear()  # a new daemon connection cannot reuse a previous chat snapshot
 
     while True:
         line = stream.readline()
@@ -898,6 +991,8 @@ def serve_once(host: str, port: int) -> None:
             continue
         op = req.get("op")
         try:
+            if (req.get("scope") or op == "launch_app") and (not paired or ctypes.windll.shell32.IsUserAnAdmin()):
+                raise RuntimeError("HUD desktop actions need the paired, non-elevated Windows bridge.")
             handler = OPS.get(op)
             if handler is None:
                 raise RuntimeError(f"unknown op {op!r}")
@@ -921,7 +1016,7 @@ def main() -> None:
     while True:
         try:
             serve_once(host, port)
-        except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+        except (OSError, wire.LinkError, wire.KeyFileError) as exc:
             print(f"[bridge] waiting for Jarvis ({type(exc).__name__})", flush=True)
         except KeyboardInterrupt:
             print("[bridge] stopped", flush=True)

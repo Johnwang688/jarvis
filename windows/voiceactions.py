@@ -30,6 +30,21 @@ def _sound(text):
     return re.sub(r"cks|ks|cs", "x", text)
 
 
+def exact_start_app(name, apps):
+    """An exact Start display name or known alias. Never choose between different AppIDs."""
+    names = [name.casefold()]
+    alias = ALIASES.get(names[0])
+    if alias and alias != names[0]:
+        names.append(alias)
+    for candidate in names:
+        matches = {app["id"]: app for app in apps if app["name"].casefold() == candidate}
+        if matches:
+            if len(matches) != 1:
+                raise ValueError("Multiple Start apps have this name. Use a different display name.")
+            return next(iter(matches.values()))
+    return None
+
+
 def match_app(name, apps):
     name = _normal(name)
     name = ALIASES.get(name, name)

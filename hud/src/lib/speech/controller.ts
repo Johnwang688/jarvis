@@ -63,6 +63,8 @@ export interface SpeechEventLike {
   relayed?: unknown;
   /** A record of a compaction turn (WP-C): never spoken. */
   compaction?: boolean;
+  /** The native voice player owns this reply, including after a HUD reconnect. */
+  native_voice_reply?: boolean;
 }
 
 export interface SpeakerGateLike {
@@ -471,7 +473,7 @@ export class SpeechController {
     // is not read aloud (owner, 2026-10-15; SV-6): none of its records is
     // spoken or ends anything being read. Its Stop still silences the
     // children it hit (above); the sub-agents' own notices are not its records.
-    if (e.self_started === true) return;
+    if (e.self_started === true || e.native_voice_reply === true) return;
     // Nor is a turn another chat's message started, or the short turn that
     // reports another chat's reply (chat-to-chat O-8): the owner did not ask
     // in this window, so it is not read to him. The daemon marks each such

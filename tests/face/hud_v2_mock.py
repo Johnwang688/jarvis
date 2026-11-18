@@ -989,7 +989,7 @@ class MockDaemon:
                     # V7: the daemon's per-chat voice map, as the real route answers it.
                     return self._json({"threads": mock.speech_threads, "pool": mock.speech_pool()})
                 if path == "/voice-agent/status":
-                    return self._json({"state": "off", "detail": "Start Voice Anywhere"})
+                    return self._json({"state": "off", "detail": "Start voice"})
                 if path == "/stt/settings":
                     return self._json(mock.stt_settings)
                 if path == "/voices":
@@ -1195,6 +1195,8 @@ class MockDaemon:
                     return mock_speaker.reading(self, mock, raw)
                 body = self._body()
                 self._record("POST", path, body)
+                if path == "/voice/chat-target":
+                    return self._json({"thread_id": body.get("thread_id")})
                 if mock.dev_fixture and mock.dev_fixture.handle(self, "POST", path, body):
                     return
                 if mock_vex.handle(self, mock, "POST", path, body):

@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import queue
-import re
 import threading
 
 if __package__:
-    from .voicetype import mentions_command, plan, sanitize
-    from .voicewire import LinkError
+    from .voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize
+    from .voicewire import LinkError, VoiceQuestionError
 else:
-    from voicetype import mentions_command, plan, sanitize
-    from voicewire import LinkError
+    from voicetype import JARVIS_ADDRESS, mentions_command, plan, sanitize
+    from voicewire import LinkError, VoiceQuestionError
 
 
 class SpokenAnswer:
@@ -103,6 +102,16 @@ class Flow:
             steps.append(step)
         self.typer.run(steps)
 
+    def _confirm_action(self, intent):
+        receipt = intent.get("receipt")
+        if receipt:
+            try:
+                self.client.confirm_action(receipt)
+            except LinkError as exc:
+                # The native action succeeded. Reconnect before the next clip
+                # without replaying this action or reporting it as a failure.
+                self.link_error = exc
+
     def on_clip(self, wav, source, *, transcript=None):
         self.link_error = None
         try:
@@ -120,16 +129,24 @@ class Flow:
                 self.typer.run([("text", text)])
                 self.ui.set_state("done")
                 return
+            addressed = source == "wake" or bool(JARVIS_ADDRESS.match(clean))
             self.ui.set_state("thinking")
             try:
-                intent = self.client.route(text, source)
+                if getattr(self.client, "action_receipts", False) is True:
+                    intent = self.client.route(text, source, with_receipt=True)
+                else:
+                    intent = self.client.route(text, source)
             except Exception as exc:
                 # Routing is optional: preserve the utterance on failure.
                 # Retain transport failures so the agent still reconnects.
                 if isinstance(exc, LinkError):
                     self.link_error = exc
-                intent = {"kind": "dictate" if source == "hotkey" else "ask",
-                          "text": text, "target": "literal" if source == "hotkey" else ""}
+                intent = {"kind": "ask" if addressed else "dictate",
+                          "text": text, "target": "" if addressed else "literal"}
+            if not addressed and intent["kind"] != "dictate":
+                # A previous daemon could route an unaddressed shortcut to an
+                # action. Preserve the original words literally in the focused app.
+                intent = {"kind": "dictate", "text": text, "target": "literal"}
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
             if kind == "dictate" and source == "hotkey":
@@ -160,19 +177,17 @@ class Flow:
                     self.player.play(self.client.say(answer))
             elif kind in {"open_app", "switch_app"}:
                 if not getattr(self.actions, kind)(target):
-                    if source == "hotkey" and not re.match(r"^(?:(?:hey|okay|ok)[,\s]+)?jarvis\b", clean, re.I):
-                        # An unaddressed phrase such as "open enrollment"
-                        # belongs back in the focused field when no app matches.
-                        self.typer.run([("text", text)])
-                        self.ui.set_state("done")
-                        return
                     self.ui.set_state("error", f"Could not find {target}.")
                     return
+                self._confirm_action(intent)
                 action = "Opened" if kind == "open_app" else "Switched to"
                 self.ui.set_state("done", f"{action} {target}.")
                 return
             elif kind == "search":
-                self.actions.search(target or words)
+                if not self.actions.search(target or words):
+                    self.ui.set_state("error", "Could not open the search.")
+                    return
+                self._confirm_action(intent)
             elif kind == "read_selection":
                 selection = self.actions.read_selection()
                 if not selection:
@@ -180,10 +195,15 @@ class Flow:
                     return
                 self.ui.set_state("answering", selection)
                 self.player.play(self.client.say(selection))
+                cancelled = getattr(self.player, "cancelled", None)
+                if cancelled is None or not cancelled.is_set():
+                    self._confirm_action(intent)
             else:
                 self.ui.set_state("error", "Unknown voice action.")
                 return
             self.ui.set_state("done")
+        except VoiceQuestionError as exc:
+            self.ui.set_state("error", str(exc))
         except LinkError as exc:
             self.link_error = exc
             self.ui.set_state("error", str(exc))

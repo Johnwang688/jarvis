@@ -92,6 +92,19 @@ describe("reading a streamed reply", () => {
 });
 
 describe("who is read", () => {
+  it("leaves native-owned replies to the voice player and reads the following HUD turn", async () => {
+    c.event({ kind: "user_message", thread_id: T, data: { via: "voice" } });
+    for (const kind of ["turn_started", "text_delta", "text", "turn_finished"]) {
+      c.event({ kind, thread_id: T, data: { text: "Native answer.", stop: "end" }, native_voice_reply: true });
+    }
+    await clock.advance(5000);
+    expect(say.calls).toEqual([]);
+    settle("Typed follow-up answer.");
+    finish();
+    await clock.advance(10_000);
+    expect(player.started).toEqual(["Typed follow-up answer."]);
+  });
+
   it("reads only the threads it was told to; others and task views are silent", async () => {
     settle("Hidden thread speaking.", "other");
     settle("Task view speaking.", "task-thread");

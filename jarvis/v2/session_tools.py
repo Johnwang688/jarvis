@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 
 from .model import ProviderName, Role
 from .mcp_catalog import MCP_TOOLS, MCP_READ_ONLY
+from .tools.hud_desktop import HUD_DESKTOP_TOOLS
 
 # What a Claude tool name looks like for a tool of the jarvis server:
 # `mcp__<server>__<tool>`.
@@ -67,6 +68,10 @@ SESSION_TOOLS: dict[str, SessionTool] = {
     name: SessionTool(name, providers=_CHAT_PROVIDERS, read_only=name in MCP_READ_ONLY)
     for name in MCP_TOOLS
 }
+for _name in HUD_DESKTOP_TOOLS:
+    SESSION_TOOLS[_name] = SessionTool(_name, providers=_CHAT_PROVIDERS, foreground_only=True,
+                                       read_only=_name == "hud_desktop_status")
+
 for _name in ("terminal_read", "hud_browser_view"):
     SESSION_TOOLS[_name] = SessionTool(
         _name, providers=_CHAT_PROVIDERS, read_only=True, foreground_only=True, desk_only=True)

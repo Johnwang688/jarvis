@@ -20,7 +20,7 @@ import numpy  # Keep audio's import outside patch.dict(sys.modules) capture fake
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from windows import voiceactions as actions, voiceflow, voicetype, voice_agent as agentmod
-from windows.voicewire import LinkError, NotJarvis, wav_bytes
+from windows.voicewire import LinkError, NotJarvis, VoiceQuestionError, wav_bytes
 
 
 class Clock:
@@ -365,11 +365,12 @@ class FlowErrors(unittest.TestCase):
                 else:
                     self.typer.run.assert_not_called()
 
-    def test_hotkey_app_miss_preserves_unaddressed_dictation_literally(self):
+    def test_hotkey_ignores_an_older_daemons_unaddressed_app_route(self):
         flow = self.make("open_app")
         self.client.dictate.return_value = {"text": "open enrollment send it"}
-        self.actions.open_app.return_value = False
+        self.actions.open_app.return_value = True
         flow.on_clip(b"fixture", "hotkey")
+        self.actions.open_app.assert_not_called()
         self.typer.run.assert_called_once_with([("text", "open enrollment send it")])
 
     def test_linkerror_outside_routing_surfaces_exact_text(self):
@@ -383,6 +384,15 @@ class FlowErrors(unittest.TestCase):
                 self.assertIs(f.link_error, error)
                 self.typer.run.assert_not_called()
                 self.player.play.assert_not_called()
+
+    def test_selecting_a_chat_after_a_refused_question_keeps_the_microphone(self):
+        f = self.make()
+        error = VoiceQuestionError("Open a chat in the HUD, then ask again.")
+        self.client.ask.side_effect = error
+        f.on_clip(b"wav", "wake")
+        self.ui.set_state.assert_called_with("error", str(error))
+        self.assertIsNone(f.link_error)
+        self.player.play.assert_not_called()
 
     def test_route_errors_use_original_words_and_source_fallback(self):
         for error_type in (LinkError, OSError, RuntimeError, ValueError):

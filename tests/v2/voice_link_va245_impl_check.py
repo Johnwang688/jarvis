@@ -1,8 +1,7 @@
 """Package D backend/concurrency regressions: real daemon, temporary HOME,
 ephemeral ports, fake speech engines and providers; no network/model calls.
 
-Implementation notes: voice uses send (never steer), subscribes before sending,
-and filters the returned turn id. Its durable reference stores only the chat id.
+Spoken questions follow the selected HUD chat. Only its id is stored separately.
 """
 from __future__ import annotations
 
@@ -34,11 +33,12 @@ from windows import voicewire as wire
 
 
 class Streaming(existing.rac.Fake):
-    def __init__(self):
-        super().__init__(PN.FAST)
+    def __init__(self, name=PN.FAST):
+        super().__init__(name)
         self.messages, self.steered, self.desk = [], [], []
         self.entered, self.release = threading.Event(), threading.Event()
         self.block = False
+        self.ask_owner = True
         self.interrupted = 0
 
     def send(self, h, message):
@@ -48,7 +48,8 @@ class Streaming(existing.rac.Fake):
         yield Event(EK.TURN_STARTED, h.thread_id)
         if self.block:
             # A question/approval wait is not a turn end.
-            yield Event(EK.QUESTION, h.thread_id, {"req_id": "owner-only", "text": "Continue?", "options": []})
+            if self.ask_owner:
+                yield Event(EK.QUESTION, h.thread_id, {"req_id": "owner-only", "text": "Continue?", "options": []})
             self.release.wait(5)
         # Other turns' events must never enter the voice answer.
         yield Event(EK.TEXT_DELTA, h.thread_id, {"text": "Hel"})
@@ -72,8 +73,18 @@ class Base(existing.Base):
         self.d.providers[PN.FAST] = self.fast
         self.addCleanup(self.fast.release.set)
 
+    def start(self):
+        super().start()
+        self.chosen = self.d.open_thread(self.d.stores.projects.inbox().id, "chat", "fast", {}, title="Project notes")
+        self.select(self.chosen.id)
+
+    def select(self, ident):
+        code, body = existing.HudLaunch.post(self, self.d.face_port, "/voice/chat-target", {"thread_id": ident})
+        self.assertEqual(code, 200, body)
+        return body["thread_id"]
+
     def voice_thread(self):
-        return next(t for t in self.d.stores.threads.list() if t.title == "Voice")
+        return self.chosen
 
     def async_ask(self, client, text="hello", seen=None):
         result, done = [], threading.Event()
@@ -106,7 +117,7 @@ class Backends(Base):
                     with patch.object(self.link, "route_model", return_value=raw):
                         self.assertEqual(c.route("original speech", source), expected)
 
-    def test_voice_created_once_reused_after_restart_and_owner_message(self):
+    def test_selected_chat_reused_after_restart_and_owner_message(self):
         self.start()
         c = self.client()
         seen = []
@@ -114,7 +125,7 @@ class Backends(Base):
         self.assertEqual(seen, ["Hel", "lo"])
         self.assertEqual(c.ask("again"), "Hello")
         thread = self.voice_thread()
-        self.assertEqual(self.d.thread_json(thread)["title"], "Voice")
+        self.assertEqual(self.d.thread_json(thread)["title"], "Project notes")
         self.assertEqual(len(self.d.stores.threads.list()), 1)
         self.assertEqual(thread.provider, PN.FAST)
         self.assertTrue(self.d.stores.projects.get(thread.project_id).inbox)
@@ -122,7 +133,7 @@ class Backends(Base):
             self.assertEqual((message.origin, message.via, message.desk, message.spoken),
                              ("owner", "voice", False, True))
         self.assertEqual(self.fast.desk, [False, False])
-        self.assertEqual(json.loads((self.d.stores.root / "voice-chat.json").read_text()), thread.id)
+        self.assertEqual(json.loads((self.d.stores.root / "voice-target.json").read_text()), thread.id)
         self.d.stop()
         other = Daemon(Stores(self.d.stores.root), {p: self.fast if p == PN.FAST else existing.rac.Fake(p) for p in PN},
                        lambda *_: lambda *_: existing.rac.Decision.DENY, 0, remote_host=None)
@@ -134,51 +145,80 @@ class Backends(Base):
         self.assertEqual(c2.ask("after restart"), "Hello")
         self.assertEqual([t.id for t in other.stores.threads.list()], [thread.id])
 
-    def test_reference_recovery_and_direct_asker_interface(self):
-        self.start()
-        self.assertEqual(self.link.asker("direct", lambda _: None), "Hello")
-        thread = self.voice_thread()
-        (self.d.stores.root / "voice-chat.json").unlink()
-        self.assertEqual(self.client().ask("recover"), "Hello")
-        self.assertEqual([t.id for t in self.d.stores.threads.list()], [thread.id])
-
-    def test_saved_reference_must_identify_an_active_default_project_voice_chat(self):
+    def test_no_target_is_actionable_and_never_creates_a_chat(self):
         self.start()
         c = self.client()
-        c.ask("create Voice")
-        voice_thread = self.voice_thread()
-        other_project = self.d.stores.projects.create("Other", str(self.root))
-        self.d.stores.projects.save(other_project)
-        for changed in ({"title": "Unrelated"}, {"project_id": other_project.id},
-                        {"provider": PN.CLAUDE}, {"archived": "2026-11-16T00:00:00Z"},
-                        {"role": Role.IMPLEMENTER}, {"task_id": "abcd1234"}):
-            with self.subTest(changed=changed):
-                values = {"project_id": voice_thread.project_id, "role": Role.CHAT,
-                          "provider": PN.FAST, "title": "Voice", **changed}
-                unrelated = self.d.stores.threads.create(**values)
-                self.d.stores.threads.save(unrelated)
-                path = self.d.stores.root / "voice-chat.json"
-                path.write_text(json.dumps(unrelated.id))
-                self.assertEqual(c.ask("only in Voice"), "Hello")
-                self.assertEqual(json.loads(path.read_text()), voice_thread.id)
-                self.assertEqual(self.d.stores.threads.read_log(unrelated.id), [])
+        self.assertEqual(self.link.asker("direct", lambda _: None), "Hello")
+        (self.d.stores.root / "voice-target.json").unlink()
+        with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_NO_TARGET):
+            c.ask("no target")
+        self.assertEqual([t.id for t in self.d.stores.threads.list()], [self.chosen.id])
+        self.select(self.chosen.id)
+        self.assertEqual(c.ask("again in my chat"), "Hello")
 
-    def test_archived_or_deleted_voice_is_replaced(self):
+    def test_owner_only_target_and_ineligible_chat_clear_previous_selection(self):
+        self.start()
+        post = existing.HudLaunch.post
+        arg = {"thread_id": None}
+        self.assertEqual(post(self, self.d.port, "/voice/chat-target", arg)[0], 403)
+        self.assertEqual(post(self, self.d.face_port, "/voice/chat-target", arg, origin=False)[0], 403)
+        self.assertEqual(post(self, self.d.face_port, "/voice/chat-target", {"thread_id": "../x"})[0], 400)
+        self.assertEqual(post(self, self.d.face_port, "/voice/chat-target", {})[0], 400)
+        self.assertEqual(self.link.asker("still selected", lambda _: None), "Hello")
+        c = self.client()
+        for changes in ({"role": Role.IMPLEMENTER}, {"task_id": "abcd1234"},
+                        {"archived": "2026-11-16T00:00:00Z"}):
+            with self.subTest(changes=changes):
+                row = self.d.stores.threads.create(**{"project_id": self.chosen.project_id,
+                    "role": Role.CHAT, "provider": PN.FAST, **changes})
+                self.d.stores.threads.save(row)
+                self.select(self.chosen.id)
+                self.assertIsNone(self.select(row.id))
+                with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_NO_TARGET):
+                    c.ask("never sent")
+                self.assertEqual(self.d.stores.threads.read_log(row.id), [])
+        self.assertEqual(len(self.fast.messages), 1)
+
+    def test_selected_cli_chat_uses_its_provider_and_shared_history(self):
+        self.start()
+        c = self.client()
+        self.d.voice_chat.select(None)
+        for name in (PN.CLAUDE, PN.CODEX):
+            with self.subTest(provider=name):
+                provider = Streaming(name)
+                self.d.providers[name] = provider
+                thread = self.d.open_thread(self.chosen.project_id, "chat", name.value, {})
+                self.assertEqual(self.select(thread.id), thread.id)
+                self.d.send(thread.id, UserMessage("typed first", via="hud", desk=True))
+                existing.eventually(lambda: not self.d.thread_json(thread)["running"])
+                self.assertEqual(c.ask("spoken next"), "Hello")
+                self.assertEqual([m.text for m in provider.messages], ["typed first", "spoken next"])
+                records = self.d.stores.threads.read_log(thread.id)
+                terminal = [r for r in records if r["kind"] == "turn_finished"]
+                self.assertFalse(terminal[0].get("native_voice_reply"))
+                self.assertTrue(terminal[1]["native_voice_reply"])
+                self.assertEqual([(m.via, m.desk) for m in provider.messages], [("hud", True), ("voice", False)])
+        self.assertEqual(self.fast.messages, [])
+
+    def test_archived_deleted_or_stale_project_clears_selection(self):
         self.start()
         c = self.client()
         self.assertEqual(c.ask("first"), "Hello")
-        old = self.voice_thread()
-        existing.eventually(lambda: not self.d.thread_json(old)["running"])
-        projects.archive_thread(self.d, old.id)
-        self.assertEqual(c.ask("second"), "Hello")
-        active = [t for t in self.d.stores.threads.list() if not t.archived]
-        self.assertEqual(len(active), 1)
-        self.assertNotEqual(active[0].id, old.id)
-        # Simulate the owner's permanent deletion of the archived chat reference.
-        self.d.close_thread(active[0].id)
-        self.d.stores.threads._delete(active[0].id)
-        self.assertEqual(c.ask("third"), "Hello")
-        self.assertNotEqual(json.loads((self.d.stores.root / "voice-chat.json").read_text()), active[0].id)
+        existing.eventually(lambda: not self.d.thread_json(self.chosen)["running"])
+        projects.archive_thread(self.d, self.chosen.id)
+        with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_NO_TARGET):
+            c.ask("archived")
+        self.assertIsNone(json.loads((self.d.stores.root / "voice-target.json").read_text()))
+        self.assertIsNone(self.select("00000000"))
+        project = self.d.stores.projects.create("Other", str(self.root))
+        self.d.stores.projects.save(project)
+        other = self.d.open_thread(project.id, "chat", "fast", {})
+        self.select(other.id)
+        project.archived = "2026-11-18T00:00:00Z"
+        self.d.stores.projects.save(project)
+        with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_NO_TARGET):
+            c.ask("project archived")
+        self.assertEqual(self.d.stores.threads.read_log(other.id), [])
 
     def test_enrolled_nonowner_wake_refused_hotkey_and_guest_transcribe(self):
         import numpy as np
@@ -278,7 +318,6 @@ class Concurrency(Base):
     def test_voice_deliver_never_steers_and_default_ask_waits_for_approval(self):
         self.start()
         c = self.client()
-        c.ask("create chat")
         thread = self.voice_thread()
         self.fast.block = True
         self.fast.entered.clear()
@@ -300,39 +339,110 @@ class Concurrency(Base):
         self.assertEqual(result, ["Hello"])
         self.assertEqual(seen, ["Hel", "lo"])
 
-    def test_refusal_in_the_gap_between_turns_is_retried(self):
-        # The thread looks idle (no turn running, nothing queued) for a moment
-        # while send still refuses, between a turn finishing and a queued
-        # message's turn starting. That refusal is retried, not ASK_FAILED.
+    def test_steer_replies_to_the_selected_running_turn_without_duplicate_playback(self):
+        self.start()
+        c = self.client()
+        self.fast.block, self.fast.ask_owner = True, False
+        turn = self.d.send(self.chosen.id, UserMessage("typed", via="hud", desk=True))
+        self.assertTrue(self.fast.entered.wait(2))
+        seen = []
+        result, done = self.async_ask(c, seen=seen)
+        existing.eventually(lambda: bool(self.fast.steered))
+        self.fast.release.set()
+        self.assertTrue(done.wait(3))
+        self.assertEqual(result, ["Hello"])
+        self.assertEqual(seen, [])  # a steer is spoken when the provider confirms consumption
+        log = self.d.stores.threads.read_log(self.chosen.id)
+        self.assertEqual([r["turn_id"] for r in log if r["kind"] == "user"], [turn, turn])
+        self.assertTrue(next(r for r in log if r["kind"] == "turn_finished")["native_voice_reply"])
+
+    def test_speech_after_turn_finished_but_before_cleanup_queues_instead_of_steering(self):
+        self.start()
+        c = self.client()
+        finished, release = threading.Event(), threading.Event()
+        real_finish = self.d._finish
+
+        def finish(session, event):
+            real_finish(session, event)
+            finished.set()
+            release.wait(3)
+
+        with patch.object(self.d, "_finish", side_effect=finish):
+            self.d.send(self.chosen.id, UserMessage("first"))
+            self.assertTrue(finished.wait(2))
+            result, done = self.async_ask(c)
+            try:
+                existing.eventually(lambda: bool(self.d._queues.get(self.chosen.id)))
+                self.assertEqual(self.fast.steered, [])
+            finally:
+                release.set()
+            self.assertTrue(done.wait(3))
+        self.assertEqual(result, ["Hello"])
+        self.assertEqual([m.text for m in self.fast.messages], ["first", "hello"])
+
+    def test_interrupt_fallback_preserves_answer_ownership_and_provenance(self):
+        from jarvis.v2.desk import SelectedVoiceMessage
+        from jarvis.v2.provider import SteerRefused
+        self.start()
+        c = self.client()
+        self.fast.block, self.fast.ask_owner = True, False
+        self.d.send(self.chosen.id, UserMessage("first"))
+        self.assertTrue(self.fast.entered.wait(2))
+        with patch.object(self.fast, "steer", side_effect=SteerRefused("unsupported", fallback="interrupt")):
+            self.assertEqual(c.ask("new question"), "Hello")
+        self.assertGreaterEqual(self.fast.interrupted, 1)
+        self.assertIsInstance(self.fast.messages[-1], SelectedVoiceMessage)
+        self.assertTrue(self.fast.messages[-1].text.endswith("new question"))
+        rows = self.d.stores.threads.read_log(self.chosen.id)
+        self.assertTrue([r for r in rows if r["kind"] == "turn_finished"][-1]["native_voice_reply"])
+
+    def test_queued_ask_is_pinned_when_hud_selects_another_chat(self):
+        self.start()
+        c = self.client()
+        self.fast.block = True
+        self.d.send(self.chosen.id, UserMessage("await owner's answer"))
+        existing.eventually(lambda: bool(self.d._sessions[self.chosen.id].questions))
+        result, done = self.async_ask(c, text="follow up")
+        existing.eventually(lambda: bool(self.d._queues.get(self.chosen.id)))
+        other = self.d.open_thread(self.chosen.project_id, "chat", "fast", {})
+        self.select(other.id)
+        self.fast.block = False
+        self.fast.release.set()
+        self.assertTrue(done.wait(3))
+        self.assertEqual(result, ["Hello"])
+        self.assertEqual(c.ask("new target"), "Hello")
+        def words(thread):
+            return [r["data"]["typed"] for r in self.d.stores.threads.read_log(thread.id) if r["kind"] == "user"]
+        self.assertEqual(words(self.chosen), ["await owner's answer", "follow up"])
+        self.assertEqual(words(other), ["new target"])
+
+    def test_unconsumed_steer_follows_its_new_turn(self):
+        self.start()
+        c = self.client()
+        self.fast.block, self.fast.ask_owner = True, False
+        with patch.object(self.fast, "undelivered", create=True, side_effect=lambda _: self.fast.steered[:]):
+            self.d.send(self.chosen.id, UserMessage("typed"))
+            self.assertTrue(self.fast.entered.wait(2))
+            seen = []
+            result, done = self.async_ask(c, text="steer which runs later", seen=seen)
+            existing.eventually(lambda: bool(self.fast.steered))
+            self.fast.release.set()
+            self.assertTrue(done.wait(3))
+        self.assertEqual(result, ["Hello"])
+        self.assertEqual(seen, ["Hel", "lo"])
+        self.assertEqual([m.text for m in self.fast.messages], ["typed", "steer which runs later"])
+        log = self.d.stores.threads.read_log(self.chosen.id)
+        ends = [r for r in log if r["kind"] == "turn_finished"]
+        self.assertFalse(ends[0].get("native_voice_reply"))
+        self.assertTrue(ends[1]["native_voice_reply"])
+
+    def test_delivery_failure_does_not_leak_playback_ownership(self):
         from jarvis.v2.daemon import DaemonError
         self.start()
         c = self.client()
-        c.ask("create chat")
-        real = self.d.send
-        calls = []
-
-        def send(thread_id, message):
-            calls.append(message.text)
-            if len(calls) == 1:
-                raise DaemonError("a turn is starting")
-            return real(thread_id, message)
-
-        with patch.object(self.d, "send", side_effect=send):
-            self.assertEqual(c.ask("in the gap"), "Hello")
-        self.assertEqual(calls, ["in the gap", "in the gap"])
-
-    def test_refusal_that_stays_idle_still_fails(self):
-        from jarvis.v2.daemon import DaemonError
-        from jarvis.v2 import voice_chat
-        self.start()
-        c = self.client()
-        c.ask("create chat")
-        with patch.object(self.d, "send", side_effect=DaemonError("broken session")), \
-                patch.object(voice_chat, "IDLE_REFUSAL_S", 0.2):
-            started = time.monotonic()
+        with patch.object(self.d, "deliver", side_effect=DaemonError("broken session")):
             with self.assertRaisesRegex(wire.LinkError, voice_link.ASK_FAILED):
                 c.ask("never")
-            self.assertLess(time.monotonic() - started, 3.0)
         self.assertEqual(c.ask("link still usable"), "Hello")
 
     def test_replaced_ask_stops_stream_and_new_ask_gets_its_own_turn(self):

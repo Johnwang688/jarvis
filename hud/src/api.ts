@@ -510,6 +510,9 @@ export const api = {
     return { text: body.text || "", backend: body.backend, fellBack: typeof body.fallback === "string" && body.fallback !== "" };
   },
   /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
+  setVoiceChatTarget: (threadId: string | null) => req<{ thread_id: string | null }>("/voice/chat-target", {
+    ...json({ thread_id: threadId }), signal: AbortSignal.timeout(3000),
+  }),
   voiceAgentStatus: (timeout = 2500) => req<VoiceAgentStatus>("/voice-agent/status", { signal: AbortSignal.timeout(timeout) }),
   stopVoiceAgent: () => req<{ stopped: true }>("/voice-agent/stop", json({})),
   startVoiceAgent: () => req<{ connected: true }>("/voice-agent/start", json({})),

@@ -136,6 +136,24 @@ class OverlayTiming(unittest.TestCase):
         self.assertEqual(self.state.state, "hidden")
         self.assertIsNone(self.state.hide_at)
 
+    def test_held_capture_outlives_stale_wake_and_reply_events(self):
+        mic = threading.Event()
+        state = voiceui._DisplayState(lambda: self.now, recording=mic.is_set)
+        state.set("done")
+        mic.set()
+        self.now += 6
+        self.assertFalse(state.expire())
+        self.assertTrue(state.set("listening"))
+        for stale in ("hidden", "thinking", "transcribing", "done", "error"):
+            self.assertFalse(state.set(stale))
+        self.assertEqual(state.state, "listening")
+        state.dismiss()
+        self.assertEqual(state.state, "hidden")
+        self.assertTrue(mic.is_set())
+        mic.clear()
+        self.assertFalse(state.set("done"))
+        self.assertTrue(state.set("listening"))
+
     def test_dismiss_ignores_updates_until_the_next_recording(self):
         self.state.set("listening")
         self.state.dismiss()

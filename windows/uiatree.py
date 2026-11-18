@@ -62,7 +62,7 @@ def clean(text: str | None) -> str:
     return " ".join(out.split())
 
 
-def snapshot(backend, max_elements: int = 150) -> tuple[str, dict]:
+def snapshot(backend, max_elements: int = 150, *, ref_prefix: str = "e") -> tuple[str, dict]:
     """Render the tree the way the browser tools render a page.
 
     The model gets `[e12] button "Save"` lines and passes e12 back. Refs beat
@@ -100,7 +100,7 @@ def snapshot(backend, max_elements: int = 150) -> tuple[str, dict]:
                 indent = "  " * min(depth, 8)
                 if interactive:
                     counter[0] += 1
-                    ref = f"e{counter[0]}"
+                    ref = f"{ref_prefix}{counter[0]}"
                     refs[ref] = {"path": child_path, "role": role, "name": name}
                     tag = f"[{ref}] "
                 else:

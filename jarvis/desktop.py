@@ -28,6 +28,7 @@ import time
 from typing import Any
 
 from . import config
+from windows import desktopwire, voicewire
 
 
 # How long to let a running bridge redial before declaring it absent. The
@@ -42,7 +43,7 @@ class DesktopError(RuntimeError):
 class DesktopSession:
     """Listens for the bridge and marshals one request at a time."""
 
-    def __init__(self, port: int | None = None):
+    def __init__(self, port: int | None = None, *, key_path=None):
         # `is None`, not `or`: port 0 means "any free port", which the tests
         # rely on to avoid fighting a real bridge for the fixed one.
         self.port = config.DESKTOP_PORT if port is None else port
@@ -53,6 +54,8 @@ class DesktopSession:
         self._accept_thread: threading.Thread | None = None
         self._next_id = 0
         self._bridge_info: dict | None = None
+        self._key_path = key_path
+        self._paired = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -81,24 +84,39 @@ class DesktopSession:
                 conn, _ = server.accept()
             except OSError:
                 return
+            stream = None
             try:
+                conn.settimeout(3.0)
                 stream = conn.makefile("rwb")
-                hello = json.loads(stream.readline() or "{}")
+                hello = voicewire.read_json(stream, 4096)
+                paired = hello.get("hello") == "jarvis-desktop-bridge" and hello.get("version") == "2"
+                if paired:
+                    key = desktopwire.private_key(self._key_path or config.voice_link_key())
+                    desktopwire.prove_daemon(stream, hello, key)
+                conn.settimeout(None)
             except Exception:
+                if stream is not None:
+                    stream.close()
                 conn.close()
                 continue
             with self._lock:
+                if self._server is not server or (self._conn is not None and self._paired and not paired):
+                    stream.close()
+                    conn.close()
+                    continue
                 if self._conn is not None:
                     try:
+                        self._stream.close()
                         self._conn.close()
                     except OSError:
                         pass
                 self._conn, self._stream = conn, stream
                 self._bridge_info = hello
+                self._paired = paired
 
     def stop(self) -> None:
         with self._lock:
-            for sock in (self._conn, self._server):
+            for sock in (self._stream, self._conn, self._server):
                 try:
                     if sock:
                         sock.close()
@@ -122,7 +140,7 @@ class DesktopSession:
 
     # -- request/response --------------------------------------------------
 
-    def request(self, op: str, timeout: float = 90.0, **fields) -> dict:
+    def request(self, op: str, timeout: float = 90.0, *, require_pair=False, current=None, **fields) -> dict:
         """Send one op to the bridge and wait for its reply."""
         self.start()
         # The bridge redials every couple of seconds, so a Jarvis that just
@@ -140,6 +158,10 @@ class DesktopSession:
             conn, stream = self._conn, self._stream
             if conn is None or stream is None:
                 raise DesktopError("the desktop bridge disconnected.")
+            if require_pair and not self._paired:
+                raise DesktopError("Start the paired Windows desktop bridge to use it from HUD chats.")
+            if current is not None and not current():
+                raise DesktopError("The owner chat turn is no longer current.")
             self._next_id += 1
             payload = {"id": self._next_id, "op": op, **fields}
             try:
@@ -155,9 +177,12 @@ class DesktopSession:
                 ) from exc
         if not line:
             with self._lock:
-                self._conn = self._stream = None
+                if self._conn is conn:
+                    self._conn = self._stream = None
             raise DesktopError("the desktop bridge closed the connection.")
         reply = json.loads(line)
+        if reply.get("id") != payload["id"]:
+            raise DesktopError("Mismatched reply from the Windows desktop bridge.")
         if not reply.get("ok"):
             raise DesktopError(reply.get("error", "unknown bridge error"))
         return reply.get("result", {})

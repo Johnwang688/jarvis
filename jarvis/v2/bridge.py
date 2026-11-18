@@ -284,7 +284,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         # A call that may outlast its relay's socket: the Browser look and act,
         # and chat_wait (chat-to-chat C4, §5.3), whose wait reads `current()`
         # through `runtime.should_stop()` and ends when the CLI's relay goes.
-        socket_bound = browser_call or name == "chat_wait"
+        desktop_call = name in session_tools.HUD_DESKTOP_TOOLS
+        socket_bound = browser_call or desktop_call or name == "chat_wait"
         drive_turn = getattr(session, "drive_turn", None) if worker is not None else None
 
     native_current = None
@@ -334,6 +335,10 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
     def dispatch():
         runtime.bind(caller=who, depth=0, tool_names=names, approve=approve,
                      desk=desk, should_stop=lambda: not current())
+        if desktop_call:
+            from .tools.hud_desktop import current as current_desktop, UNAVAILABLE
+            if not current_desktop():
+                return tools.ToolResult(UNAVAILABLE)
         if entry.owner_gated and drive_turn is None:
             return tools.ToolResult("Refused: this Browser action needs the current owner chat turn.")
         # Codex native approval delegates transport for every offered tool.

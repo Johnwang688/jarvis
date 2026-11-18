@@ -1023,34 +1023,7 @@ DESKTOP_BRIDGE_CMD = rf"{DESKTOP_BRIDGE_DIR}\run-bridge.cmd"
 #   "uia"  — UI Automation. Native, UWP, WPF, WinForms.
 #   "msaa" — MSAA/IAccessible. Required for Chromium/Electron, which exposes
 #            nothing useful over UIA (verified 2026-07-31; see windows/bridge.py).
-DESKTOP_APPS: dict[str, dict] = {
-    "settings": {
-        "description": "Windows Settings (system, network, personalization, updates)",
-        "title": "Settings",
-        "class": "ApplicationFrameWindow",
-        "backend": "uia",
-        "maximize": True,
-        "launch": {"kind": "uri", "target": "ms-settings:"},
-    },
-    "claude": {
-        "description": "Claude Desktop",
-        "title": "Claude",
-        "class": "Chrome_WidgetWin_1",
-        "backend": "msaa",
-        "maximize": False,
-        # MSIX/Store package: the exe under WindowsApps is ACL'd and
-        # `explorer.exe shell:AppsFolder\…` silently drops arguments, which
-        # would cost Electron the accessibility flag. The activation manager
-        # is the only launch route that passes a command line.
-        "launch": {
-            "kind": "aumid",
-            "target": "Claude_pzs8sxrjxfjjc!Claude",
-            # Without this Electron leaves its renderer accessibility tree
-            # switched off and the window reads as one empty pane.
-            "args": "--force-renderer-accessibility",
-        },
-    },
-}
+from windows.desktopwire import APPS as DESKTOP_APPS
 
 # Speech-to-text (phase 2). Cloud via the same key — owner's call, see
 # CLAUDE.md. Probe 2026-07-30 (tests/voice_probe.py, real webm/opus):

@@ -101,6 +101,7 @@ import { micSuppressedBySpeech, onMicModeChange, speakingThreads, speechSilenced
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
 import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
 import { microphoneSource, startSharedMic } from "./lib/sharedMic";
+import { useVoiceChatTarget } from "./lib/voiceChatTarget";
 import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
@@ -607,6 +608,14 @@ export default function App() {
     view.fit.panes.includes(view.ws.focused) && view.ws.panes[view.ws.focused - 1].view === "chat"
       ? view.ws.focused : null;
   const selected = selectedChatOf(view.ws, view.fit.panes, state.selectedOrder);
+  const voicePane = selected === null ? null : state.chats[selected];
+  // A compose pane has no settled transcript, even while its first send is
+  // creating a thread. Never leave the previous pane as its voice destination.
+  const voiceThread = voicePane?.threadId && !voicePane.compose
+    ? state.threads.find(t => t.id === voicePane.threadId && t.role === "chat" && !t.task_id && !t.archived) : null;
+  const voiceDestination = voiceThread && state.projects.some(p => p.id === voiceThread.project_id && !p.archived)
+    ? voiceThread.id : null;
+  const syncVoiceDestination = useVoiceChatTarget(booted, voiceDestination);
   // The pane in slot 1: the chat the window is about when none was ever
   // selected. Never id 1, which a close may have taken away (WP-G2).
   const home: PaneNo = view.fit.panes[0] ?? orderOf(view.ws)[0];
@@ -1343,8 +1352,8 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         }), observeVoiceTiming(() => speech.controller.outputEnabled(threadId!)) ?? false);
         const status = result?.status ?? "started";
-        // A message went to this thread: the reply being read is stale (V-7).
-        if (status !== "dropped") speech.controller.messageSent(threadId);
+        // The ordered user_message event cancels old speech for an accepted
+        // send. Its new reply can already be playing when this POST returns.
         if (status === "started" && result.turn_id) {
           dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
         }
@@ -1603,7 +1612,7 @@ export default function App() {
       observeVoiceTiming(() => voiceTimings.event(e));
       try { speech.controller.event(e); } catch { /* speech never breaks the stream */ }
       if (devservers.event(e)) return;
-      if (kind === "_connected") { devservers.connect(); void speech.voices.load(); void speaker.load(); }
+      if (kind === "_connected") { syncVoiceDestination(); devservers.connect(); void speech.voices.load(); void speaker.load(); }
       if (kind === "thread_voice") speech.voices.apply(data);
       if (kind === "speaker_guest") speaker.apply(data);
       // V13: another window (or a hand edit the daemon noticed) changed the speech-to-text
@@ -1752,7 +1761,7 @@ export default function App() {
           // Only the selected chat's own turn opens the follow-up window. A
           // Discord turn, or a turn in another pane, finishing must not start
           // the HUD listening.
-          if (followUp) {
+          if (followUp && e.native_voice_reply !== true) {
             if (speech.controller.view().active) followUpAfterSpeech.current = true;
             else openFollowUpFor(at.selectedChat!);
           }
@@ -3552,7 +3561,7 @@ export default function App() {
       setVoiceChecked(true);
     } catch (error) {
       failedVoiceAction.current = stop ? "stop" : "start";
-      setVoiceAgentError(error instanceof Error ? error.message : "Voice Anywhere could not change state.");
+      setVoiceAgentError(error instanceof Error ? error.message : "Voice could not change state.");
     } finally {
       voiceRevision.current++;
       voiceAgentRequest.current = false;
@@ -3586,7 +3595,7 @@ export default function App() {
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
     if (micSource === "stopped" || micSource === "waiting") {
-      dispatch({ type: "patch", patch: { error: micSource === "stopped" ? "Start Voice Anywhere beside the orb to use the microphone." : "The microphone is connecting." } });
+      dispatch({ type: "patch", patch: { error: micSource === "stopped" ? "Choose Start voice beside the orb to use the microphone." : "The microphone is connecting." } });
       return;
     }
     // Push-to-talk and the orb act on the selected chat (decisions W-6): with
@@ -3675,7 +3684,8 @@ export default function App() {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       const blocked = live.current.approvals.length > 0;
-      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked })) sayTalkKeyOnce();
+      const orbKey = e.target instanceof HTMLElement && e.target.id === "orb";
+      if (!orbKey && wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked })) sayTalkKeyOnce();
       // **A pending Monaco chord's second key is Monaco's** (decisions E-10,
       // the window's one tracker in lib/editorkeys.ts, shared with the layout
       // keys): Ctrl+K then Ctrl+D in an editor is Monaco's chord, not
@@ -5058,6 +5068,7 @@ export default function App() {
             onModeChange={setMode}
             voiceAction={voiceAction}
             sharedMicLive={sharedMicLive}
+            voiceHasChat={voiceDestination !== null}
             voiceAgentStatus={voiceAgentStatus}
             voiceAgentError={voiceAgentError}
             onToggleVoiceAgent={() => { void toggleVoiceAgent(); }}
