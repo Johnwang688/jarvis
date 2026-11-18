@@ -2006,7 +2006,8 @@ def speed_reconnect_checks() -> None:
         provider.set_model(handle, "claude-fable-5-2", None, speed=None)
         standard = FakeClient.instances[-1]
         check(standard is not faster and faster.disconnects == 1, "speed: reset reconnects")
-        eq(standard.options.settings, None, "speed: Standard omits fastMode")
+        eq(json.loads(standard.options.settings), {"fastMode": False},
+           "speed: Standard says fastMode false (never inherited from settings files)")
         provider.close(handle)
 
 

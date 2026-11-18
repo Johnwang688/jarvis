@@ -143,17 +143,20 @@ class Choices(unittest.TestCase):
 
     def test_claude_fastmode_only_when_fast_and_supported(self):
         self.assertEqual(json.loads(self.options("fast").settings), {"fastMode": True})
+        # Standard is explicit too, so Claude Code's own settings files can never
+        # turn fast mode on behind the HUD's back (follow-up 1, 2026-11-17).
         for speed, model in ((None, "claude-a"), ("priority", "claude-a"), ("fast", "claude-b")):
-            self.assertIsNone(self.options(speed, model).settings)
+            self.assertEqual(json.loads(self.options(speed, model).settings), {"fastMode": False})
 
     def test_claude_settings_merge_preserves_other_options(self):
         options = self.options("fast", settings={"theme": "dark", "nested": {"keep": True}})
         self.assertEqual(json.loads(options.settings),
                          {"theme": "dark", "nested": {"keep": True}, "fastMode": True})
-        self.assertEqual(json.loads(self.options(None, settings={"theme": "dark"}).settings), {"theme": "dark"})
+        self.assertEqual(json.loads(self.options(None, settings={"theme": "dark"}).settings),
+                         {"theme": "dark", "fastMode": False})
         for speed, model in ((None, "claude-a"), ("fast", "claude-b")):
             self.assertEqual(json.loads(self.options(speed, model, settings={"fastMode": True, "theme": "dark"}).settings),
-                             {"theme": "dark"})
+                             {"theme": "dark", "fastMode": False})
 
 
 class LockedWrites(unittest.TestCase):
