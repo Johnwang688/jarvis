@@ -186,13 +186,11 @@ export function Orb(props: {
     </div>
   );
   return (
-    <>
     <div
       id="orbdock"
       className={props.compact ? "mini" : props.tight ? "tight" : undefined}
       data-mode={props.mode}
     >
-      {props.tight && !props.compact ? props.speech : null}
       <div id="micstrip">
         {folded ? null : props.speech}
         <div id="dictation" data-testid="dictation" title={voiceReady ? "HUD dictation: AUTO sends, REVIEW puts words in the box, OFF pauses HUD dictation. Stop Voice Anywhere to release the microphone." : "What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes HUD dictation"}>
@@ -217,62 +215,60 @@ export function Orb(props: {
           </div>
         </div>
       </div>
-      <canvas
-        ref={canvasRef}
-        id="orb"
-        data-testid="orb"
-        data-state={props.state}
-        // Push-to-talk's key since 2026-10-10 (lib/talkkey.ts); in a
-        // terminal Ctrl+D is the shell's, and the orb is the way to talk.
-        title="Hold to talk, or hold Ctrl+D"
-        onPointerDown={(e) => {
-          e.preventDefault();
-          props.onPress();
-        }}
-        onPointerUp={props.onRelease}
-        onPointerLeave={props.onRelease}
-      />
-      {props.avatarUrl ? (
-        <img
-          className="avatar"
-          id="avatar"
-          alt=""
-          src={props.avatarUrl}
-          onError={(e) => {
-            // A face that will not load falls back to the emblem rather than
-            // leaving a broken image where the PTT button is.
-            (e.currentTarget as HTMLImageElement).style.display = "none";
+      <div className="orb-face">
+        <canvas
+          ref={canvasRef}
+          id="orb"
+          data-testid="orb"
+          data-state={props.state}
+          // Push-to-talk's key since 2026-10-10 (lib/talkkey.ts); in a
+          // terminal Ctrl+D is the shell's, and the orb is the way to talk.
+          title="Hold to talk, or hold Ctrl+D"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            props.onPress();
           }}
+          onPointerUp={props.onRelease}
+          onPointerLeave={props.onRelease}
         />
-      ) : null}
-      <div className="st" id="orbstatus" data-testid="orb-status" title={props.status || undefined}>
-        {props.status || ""}
+        {props.avatarUrl ? (
+          <img
+            className="avatar"
+            id="avatar"
+            alt=""
+            src={props.avatarUrl}
+            onError={(e) => {
+              // A face that will not load falls back to the emblem rather than
+              // leaving a broken image where the PTT button is.
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : null}
+        <div className="st" id="orbstatus" data-testid="orb-status" title={props.status || undefined}>
+          {props.status || ""}
+        </div>
       </div>
+      {folded ? (
+        <div className="folded-voice-controls" id={props.compact ? "voice-controls-rail" : undefined}>
+          {props.compact ? props.speechRail : props.speech}
+          {voiceControl}
+          <button
+            type="button"
+            id="modecycle"
+            className={props.compact ? undefined : "beside"}
+            data-testid="dictation-cycle"
+            data-mode={props.mode}
+            disabled={props.blocked}
+            // A click must not leave it focused: a habitual Space would cycle the
+            // mic on again (OFF → REVIEW → AUTO; lib/talkkey.ts, noPointerFocus).
+            onMouseDown={noPointerFocus}
+            title={`Dictation: ${props.mode.toUpperCase()} — click for ${next.toUpperCase()}`}
+            onClick={() => props.onModeChange(next)}
+          >
+            {props.mode === "review" ? "rev" : props.mode}
+          </button>
+        </div>
+      ) : null}
     </div>
-    {props.compact ? (
-      <div id="voice-controls-rail">{props.speechRail}{voiceControl}</div>
-    ) : props.tight ? voiceControl : null}
-    {folded ? (
-      // The dock is scaled down to a 36px mini orb, and so would a strip inside
-      // it be; a short window has no room above the orb for it. Either way the
-      // mode is one small button that cycles: above the mini orb, or beside the
-      // full one.
-      <button
-        type="button"
-        id="modecycle"
-        className={props.compact ? undefined : "beside"}
-        data-testid="dictation-cycle"
-        data-mode={props.mode}
-        disabled={props.blocked}
-        // A click must not leave it focused: a habitual Space would cycle the
-        // mic on again (OFF → REVIEW → AUTO; lib/talkkey.ts, noPointerFocus).
-        onMouseDown={noPointerFocus}
-        title={`Dictation: ${props.mode.toUpperCase()} — click for ${next.toUpperCase()}`}
-        onClick={() => props.onModeChange(next)}
-      >
-        {props.mode === "review" ? "rev" : props.mode}
-      </button>
-    ) : null}
-    </>
   );
 }

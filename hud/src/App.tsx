@@ -4988,49 +4988,83 @@ export default function App() {
           + (micTight ? "mic-tight " : "") + (!drawn.leftFolded && stripShown(speechView, voiceLabel !== "") ? "speech-on" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
-        {drawn.leftFolded ? (
-          <Rail
-            side="left"
-            auto={drawn.autoLeft}
-            disabled={workBlocked}
-            onExpand={() => view.open("left")}
-            onNewThread={() => newThread()}
+        <div className="pane voice-sidebar">
+          {drawn.leftFolded ? (
+            <Rail
+              side="left"
+              auto={drawn.autoLeft}
+              disabled={workBlocked}
+              onExpand={() => view.open("left")}
+              onNewThread={() => newThread()}
+            />
+          ) : null}
+          <Sidebar
+            zoom={view.zoom}
+            layoutBlocked={blocked}
+            onCollapse={sidebarCalls.onCollapse}
+            projects={state.projects}
+            archivedNames={state.archivedNames}
+            platforms={state.platforms}
+            threads={state.threads}
+            tasks={state.tasks}
+            taskThreads={state.taskThreads}
+            activity={state.activity}
+            activeProjectId={activeProjectId}
+            open={sidebarOpen}
+            composing={sidebarComposing}
+            taskId={state.taskId}
+            onPickThread={sidebarCalls.onPickThread}
+            onPickTask={sidebarCalls.onPickTask}
+            onNewProject={sidebarCalls.onNewProject}
+            onNewThread={sidebarCalls.onNewThread}
+            onNewTask={sidebarCalls.onNewTask}
+            moveError={state.moveError}
+            onMoveThread={sidebarCalls.onMoveThread}
+            onMoveCompose={sidebarCalls.onMoveCompose}
+            onEditProject={sidebarCalls.onEditProject}
+            onArchiveProject={sidebarCalls.onArchiveProject}
+            onRenameProject={sidebarCalls.onRenameProject}
+            onRenameThread={sidebarCalls.onRenameThread}
+            onArchiveThread={sidebarCalls.onArchiveThread}
+            onOpen={sidebarCalls.onOpen}
+            inbox={sidebarInbox}
+            onOpenInbox={sidebarCalls.onOpenInbox}
+            review={sidebarReview}
+            onOpenReview={sidebarCalls.onOpenReview}
           />
-        ) : null}
-        <Sidebar
-          zoom={view.zoom}
-          layoutBlocked={blocked}
-          onCollapse={sidebarCalls.onCollapse}
-          projects={state.projects}
-          archivedNames={state.archivedNames}
-          platforms={state.platforms}
-          threads={state.threads}
-          tasks={state.tasks}
-          taskThreads={state.taskThreads}
-          activity={state.activity}
-          activeProjectId={activeProjectId}
-          open={sidebarOpen}
-          composing={sidebarComposing}
-          taskId={state.taskId}
-          onPickThread={sidebarCalls.onPickThread}
-          onPickTask={sidebarCalls.onPickTask}
-          onNewProject={sidebarCalls.onNewProject}
-          onNewThread={sidebarCalls.onNewThread}
-          onNewTask={sidebarCalls.onNewTask}
-          moveError={state.moveError}
-          onMoveThread={sidebarCalls.onMoveThread}
-          onMoveCompose={sidebarCalls.onMoveCompose}
-          onEditProject={sidebarCalls.onEditProject}
-          onArchiveProject={sidebarCalls.onArchiveProject}
-          onRenameProject={sidebarCalls.onRenameProject}
-          onRenameThread={sidebarCalls.onRenameThread}
-          onArchiveThread={sidebarCalls.onArchiveThread}
-          onOpen={sidebarCalls.onOpen}
-          inbox={sidebarInbox}
-          onOpenInbox={sidebarCalls.onOpenInbox}
-          review={sidebarReview}
-          onOpenReview={sidebarCalls.onOpenReview}
-        />
+          <Orb
+            state={orbShown}
+            level={state.level}
+            outputLevel={() => speech.controller.level()}
+            speech={<SpeechStrip view={speechView} label={speechLabel} blocked={workBlocked}
+              guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
+              onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
+              onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
+            speechRail={<SpeechStrip compact view={speechView} label={speechLabel} blocked={workBlocked}
+              guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
+              onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
+              onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
+            rings={state.avatar?.rings}
+            accent={state.avatar?.accent}
+            avatarUrl={state.avatar ? `/avatar.svg?v=${avatarCacheBust}` : null}
+            // A folded sidebar leaves a 36px rail: the orb shrinks into its foot
+            // rather than sitting on top of the input bar.
+            compact={drawn.leftFolded}
+            tight={micTight}
+            blocked={workBlocked}
+            zoom={view.zoom}
+            status={orbStatus}
+            mode={state.dictation}
+            onModeChange={setMode}
+            voiceAction={voiceAction}
+            sharedMicLive={sharedMicLive}
+            voiceAgentStatus={voiceAgentStatus}
+            voiceAgentError={voiceAgentError}
+            onToggleVoiceAgent={() => { void toggleVoiceAgent(); }}
+            onPress={press}
+            onRelease={release}
+          />
+        </div>
         {drawn.leftFolded ? null : (
           <Splitter
             side="left"
@@ -5149,38 +5183,7 @@ export default function App() {
         onPlace={chooseDevPane}
         onDismiss={id => { if (!blockedNow.current && !settingsNow.current) void devservers.dismiss(id); }} />
 
-      <Orb
-        state={orbShown}
-        level={state.level}
-        outputLevel={() => speech.controller.level()}
-        speech={<SpeechStrip view={speechView} label={speechLabel} blocked={workBlocked}
-          guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
-          onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
-          onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
-        speechRail={<SpeechStrip compact view={speechView} label={speechLabel} blocked={workBlocked}
-          guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
-          onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
-          onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
-        rings={state.avatar?.rings}
-        accent={state.avatar?.accent}
-        avatarUrl={state.avatar ? `/avatar.svg?v=${avatarCacheBust}` : null}
-        // A folded sidebar leaves a 36px rail: the orb shrinks into its foot
-        // rather than sitting on top of the input bar.
-        compact={drawn.leftFolded}
-        tight={micTight}
-        blocked={workBlocked}
-        zoom={view.zoom}
-        status={orbStatus}
-        mode={state.dictation}
-        onModeChange={setMode}
-        voiceAction={voiceAction}
-        sharedMicLive={sharedMicLive}
-        voiceAgentStatus={voiceAgentStatus}
-        voiceAgentError={voiceAgentError}
-        onToggleVoiceAgent={() => { void toggleVoiceAgent(); }}
-        onPress={press}
-        onRelease={release}
-      />
+
       </div>
       </WorkspaceBoundary>
 

@@ -14,13 +14,36 @@ from tests.face.hud_v2_declutter_check import _fold_left  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 
 
+def check_voice_geometry(page):
+    # Active hit targets, not just CSS visibility. The 132px fixed dock used
+    # to put the mic/status over the bottom of the tree and Schedules.
+    info = page.evaluate("""() => {
+        const footer = document.querySelector('#orbdock').getBoundingClientRect();
+        const side = document.querySelector('.voice-sidebar').getBoundingClientRect();
+        const button = document.querySelector('#voice-agent-start');
+        const controls = [...new Set([button, ...document.querySelectorAll(
+          '#micstrip button, #modecycle, #orb, #speechstrip button, #sidebar .sidebar-foot button'
+        )])].filter(el => el.getBoundingClientRect().height > 0);
+        const covered = controls.filter(el => {
+          const r = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return !el.contains(hit) || r.right > side.right + 1 || r.left < side.left - 1;
+        }).map(el => el.id || el.textContent);
+        const schedule = document.querySelector('#sidebar .sidebar-foot').getBoundingClientRect();
+        return { covered, footerTop: footer.top, schedulesBottom: schedule.bottom,
+                 buttonFits: button.scrollWidth <= button.clientWidth + 1 };
+    }""")
+    assert not info["covered"] and info["buttonFits"], info
+    assert info["schedulesBottom"] <= info["footerTop"] + 1, info
+
+
 def main():
     mock = MockDaemon(0).start()
     url = f"http://127.0.0.1:{mock.port}"
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
-            ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
+            ctx = browser.new_context(viewport={"width": 1408, "height": 853}, permissions=["microphone"])
             guard(ctx)
             ctx.add_init_script("""
                 window.testMics = [];
@@ -104,6 +127,7 @@ def main():
             status.update(can_stop=True, shared_mic=True)
             expect(page.get_by_role("button", name="Stop Voice Anywhere")).to_be_enabled()
             expect(result).to_contain_text("share one mic")
+            check_voice_geometry(page)
             assert page.evaluate("window.testMics.every(t => t.readyState === 'ended')")
             page.get_by_role("button", name="Stop Voice Anywhere").click()
             expect(indicator).to_have_text("Off")
@@ -126,9 +150,11 @@ def main():
 
             page.set_viewport_size({"width": 1280, "height": 500})
             expect(page.locator("#voice-agent-start.beside")).to_be_visible()
+            check_voice_geometry(page)
             page.set_viewport_size({"width": 1280, "height": 800})
             _fold_left(page, until)
             expect(page.locator("#voice-agent-start.rail")).to_be_visible()
+            check_voice_geometry(page)
             button.click()
             until(lambda: len(pending) == 1)
             pending.pop().fulfill(status=409, json={"error": "Voice link is offline."})

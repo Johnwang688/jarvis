@@ -226,7 +226,12 @@ input:focus, textarea:focus, select:focus { outline: none; box-shadow: var(--foc
 
 /* Widths are the window's (lib/layout.ts fits them); the fallbacks are the
    defaults. A folded pane is hidden, never unmounted, so its state survives. */
-#sidebar { flex: 0 0 var(--left-w, 236px); border-right: 1px solid var(--rim); }
+.voice-sidebar { flex: 0 0 var(--left-w, 236px); border-right: 1px solid var(--rim); }
+#shell.left-collapsed .voice-sidebar { flex-basis: 36px; }
+.voice-sidebar > #sidebar, .voice-sidebar > .rail.left {
+  flex: 1 1 auto; min-height: 0; background: transparent; box-shadow: none; border: 0;
+}
+.voice-sidebar > .rail.left { padding-bottom: 0; overflow-y: auto; }
 #main { flex: 1 1 auto; }
 #right { flex: 0 0 var(--right-w, 316px); border-left: 1px solid var(--rim); }
 #shell.left-collapsed #sidebar, #shell.right-collapsed #right { display: none; }
@@ -355,13 +360,6 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
   font: 10px var(--mono); color: var(--text-muted); flex: 0 4 auto; max-width: 45%;
   min-width: 0; overflow: hidden; text-overflow: ellipsis; word-spacing: normal; }
 
-/* The fixed orb dock sits over the sidebar's bottom-left corner (132px plus
-   its 10px inset, and the mic strip's ~44px above it), so the sidebar keeps that band empty and its last rows —
-   schedules, usage, route — sit above the orb instead of under it. */
-#sidebar { padding-bottom: 190px; }
-/* A short window folds the strip into one button beside the orb (Orb.tsx),
-   and the sidebar gets the strip's 44px back for its rows. */
-#shell.mic-tight #sidebar { padding-bottom: 146px; }
 .sidebar-foot { border-top: 1px solid var(--border); flex: 0 0 auto; padding: 4px 0; }
 
 .badge {
@@ -652,16 +650,16 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 
 /* The mic: dictation mode and level meter, a strip above the orb. */
 #micstrip {
-  position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 6px;
+  min-width: 0; margin-bottom: 6px;
   display: flex; flex-direction: column; gap: 5px; align-items: stretch;
 }
 .mic-tools { display: flex; flex-direction: column; gap: 4px; }
 #micstrip #level { flex: 0 0 auto; width: 100%; }
 .voice-agent-control { min-width: 0; }
-.voice-agent-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.voice-agent-header { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; min-width: 0; }
 #voice-agent-start {
-  flex: 0 1 auto; min-width: 0; height: 23px; padding: 0 6px;
-  font: 10px var(--mono); word-spacing: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%; min-height: 23px; padding: 2px 6px;
+  font: 10px var(--mono); word-spacing: normal; white-space: normal;
 }
 #voice-agent-start:disabled { opacity: 0.8; }
 .voice-agent-state {
@@ -678,20 +676,12 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 #voice-agent-result:not(:empty) {
   padding-top: 3px; color: var(--text); font-size: 11px; line-height: 1.3;
 }
-.voice-agent-control.beside { position: fixed; left: 146px; bottom: 42px; max-width: 195px; z-index: 40; }
+.folded-voice-controls { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .voice-agent-control.rail .voice-agent-header { flex-direction: column; gap: 2px; }
 .voice-agent-control.rail .voice-agent-state { gap: 0; font-size: 8px; }
-.voice-agent-control.rail .voice-agent-state::before { display: none; }
-.voice-agent-control.rail #voice-agent-result:not(:empty) {
-  position: absolute; bottom: 0; left: 36px; width: 180px; padding: 5px 7px;
-  border: 1px solid var(--red-line); border-radius: var(--radius-btn); background: var(--bg-3);
-}
-#voice-agent-start.rail { width: 32px; height: 20px; }
-#voice-controls-rail {
-  position: fixed; left: 2px; bottom: 72px; width: 32px; z-index: 40;
-  display: flex; flex-direction: column-reverse; gap: 4px;
-}
-#voice-controls-rail #speechstrip.compact { position: static; }
+.voice-agent-control.rail .voice-agent-state::before, .voice-agent-control.rail #voice-agent-result { display: none; }
+#voice-agent-start.rail { width: 32px; }
+#voice-controls-rail { align-items: center; }
 :is(#dictation, .dictation) { display: flex; gap: 0; flex: 0 0 auto; justify-content: center; }
 :is(#dictation, .dictation) button {
   padding: 4px 6px; border-radius: 0; margin-left: -1px;
@@ -715,31 +705,24 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; word-spacing: normal; }
 
 /* ---- orb ---- */
-#orbdock { position: fixed; left: 10px; bottom: 10px; width: 132px; height: 132px; z-index: 40; }
-#orbdock canvas { width: 132px; height: 132px; cursor: pointer; touch-action: none; user-select: none; border-radius: 50%; }
-/* An <img>, never inline markup: the file is owner-authored but write_file can
-   reach avatars/, and this is the window that gates approvals. Fixed size and
-   pointer-events:none keep it mechanically confined to the orb — it cannot
-   grow to cover the authorization card or intercept a click meant for it. */
+/* The footer takes its own height before the tree gets its scroll area,
+   including when a status wraps or the owner changes the HUD zoom. */
+#orbdock { flex: 0 0 auto; min-width: 0; padding: 6px 10px 10px; }
+.orb-face { width: 132px; max-width: 100%; aspect-ratio: 1; position: relative; }
+#orbdock canvas { display: block; width: 100%; height: 100%; cursor: pointer; touch-action: none; user-select: none; border-radius: 50%; }
 #orbdock img.avatar {
-  position: absolute; left: 50%; top: 50%; width: 52px; height: 52px;
+  position: absolute; left: 50%; top: 50%; width: 39.4%; height: 39.4%;
   transform: translate(-50%, -50%); pointer-events: none; user-select: none;
 }
-/* Folded into the left rail's foot (36px) while the sidebar is hidden: the
-   same orb, scaled, still the push-to-talk control. */
-#orbdock.mini { left: 2px; bottom: 8px; transform: scale(0.2424); transform-origin: left bottom; }
-#orbdock.mini .st, #orbdock.mini #micstrip, #orbdock.tight #micstrip { display: none; }
-
-/* Jarvis's voice (components/SpeechStrip): pause, skip, stop and a line, above
-   the mic strip. Not in the layout until there is speech to control, so the
-   sidebar gives it its room only then (`.speech-on`). */
-#orbdock { --micstrip-h: 40px; }
-#orbdock.tight { --micstrip-h: 0px; }
-#speechstrip {
-  position: absolute; left: 0; right: 0; bottom: calc(100% + var(--micstrip-h) + 6px);
-  display: flex; flex-direction: column; gap: 3px; align-items: stretch;
+#orbdock.tight {
+  display: grid; grid-template-columns: minmax(58px, 38%) minmax(0, 1fr);
+  align-items: end; gap: 6px; padding: 4px 6px 6px;
 }
-#micstrip #speechstrip { position: static; }
+#orbdock.tight .folded-voice-controls { align-self: center; }
+#orbdock.mini { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 1px 8px; }
+#orbdock.mini .orb-face { order: 1; width: 32px; }
+#orbdock.mini .st, #orbdock.mini #micstrip, #orbdock.tight #micstrip { display: none; }
+#speechstrip { min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
 #speechstrip .note {
   font: 9px var(--mono); letter-spacing: 0.06em; color: var(--text-muted); text-transform: uppercase;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; word-spacing: normal; }
@@ -755,10 +738,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   padding: 2px 0; width: 36px; border-radius: 0; margin-left: -1px; font: 11px var(--mono); word-spacing: normal; }
 #speechstrip button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
 #speechstrip button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
-#speechstrip.compact { position: fixed; left: 2px; bottom: 72px; width: 32px; display: block; z-index: 40; }
+#speechstrip.compact { width: 32px; display: block; }
 #speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius-btn); margin: 0; }
-#shell.speech-on #sidebar { padding-bottom: 224px; }
-#shell.mic-tight.speech-on #sidebar { padding-bottom: 180px; }
 
 /* A chat pane's voice chip (components/VoiceChip): the voice, a pulse while it
    speaks, and inline when opened -- the strip wraps, so it is never clipped. */
@@ -775,10 +756,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 
 /* Folded: the mode as one small button above the mini orb (a red OFF when muted). */
 #modecycle {
-  position: fixed; left: 2px; bottom: 48px; width: 32px; height: 20px; z-index: 40; padding: 0;
+  width: 32px; height: 20px; padding: 0;
   font: 9px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; word-spacing: normal; }
-/* A short window: the same button, beside the full orb's lower right. */
-#modecycle.beside { left: 146px; bottom: 66px; }
 #modecycle[data-mode="off"] { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
 /* The selected chat's status under the orb (orbLine). A little wider than the
    orb, so "LISTENING · SPEAK NOW" fits on one line, and up to three lines
@@ -1617,7 +1596,7 @@ body.resizing.resizing-rows, body.resizing.resizing-rows * { cursor: row-resize 
 body.resizing iframe { pointer-events: none; }
 
 /* What a folded pane leaves behind. */
-.rail {
+.rail:is(.left, .right) {
   flex: 0 0 36px; background: var(--glass-sheen), var(--glass-pane); display: flex; flex-direction: column;
   align-items: center; gap: 6px; padding: 10px 0 48px; min-width: 0;
 }
