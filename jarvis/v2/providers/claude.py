@@ -1119,12 +1119,15 @@ class ClaudeProvider:
             kwargs["effort"] = brief.effort
         from ..thread_model import speeds_of
         fast = brief.speed == "fast" and any(t[0] == "fast" for t in speeds_of("claude", brief.model))
-        if fast or kwargs.get("settings"):
-            settings = json.loads(kwargs.get("settings") or "{}")
-            settings.pop("fastMode", None)
-            if fast:
-                settings["fastMode"] = True
-            kwargs["settings"] = json.dumps(settings)
+        # Always explicit, Standard included: a session's tier is the one the
+        # thread chose, never one inherited from Claude Code's own settings
+        # files (a `/fast` the owner once ran in a terminal persists there).
+        # Measured on 2.1.325: SDK sessions ignore a settings-file
+        # `fastMode: true` ("sdk_opt_in_required"), so this guards against a
+        # CLI that changes that rule (follow-up 1, 2026-11-17).
+        settings = json.loads(kwargs.get("settings") or "{}")
+        settings["fastMode"] = fast
+        kwargs["settings"] = json.dumps(settings)
         if brief.max_turns is not None:
             kwargs["max_turns"] = brief.max_turns
         if brief.allowed_tools is not None:
