@@ -14,7 +14,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 import wave
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -435,6 +435,37 @@ class Lifecycle(unittest.TestCase):
         self.assertIsNone(self.listener._stream)
         self.assertFalse(Path(self.spotters[0].config["keywords_file"]).exists())
 
+    def test_conflicting_windows_runtime_never_enters_native_model(self):
+        with patch.object(voicewake.sys, "platform", "win32"), \
+             patch.object(voicewake, "_pin_windows_onnxruntime", side_effect=OSError("mismatch")), \
+             wake_imports(sherpa_onnx=self.sherpa, sounddevice=self.sd):
+            self.assertFalse(self.listener.start())
+            self.assertEqual(self.listener.status(), "recognizer_unavailable")
+            self.assertEqual((self.spotters, self.inputs), ([], []))
+
+    def test_pin_uses_the_wheel_dll_and_rejects_a_preloaded_namesake(self):
+        import ctypes
+        package = ROOT / "venv" / "sherpa_onnx"
+        spec = SimpleNamespace(origin=str(package / "__init__.py"))
+        kernel, runtime = Mock(), SimpleNamespace(_handle=35)
+        self.addCleanup(voicewake._pin_windows_onnxruntime.cache_clear)
+        for loaded, refused in ((None, False), (35, False), (100, True)):
+            with self.subTest(loaded=loaded):
+                voicewake._pin_windows_onnxruntime.cache_clear()
+                kernel.GetModuleHandleW.return_value = loaded
+                with patch("importlib.util.find_spec", return_value=spec), \
+                     patch.object(ctypes, "WinDLL", side_effect=[kernel, runtime], create=True) as load:
+                    if refused:
+                        with self.assertRaises(OSError):
+                            voicewake._pin_windows_onnxruntime()
+                    else:
+                        self.assertIs(voicewake._pin_windows_onnxruntime(), runtime)
+                        self.assertIs(voicewake._pin_windows_onnxruntime(), runtime)
+                    self.assertEqual(load.call_args_list, [
+                        call("kernel32", use_last_error=True), call(str(package / "lib" / "onnxruntime.dll")),
+                    ])
+                    kernel.GetModuleHandleW.assert_called_with("onnxruntime.dll")
+
     def test_missing_sherpa_is_an_actionable_failure(self):
         with wake_imports(sherpa_onnx=None):
             self.assertFalse(self.listener.start())
@@ -445,7 +476,6 @@ class Lifecycle(unittest.TestCase):
 class RealSpotter(unittest.TestCase):
     def test_vendored_model_constructs_and_accepts_silence(self):
         import numpy as np
-        import sherpa_onnx
         # Use the listener's real construction path, faking only the Windows mic.
         listener = voicewake.WakeListener(lambda wav: None, lambda rms: None, lambda: False)
         self.addCleanup(listener.stop)
@@ -455,6 +485,7 @@ class RealSpotter(unittest.TestCase):
         with wake_imports(sounddevice=sd):
             self.assertTrue(listener.start(), listener.reason)
             spotter = listener._spotter
+            import sherpa_onnx
             self.assertIsInstance(spotter, sherpa_onnx.KeywordSpotter)
             stream = spotter.create_stream()
             stream.accept_waveform(16000, np.zeros(16000, dtype=np.float32))

@@ -392,6 +392,11 @@ every one of these routes asks (`kind`):
   device release. `GET /voice-agent/microphone` is a no-store binary stream of signed little-endian
   16-bit mono PCM at 16 kHz. It ends on device or pairing loss. All four routes are owner-only
   on the local HUD listener. Slow readers receive recent audio with a bounded queue.
+  To verify an installation, start Voice Anywhere from the installed HUD and wait for Ready
+  and the message that the HUD and Voice Anywhere share one mic. That message appears after
+  the HUD receives native audio. Stop releases the device. The Windows helper must load the
+  ONNX Runtime DLL bundled with Sherpa before importing Sherpa. The WSL service can otherwise
+  load the older Windows system DLL and exit during wake detector initialization.
 - `GET /stt/cleanup` → `{off, rules, raw, model}`, each `{typed, scratched}`.
   Owner-only, read-only counts since daemon startup, with no dictation text.
 - `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one

@@ -117,6 +117,8 @@ class VoiceLink:
         self._launched_agent = self._launched_instance = None
         self._launch_deadline = 0.0
         self._launch_issue = ""
+        self._lost_pairing = False
+        self._lost_instance = None
         self._agent_wake = None
         self._control_session = self._instance = self._mic = None
         self._subscribers = set()
@@ -154,6 +156,13 @@ class VoiceLink:
             return {"state": "stopping", "detail": "Releasing the Windows microphone…"}
         if self._active is None or self._hud_mic_paused:
             child = self._launched_agent
+            if self._lost_pairing and not self._hud_mic_paused:
+                if (self._lost_instance is not None and self._lost_instance == self._launched_instance
+                        and child is not None and child.poll() is not None):
+                    return {"state": "launch_failed",
+                            "detail": "The Windows voice helper exited after connecting. Start Voice Anywhere to retry."}
+                return {"state": "connect_failed",
+                        "detail": "The Windows voice helper disconnected. Waiting for it to reconnect; retry Start if needed."}
             if child is not None and child.poll() is None and not self._hud_mic_paused:
                 if time.monotonic() < self._launch_deadline:
                     return {"state": "starting", "detail": "Waiting for the Windows agent to connect…"}
@@ -240,6 +249,7 @@ class VoiceLink:
                     # A reconnecting surviving helper may resume the session.
                     self._stopped_instance = None
                 self._hud_mic_paused = False
+                self._lost_pairing = False
                 self._release = None
                 if self._active is not None and self._instance != self._stopped_instance:
                     return
@@ -655,6 +665,7 @@ class VoiceLink:
                     self._instance = None
                     self._agent_wake = None
                     self._launch_issue = ""
+                    self._lost_pairing = False
                     self._end_subscriptions_locked()
                     if self._mic is not None:
                         _shutdown(self._mic)
@@ -805,6 +816,11 @@ class VoiceLink:
                     self._mic = None
                     self._end_subscriptions_locked()
                 if self._active is conn:
+                    if self._server is server and not self._hud_mic_paused:
+                        # TCP EOF can arrive just before WSL reaps the helper.
+                        # Retain the loss even if only a later poll sees its exit.
+                        self._lost_pairing = True
+                        self._lost_instance = self._instance
                     self._active = None
                     self._control_session = self._instance = self._agent_wake = None
                     self._end_subscriptions_locked()

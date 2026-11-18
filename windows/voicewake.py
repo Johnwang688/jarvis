@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
 import hashlib
 import math
 import json
 from pathlib import Path
 import queue
 from statistics import median
+import sys
 import tempfile
 import threading
 import time
@@ -16,6 +18,31 @@ RATE, CHUNK = 16000, 1600
 WAKE_LOOKBACK_CHUNKS = 20
 WAKE_PIECES = ("▁JA", "R", "VI", "S")  # hud/src/lib/wake/keywords.ts
 MODEL_DIR = Path(__file__).resolve().parents[1] / "hud" / "vendor" / "kws-zipformer-gigaspeech-3.3M"
+
+
+@lru_cache(maxsize=1)
+def _pin_windows_onnxruntime():
+    """Bind Sherpa to its wheel's runtime before the extension resolves its imports.
+
+    Windows also ships onnxruntime.dll. Its older API can make Sherpa crash
+    inside its native constructor before Python can report an exception.
+    Retain the wheel DLL for this process and refuse a conflicting prior load.
+    """
+    import ctypes
+    from importlib.util import find_spec
+
+    package = find_spec("sherpa_onnx")
+    if package is None or not package.origin:
+        raise ImportError("sherpa-onnx is not installed")
+    bundled = Path(package.origin).resolve().parent / "lib" / "onnxruntime.dll"
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+    kernel.GetModuleHandleW.restype = ctypes.c_void_p
+    previous = kernel.GetModuleHandleW("onnxruntime.dll")
+    runtime = ctypes.WinDLL(str(bundled))
+    if previous and previous != runtime._handle:
+        raise OSError("A different ONNX runtime is already loaded")
+    return runtime
 
 
 def keywords_text(pieces, name="JARVIS", boost=1.0, threshold=0.25):
@@ -149,6 +176,12 @@ class WakeListener:
         ok, self.reason = verify_model(self.model_dir)
         if not ok:
             return False
+        if sys.platform == "win32":
+            try:
+                _pin_windows_onnxruntime()
+            except (OSError, ImportError, ValueError):
+                self.reason = "Wake runtime unavailable: restart the helper or run jarvis voice-link setup"
+                return False
         try:
             import sherpa_onnx
         except Exception:

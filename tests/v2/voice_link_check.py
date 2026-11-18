@@ -237,6 +237,44 @@ class HudLaunch(Base):
                 for click_thread in clicks:
                     click_thread.join(timeout=5)
 
+    def test_connected_helper_exit_stays_visible_until_a_successful_retry(self):
+        self.start()
+        child = Mock()
+        child.poll.return_value = None
+        self.link._launched_agent = child
+        self.link._launch_deadline = time.monotonic() + 8
+        agent = self.client()
+        self.link._launched_instance = wire.new_nonce()
+        agent.ping(wake="ready", instance=self.link._launched_instance)
+        agent.close()
+        eventually(lambda: self.link._active is None)
+        self.assertEqual(self.link.agent_status()["state"], "connect_failed")
+        child.poll.return_value = 5  # Interop may reap it after the TCP disconnect.
+        for _ in range(2):
+            status = self.link.agent_status()
+            self.assertEqual(status["state"], "launch_failed")
+            self.assertIn("exited after connecting", status["detail"])
+        def launch():
+            self.client().ping(wake="ready")
+            return Mock()
+        with patch.object(self.link, "_launch_windows_process", side_effect=launch):
+            self.link.start_windows_agent()
+        self.assertEqual(self.link.agent_status()["state"], "ready")
+
+    def test_losing_manual_or_legacy_agent_never_reports_another_child_exit(self):
+        self.start()
+        self.link._launched_instance = wire.new_nonce()
+        child = self.link._launched_agent = Mock()
+        child.poll.return_value = 5
+        for manual_instance in (None, wire.new_nonce()):
+            agent = self.client()
+            agent.ping(wake="ready", instance=manual_instance)
+            agent.close()
+            eventually(lambda: self.link._active is None)
+            status = self.link.agent_status()
+            self.assertEqual(status["state"], "connect_failed")
+            self.assertIn("disconnected", status["detail"])
+
     def test_systemd_launch_uses_wsl_interop_system_socket(self):
         import socket
         bridge = self.root / "bridge"
