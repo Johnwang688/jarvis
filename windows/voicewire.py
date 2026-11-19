@@ -124,11 +124,17 @@ MAX_PCM = MAX_CLIP_S * 32000
 MIC_PACKET_BYTES = 3200
 MIC_STATES = {"starting": b"S", "ready": b"R", "microphone_unavailable": b"M",
               "recognizer_unavailable": b"K"}
+DESKTOP_HEARTBEAT_S = 0.2
+DESKTOP_TIMEOUT_S = 0.75
 
 
 def microphone_key(key, session):
     # Purpose and parent connection are part of BOTH directions of authentication.
     return hmac.digest(key, b"hud-microphone/1|" + session.encode("ascii"), "sha256")
+
+
+def desktop_control_key(key, session):
+    return hmac.digest(key, b"desktop-control/1|" + session.encode("ascii"), "sha256")
 
 
 class Capture:
@@ -191,7 +197,7 @@ class Client:
         self._speech_lock = threading.Lock()
         self._speaking_id = None
 
-    def connect(self, *, microphone_session=None):
+    def connect(self, *, microphone_session=None, desktop_session=None):
         self.close()
         try:
             self._socket = socket.create_connection((self.host, self.port), min(self.timeout, 5.0))
@@ -203,6 +209,9 @@ class Client:
             if microphone_session is not None:
                 hello.update(hello="jarvis-hud-microphone", session=microphone_session)
                 proof_key = microphone_key(self.key, microphone_session)
+            elif desktop_session is not None:
+                hello.update(hello="jarvis-desktop-control", session=desktop_session)
+                proof_key = desktop_control_key(self.key, desktop_session)
             send_json(self._stream, hello)
             got = read_json(self._stream, 4096)
             d, proof = got.get("nonce_d"), got.get("proof")
@@ -470,6 +479,69 @@ class Client:
                 pass
         if sock:
             sock.close()
+
+
+class DesktopRelay:
+    """State and stop-only traffic alongside the sequential voice requests."""
+
+    def __init__(self, client):
+        self.client, self.session = client, client.session
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="voice-desktop-control")
+        self._lock = threading.Lock()
+        self._state = self._shown = self._stop = None
+
+    def indicator(self):
+        with self._lock:
+            return self._state if self.client.session == self.session else None
+
+    def badge_shown(self, state):
+        with self._lock:
+            self._shown = state if state == self._state else None
+
+    def request_stop(self, reason):
+        with self._lock:
+            if self._state is not None and self._state == self._shown:
+                self._stop = reason
+
+    def close(self):
+        self.done.set()
+        with self._lock:
+            self._state = self._shown = self._stop = None
+
+    def _run(self):
+        client = self.client
+        while not self.done.is_set() and client.session == self.session:
+            peer = Client(client.host, client.port, client.key, timeout=DESKTOP_TIMEOUT_S)
+            try:
+                peer.connect(desktop_session=self.session)
+                stream = peer._stream
+                while not self.done.is_set() and client.session == self.session:
+                    state = read_json(stream, 256)
+                    if (state.get("op") != "desktop_state" or type(state.get("driving")) is not bool
+                            or type(state.get("revision")) is not int):
+                        raise LinkError("Invalid desktop driving state.")
+                    # The peer object scopes the revision to this socket.
+                    indicator = (peer, state["revision"]) if state["driving"] else None
+                    with self._lock:
+                        if self.done.is_set() or client.session != self.session:
+                            return
+                        if indicator != self._state:
+                            self._state = indicator
+                            self._shown = self._stop = None
+                        reason, self._stop = self._stop, None
+                        shown = indicator is not None and indicator == self._shown
+                    if reason is None:
+                        send_json(stream, {"op": "desktop_badge", "shown": shown})
+                    else:
+                        send_json(stream, {"op": "desktop_stop", "reason": reason})
+            except (LinkError, OSError, ValueError):
+                pass
+            finally:
+                with self._lock:
+                    self._state = self._shown = self._stop = None
+                peer.close()
+            self.done.wait(0.5)
 
 
 class MicrophoneRelay:

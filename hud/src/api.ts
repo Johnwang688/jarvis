@@ -36,7 +36,7 @@ export class ApiError extends Error {
   }
 }
 
-export type DesktopDrivingState = { enabled: boolean; thread_id: string | null };
+export type DesktopDrivingState = { enabled: boolean; thread_id: string | null; badge_showing: boolean };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);

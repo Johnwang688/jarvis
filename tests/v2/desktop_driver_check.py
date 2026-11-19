@@ -86,7 +86,8 @@ class Checks(fixture.DaemonHarness):
                 self.assertEqual(status, 403)
         for invalid in (1, "true", None, []):
             self.assertEqual(self.toggle(chat, invalid)[0], 400)
-        self.assertEqual(self.owner("GET", "/desktop-driving"), (200, {"enabled": True, "thread_id": None}))
+        self.assertEqual(self.owner("GET", "/desktop-driving"),
+                         (200, {"enabled": True, "thread_id": None, "badge_showing": False}))
         self.assertEqual(self.owner("GET", "/desktop-driving", origin=False,
                                     headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
 
@@ -111,7 +112,8 @@ class Checks(fixture.DaemonHarness):
         for chat in (first, second):
             self.assertFalse(self.catalog(chat) & names)
         self.assertEqual(self.toggle(fast)[0], 409)
-        self.assertEqual(self.toggle(first), (200, {"enabled": True, "thread_id": first.id}))
+        self.assertEqual(self.toggle(first),
+                         (200, {"enabled": True, "thread_id": first.id, "badge_showing": False}))
         self.assertEqual(self.catalog(first) & names, names)
         self.assertFalse(self.catalog(second) & names)
         status, error = self.toggle(second)
@@ -135,7 +137,7 @@ class Checks(fixture.DaemonHarness):
         self.d.stop()
         restarted = self.make_daemon()
         self.assertEqual(self.owner("GET", "/desktop-driving", daemon=restarted)[1],
-                         {"enabled": True, "thread_id": None})
+                         {"enabled": True, "thread_id": None, "badge_showing": False})
         with patch.dict(os.environ):
             del os.environ["JARVIS_DESKTOP_DRIVE"]
             # A dotenv file in a test fixture is unable to opt in the daemon.
@@ -146,7 +148,7 @@ class Checks(fixture.DaemonHarness):
             disabled = self.make_daemon()
             self.assertEqual(self.toggle(chat, daemon=disabled)[0], 409)
             self.assertEqual(self.owner("GET", "/desktop-driving", daemon=disabled)[1],
-                             {"enabled": False, "thread_id": None})
+                             {"enabled": False, "thread_id": None, "badge_showing": False})
         self.assertEqual(self.toggle(chat, daemon=disabled)[0], 409)
 
     def test_non_driver_calls_all_refused_before_any_side_effect(self):

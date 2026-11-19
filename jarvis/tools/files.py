@@ -110,6 +110,7 @@ SELF_PROTECTED = frozenset(
         "windows/uiatree.py",
         "windows/windowpolicy.py",
         "windows/desktopguard.py",
+        "windows/driveui.py",
         "jarvis/v2/desktop_risk.py",
         "jarvis/v2/desktop_driver.py",
         "jarvis/v2/hud_sensitive.py",
