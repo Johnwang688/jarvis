@@ -60,6 +60,9 @@ class VexSdkPath(unittest.TestCase):
                 f"ln -s ../github.auth {self.one}/l",
                 f"sed -i s/a/b/ {self.one}/sdk/a.h",
                 f"timeout 5 cat {self.one}/sdk/a.h",                # a wrapper in front: asked
+                f"o=-R; grep $o token {self.one}",                  # an option behind a variable
+                f"p=wb; sed -n $p {self.one}/sdk/a.h",
+                f"rg --hostname-bin=/tmp/x token {self.one}",
                 f"cat {self.one}/../github.auth/x",                 # out of the folder through `..`
                 f"cat {self.one}/sdk:{self.users}/Fixture/AppData/Roaming/secret/token",  # a second path
                 f"cat {self.one}/sdk={self.users}/Fixture/AppData/Roaming/secret/token",

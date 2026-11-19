@@ -1221,7 +1221,7 @@ _VEX_READERS: dict[str, tuple[str, ...]] = {
     "echo": (), "test": (), "basename": (), "dirname": (), "cmp": (),
     "md5sum": ("-c", "--check"), "sha256sum": ("-c", "--check"),
     "grep": ("-R", "--dereference-recursive", "-f", "--file"),
-    "rg": ("-L", "--follow", "-f", "--file", "--pre"),
+    "rg": ("-L", "--follow", "-f", "--file", "--pre", "--hostname-bin"),
     "find": ("-L", "-H", "-follow", "-exec", "-execdir", "-ok", "-okdir", "-delete",
              "-fprint", "-fprint0", "-fprintf", "-fls", "-files0-from"),
 }
@@ -1233,7 +1233,7 @@ def _vex_reader(tokens: list[str], segment: str | None = None) -> bool:
     """Whether the segment only reads: its program is on `_VEX_READERS`
     (written bare; a `NAME=$(` in front is the usual `SDK=$(ls -d …)`) and
     carries none of that program's excluded options, or it is `sed -n` with
-    one print script. No word may have a `..` piece or hold a substitution,
+    one print script. No word may have a `..` piece or hold an expansion,
     and the segment (when given) redirects nothing but its errors, to
     `/dev/null` or onto its output: a redirection writes."""
     if not tokens:
@@ -1249,8 +1249,8 @@ def _vex_reader(tokens: list[str], segment: str | None = None) -> bool:
     words = list(tokens)
     words[0] = _VEX_ASSIGNED.sub("", words[0], count=1)
     program = words[0]
-    if any(".." in word.split("/") or "$(" in word or "`" in word for word in words):
-        return False
+    if any(".." in word.split("/") or "$" in word or "`" in word for word in words):
+        return False        # an expansion could be an option (`o=-R; grep $o`) or a sed command
     if program == "sed":
         return (len(words) >= 4 and words[1] == "-n"
                 and bool(_VEX_SED_PRINT.fullmatch(words[2].strip("'\"")))
