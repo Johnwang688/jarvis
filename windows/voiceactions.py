@@ -810,9 +810,13 @@ class Actions:
             return False
         if not regular_browser_window(names) or not _allowed(guard):
             return False
-        # A private-mode marker can precede the tab title in localized UI.
-        # Only accept the browser root title itself or its regular profile suffix.
-        if names[0] != seen.title and not names[0].startswith(seen.title + " - "):
+        # Chrome inserts an accessibility status before the product name on
+        # network-error pages. Match the complete Win32 tab title in either
+        # form so a private-mode prefix cannot be mistaken for the same tab.
+        product = " - Google Chrome"
+        tab = seen.title.removesuffix(product)
+        regular_titles = (seen.title, f"{tab} - Network error{product}")
+        if not any(names[0] == title or names[0].startswith(title + " - ") for title in regular_titles):
             return False
         read = self.command_line
         if read is None:

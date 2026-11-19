@@ -336,6 +336,7 @@ def scenario():
         url = navigation_target("Go to youtube.com", "hotkey")
         report["routed_url"] = url
         case("profile1_window_not_last_used", beta, url, "youtube.com")
+        case("profile1_after_error", beta, "https://example.edu", "example.edu")
         case("default_window", alpha, "https://wikipedia.org", "wikipedia.org")
 
         # Revoked before the launch: nothing starts.
@@ -412,7 +413,7 @@ def scenario():
     report["ok"] = bool(
         not errors and report.get("finished") and report.get("routed_url") == "https://youtube.com"
         and all(cases.get(name, {}).get("ok") for name in
-                ("profile1_window_not_last_used", "default_window", "revoked", "not_canonical",
+                ("profile1_window_not_last_used", "profile1_after_error", "default_window", "revoked", "not_canonical",
                  "incognito_refused"))
         and not report.get("opener_called") and report["profile_dir_removed"])
     return report

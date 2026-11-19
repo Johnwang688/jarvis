@@ -166,6 +166,15 @@ class Navigate(unittest.TestCase):
         self.assertEqual(rig.opened, [])
         self.assertEqual(rig.reads, [77])
 
+    def test_network_error_tab_accepts_the_next_destination_in_the_same_profile(self):
+        title = "youtube.com - Google Chrome"
+        rig = Rig(identity=ident(title=title),
+                  names=("youtube.com - Network error - Google Chrome - Work", ("Work",)))
+        self.assertTrue(rig.go("https://example.edu"))
+        self.assertEqual(rig.launches, [[CHROME, "--profile-directory=Profile 1",
+                                         "--single-argument", "https://example.edu"]])
+        self.assertEqual(rig.opened, [])
+
     def test_default_profile_and_custom_directory(self):
         rig = Rig(identity=ident(aumid="Chrome"))
         self.assertIs(rig.go("http://example.org"), True)
