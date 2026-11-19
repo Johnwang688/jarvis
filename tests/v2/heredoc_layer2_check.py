@@ -33,6 +33,15 @@ MARKERS = {
     "credentials-inner": "sh -c $(true)",
 }
 
+ALLOWLIST_WRITE = "echo x > ~/.config/jarvis/allowlist.json"
+COMMENT_CONTINUATIONS = {
+    "bare comment": "cat > n <<'EOF' #\\\nx\nEOF\n",
+    "comment text": "cat > n <<'EOF' # note\\\nx\nEOF\n",
+    "tee": "tee n <<'EOF' #\\\nx\nEOF\n",
+    "redirect after operator": "cat <<'EOF' > n #\\\nx\nEOF\n",
+    "operator continued onto comment": "cat > n <<'EOF' \\\n#\\\nEOF\n",
+}
+
 # The routes from the HD-0 review. Use placeholders so the same routes are
 # tested against every rule, with the appropriate Makefile recipe indentation.
 EXECUTORS = {
@@ -112,12 +121,51 @@ class HeredocLayer2(unittest.TestCase):
                 self.assert_rule(line + "; cat <<'EOF'\nordinary data\nEOF", rule)
                 self.assert_rule("cat <<'EOF'\nordinary data\nEOF\n" + line, rule)
 
-    def test_operator_redirect_is_still_refused_in_mode_all(self):
-        command = "cat > ~/.config/jarvis/allowlist.json <<'EOF'\n[]\nEOF"
+    def test_comment_continuations_keep_main_verdicts(self):
+        for shape, prefix in COMMENT_CONTINUATIONS.items():
+            with self.subTest(shape=shape):
+                self.assert_allowlist_write_refused(prefix + ALLOWLIST_WRITE)
+
+        for marker, rule in (
+            ("git push --force origin topic", "git-push-force"),
+            ("git push origin main", "git-push-protected"),
+            ("vercel --prod", "vercel-prod"),
+        ):
+            with self.subTest(rule=rule):
+                self.assertEqual(rule_of(COMMENT_CONTINUATIONS["bare comment"] + marker), rule)
+
+    def test_proof_preserves_continuation_context_and_rejects_outer_comments(self):
+        ordinary = "cat <<'EOF'\n# body\nEOF"
+        for command in (
+            "cat <<'EOF' # comment\n# body\nEOF",
+            ordinary + "\necho ok # trailing",
+            ordinary + "\necho a\\\nb",
+            "cat <<\"EO\\\nF\"\n# body\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rules.heredoc_data_reading(command))
+                self.assertIsNone(rules.heredoc_data_reading(command, keep=False))
+
+        for command in (
+            "echo a#b '#' \"#\" \\#; " + ordinary,
+            "ec\\\nho ok\n" + ordinary,
+            "cat <<'EOF'\nx\\\ny\nEOF",
+            # The synthetic newline after a body at EOF stays inside quotes.
+            "cat <<'EOF'\nx\\",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(rules.heredoc_data_reading(command))
+                self.assertIsNotNone(rules.heredoc_data_reading(command, keep=False))
+
+    def assert_allowlist_write_refused(self, command):
         touch = protected_state.command_touch(command)
+        self.assertIsNotNone(touch)
         self.assertTrue(protected_state.denies(touch))
+        self.assertIsNotNone(v2._command_writes_protected_state(command))
         self.assertIsNotNone(v2.denied_command(command))
         self.assertEqual(v1.static_verdict(command).decision, rules.DENY)
+
+    def assert_mode_all_refuses(self, command):
         previous_mode = v1.mode()
         self.addCleanup(v1.set_mode, previous_mode)
         v1.set_mode("all")
@@ -130,6 +178,14 @@ class HeredocLayer2(unittest.TestCase):
             self.assertIn("Refused", out.text)
             self.assertIn("allowlist.json", out.text)
             run.assert_not_called()
+
+    def test_operator_redirect_is_still_refused_in_mode_all(self):
+        command = "cat > ~/.config/jarvis/allowlist.json <<'EOF'\n[]\nEOF"
+        self.assert_allowlist_write_refused(command)
+        self.assert_mode_all_refuses(command)
+
+    def test_comment_continuation_is_still_refused_in_mode_all(self):
+        self.assert_mode_all_refuses(COMMENT_CONTINUATIONS["bare comment"] + ALLOWLIST_WRITE)
 
     def test_ansi_c_decoding_cannot_hide_outer_redirects(self):
         data = "cat <<'EOF'"

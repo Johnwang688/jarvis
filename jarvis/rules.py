@@ -3402,6 +3402,7 @@ def _close_paren(text: str, j: int) -> int:
 # arithmetic (`$((1<<2))`, `((x<<=1))`, `$[…]`) — because one recognised where
 # bash would not hides the lines after it.
 _HEREDOC_STOP = " \t\n;|&<>()`"
+_HEREDOC_COMMENT_DELIMITER = re.compile(r"<<-?[ \t]*#")
 HEREDOC_CAP = 64           # here-documents open on one line before it is too complex (round 3b)
 # The `$'…'` escapes whose decoding by `_ansi_c_decoded` is exactly bash's;
 # any other (`\x`, octal, `\u`, `\c`, `\e`, `\?`) makes the delimiter unsure.
@@ -3504,7 +3505,8 @@ def _joins(line: str) -> bool:
 
 
 def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
-                     unsure: list | None = None) -> str:
+                     unsure: list | None = None, *, reject_comments: bool = False,
+                     body_ranges: list[tuple[int, int]] | None = None) -> str:
     """The text with each here-document's body moved into its operator as a
     here-string (see above). Several on one line are read in order, `<<-`
     strips leading tabs, a body with no terminator runs to the end (as in
@@ -3536,7 +3538,9 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
     and more than `HEREDOC_CAP` open on one line. One shape is flagged in
     `unsure` instead (when given) and read on: a here-document opened in
     backticks that close before its body — its lines after are read as
-    commands, the stricter reading."""
+    commands, the stricter reading. The data proof also asks this lexer to
+    reject shell comments outside bodies and record the raw ranges it
+    removed, including the delimiters that terminate the bodies."""
     if "<<" not in text:
         return text
     if "\x00" in text and "\n" in text:
@@ -3612,12 +3616,18 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
             out.append(ch)
             i += 1
             continue
-        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;|&()"):
-            end = text.find("\n", i)
-            end = n if end == -1 else end
-            out.append(text[i:end])
-            i = end
-            continue
+        if ch == "#":
+            # The proof rejects a possible comment even after a redirection
+            # operator or a physical continuation.
+            comment = i == 0 or text[i - 1] in " \t\n;|&()"
+            if reject_comments and (comment or out[-1] in ("<", ">", "<<<", "\\\n")):
+                raise _TooComplex
+            if comment:
+                end = text.find("\n", i)
+                end = n if end == -1 else end
+                out.append(text[i:end])
+                i = end
+                continue
         if text.startswith("${", i):
             stack.append(["${", 1])
             out.append("${")
@@ -3671,6 +3681,8 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
             i += 3
             continue
         elif text.startswith("<<", i):
+            if reject_comments and _HEREDOC_COMMENT_DELIMITER.match(text, i):
+                raise _TooComplex
             strip = text.startswith("<<-", i)
             try:
                 delimiter, quoted, j = _heredoc_word(text, i + (3 if strip else 2), top == "`")
@@ -3693,6 +3705,7 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
         elif ch == "\n" and pending:
             out.append(ch)
             i += 1
+            body_start = i
             in_tick = "`" in stack
             for delimiter, strip, quoted, slot, _written, _depth, in_sub in pending:
                 lines: list[str] = []
@@ -3735,6 +3748,8 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
                 if bodies is not None:
                     bodies.append(body)
                 out[slot] = "<<<" + _here_word(body, quoted, keep)
+            if body_ranges is not None:
+                body_ranges.append((body_start, min(i, n)))
             pending = []
             continue
         out.append(ch)
@@ -3805,6 +3820,21 @@ def _heredoc_segment_ok(words: list[str], redirects: list[Redirect], here: bool)
     return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
 
 
+def _continuation_prefix(text: str, body_ranges: list[tuple[int, int]] | None = None) -> str:
+    """The spelling through the last outer backslash-newline and its next
+    physical line. Only pairs wholly within a body range are ignored."""
+    last = text.rfind("\\\n")
+    for start, end in reversed(body_ranges or ()):
+        if last >= end - 1:
+            break
+        if last >= start:
+            last = text.rfind("\\\n", 0, start + 1)
+    if last == -1:
+        return ""
+    end = text.find("\n", last + 2)
+    return text if end == -1 else text[:end + 1]
+
+
 def heredoc_data_reading(text: str, *, keep: bool = True) -> str | None:
     """`text` with its here-document bodies moved into their operators as
     here-strings (`_inline_heredocs`), when nothing on the line can
@@ -3812,15 +3842,17 @@ def heredoc_data_reading(text: str, *, keep: bool = True) -> str | None:
     programs, and a body fed only to one of them or to `python3 -`/`node -`),
     with no group, subshell, function or process substitution, nothing live
     (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
-    assignment. None otherwise (the inlining raised or flagged itself
-    unsure, a segment or here-string could not be placed), and the caller
+    assignment. The rewrite must preserve continuations and the shell text
+    outside bodies must be free of comments. None otherwise, and the caller
     keeps the raw line, every body line a command. With `keep=False`,
     the proven data is omitted from the synthetic here-strings."""
     if "<<" not in text:
         return None
     flagged: list = []
+    body_ranges: list[tuple[int, int]] | None = [] if "\\\n" in text else None
     try:
-        inlined = _inline_heredocs(text, unsure=flagged)
+        inlined = _inline_heredocs(text, unsure=flagged, reject_comments=True,
+                                   body_ranges=body_ranges)
     except Exception:       # noqa: BLE001 — too complex: the raw reading
         return None
     if flagged or inlined == text:
@@ -3865,12 +3897,18 @@ def heredoc_data_reading(text: str, *, keep: bool = True) -> str | None:
     # (review round 3 of #396).
     if interpreted and found > 1:
         return None
-    if keep:
+    if keep and body_ranges is None and "\\\n" not in inlined:
         return inlined
+    # Compare the raw and rewritten command text with the payload opaque.
+    # The retained payload is single-quoted or has its backslashes doubled
+    # inside double quotes, so its own pairs cannot join shell lines.
     try:
-        return _inline_heredocs(text, keep=False)
+        omitted = _inline_heredocs(text, keep=False)
     except Exception:       # noqa: BLE001 — unreadable: the raw reading
         return None
+    if _continuation_prefix(omitted) != _continuation_prefix(text, body_ranges):
+        return None
+    return inlined if keep else omitted
 
 
 def _shell_words(segment: str) -> list[str]:

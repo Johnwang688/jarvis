@@ -179,7 +179,7 @@ class HeredocCredentialsRead(unittest.TestCase):
                 self.assertEqual(match[0] if match else None, "credentials-read")
 
     def test_an_unsure_inlining_keeps_the_raw_reading(self):
-        def unsure(text, keep=True, bodies=None, unsure=None):
+        def unsure(text, **kwargs):
             raise rules.TooComplex
         with patch.object(rules, "_inline_heredocs", unsure):
             self.assertIsNone(rules.heredoc_data_reading(REPORTED))
@@ -189,8 +189,8 @@ class HeredocCredentialsRead(unittest.TestCase):
         clean = "cat > notes.txt <<'EOF'\npass\nEOF"
         self.assertIsNotNone(rules.heredoc_data_reading(clean))
 
-        def flagged(text, keep=True, bodies=None, unsure=None):
-            out = real(text, keep=keep, bodies=bodies, unsure=unsure)
+        def flagged(text, *, unsure, **kwargs):
+            out = real(text, unsure=unsure, **kwargs)
             unsure.append("flagged")
             return out
         with patch.object(rules, "_inline_heredocs", flagged):

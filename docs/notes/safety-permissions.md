@@ -3932,6 +3932,12 @@ outside the synthetic here-string payloads. The VEX body backstop
 still checks bodies when any variant lacks the proof. A redirect into the
 allowlist still denies, including in mode `all`.
 
+The data proof keeps the raw reading when it sees a shell comment outside
+the bodies or the rewrite changes the context of a backslash-newline.
+A trailing backslash in a Bash comment leaves the next physical line
+separate, so moving a body past that backslash can hide a command from
+the gate's segment scanner.
+
 Single-quoted `sed -i`, `node -e` and `python3 -c` arguments already stay
 in their shell segment. Quoted substitutions and protected names in
 interpreter source have separate gate-state checks. The merge gate also

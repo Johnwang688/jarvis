@@ -249,3 +249,8 @@ remain in effect. The HD-0 program list is unchanged, including the raw
 fallback for `git commit -F -`. Gap G stays deferred. The GB-1 regression
 matrix covers 14 execution routes across protected state, force pushes,
 protected-branch pushes, credential paths and unreadable inner commands.
+
+The whole-line proof falls back to the raw reading on any shell comment
+outside the bodies. With the payloads set aside, the rewrite must preserve
+the text through the last backslash-newline in the shell text and the
+line it precedes.
