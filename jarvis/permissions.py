@@ -176,7 +176,9 @@ def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool
     # complex to judge, is never covered: an entry for `uv` was a yes to
     # running Python, not to whatever `uv run $X` turns out to start (VX-1,
     # `rules.vex_uncoverable`).
-    if rules.vex_uncoverable(command):
+    # Keep the unresolved reading so a variable-held program gains no
+    # allowlist coverage through VEX's literal proof.
+    if rules.vex_uncoverable(command, resolve_literals=False):
         return False
     # A kill whose pattern is too costly to judge against the v2 daemon: an
     # entry for `pkill` was a yes to killing what the owner meant, not to a

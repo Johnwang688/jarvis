@@ -1039,7 +1039,15 @@ def segments(command: str) -> list[str]:
     as its arguments.
     """
     command = join_continuations(command)
-    parts: list[str] = []
+    parts = _segment_parts(command)
+    if parts is None:
+        return [p.strip() for p in re.split(r"\|\||&&|;|\||\n|&", command) if p.strip()]
+    return [part for part, _ in parts if part]
+
+
+def _segment_parts(command: str) -> list[tuple[str, str]] | None:
+    """The segments with their following separators, or None for open quoting."""
+    parts: list[tuple[str, str]] = []
     buf: list[str] = []
     quote = ""
     escaped = False
@@ -1070,7 +1078,7 @@ def segments(command: str) -> list[str]:
             elif hit == "|" and after_gt:
                 hit = ""  # `>|`, the noclobber redirect
             if hit:
-                parts.append("".join(buf))
+                parts.append(("".join(buf).strip(), hit))
                 buf = []
                 i += len(hit)
                 after_gt = False
@@ -1078,10 +1086,8 @@ def segments(command: str) -> list[str]:
             buf.append(ch)
             after_gt = ch == ">"
         i += 1
-    parts.append("".join(buf))
-    if quote:
-        parts = re.split(r"\|\||&&|;|\||\n|&", command)
-    return [p.strip() for p in parts if p.strip()]
+    parts.append(("".join(buf).strip(), ""))
+    return None if quote else parts
 
 
 def unquoted_indices(text: str, *, double_is_quote: bool = True) -> list[int]:
@@ -3828,6 +3834,116 @@ def _command_words(tokens: list[str]) -> list[str]:
     return tokens
 
 
+_LITERAL_BINDING = re.compile(
+    r"""(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=([^ \t'"<>]+|'[^']*'|"[^"]*")""")
+_PROGRAM_VAR = re.compile(
+    r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
+_PROGRAM_VAR_START = re.compile(r'(?:"(\$[^" \t]+)"|(\$[^ \t<>]+))(?=$|[ \t<>])')
+_SIMPLE_FUNCTION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]+")
+_SHELL_MUTATORS = frozenset({
+    ".", "source", "eval", "read", "readarray", "mapfile", "unset", "declare", "local",
+    "typeset", "readonly", "printf", "getopts", "let", "set", "shopt", "trap", "alias",
+    "unalias", "builtin", "command", "enable", "wait", "time", "test", "compgen", "fc",
+    "export",
+})
+_SPECIAL_BINDINGS = frozenset({
+    "IFS", "LINENO", "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME",
+    "OPTIND", "OPTARG", "PIPESTATUS", "DIRSTACK", "FUNCNAME", "GROUPS", "PPID", "UID",
+    "EUID", "SHLVL", "PWD", "OLDPWD", "HISTCMD", "SHELLOPTS", "_",
+})
+
+
+def _vex_literal_programs(outer: str) -> dict[int, str]:
+    """Prove literal bindings for direct program words in a flat shell list.
+
+    Substitutions have already been masked by the walk and are read separately.
+    Only a stand-alone assignment in a sequential list can establish a value.
+    The one compound shape accepted here is an inert, simple function definition
+    whose name is never invoked on the line. Other syntax keeps the old reading.
+    """
+    parts = _segment_parts(outer)
+    if parts is None:
+        return {}
+    assigned: set[str] = set()
+    repeated: set[str] = set()
+    values: dict[str, str] = {}
+    uses: dict[int, tuple[str, str]] = {}
+    functions: set[str] = set()
+    called: set[str] = set()
+    in_function = saw_dynamic = False
+    before = ""
+    for index, (segment, after) in enumerate(part for part in parts if part[0]):
+        header = _SIMPLE_FUNCTION.match(segment)
+        if header and not in_function and before in ("", ";"):
+            functions.add(header[1])
+            segment = segment[header.end():]
+            in_function = True
+        if segment == "}" and in_function and before == ";" and after in ("", ";"):
+            in_function = False
+            before = after
+            continue
+
+        # Remove the two expansion shapes the proof understands before checking
+        # for other shell syntax. A masked command/process substitution has no
+        # effect on the parent shell's bindings.
+        syntax = _PROGRAM_VAR.sub("VAR", segment).replace("$(_)", "SUB")
+        syntax = syntax.replace("<(_)", "SUB").replace(">(_)", "SUB")
+        if first_unquoted(syntax, ("(", ")", "{", "}", "[", "#")):
+            return {}
+        # Other expansions, even in double quotes, can assign in the parent.
+        if any(syntax[i] == "$" for i in unquoted_indices(syntax, double_is_quote=False)):
+            return {}
+
+        words = _shell_words(strip_redirections(segment))
+        if not words:
+            return {}
+        # Count prefixes too. Bash expands the program using the old value
+        # before applying the temporary environment, so a prefix proves nothing.
+        for word in words:
+            parts_of_word = assignment(word)
+            if parts_of_word is not None:
+                name = parts_of_word[0]
+                if name in assigned:
+                    repeated.add(name)
+                assigned.add(name)
+        start = strip_assignments(words)
+        binding = _LITERAL_BINDING.fullmatch(segment)
+        if binding:
+            name, spelling = binding.groups()
+            if (not in_function and before in ("", ";") and after in ("", ";")
+                    and not any(c in spelling for c in "$`*?[")
+                    and not (spelling.startswith("~") or "=~" in spelling)
+                    and name not in _SPECIAL_BINDINGS and not name.startswith("BASH")):
+                value = _shell_words(spelling)[0]
+                if value:
+                    values[name] = value
+        elif start:
+            head = start[0]
+            if (head in _LEAD_WORDS or head in {"for", "select", "[["}
+                    or head in _SHELL_MUTATORS):
+                return {}
+            called.add(head)
+            dynamic = any(c in head for c in "$`*?[")
+            if in_function and dynamic:
+                return {}
+            use = _PROGRAM_VAR_START.match(segment)
+            if use and not in_function and not saw_dynamic:
+                var = _PROGRAM_VAR.fullmatch(use[1] or use[2])
+                if var and head == var[0]:
+                    name = var[1] or var[2]
+                    value = values.get(name)
+                    if (value and value not in _SHELL_MUTATORS
+                            and (use[1] or not any(c.isspace() for c in value))):
+                        uses[index] = (name, value)
+            saw_dynamic = saw_dynamic or dynamic
+        before = after
+    if (in_function or functions & called or "command_not_found_handle" in functions
+            or "IFS" in assigned):
+        return {}
+    return {site: value for site, (name, value) in uses.items()
+            if name not in repeated and value not in functions}
+
+
 @dataclass(frozen=True)
 class _Prog:
     word: str               # as the line spells it ("" when it comes from input)
@@ -3835,6 +3951,7 @@ class _Prog:
     args: tuple
     via_input: bool = False
     replace: str | None = None
+    literal: str | None = None    # only set for a proven direct use in the VEX reading
 
 
 class _Walk:
@@ -3854,33 +3971,42 @@ class _Walk:
         if self.spent > PROGRAM_CAP or depth > PROGRAM_DEPTH:
             raise _TooComplex
 
-    def line(self, text: str, certain: bool, depth: int) -> None:
+    def line(self, text: str, certain: bool, depth: int, *, literal_programs=False) -> None:
         self._spend(depth)
+        # Prove bindings only against the original single line. In particular
+        # a decoded variant, heredoc or backslash can change shell syntax.
+        can_bind = (literal_programs and len(text) <= 16384 and ";" in text and "$" in text
+                    and not any(c in text for c in ("\\", "\x00", "`", "<<", "$'"))
+                    and not any(c.isspace() and c not in " \t" for c in text))
         text = join_continuations(_inline_heredocs(text, bodies=self.bodies,
                                                    unsure=self.flagged))
         inners, outer = _substitutions(text)
+        literals = _vex_literal_programs(outer) if can_bind else {}
         for inner in inners:
             self.line(inner, certain, depth + 1)
-        for segment in segments(outer):
+        for index, segment in enumerate(segments(outer)):
             here = [r.word for r in redirections(segment) if r.op == "<<<"]
-            self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here)
+            self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here,
+                         literal=literals.get(index))
 
-    def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None) -> None:
+    def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None,
+                literal=None, program_already_known=False) -> None:
         # A reading reached again (an option the table does not know offers
         # the same tail more than once) is not walked again.
         key = (tuple((str(t), getattr(t, "active", None)) for t in tokens), certain, depth,
-               via_input, tuple(here), replace)
+               via_input, tuple(here), replace, literal, program_already_known)
         if key in self.seen:
             return
         self.seen.add(key)
         self._spend(depth)
-        tokens = _command_words(tokens)
+        if not program_already_known:
+            tokens = _command_words(tokens)
         if not tokens:
             if via_input:
                 self.progs.append(_Prog("", certain, (), True, replace))
             return
         word, args = tokens[0], tokens[1:]
-        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace))
+        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace, literal))
         stem = _basename(word)
         if _PYTHON.fullmatch(stem) and _module_run(args):
             self.modules = True
@@ -4134,7 +4260,7 @@ class VexLine:
     vexbuild: bool = False
 
 
-def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
+def _vex_line_uncached(command: str, backstop: bool = True, *, resolve_literals=True) -> VexLine:
     if not command.strip():
         return VexLine()
     named = vexcom_reading(command)
@@ -4145,16 +4271,40 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
     bodies: list[str] = []
     for text in _program_variants(command):
         walk = _Walk()
+        complete = True
         try:
-            walk.line(text, True, 0)
+            walk.line(text, True, 0, literal_programs=resolve_literals and text == command)
         except _TooComplex:
+            complete = False
             unsure = unsure or TOO_COMPLEX
         if walk.flagged:
             unsure = unsure or TOO_COMPLEX
+        readings = ((prog, _program_kind(prog)) for prog in walk.progs)
+        candidates = [prog for prog in walk.progs if prog.literal]
+        if candidates and complete and not walk.flagged and named != COMPLEX:
+            # Keep the original walk and its DENYs. Only a proven direct use's
+            # UNKNOWN may be replaced. Read what a resolved runner or shell
+            # starts with the existing walker, in a separate work budget.
+            original = list(readings)
+            if all(kind != COMPLEX for _, kind in original):
+                resolved = _Walk()
+                try:
+                    for prog in candidates:
+                        word = _Word(prog.literal, (False,) * len(prog.literal))
+                        resolved.segment([word, *prog.args], True, 0, program_already_known=True)
+                except _TooComplex:
+                    unsure = unsure or TOO_COMPLEX
+                else:
+                    if not resolved.flagged:
+                        original = [(prog, kind) for prog, kind in original
+                                    if kind != UNKNOWN or not prog.literal]
+                original.extend((prog, _program_kind(prog)) for prog in resolved.progs)
+                bodies.extend(resolved.bodies)
+                vexbuild = vexbuild or resolved.modules
+            readings = iter(original)
         bodies.extend(walk.bodies)
         vexbuild = vexbuild or walk.modules
-        for prog in walk.progs:
-            kind = _program_kind(prog)
+        for prog, kind in readings:
             if kind == RUNS:
                 return VexLine(deny=(
                     f"it runs {_quoted_word(prog.word)} as a program, which could be vexcom, "
@@ -4222,7 +4372,7 @@ def _body_marker(bodies: list[str]) -> str | None:
                 if line in seen or not line.strip():
                     continue
                 seen.add(line)
-                alone = _vex_line_uncached(line, backstop=False)
+                alone = _vex_line_uncached(line, backstop=False, resolve_literals=False)
                 if alone.deny:
                     return BODY_MARKER
                 # Unsure alone, and nothing but the vex reading would ask it:
@@ -4240,21 +4390,21 @@ def _quoted_word(word: str) -> str:
 
 
 @functools.lru_cache(maxsize=256)
-def _vex_line_cached(command: str) -> VexLine:
-    return _vex_line_uncached(command)
+def _vex_line_cached(command: str, resolve_literals: bool) -> VexLine:
+    return _vex_line_uncached(command, resolve_literals=resolve_literals)
 
 
 _LAST_LONG: tuple = ("", VexLine())
 
 
-def _vex_line(command: str) -> VexLine:
+def _vex_line(command: str, *, resolve_literals=True) -> VexLine:
     """The vex reading of a line (`decide`, the allowlist and v2's layer 2
     each ask; short lines are cached, the last long one is kept, the
     reading is pure)."""
     global _LAST_LONG
     command = command or ""
     if len(command) <= 16384:
-        return _vex_line_cached(command)
+        return _vex_line_cached(command, resolve_literals)
     last = _LAST_LONG
     if last[0] == command:
         return last[1]
@@ -4263,12 +4413,13 @@ def _vex_line(command: str) -> VexLine:
     return line
 
 
-def vex_uncoverable(command: str) -> str | None:
+def vex_uncoverable(command: str, *, resolve_literals=True) -> str | None:
     """Why no allowlist entry, and no v2 profile, may answer for this line
     without asking: it names or runs vexcom (DENY before this is reached),
     or it may run vexcom and cannot be told, or it is too complex to judge.
-    `permissions.allows` and v2's layer 2 read it."""
-    line = _vex_line(command)
+    V2's layer 2 uses the literal proof. `permissions.allows` keeps the
+    unresolved reading so that proof cannot grant standing coverage."""
+    line = _vex_line(command, resolve_literals=resolve_literals)
     return line.deny or line.unsure
 
 

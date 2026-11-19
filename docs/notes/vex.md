@@ -1273,6 +1273,16 @@ try", and `vex_check` for the refusal's code. Removing the calls, the wait, its
 limit or the `holds()` stop each fails it. Not yet seen on the robot: a download after the brain terminal saying
 "(controller download channel)" in the journal and taking about 20 s.
 
+## Same-line program variables (GB-2)
+
+The command gate's VEX reading can use one earlier, unconditional literal
+assignment on the same line for a direct `$VAR` or `${VAR}` program word.
+Double quotes let a path contain spaces. Reassignment, temporary command
+environments, variable-mutating builtins and uncertain shell syntax keep
+the owner ask. A literal VEX device command still gets the existing refusal.
+The ordinary command rules still read the original line, and the allowlist
+continues to use the unresolved VEX reading.
+
 ## The Reach check and the `vex` record tree (2026-11-06)
 
 `Reach.test_nothing_but_the_daemon_and_its_routes_reaches_vex` had failed on

@@ -3260,6 +3260,147 @@ class ProgramPosition(Base):
                 self.assertIsNone(rules.vex_uncoverable(command))
 
 
+class LiteralVariablePrograms(Base):
+    def test_proven_bindings_use_the_literal_vex_reading(self):
+        cases = (
+            ('PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+             '$PS -NoProfile -ExecutionPolicy Bypass -File build.ps1 build 2>&1 | tail -3',
+             '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe '
+             '-NoProfile -ExecutionPolicy Bypass -File build.ps1 build 2>&1 | tail -3'),
+            ('cd /repo; CXX="/mnt/c/Program Files/LLVM/bin/clang++.exe"; '
+             'objs=$(ls build/obj/*.o); "${CXX}" -c x.cpp',
+             '"/mnt/c/Program Files/LLVM/bin/clang++.exe" -c x.cpp'),
+            ('N="/mnt/c/Program Files/nodejs/node.exe"; get(){ grep -h foo run.log; }; "$N" tool.mjs',
+             '"/mnt/c/Program Files/nodejs/node.exe" tool.mjs'),
+            ("V='/opt/build-cli'; ${V} build", "/opt/build-cli build"),
+            ('V=vexbuild; "$V" build', 'vexbuild build'),
+        )
+        for variable, literal in cases:
+            with self.subTest(variable):
+                self.assertEqual(rules._vex_line(variable), rules._vex_line(literal))
+                self.assertEqual(rules.decide(variable).decision, rules.ASK)
+
+    def test_auto_leaves_a_proven_ordinary_program_to_the_provider(self):
+        args = {"command": 'V=/opt/build-cli; "$V" build'}
+        with patch.object(v2_permissions, "log_decision") as log:
+            for profile, decision, layer, cards in (
+                    (PP.AUTO, Decision.ALLOW, v2_permissions.L_REVIEWER, 0),
+                    (PP.ASK, Decision.DENY, v2_permissions.L_HUMAN, 1),
+                    (PP.STRICT, Decision.DENY, v2_permissions.L_HUMAN, 0)):
+                with self.subTest(profile):
+                    asker = Asker(Decision.DENY)
+                    permit = v2_permissions.build_permit(context(self.root, profile), asker)
+                    self.assertEqual(permit("Bash", args), decision)
+                    self.assertEqual(log.call_args.args[0].layer, layer)
+                    self.assertEqual(len(asker.seen), cards)
+
+    def test_unproven_bindings_keep_the_unknown_program_ask(self):
+        cases = {
+            "second binding": 'V=/opt/build-cli; V=/opt/other-cli; "$V" build',
+            "later second binding": 'V=/opt/build-cli; "$V" build; V=/opt/other-cli',
+            "appended binding": 'V=/opt/build-cli; V+=-new; "$V" build',
+            "before assignment": '"$V" build; V=/opt/build-cli; "$V" build',
+            "loop assignment": 'while true; do V=/opt/build-cli; break; done; "$V" build',
+            "loop use": 'V=/opt/build-cli; while false; do "$V" build; done',
+            "function assignment": 'f() { V=/opt/build-cli; }; "$V" build',
+            "function use": 'V=/opt/build-cli; f() { "$V" build; }',
+            "same use text in function and outside": 'V=/opt/build-cli; f(){ :; "$V"; }; "$V"',
+            "subshell assignment": '(V=/opt/build-cli); "$V" build',
+            "subshell use": 'V=/opt/build-cli; ( "$V" build )',
+            "brace assignment": '{ V=/opt/build-cli; }; "$V" build',
+            "brace use": 'V=/opt/build-cli; { "$V" build; }',
+            "branch assignment": 'if true; then V=/opt/build-cli; fi; "$V" build',
+            "branch use": 'V=/opt/build-cli; if true; then "$V" build; fi',
+            "short-circuit and": 'cd /repo && V=/opt/build-cli; "$V" build',
+            "short-circuit or": 'cd /repo || V=/opt/build-cli; "$V" build',
+            "assignment in and-list": 'V=/opt/build-cli && "$V" build',
+            "pipe": 'V=/opt/build-cli | cat; "$V" build',
+            "background": 'V=/opt/build-cli & "$V" build',
+            "comment": 'echo ok # ; V=/opt/build-cli; "$V" build',
+            "read": 'V=/opt/build-cli; read V; "$V" build',
+            "timed read": 'V=/opt/build-cli; time -p read V; "$V" build',
+            "variable-held read": 'V=read; "$V" V',
+            "default read target": 'REPLY=/opt/build-cli; read; "$REPLY" build',
+            "eval": 'V=/opt/build-cli; eval "$CODE"; "$V" build',
+            "source": 'V=/opt/build-cli; source vars.sh; "$V" build',
+            "dot": 'V=/opt/build-cli; . vars.sh; "$V" build',
+            "unset": 'V=/opt/build-cli; unset V; "$V" build',
+            "declare": 'V=/opt/build-cli; declare -n V=OTHER; "$V" build',
+            "local": 'V=/opt/build-cli; local -n V=OTHER; "$V" build',
+            "export": 'V=/opt/build-cli; export -n V; "$V" build',
+            "printf": 'V=/opt/build-cli; printf -v V %s /opt/other-cli; "$V" build',
+            "mapfile": 'V=/opt/build-cli; mapfile V; "$V" build',
+            "for variable": 'V=/opt/build-cli; for V in /opt/other-cli; do :; done; "$V" build',
+            "parameter assignment": 'V=/opt/build-cli; : "${OTHER:=value}"; "$V" build',
+            "computed assignment": 'V="$OTHER"; "$V" build',
+            "substitution": 'V=$(cat tool.txt); "$V" build',
+            "backticks": 'V=`cat tool.txt`; "$V" build',
+            "glob": 'V=/opt/build-*; "$V" build',
+            "unquoted spaces": 'V="/opt/build cli"; $V build',
+            "redirected assignment": 'V=/opt/build-cli >out; "$V" build',
+            "only environment": 'V=/opt/build-cli true; "$V" build',
+            "prefix on use": 'V=/opt/build-cli "$V" build',
+            "env wrapper": 'env V=/opt/build-cli true; "$V" build',
+            "different physical lines": 'V=/opt/build-cli\n"$V" build',
+            "alias chain": 'V=/opt/build-cli; W=$V; $W',
+        }
+        for label, command in cases.items():
+            with self.subTest(label):
+                self.assertIn("cannot be told from here", rules.vex_uncoverable(command) or "")
+                self.assertEqual(rules.decide(command).decision, rules.ASK)
+
+    def test_bash_expands_the_old_value_before_applying_the_prefix(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'first() { echo "first:$V"; }; second() { echo second; }; '
+             'V=first; V=second "$V"; "$V"; V=second true; "$V"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["first:second", "first:first", "first:first"])
+        line = 'V=/opt/build-cli; V=/opt/other-cli "$V" build'
+        self.assertIn("cannot be told from here", rules.vex_uncoverable(line) or "")
+
+    def test_original_and_resolved_device_denials_win(self):
+        cases = (
+            'V=vexcom; $V --user',
+            'V=/path/to/vexcom.exe; "$V" --user',
+            'V=vexcom; W=$V; $W',
+            'V=/opt/build-cli; "$V" build; *.exe --user',
+            'V=/bin/bash; "$V" -c "./v*.exe --user"',
+        )
+        for command in cases:
+            with self.subTest(command):
+                self.assertEqual(rules.decide(command).decision, rules.DENY)
+                self.assertIn("vexcom", v2_permissions.denied_command(command) or "")
+        self.assertIn("`$OTHER`", rules.vex_uncoverable('V=/bin/bash; "$V" -c \'$OTHER\'') or "")
+
+    def test_walk_past_its_budget_keeps_the_ask(self):
+        command = 'V=/opt/build-cli; "$V" build; echo done'
+        with patch.object(rules, "PROGRAM_CAP", 3):
+            self.assertEqual(rules._vex_line_uncached(command).unsure, rules.TOO_COMPLEX)
+
+    def test_literal_resolution_cannot_add_allowlist_coverage(self):
+        with patch.object(v1_permissions, "load_allowlist", return_value=[
+                {"tool": "run_command", "prefix": p} for p in ("export", "$V", "/opt/build-cli")]):
+            # An export has a command stem, so even explicit entries for all
+            # the original targets would cover it if the VEX check were relaxed.
+            command = 'export V=/opt/build-cli; "$V" build'
+            self.assertTrue(rules.command_targets(command))
+            self.assertIsNone(rules.vex_uncoverable(command))
+            self.assertFalse(v1_permissions.allows("run_command", {"command": command}))
+
+    def test_existing_general_denials_and_always_ask_stems_still_win(self):
+        for command in (
+                'V=/opt/build-cli; "$V" build; sudo true',
+                'V=/opt/build-cli; "$V" build; jarvis restart',
+                'V=/opt/build-cli; "$V" build; cp /tmp/x ~/.config/jarvis/allowlist.json'):
+            with self.subTest(command):
+                self.assertIsNone(rules.vex_uncoverable(command))
+                self.assertIsNotNone(v2_permissions.denied_command(command, str(self.root)))
+        args = {"command": 'V=/opt/build-cli; "$V" build; git push --force origin topic'}
+        self.assertEqual(v2_permissions.always_ask_match("Bash", args)[0], "git-push-force")
+
+
 class TooComplex(Base):
     """MED 2: a glob past the caps is too complex to judge — asked, never slow."""
 
