@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from desktopwire import APPS, NAV_KEYS, launch_name, private_key, prove_windows, wire
 from desktopguard import (
-    Guard, HUD_REGION_NAME, KEY_NAMES, MaskedTree, Rect as ScreenRect, Refused, black_out,
+    Guard, HUD_MARKER_NAME, HUD_REGION_NAME, KEY_NAMES, MaskedTree, Rect as ScreenRect, Refused, black_out,
     own_image, require_expected_control,
 )
 import windowpolicy as window_policy
@@ -1146,15 +1146,23 @@ class WindowsDesktop:
             pending = [root]
             regions = []
             visited = 0
+            marker = False
             while pending:
                 node = pending.pop()
                 visited += 1
                 if visited > 10000:
                     return None
-                if node.Name == HUD_REGION_NAME and not node.IsOffscreen:
+                name = node.Name
+                if name == HUD_MARKER_NAME:
+                    marker = True
+                if name == HUD_REGION_NAME and not node.IsOffscreen:
                     bounds = node.BoundingRectangle
                     regions.append(ScreenRect(bounds.left, bounds.top, bounds.right, bounds.bottom))
                 pending.extend(node.GetChildren())
+            if not marker:
+                # First real run, 2026-11-19: Chrome showed 5 page nodes on the
+                # first scan and 400 on a later one. No marker, no page.
+                return None
             return list(dict.fromkeys(regions))
         except Exception:
             return None

@@ -16,6 +16,10 @@ else:
 
 Rect = policy.Rect
 HUD_REGION_NAME = "Jarvis protected area"
+# The HUD page always carries one element with this accessible name. Chrome
+# exposes a page's accessibility tree only after something first asks for it,
+# so a scan that does not find the marker has not seen the page: unreadable.
+HUD_MARKER_NAME = "Jarvis HUD page"
 _MODIFIERS = frozenset({
     "shift", "lshift", "rshift", "ctrl", "control", "lctrl", "rctrl",
     "alt", "lalt", "ralt", "altgr",

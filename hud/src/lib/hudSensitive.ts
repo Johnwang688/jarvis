@@ -2,6 +2,9 @@ import { api } from "../api";
 import { WINDOW_ID } from "./windowId";
 
 const REGION_NAME = "Jarvis protected area";
+// windows/desktopguard.py HUD_MARKER_NAME: the bridge trusts a scan of this
+// page only when it finds this element, so it must always be in the tree.
+const MARKER_NAME = "Jarvis HUD page";
 const REGION_SELECTOR = `[role="group"][aria-label="${REGION_NAME}"]`;
 const HEARTBEAT_MS = 1500;
 
@@ -49,6 +52,11 @@ export function startHudSensitiveReports(): () => void {
     void send();
   }
 
+  const marker = document.createElement("span");
+  marker.setAttribute("role", "img");
+  marker.setAttribute("aria-label", MARKER_NAME);
+  marker.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
+  document.body.appendChild(marker);
   const changed = () => publish();
   const observer = new MutationObserver(changed);
   observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true,
@@ -58,6 +66,7 @@ export function startHudSensitiveReports(): () => void {
   document.addEventListener("visibilitychange", changed);
   publish(true);
   return () => {
+    marker.remove();
     observer.disconnect();
     window.clearInterval(interval);
     window.removeEventListener("resize", changed);

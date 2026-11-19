@@ -16,7 +16,9 @@ from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
 from jarvis.v2.browser import policy
 from jarvis.v2.daemon import _handler
 from jarvis.v2.tools import hud_window
-from windows.desktopguard import HUD_REGION_NAME
+from pathlib import Path as _P
+ROOT_FOR_MARKER = _P(__file__).resolve().parents[2]
+from windows.desktopguard import HUD_MARKER_NAME, HUD_REGION_NAME
 
 ROUTE = "/hud/sensitive"
 CLIENT = "a" * 32
@@ -158,6 +160,8 @@ class BoundaryChecks(unittest.TestCase):
     def test_hud_source_uses_the_bridge_label(self):
         source = Path(__file__).resolve().parents[2] / "hud/src/lib/hudSensitive.ts"
         self.assertIn(json.dumps(HUD_REGION_NAME), source.read_text())
+        self.assertIn(json.dumps(HUD_MARKER_NAME), source.read_text())
+        self.assertIn("name == HUD_MARKER_NAME", (ROOT_FOR_MARKER / "windows/bridge.py").read_text())
 
 
 if __name__ == "__main__":
