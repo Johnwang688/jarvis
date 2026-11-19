@@ -9,13 +9,13 @@ import unicodedata
 from dataclasses import dataclass, replace
 
 if __package__:
-    from .voiceactions import LaunchStatus, action_scope
+    from .voiceactions import LaunchStatus, action_scope, match_app
     from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
                             mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
                             spoken_websites)
     from .voicewire import LinkError, VoiceQuestionError
 else:
-    from voiceactions import LaunchStatus, action_scope
+    from voiceactions import LaunchStatus, action_scope, match_app
     from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
                            mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
                            spoken_websites)
@@ -245,6 +245,17 @@ def _same_site(url, other):
         value = value.split("://", 1)[-1].casefold().rstrip("/")
         return value.removeprefix("www.")
     return isinstance(url, str) and isinstance(other, str) and site(url) == site(other)
+
+
+def _names_site(value, site):
+    """Whether an app name or spoken target is an offered website's name."""
+    if not isinstance(value, str) or not isinstance(site, str):
+        return False
+    if _same_site(value, site):
+        return True
+    host = site.split("://", 1)[-1].casefold().rstrip("/").removeprefix("www.")
+    words = " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split()).removeprefix("www ")
+    return bool(words) and words in (" ".join(re.sub(r"[^\w]+", " ", host).split()), host.split(".", 1)[0])
 
 
 def _run_native(current, action, *args, **kwargs):
@@ -809,7 +820,7 @@ class Flow:
             self._outcome(turn, "cancelled")
             return
         if (kind in ("navigate", "open_app") and offered
-                and any(_same_site(target, site) for site in offered[0])):
+                and any(_names_site(target, site) for site in offered[0])):
             # Not a plain choice, so the offer did not select it; never the
             # router either, as a page or as an installed app of that name.
             self._outcome(turn, "cancelled")
@@ -951,8 +962,14 @@ class Flow:
             # A reply context carried to a helper without Laya routing still
             # keeps its sites: nothing here opens one the offer did not.
             offered = self._offered_sites()
-            if offered and (kind in ("navigate", "open_app") or url) and any(
-                    _same_site(value, site) for value in (url, target) for site in offered[0]):
+            named = [url, target] if kind in ("navigate", "open_app") else [url]
+            if offered and kind == "open_app":
+                # The legacy matcher resolves loosely ("NOAA" finds an app
+                # called noaa.gov): judge the app it would launch as well.
+                apps = getattr(self.actions, "apps", None)
+                app = match_app(target, apps) if isinstance(apps, list) and isinstance(target, str) else None
+                named.append(app["name"] if app else None)
+            if offered and any(_names_site(value, site) for value in named for site in offered[0]):
                 self.ui.set_state(*offered[1])
                 return
             if url or kind == "navigate":

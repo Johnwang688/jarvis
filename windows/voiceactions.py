@@ -123,8 +123,8 @@ def match_window(target, windows):
     return None
 
 
-# The image a Start entry names: "{folder}\\Vendor\\app.exe", "Microsoft.Office.WINWORD.EXE.15".
-_APP_ID_IMAGE = re.compile(r"([^\\/.!_]+)\.exe(?=$|[.!_])", re.IGNORECASE)
+# The image an application ID spells out: "Microsoft.Office.WINWORD.EXE.15".
+_APP_ID_IMAGE = re.compile(r"(?:^|[.!_])([^.!_]+)\.exe(?=$|[.!_])", re.IGNORECASE)
 
 
 def _app_images(target, apps):
@@ -136,9 +136,16 @@ def _app_images(target, apps):
         name, ident = app.get("name"), app.get("id")
         if not isinstance(name, str) or not isinstance(ident, str) or _normal(name) not in (target, canonical):
             continue
-        # Only an image the entry spells out. A vendor or suite word in an
+        # Only an image the entry spells out. A classic entry is a path and
+        # names its whole file ("...\\Acme\\acme.report.exe"), never a folder
+        # or a piece of the file name. A vendor or suite word in an
         # application ID ("Microsoft", "Office") names no process.
-        images.update(_normal(image) for image in _APP_ID_IMAGE.findall(ident))
+        if "\\" in ident or "/" in ident:
+            base = ntpath.basename(ident)
+            if base.casefold().endswith(".exe"):
+                images.add(_normal(base[:-4]))
+        else:
+            images.update(_normal(image) for image in _APP_ID_IMAGE.findall(ident))
     images.discard("")
     return images
 
