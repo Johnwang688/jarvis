@@ -25,7 +25,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { flushSync } from "react-dom";
 import { CaptureDrafts } from "./lib/captureDraft";
 import type { CaptureDestination } from "./components/BrowserCapture";
-import { api, subscribe, type VoiceAgentStatus } from "./api";
+import { api, subscribe, type DesktopDrivingState, type VoiceAgentStatus } from "./api";
 import { browserSound } from "./state/browserSoundClient";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState, turnOrb,
@@ -38,6 +38,7 @@ import { SubagentPane } from "./components/SubagentPane";
 import { subagents } from "./state/subagents";
 import { MAIN_STOP_CLAUDE_HELP, sameRef, validSid, type SubagentRef } from "./lib/subagents";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
+import { DesktopDriving } from "./components/DesktopDriving";
 import { TaskView } from "./components/TaskView";
 import { FileTab, type FileAsk } from "./components/FileTab";
 import { VexView } from "./components/VexView";
@@ -586,6 +587,22 @@ export default function App() {
     approvalSync.heard(action);
     dispatch(action);
   }, [approvalSync, dispatch]);
+
+  const [desktopDriving, setDesktopDriving] = useState<DesktopDrivingState>({ enabled: false, thread_id: null });
+  const [desktopBusy, setDesktopBusy] = useState(false);
+  const desktopRead = useRef(0);
+  const refreshDesktopDriving = useCallback(async () => {
+    const read = ++desktopRead.current;
+    try {
+      const current = await api.desktopDriving();
+      if (read === desktopRead.current) setDesktopDriving(current);
+    } catch { /* Older daemons have no desktop driving route. */ }
+  }, []);
+  const stopDesktopDriving = useCallback((id: string) => {
+    void api.stopDesktopDriving(id).catch((e) => {
+      dispatch({ type: "patch", patch: { error: e.message } });
+    }).finally(refreshDesktopDriving);
+  }, [dispatch, refreshDesktopDriving]);
   const rereadApprovals = useCallback(async () => {
     const pending = approvalSync.begin();
     try {
@@ -1853,6 +1870,9 @@ export default function App() {
         case "thread_moved":
           void refreshThreads();
           break;
+        case "desktop_driving":
+          void refreshDesktopDriving();
+          break;
         case "thread_updated": {
           // Two producers: a model/effort change sends the whole record
           // (`changed: ["model","effort"]`), patched in place so a click's
@@ -2069,6 +2089,7 @@ export default function App() {
       // Ordered against what the stream says meanwhile (NEW-3).
       void rereadApprovals();
       void refreshThreads();
+      void refreshDesktopDriving();
       // So is a sub-agent's word: rows and panes read theirs again (a
       // restart's children come back stopped).
       subagents.reconnect();
@@ -3325,6 +3346,7 @@ export default function App() {
         placeChat(pane);
       }
       void refreshActivity();
+      void refreshDesktopDriving();
       void inbox.refresh();
       void working.refresh();
       void review.refresh();
@@ -4395,6 +4417,8 @@ export default function App() {
     // pane has no thread, so none.
     const chip = compactFor(thread, { turnRunning: runningHere(chat) || chat.busy, card: workBlocked });
     const bypass = bypassFor(thread);
+    const desktopProject = chatProjectId(chat, state.threads)
+      ?? lastProject(state.projects, state.threads, loadLastProject());
     return (
       <>
         <ChatTab
@@ -4412,6 +4436,21 @@ export default function App() {
           onWithdrawRelay={withdrawRelay}
           relayWaiting={relayWaitingLine(thread)}
         />
+        <DesktopDriving state={desktopDriving} thread={thread} busy={desktopBusy} canCreate={!!desktopProject}
+          onToggle={(id, on) => {
+            setDesktopBusy(true);
+            void api.setDesktopDriving(id, on).catch((e) => chatPatch(n, { error: e.message }))
+              .finally(async () => { await refreshDesktopDriving(); setDesktopBusy(false); });
+          }}
+          onStop={stopDesktopDriving}
+          onCreate={() => {
+            if (!desktopProject) return;
+            setDesktopBusy(true);
+            void api.newDesktopDriverChat(desktopProject).then(async (opened) => {
+              await refreshThreads();
+              if (!blockedNow.current) pickThread(opened.id);
+            }).catch((e) => chatPatch(n, { error: e.message })).finally(() => setDesktopBusy(false));
+          }} />
         <InputBar
           status={status}
           reserveStatus={drawnChats.length > 1}
@@ -5328,7 +5367,8 @@ export default function App() {
           it; below the authorization veil, and gone the moment a card is known.
           Automation never mounts it unless its own suite opts in. */}
       {!navigator.webdriver || window.__hudBootForce === true ? <BootOverlay cardUp={blocked} /> : null}
-      <ApprovalVeil requests={state.approvals} onDecide={decide} onSubagent={revealSubagent} />
+      <ApprovalVeil requests={state.approvals} onDecide={decide} onSubagent={revealSubagent}
+        desktopDriver={desktopDriving.thread_id} onStopDesktopDriving={stopDesktopDriving} />
 
       {/* A picker or dialog that throws is closed, and the window carries on
           (components/Boundary.tsx). */}

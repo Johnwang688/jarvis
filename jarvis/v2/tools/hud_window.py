@@ -1,6 +1,8 @@
 """Drive paired Windows windows from a current owner HUD chat."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 import fcntl
 import json
@@ -20,6 +22,7 @@ from windows.windowpolicy import DRIVABLE, SEE_ONLY
 
 from .. import desktop_risk as risk
 from ..approvals import ApprovalRequest
+from ..desktop_driver import REFUSED as OFF
 from ..model import utcnow
 from ..provider import Decision
 from . import hud_desktop
@@ -28,7 +31,6 @@ HUD_WINDOW_TOOLS = frozenset({
     "hud_window_list", "hud_window_snapshot", "hud_window_screenshot",
     "hud_window_click", "hud_window_type", "hud_window_key", "hud_window_scroll",
 })
-OFF = "Refused: Windows window driving is off."
 UNAVAILABLE = "Refused: Windows window tools require a current owner HUD chat turn."
 FRESH_SNAPSHOT = "Take a fresh snapshot of this window in this chat."
 COMPLETED = "Action completed. Take a fresh snapshot to see the result."
@@ -43,6 +45,7 @@ _HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _DETAIL_LIMIT = 200
 _TYPED_WITHHELD = "[typed text withheld]"
 _service = None
+_bound_grant = ContextVar("desktop_window_grant", default=None)
 
 WindowId = Annotated[str, "Window id from hud_window_list"]
 Purpose = Annotated[str, "One sentence describing why you are taking this action, up to 300 characters"]
@@ -54,6 +57,15 @@ Y = Annotated[int, "Y in pixels from this chat's latest screenshot of this windo
 
 class Refused(Exception):
     pass
+
+
+@contextmanager
+def bind_grant(grant):
+    binding = _bound_grant.set(grant)
+    try:
+        yield
+    finally:
+        _bound_grant.reset(binding)
 
 
 def _window_id(window):
@@ -249,11 +261,15 @@ class WindowDrive:
             _service = None
 
     def current(self):
-        return (_service is self and config.desktop_drive() and runtime.at_desk()
-                and hud_desktop.current() and runtime.caller().get("provider") in ("claude", "codex"))
+        return (_service is self and runtime.at_desk() and hud_desktop.current()
+                and runtime.caller().get("provider") in ("claude", "codex"))
 
-    def request(self, op, thread, *, current=None, acting=False, **fields):
-        current = self.current if current is None else current
+    def grant(self):
+        grant = self.daemon.desktop_driver.grant((runtime.caller() or {}).get("thread_id"))
+        expected = _bound_grant.get()
+        return grant if expected is None or grant is expected else None
+
+    def request(self, op, thread, *, current, acting=False, **fields):
         if not current():
             raise Refused("The owner chat turn is no longer current. Inspect the window again.")
         sensitive = self.daemon.hud_sensitive_reports.count(len(self.daemon.approvals.pending()))
@@ -263,8 +279,8 @@ class WindowDrive:
             raise Refused("The owner chat turn or snapshot is no longer current.")
         return result
 
-    def windows(self, thread):
-        rows = self.request("windows", thread)["windows"]
+    def windows(self, thread, current):
+        rows = self.request("windows", thread, current=current)["windows"]
         apps = {}
         lines = []
         for row in rows:
@@ -279,23 +295,23 @@ class WindowDrive:
             self._apps[thread] = apps
         return "\n".join(lines) or "No windows are available."
 
-    def app(self, thread, window):
+    def app(self, thread, window, current):
         with self._lock:
             app = self._apps.get(thread, {}).get(window)
         if app is None:
-            self.windows(thread)
+            self.windows(thread, current)
             with self._lock:
                 app = self._apps.get(thread, {}).get(window)
         if app is None:
             raise Refused("Unknown window. List windows first.")
         return app
 
-    def snapshot(self, thread, window):
+    def snapshot(self, thread, window, current):
         with self._snapshot_lock:
             with self._lock:
                 self._refs.pop((thread, window), None)
-            self.app(thread, window)
-            result = self.request("window_snapshot", thread, window=window)
+            self.app(thread, window, current)
+            result = self.request("window_snapshot", thread, current=current, window=window)
             if (not isinstance(result, dict) or type(result.get("snapshot")) is not str
                     or not result["snapshot"].strip() or not isinstance(result.get("refs"), dict)):
                 raise Refused("The bridge did not provide a valid window snapshot.")
@@ -312,27 +328,36 @@ class WindowDrive:
             return result["snapshot"]
 
     def read(self, op, window=None):
+        grant = self.grant()
+        if grant is None:
+            return OFF
         if not self.current():
             return UNAVAILABLE
         thread = runtime.caller()["thread_id"]
+
+        def current():
+            return self.grant() is grant and self.current()
+
         try:
             if op == "windows":
-                return self.windows(thread)
+                return self.windows(thread, current)
             if not _window_id(window):
                 raise Refused("Use a window id from hud_window_list.")
             if op == "window_snapshot":
-                return self.snapshot(thread, window)
+                return self.snapshot(thread, window, current)
             if not runtime.desk_images():
                 raise Refused("This chat's model does not support screenshots.")
-            result = self.request(op, thread, window=window)
+            result = self.request(op, thread, current=current, window=window)
             return ToolResult("Windows window screenshot. Coordinates are in screenshot pixels.",
                               result["image_b64"], "image/png")
         except (Refused, DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            if self.grant() is not grant:
+                return OFF
             if op == "windows" and isinstance(exc, DesktopError) and _disconnected(str(exc)):
                 return BRIDGE_DISCONNECTED
             return _refusal(exc)
 
-    def prepare(self, kind, window, thread, purpose, risky, fields, record):
+    def prepare(self, kind, window, thread, purpose, risky, fields, record, grant):
         _check(window, kind, fields)
         keys = tuple(fields.get("keys", ()))
         submit = fields.get("submit", False)
@@ -354,21 +379,21 @@ class WindowDrive:
                 raise Refused(FRESH_SNAPSHOT)
 
         def current():
-            if not self.current():
+            if self.grant() is not grant or not self.current():
                 return False
             if refs is None:
                 return True
             with self._lock:
                 return self._refs.get((thread, window)) is refs
 
-        app = self.app(thread, window)
+        app = self.app(thread, window, current)
         text = fields.get("text", "").strip()
         sensitive = text if len(text) >= 3 else ""
         record["app"] = _withhold_text(app, sensitive, "an app showing the typed text")
         if kind == "key":
-            expected = _control(self.request("window_probe", thread, window=window, focus=True))
+            expected = _control(self.request("window_probe", thread, current=current, window=window, focus=True))
         elif not ref:
-            expected = _control(self.request("window_probe", thread, window=window,
+            expected = _control(self.request("window_probe", thread, current=current, window=window,
                                              x=fields["x"], y=fields["y"]))
         elif kind == "type":
             live = _control(self.request("window_probe", thread, current=current, window=window, ref=ref))
@@ -419,10 +444,8 @@ def _record_verdict(record, verdict):
 
 
 def _read(op, window=None):
-    if not config.desktop_drive():
-        return OFF
     service = _service
-    return service.read(op, window) if service is not None else UNAVAILABLE
+    return service.read(op, window) if service is not None else OFF
 
 
 def invalid_call(name, arguments, missing, unexpected):
@@ -441,28 +464,28 @@ def invalid_call(name, arguments, missing, unexpected):
 
 
 def _act(kind, window, purpose, risky, *, fault=None, **fields):
+    service = _service
+    grant = service.grant() if service is not None else None
+    if grant is None:
+        return OFF
     who = runtime.caller() or {}
     thread = who.get("thread_id")
     record = {"at": utcnow(), "thread_id": thread, "tool": "hud_window_" + kind,
               "app": "", "name": "", "role": "", "keys": [],
               "purpose": _reason_text(purpose, fields.get("text")),
               "decision": risk.REFUSE, "group": "", "reasons": ()}
-    service = _service
     outcome = "refused"
     text = fields.get("text")
     detail = ""
     try:
-        if not config.desktop_drive():
-            record["reasons"] = ("disabled",)
-            result = OFF
-        elif service is None or not service.current():
+        if not service.current():
             record["reasons"] = ("unavailable",)
             result = UNAVAILABLE
         elif fault is not None:
             record["reasons"] = (fault,)
             result = f"Refused: {fault}"
         else:
-            outcome, result = service.prepare(kind, window, thread, purpose, risky, fields, record)
+            outcome, result = service.prepare(kind, window, thread, purpose, risky, fields, record, grant)
     except Refused as exc:
         if not record["reasons"]:
             record["reasons"] = (str(exc),)
@@ -470,6 +493,8 @@ def _act(kind, window, purpose, risky, *, fault=None, **fields):
     except Exception as exc:
         outcome, result, detail = _action_failure(exc, text)
 
+    if service.grant() is not grant:
+        return OFF
     try:
         if detail:
             record["outcome_detail"] = detail
@@ -483,9 +508,13 @@ def _act(kind, window, purpose, risky, *, fault=None, **fields):
             result()
             outcome, result = "asked-approved" if record.get("asked") else "run", COMPLETED
         except Refused as exc:
-            outcome, result = "refused", _refusal(exc)
+            outcome, result = "refused", OFF if service.grant() is not grant else _refusal(exc)
         except Exception as exc:
-            outcome, result, detail = _action_failure(exc, text)
+            if (isinstance(exc, DesktopError) and str(exc) == "The owner chat turn is no longer current."
+                    and service.grant() is not grant):
+                outcome, result = "refused", OFF
+            else:
+                outcome, result, detail = _action_failure(exc, text)
         try:
             _update_audit(fd, offset, outcome, detail)
         except OSError:

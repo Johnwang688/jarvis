@@ -80,7 +80,9 @@ def main():
             for provider in ("claude", "codex"):
                 listed = {row["name"] for row in bridge.listing(provider)}
                 assert {name for name in listed if name.startswith("hud_desktop_")} == NAMES
-                assert bool(listed & session_tools.HUD_WINDOW_TOOLS) == (enabled == "1")
+                assert not listed & session_tools.HUD_WINDOW_TOOLS
+                driver = {row["name"] for row in bridge.listing(provider, window_tools=True)}
+                assert bool(driver & session_tools.HUD_WINDOW_TOOLS) == (enabled == "1")
     assert NAMES <= tools.EXPLICIT_ONLY and not NAMES & MCP_TOOLS
     assert all(tools.REGISTRY[n].dangerous for n in NAMES - {"hud_desktop_status"})
     assert call("hud_desktop_status")[0].startswith("Refused:")

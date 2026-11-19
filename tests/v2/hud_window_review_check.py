@@ -91,6 +91,9 @@ class Review(unittest.TestCase):
         self.daemon = object.__new__(Daemon)
         self.daemon._lock = threading.RLock()
         self.daemon._stopping = False
+        from jarvis.v2.desktop_driver import DesktopDriver
+        self.daemon.desktop_driver = DesktopDriver(self.daemon._lock)
+        self.daemon.desktop_driver.set("review-chat", True)
         self.daemon.hud_sensitive_reports = Reports()
         self.addCleanup(self.daemon.hud_sensitive_reports.close)
         self.service = window.WindowDrive(self.daemon)
@@ -102,6 +105,10 @@ class Review(unittest.TestCase):
         self.responses = {}
         self.stopped = False
         isolate(self, window.SESSION, "request", self.exchange)
+
+    def drive_chat(self, thread_id):
+        self.daemon.desktop_driver.clear()
+        self.daemon.desktop_driver.set(thread_id, True)
 
     def exchange(self, op, **kw):
         self.calls.append((op, kw))
@@ -153,7 +160,7 @@ class Review(unittest.TestCase):
 
     def test_01_flag_flip_after_listing_and_inside_approval(self):
         for provider in ProviderName:
-            names = {row["name"] for row in bridge.listing(provider)}
+            names = {row["name"] for row in bridge.listing(provider, window_tools=True)}
             self.assertEqual(names & NAMES, NAMES if provider != ProviderName.FAST else set())
         listed = self.snapshot()
         self.assertIn(QUEUE, listed)
@@ -202,7 +209,8 @@ class Review(unittest.TestCase):
     def test_02_claude_subagent_is_denied_and_legacy_admission_is_unchanged(self):
         provider = object.__new__(claude.ClaudeProvider)
         session = NS(brief=NS(role=Role.CHAT, task_id=None, mcp_servers={"jarvis": {}}),
-                     denied_tools=set(), child_denied=OrderedDict(), mutex=threading.Lock())
+                     denied_tools=set(), child_denied=OrderedDict(), mutex=threading.Lock(),
+                     permit=NS(desktop_driver_grant=lambda: self.daemon.desktop_driver.grant("review-chat")))
         hook = provider._pre_tool_hook(session)
 
         def run(tool, **metadata):
@@ -215,6 +223,10 @@ class Review(unittest.TestCase):
             permit.assert_not_called()
             self.assertEqual(run("hud_window_snapshot"), "allow")
             browser_admission.assert_not_called()
+            permit.reset_mock()
+            self.daemon.desktop_driver.clear()
+            self.assertEqual(run("hud_window_snapshot"), "deny")
+            permit.assert_not_called()
             self.assertEqual(run("hud_browser_act"), "deny")
             browser_admission.assert_called_once()
             self.assertEqual(run("hud_desktop_type"), "allow")
@@ -272,9 +284,11 @@ class Review(unittest.TestCase):
     def test_04_interleaving_preserves_only_each_windows_latest_refs(self):
         self.snapshot()
         self.snapshot(SECONDARY)
+        self.drive_chat("another-chat")
         self.snapshot(SECONDARY, thread="another-chat")
+        self.assertIn("fresh snapshot", self.act("click", ref=EDIT, via={"thread": "another-chat"}))
+        self.drive_chat("review-chat")
         self.assertIn("Refused:", self.act("click", on=SECONDARY, ref=EDIT))
-        self.assertIn("Refused:", self.act("click", ref=EDIT, via={"thread": "another-chat"}))
         self.assertIn("Refused:", self.act("click", ref="66d40c77b6153189-e5"))
         self.assertIn("Refused:", self.act("click", ref=EDIT, name="Fabricated", role="button"))
         self.assertEqual(self.act("click", ref=EDIT), COMPLETED)
@@ -282,6 +296,7 @@ class Review(unittest.TestCase):
         self.snapshot()
         self.assertIn("Refused:", self.act("click", ref=EDIT))
         self.assertEqual(self.act("click", ref=NEW), COMPLETED)
+        self.drive_chat("another-chat")
         self.assertEqual(self.act("click", ref=NEW, on=SECONDARY, via={"thread": "another-chat"}), COMPLETED)
         for op, fields in self.actions():
             self.assertEqual(fields["expect"], EDITOR, op)
@@ -369,6 +384,7 @@ class Review(unittest.TestCase):
 
     def test_06_every_transport_request_has_scope_pairing_and_liveness(self):
         via = {"thread": "scope-review"}
+        self.drive_chat(via["thread"])
 
         def checked_reply(fields):
             self.assertTrue(fields["current"]())

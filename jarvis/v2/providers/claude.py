@@ -1177,6 +1177,16 @@ class ClaudeProvider:
             # A Jarvis session tool (`mcp__jarvis__<tool>`, plan 2026-10-10).
             from .. import session_tools
             jarvis = session_tools.claude_session_tool(session.brief, name)
+            if (name.startswith(session_tools.CLAUDE_PREFIX)
+                    and name.removeprefix(session_tools.CLAUDE_PREFIX) in session_tools.HUD_WINDOW_TOOLS
+                    and "jarvis" in session.brief.mcp_servers):
+                current_grant = getattr(getattr(session, "permit", None), "desktop_driver_grant", None)
+                if not callable(current_grant) or current_grant() is None:
+                    from ..desktop_driver import REFUSED
+                    _note_denied(session, tool_use_id, agent_id)
+                    return {"hookSpecificOutput": {
+                        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                        "permissionDecisionReason": REFUSED}}
             if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
                 _note_denied(session, tool_use_id, agent_id)
                 # A sub-agent's call (the hook input names its agent): refused

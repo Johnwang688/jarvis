@@ -36,6 +36,8 @@ export class ApiError extends Error {
   }
 }
 
+export type DesktopDrivingState = { enabled: boolean; thread_id: string | null };
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   const text = await res.text();
@@ -133,6 +135,15 @@ export const api = {
     provider?: string;
     brief?: { model?: string; effort?: string; speed?: string };
   }) => req<Thread>("/threads", json(body)),
+  newDesktopDriverChat: (projectId: string): Promise<Thread> => api.openThread({
+    project_id: projectId, role: "chat", provider: "codex",
+    brief: { model: "gpt-6.2-sol", effort: "medium", speed: "ultrafast" },
+  }),
+  desktopDriving: () => req<DesktopDrivingState>("/desktop-driving"),
+  setDesktopDriving: (id: string, on: boolean) =>
+    req<DesktopDrivingState>(`/threads/${encodeURIComponent(id)}/desktop-driving`, patch({ on })),
+  stopDesktopDriving: (id: string) =>
+    req<DesktopDrivingState>(`/threads/${encodeURIComponent(id)}/desktop-driving/stop`, json({})),
   /** A chat thread's model and effort, from its next message; `model: null`
    * is the default. Never its provider. */
   setThreadModel: (id: string, body: { model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null }) =>

@@ -296,6 +296,23 @@ every one of these routes asks (`kind`):
   files, 4 MB each, text inlined and scrubbed, protected names refused as
   a bracketed note).
 
+### Desktop driving
+
+The Browser's owner, HUD listener, Origin and loopback Host checks apply to
+these routes. Each returns `{"enabled": bool, "thread_id": string | null}`.
+
+- `GET /desktop-driving` reads the daemon's current state.
+- `PATCH /threads/{id}/desktop-driving` takes `{"on": bool}`. Turning it
+  on requires an active Codex or Claude chat and `JARVIS_DESKTOP_DRIVE=1`
+  in the daemon's launch environment. A different chat holding the grant
+  yields 409. A repeated `on: true` keeps the existing grant.
+- `POST /threads/{id}/desktop-driving/stop` takes `{}`. It revokes the
+  named chat's grant and interrupts its current turn if one is running.
+
+The grant lives only in memory. Changes publish `desktop_driving` to prompt
+HUD windows to read the state again. The New desktop driver chat action
+uses `POST /threads` with the existing Codex model, effort and speed fields.
+
 ## Tasks (additions)
 
 - `GET /tasks/{id}/threads` → `[{"thread_id", "role", "provider", "model",

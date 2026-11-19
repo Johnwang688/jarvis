@@ -1159,7 +1159,10 @@ def _load_dotenv() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        key = key.strip()
+        # Windows window driving requires an explicit daemon environment opt-in.
+        if key != "JARVIS_DESKTOP_DRIVE":
+            os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 _load_dotenv()
