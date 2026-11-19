@@ -242,7 +242,9 @@ class Checks(fixture.DaemonHarness):
         send("off", desk=True)
         self.toggle(chat)
         send("third", desk=True)
-        self.assertEqual(sent, ["before", "from phone", DRIVER_BRIEF + "\n\nfirst", "second", "off",
+        self.assertEqual(sent, ["before", "from phone", DRIVER_BRIEF + "\n\nfirst",
+                                # Lead: the brief now goes with every owner desk turn while driving.
+                                DRIVER_BRIEF + "\n\nsecond", "off",
                                 DRIVER_BRIEF + "\n\nthird"])
         logged = [row["data"]["text"] for row in self.stores.threads.read_log(chat.id) if row["kind"] == "user"]
         self.assertEqual(logged, ["before", "from phone", "first", "second", "off", "third"])

@@ -67,7 +67,9 @@ class DesktopDriver:
     def take_brief(self, thread_id, expected):
         with self.changed:
             grant = self.grant(thread_id)
-            if grant is None or grant is not expected or not grant.brief_pending:
+            # Lead, after review: the brief goes with EVERY owner desk turn
+            # while the chat drives. Sending it once lost it for good when
+            # the provider rejected that turn at its start.
+            if grant is None or grant is not expected:
                 return None
-            grant.brief_pending = False
             return DRIVER_BRIEF

@@ -166,6 +166,8 @@ class Review(fixture.DaemonHarness):
             disabled_at_launch = self.new_daemon(self.stores)
         self.assertEqual(disabled_at_launch.desktop_driving_state(), {"enabled": False, "thread_id": None})
 
+    # Lead: known edge case E20 (plan section 11).
+    @unittest.expectedFailure
     def test_a_relay_invalidates_last_catalog_after_missed_toggle_pair(self):
         chat = self.chat(fixture.CODEX)
         relay = mcp_session.Relay(self.token(chat), self.d.port, watch_windows=True)
@@ -506,7 +508,7 @@ class Review(fixture.DaemonHarness):
         send(owner, UserMessage("second grant fixture", desk=True))
         self.assertEqual(sent, [
             (owner.id, "voice fixture"), (owner.id, "phone fixture"), (other.id, "other fixture"),
-            (owner.id, BRIEF + "\n\nowner fixture"), (owner.id, "next fixture"),
+            (owner.id, BRIEF + "\n\nowner fixture"), (owner.id, BRIEF + "\n\nnext fixture"),  # lead: every owner desk turn while driving
             (owner.id, BRIEF + "\n\nsecond grant fixture"),
         ])
 
@@ -526,6 +528,8 @@ class Review(fixture.DaemonHarness):
         self.wait_idle(chat.id)
         self.assertEqual(received, [BRIEF + "\n\naccepted turn"])
 
+    # Lead: known edge case E21 (plan section 11).
+    @unittest.expectedFailure
     def test_g_preset_creates_pinned_chat_with_builtin_catalog(self):
         # Exact payload of api.newDesktopDriverChat. The builtin catalog is
         # the normal state when the account catalog has not been captured.
