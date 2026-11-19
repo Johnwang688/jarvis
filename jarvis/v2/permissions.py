@@ -1109,7 +1109,7 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str],
         judge = v1_files.credential_folder_judge()
         # The VEX folder exception: only for a segment that reads, as written
         # (the wrapper-peeled `tokens` and the raw words must both say so).
-        vex = _vex_reader(tokens) and _vex_reader(rules._tokens(segment))
+        vex = _vex_reader(tokens, segment) and _vex_reader(rules._tokens(rules.strip_redirections(segment)))
         return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge, vex)
                     for token in tokens + _path_words(segment))
                 or _shell_walk_holds(tokens, bases, vex)
@@ -1216,9 +1216,10 @@ _VEX_SDK_PIECE = re.compile(r"[A-Za-z0-9_ .\-]+")
 # `-C`/`--chdir` option moves a relative operand into it, `find -exec` runs
 # anything). The list says what is safe, never what is dangerous.
 _VEX_READERS: dict[str, tuple[str, ...]] = {
-    "ls": (), "cat": (), "head": (), "tail": (), "wc": (), "file": (), "stat": (),
-    "strings": (), "nm": (), "du": (), "cd": (), "pushd": (), "echo": (), "test": (),
-    "basename": (), "dirname": (), "md5sum": (), "sha256sum": (), "cmp": (), "diff": (),
+    "ls": ("-L", "--dereference"), "cat": (), "head": (), "tail": (),
+    "wc": ("--files0-from",), "stat": (), "strings": (), "cd": (), "pushd": (),
+    "echo": (), "test": (), "basename": (), "dirname": (), "cmp": (),
+    "md5sum": ("-c", "--check"), "sha256sum": ("-c", "--check"),
     "grep": ("-R", "--dereference-recursive", "-f", "--file"),
     "rg": ("-L", "--follow", "-f", "--file", "--pre"),
     "find": ("-L", "-H", "-follow", "-exec", "-execdir", "-ok", "-okdir", "-delete",
@@ -1228,13 +1229,23 @@ _VEX_SED_PRINT = re.compile(r"[0-9$,]*p")
 _VEX_ASSIGNED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$\(")
 
 
-def _vex_reader(tokens: list[str]) -> bool:
+def _vex_reader(tokens: list[str], segment: str | None = None) -> bool:
     """Whether the segment only reads: its program is on `_VEX_READERS`
     (written bare; a `NAME=$(` in front is the usual `SDK=$(ls -d …)`) and
     carries none of that program's excluded options, or it is `sed -n` with
-    one print script. No word may have a `..` piece or hold a substitution."""
+    one print script. No word may have a `..` piece or hold a substitution,
+    and the segment (when given) redirects nothing but its errors, to
+    `/dev/null` or onto its output: a redirection writes."""
     if not tokens:
         return False
+    if segment is not None:
+        try:
+            redirects = rules.redirections(segment)
+        except Exception:      # noqa: BLE001 — unreadable: no exception
+            return False
+        for redirect in redirects:
+            if segment[redirect.start:redirect.end].replace(" ", "") not in ("2>&1", "2>/dev/null"):
+                return False
     words = list(tokens)
     words[0] = _VEX_ASSIGNED.sub("", words[0], count=1)
     program = words[0]
@@ -1253,6 +1264,9 @@ def _vex_reader(tokens: list[str]) -> bool:
         name = word.split("=", 1)[0]
         if name in excluded:
             return False
+        if word.startswith("--") and len(name) > 2 and any(
+                option.startswith(name) for option in excluded if option.startswith("--")):
+            return False        # GNU reads an unambiguous prefix (`--deref`) as the option
         if not word.startswith("--") and any(
                 len(option) == 2 and option[1] in word[1:] for option in excluded):
             return False        # a short option inside a cluster (`-rnR`)

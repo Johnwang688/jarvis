@@ -3939,8 +3939,10 @@ Other extensions' storage and all else under `AppData` ask as before.
 The exception is for reading (Opus review, 2026-11-19): only a segment whose
 program is on `_VEX_READERS` (ls, cat, head, tail, grep without `-R`, find
 without `-L`/`-exec`/`-delete`, `sed -n` with a print script, and the like),
-written bare, with no `..` piece and no substitution among its words, gets
-it. Any other program that names the folder asks as before, so nothing can
+written bare, with no `..` piece and no substitution among its words, and no
+redirection but its errors to `/dev/null` or onto its output, gets it (the
+second review: `echo x > V/b` writes, `grep --deref`, `diff -r`, `ls -LR` and
+`du -L` follow a link below the folder, so those options or programs are out). Any other program that names the folder asks as before, so nothing can
 be written there unasked: a write could plant a link (`ln -s ../github.auth
 V/l; cat V/l/token`), `tar -C V`/`env -C V`/`git -C V` move a relative
 operand into it, and `find -exec` runs anything. Pieces are plain ASCII
