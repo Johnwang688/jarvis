@@ -1737,14 +1737,16 @@ def _cd_bases(segments, bases) -> list:
 
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
                      project: Project | None = None, *, cwd: str | None = None,
-                     shell_cwd: str | None = None) -> tuple[str, str] | None:
+                     shell_cwd: str | None = None,
+                     command_readings: tuple[str, ...] | None = None) -> tuple[str, str] | None:
     """(rule id, reason) if this call is on the always-ask list, else None.
     `cwd` and `shell_cwd` place a walk's relative root (`credentials-path`)."""
     bases = tuple(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or (None,)
     segments: list[tuple[str, list[str], list[str]]] = []
     # Each reading's segments: a call with two command fields is matched
     # field by field as well as joined (#211 bench, MED).
-    lines = [text for text in _judged_of(tool, args) if text.strip()]
+    lines = [text for text in (_judged_of(tool, args) if command_readings is None else command_readings)
+             if text.strip()]
     for segment in [part for text in lines for part in rules.segments(text)]:
         tokens = _tokens_of(segment)
         stems = [s for s, _ in rules.command_targets(segment)]
@@ -1799,6 +1801,28 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
         why = credential_names_ask(tool, args, cwd, shell_cwd)
         if why:
             return "credentials-path", why
+    return None
+
+
+def _shell_always_ask(lines, cwd, *, resolve_literals=True) -> tuple[str, str] | None:
+    """Command-only layer 2 checks, in their original precedence order."""
+    lines = [text for text in lines if text.strip()]
+    for text in lines:
+        touch = protected_state.command_touch(text, cwd)
+        if touch is not None:
+            return ("env-file" if touch.env else "gate-state", protected_state.ask_reason(touch))
+    for text in lines:
+        why = rules.vex_uncoverable(text, resolve_literals=resolve_literals)
+        if why:
+            return "vex-device", why
+    for text in lines:
+        why = protected_state.kill_unsure(text)
+        if why:
+            return "daemon-kill", why
+    for text in lines:
+        why = rules.runners_unsure(text)
+        if why:
+            return "too-complex", why
     return None
 
 
@@ -1993,6 +2017,23 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                        if isinstance(extra, str) and extra.strip() else None)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
+        resolved: dict[str, str] = {}
+        unresolved = None
+        for original in dict.fromkeys((*judged, *(c for c in also_commands if isinstance(c, str)))):
+            try:
+                readings = rules.literal_program_readings(original)
+            except Exception:
+                unresolved = original
+                continue
+            for text in readings:
+                try:
+                    refusal = denied_command(text, cwd)
+                except Exception:
+                    unresolved = original
+                    continue
+                if refusal:
+                    return finish(Decision.DENY, L_DENY, refusal)
+                resolved.setdefault(text, original)
         unchecked: list[str] = []
         for access, target in grants:
             refusal = denied_grant(target, access, unchecked)
@@ -2011,7 +2052,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # are never asked of anyone and come before every layer that could
         # allow; a push it cannot read is asked of the owner, no Always.
         # A task without one is judged exactly as before.
-        scoped = _pr_scope_hit(ctx, tool, args, judged, also_commands, cwd, shell_cwd)
+        scoped = _pr_scope_hit(ctx, tool, args, judged, (*also_commands, *resolved), cwd, shell_cwd)
         if scoped is not None:
             if scoped.decision != "ask":
                 return finish(Decision.DENY, L_PR_SCOPE, scoped.reason)
@@ -2043,7 +2084,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # A Codex git tool is judged by the line the daemon will run, where
         # it runs (`chat_git.gate_line`).
         owner_only = _owner_only(tool, chat.line if chat is not None else command,
-                                 (*judged[1:], *also_commands), args, ctx,
+                                 (*judged[1:], *also_commands, *resolved), args, ctx,
                                  chat.where if chat is not None else
                                  shell_cwd if isinstance(shell_cwd, str) else None, cwd)
 
@@ -2062,7 +2103,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             if (ctx.provider == "codex" and brief is not None and brief.role == Role.CHAT
                     and brief.task_id is None
                     and any(chat_git.raw_remote(line)
-                            for line in (command, *judged[1:], *also_commands))):
+                            for line in (command, *judged[1:], *also_commands, *resolved))):
                 return finish(Decision.DENY, L_CHAT_GIT, chat_git.POINTER)
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_WIDENING,
@@ -2135,6 +2176,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                                        subagent=sid, relay_child=bridged, cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)
         match = always_ask_match(tool, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
+        alias = None
         if match is None and delegated is not None:
             alias = (session_tools.CLAUDE_PREFIX + delegated.name
                      if ctx.provider == "codex" else delegated.name)
@@ -2143,52 +2185,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             # An unknown tool's command key holds something that is not text:
             # it cannot be judged, so the owner is asked (#211 review, F3).
             match = ("command-unreadable", f"{tool}'s command is not text and cannot be judged")
-        for text in judged if match is None else ():
-            # A line that might write the gate's own state but is not provably
-            # a write (layer 1 took those): a copy into the gate's folder, a
-            # path behind an unset variable — or a line too complex to judge at
-            # all (past the substitution bound). Under AUTO it would otherwise
-            # go to the provider's classifier; it goes to the owner instead, in
-            # every profile.
-            touch = protected_state.command_touch(text, cwd) if text.strip() else None
-            if touch is not None:
-                match = ("env-file" if touch.env else "gate-state",
-                         protected_state.ask_reason(touch))
-                break
-        for text in judged if match is None else ():
-            if not text.strip():
-                continue
-            # A line that may run VEX's device tool (the robot's download)
-            # and cannot be told — a program that is only an expansion, read
-            # from input, or behind an option the table does not know — or
-            # one too complex to judge: never the provider's reviewer's call
-            # under AUTO (VX-1, `rules.vex_uncoverable`). A line that
-            # certainly names or runs it was refused at layer 1.
-            unsure = rules.vex_uncoverable(text)
-            if unsure:
-                match = ("vex-device", unsure)
-                break
-        for text in judged if match is None else ():
-            if not text.strip():
-                continue
-            # A kill whose pattern is too costly to judge against the v2
-            # daemon — too complex to judge, so asked, never refused (that
-            # is layer 1's for a provable match) and never the reviewer's
-            # call under AUTO (the delta review of PR #48).
-            unsure = protected_state.kill_unsure(text)
-            if unsure:
-                match = ("daemon-kill", unsure)
-                break
-        for text in judged if match is None else ():
-            if not text.strip():
-                continue
-            # What the line's wrappers and runners start is too complex to
-            # judge within its work budget (review of PR #75): asked, never
-            # the reviewer's call under AUTO and never the allowlist's.
-            unsure = rules.runners_unsure(text)
-            if unsure:
-                match = ("too-complex", unsure)
-                break
+        if match is None:
+            match = _shell_always_ask(judged, cwd)
         if match is None and multi and open_quoting(args) is not None:
             # More than one command line, one with a quote or backslash left
             # open: which line it joins is the tool's business, so it cannot
@@ -2196,6 +2194,32 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             match = ("command-unreadable",
                      f"{tool} carries more than one command line and one leaves its "
                      "quoting open, so what runs cannot be judged")
+        resolved_ask = False
+        if match is None:
+            # Judge the added readings for asks only. Keep original args for
+            # the card, allowlist and the provider's reviewer.
+            for text, original in resolved.items():
+                try:
+                    reading = (text,)
+                    match = always_ask_match(tool, args, brief, ctx.project, cwd=cwd,
+                                             shell_cwd=_shell, command_readings=reading)
+                    if match is None and alias is not None:
+                        match = always_ask_match(alias, args, brief, ctx.project, cwd=cwd,
+                                                 shell_cwd=_shell, command_readings=reading)
+                    if match is None:
+                        match = _shell_always_ask(reading, cwd, resolve_literals=False)
+                    if match and (match[0] in {"too-complex", "credentials-inner", "daemon-kill"}
+                                  or match[1] == rules.TOO_COMPLEX):
+                        match = None
+                        unresolved = original
+                except Exception:
+                    unresolved = original
+                if match is not None:
+                    break
+            if match is None and unresolved is not None:
+                match = ("vex-device", rules.vex_uncoverable(unresolved, resolve_literals=False)
+                         or rules.TOO_COMPLEX)
+            resolved_ask = match is not None
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
@@ -2209,7 +2233,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             # 2026-10-29): a yes to printing or changing a credential is for
             # this call only, never an allowlist entry a v1 surface would read.
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
-                                       allowlistable=not rule_id.startswith("credentials-"),
+                                       allowlistable=not resolved_ask and not rule_id.startswith("credentials-"),
                                        origin=who, subagent=sid, relay_child=bridged,
                                        cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)

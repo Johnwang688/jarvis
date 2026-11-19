@@ -1291,9 +1291,11 @@ which Bash can run if the variable is unset. If the assignment was skipped,
 a quoted `"$VAR"` takes any value the variable already had in the environment.
 The gate does not see that inherited value.
 
-A literal VEX device command still gets the existing refusal. Owner
-operations, gate-state and other always-ask rules read the original command,
-and the allowlist continues to use the unresolved VEX reading.
+The gate checks both the original line and the line with proven program words
+substituted for refusals and owner questions, with a refusal taking precedence.
+If the substitution or its checks cannot be completed, the original VEX
+question still applies, including when `hash` can rebind a program name.
+Allowlist coverage, Always offers and automatic approvals use the original line.
 
 ## The Reach check and the `vex` record tree (2026-11-06)
 
