@@ -28,28 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from jarvis.v2 import laya_routing
+from jarvis.v2.laya_schema import QUESTION, REPO
 
 
-REPO = "convaiinnovations/laya"
 MODES = ("assistant", "wake", "dictation")
-QUESTION = {
-    "route": {
-        "type": "choice",
-        "instructions": (
-            "Classify the speaker's primary intent in this voice transcript. "
-            "Ignore filler and courtesy. Base the choice on what they want done."
-        ),
-        "criteria": {
-            "ask": "Give an answer, explanation or comparison in conversation, or help with a task in chat.",
-            "navigate": "Visit an explicitly named website in a browser.",
-            "open_app": "Launch a named desktop application.",
-            "switch_app": "Return to or focus a named open app or window.",
-            "search": "Perform a web search for the speaker's query.",
-            "read_selection": "Read aloud text already selected on the desktop.",
-            "clarify": "The requested outcome is unclear or contradictory.",
-        },
-    },
-}
 
 
 def read_runtime(path):
