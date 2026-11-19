@@ -106,6 +106,10 @@ class G6QuoteLookAlikesOnTheCard(unittest.TestCase):
     """LOW: F7/N3 class. Characters that draw like a double quote survive, and
     the replacement itself turns '""' into "''", which reads as '"'."""
 
+    # Known edge case, left open by the owner's decision of 2026-11-19 (plan
+    # section 11): only a hostile page can produce these characters, and the
+    # step still asks; the card's quoting can merely be made to look odd.
+    @unittest.expectedFailure
     def test_no_double_quote_look_alike(self):
         for quote in ('""', "''", "˵", "΅", "῭", "΅", "῁", "¨", "⹉", "``", "´´", "ˊˊ", "ˋˋ"):
             with self.subTest(quote=ascii(quote)):

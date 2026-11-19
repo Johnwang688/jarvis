@@ -109,7 +109,8 @@ class Enter(unittest.TestCase):
                      "Address and search bar", "URL", "Enter URL"):
             with self.subTest(name=name):
                 self.assertFalse(enter_asks(name, "editable"))
-                self.assertFalse(enter_asks(name, "unrecognized"))
+                # An unknown role may be a button: a risky label there asks.
+                self.assertEqual(enter_asks(name, "unrecognized"), name == "Search and pay")
                 # A focused button is pressed by Enter whatever else its label says.
                 self.assertTrue(enter_asks(name + " and send", "button"))
 
@@ -235,7 +236,10 @@ class Decisions(unittest.TestCase):
                          Verdict(ASK, "delete", ("shortcut", "enter", "key:delete")))
         self.assertEqual(decide(replace(key, name="Search", role="search", risky="no")),
                          Verdict(ASK, reasons=("shortcut", "enter")))
+        # The focused control is "Send": a key press that asks carries its group.
         self.assertEqual(decide(replace(key, keys=("Delete",), risky="no")),
+                         Verdict(ASK, "send", ("key:delete",)))
+        self.assertEqual(decide(replace(key, keys=("Delete",), name="Inbox", risky="no")),
                          Verdict(ASK, "delete", ("key:delete",)))
         self.assertEqual(decide(replace(key, keys=(" RETURN ",), risky="no")),
                          Verdict(ASK, "send", ("enter",)))
@@ -284,7 +288,7 @@ class Decisions(unittest.TestCase):
         for modifier, allowed in (
             ("control", (*"acvxzyfltnrsp0", *"wbiuhke", "home", "end", "left", "right", "up", "down",
                          "tab", "pageup", "pagedown", "plus", "minus", "backspace")),
-            ("alt", ("left", "right", "up", "tab", "home", "d")),
+            ("alt", ("left", "right", "up", "tab", "home")),
         ):
             # The list is pinned whole: a key added to it must be added here.
             for key in sorted(KEYS - set(allowed) - {"shift", "enter", "return"}):
@@ -295,7 +299,10 @@ class Decisions(unittest.TestCase):
             for key in allowed:
                 with self.subTest(modifier=modifier, key=key):
                     self.assertEqual(decide(replace(action, keys=(modifier, key))), Verdict(RUN))
-                    self.assertEqual(decide(replace(action, keys=(key, "shift", modifier))), Verdict(RUN))
+                    shifted = decide(replace(action, keys=(key, "shift", modifier)))
+                    beside = key in ("home", "end", "left", "right", "up", "down", "tab",
+                                     "pageup", "pagedown", "z", "t", "v")
+                    self.assertEqual(shifted, Verdict(RUN) if beside else Verdict(ASK, reasons=("shortcut",)))
         for keys in (("ctrl", "pgup"), ("alt", "arrowleft"), ("CONTROL", "PgDn")):
             with self.subTest(alias=keys):
                 self.assertEqual(decide(replace(action, keys=keys)), Verdict(RUN))
@@ -355,7 +362,7 @@ class Statements(unittest.TestCase):
     def test_sanitisation_and_fallbacks(self):
         action = replace(BASE, name='  Se"\n\t\x7f\x85\u202e\u200b\u2028\u2029nd  ',
                          app='  O"u\u202et\nlook <x>/@!😈. -_+()  ')
-        self.assertEqual(statement(action, decide(action)), 'Click "Se\'nd" in Outlook x. -_+()')
+        self.assertEqual(statement(action, decide(action)), 'Click "Se\' nd" in Outlook x. -_+()')
         action = replace(BASE, app=' "\u202e\n\u200b! ', name="\t\u202e\u2029 ")
         self.assertEqual(statement(action, decide(action)), "Click an unlabeled control in an unknown app")
         self.assertEqual(statement(replace(BASE, app="Éditeur ２"), None), 'Click "Send" in Éditeur ２')
@@ -366,8 +373,8 @@ class Statements(unittest.TestCase):
         quotes = '"＂ʺ“”„‟«»″〃‘’'
         action = replace(BASE, name=f" Ｐay{hidden}{quotes} now ", app=f"AC{hidden}ME")
         card = statement(action, Verdict(ASK, "pay"))
-        apostrophes = "'" * len(quotes)
-        self.assertEqual(card, f'Click "Ｐay{apostrophes} now" in ACME (pay)')
+        # The line break in `hidden` is a gap; a run of quote marks is one mark.
+        self.assertEqual(card, 'Click "Ｐay \' now" in ACME (pay)')
         card.encode("utf-8")
         self.assertEqual(statement(replace(BASE, app="É ２"), None),
                          'Click "Send" in an unknown app')
@@ -494,7 +501,10 @@ class LeadAdditions(unittest.TestCase):
 
 class SecondReview(unittest.TestCase):
     def test_shift_enter_is_a_new_line_only_in_a_text_field(self):
-        box = replace(BASE, kind="key", role="edit", name="Message", keys=("shift", "enter"))
+        box = replace(BASE, kind="key", role="document", name="Message", keys=("shift", "enter"))
+        # A single-line field submits on Shift+Enter as on Enter.
+        self.assertEqual(decide(replace(box, role="edit")).decision, ASK)
+        self.assertEqual(decide(replace(box, role="rich edit")), Verdict(RUN))
         self.assertEqual(decide(box), Verdict(RUN))
         self.assertEqual(decide(replace(box, keys=("enter",))).decision, ASK)
         self.assertEqual(decide(replace(box, keys=("ctrl", "shift", "enter"))).decision, ASK)
@@ -529,6 +539,41 @@ class SecondReview(unittest.TestCase):
     def test_added_words(self):
         for name in ("Place your order", "Confirm order", "Send money", "Redeem", "Claim"):
             self.assertEqual(label_group(name), "pay")
+
+    def test_access_keys_on_a_focused_button(self):
+        button = replace(BASE, kind="key", role="button", name="No", keys=("y",))
+        self.assertEqual(decide(button), Verdict(ASK, "", ("accesskey",)))
+        self.assertEqual(decide(replace(button, keys=("shift", "n"), name="Save")).reasons, ("accesskey",))
+        self.assertEqual(decide(replace(button, role="push button", keys=("1",))).decision, ASK)
+        self.assertEqual(decide(replace(button, name="Pay now")), Verdict(ASK, "pay", ("accesskey",)))
+        for role in ("edit", "document", "listitem", "treeitem", "", "cell"):
+            with self.subTest(role=role):
+                self.assertEqual(decide(replace(button, role=role)), Verdict(RUN))
+        for keys in (("tab",), ("down",), ("escape",), ("f5",)):
+            self.assertEqual(decide(replace(button, keys=keys)), Verdict(RUN))
+        self.assertEqual(decide(replace(button, keys=("alt", "d"))), Verdict(ASK, "", ("shortcut",)))
+
+    def test_plain_role_spelt_with_a_space_follows_its_label(self):
+        key = replace(BASE, kind="key", keys=("enter",), name="Next")
+        for role in ("push button", "pushbutton", "page tab", "outline item", "menu button"):
+            with self.subTest(role=role):
+                self.assertEqual(decide(replace(key, role=role)), Verdict(RUN))
+        self.assertEqual(decide(replace(key, role="mystery")).decision, ASK)
+
+    def test_line_breaks_are_read_as_a_gap_and_as_nothing(self):
+        for name in ("Pay\nnow", "Buy\r\nnow", "Delete\naccount", "Send\tmessage", "Se\x85nd", "Se\u200and"):
+            with self.subTest(name=name):
+                self.assertTrue(label_group(name))
+        self.assertEqual(statement(replace(BASE, name="Pay\nnow"), None), 'Click "Pay now" in Outlook')
+        self.assertEqual(label_group("word\n" * 12 + "pay"), "")
+
+    def test_a_payment_control_in_focus_blocks_voice_for_any_asking_key(self):
+        focused = replace(BASE, kind="key", role="button", name="Pay now")
+        for keys in (("ctrl", "q"), ("alt", "p"), ("delete",)):
+            with self.subTest(keys=keys):
+                verdict = decide(replace(focused, keys=keys))
+                self.assertEqual((verdict.decision, verdict.group), (ASK, "pay"))
+                self.assertFalse(voice_may_approve(verdict))
 
     def test_only_three_first_words_mark_a_lookup_box(self):
         for word in ("search", "find", "filter"):

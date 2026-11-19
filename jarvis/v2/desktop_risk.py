@@ -1,6 +1,7 @@
 """Classify desktop actions and render their approval statements."""
 
 from dataclasses import dataclass
+import re
 from unicodedata import category, name as _unicode_name, normalize
 
 
@@ -60,7 +61,7 @@ _PLAIN = frozenset((
 _MATCH_HIDDEN = frozenset(("Cf", "Cs", "Mn", "Me", "Cc", "Cn", "Co"))
 _CARD_HIDDEN = _MATCH_HIDDEN | {"Zl", "Zp"}
 _PURPOSE_INVALID = frozenset(("Cc", "Cf", "Cs", "Zl", "Zp"))
-_BLANK_CHARACTERS = frozenset("\u034f\u115f\u1160\u3164\uffa0\u2800")
+_BLANK_CHARACTERS = frozenset("\u034f\u115f\u1160\u3164\uffa0\u2800\U00013441\U00013442")
 _QUOTE_NAMES = ("QUOTATION", "PRIME", "DOUBLE ACUTE", "GERSHAYIM", "DITTO", "DOUBLE APOSTROPHE")
 
 
@@ -113,8 +114,23 @@ _ALLOWED_SHORTCUTS = {
         *"acvxzyfltnrsp0", *"wbiuhke", "home", "end", "left", "right", "up", "down", "tab",
         "pageup", "pagedown", "plus", "minus", "backspace",
     )),
-    "alt": frozenset(("left", "right", "up", "tab", "home", "d")),
+    # No Alt+letter: in a dialog that is the access key of whichever button
+    # carries the letter ("&Delete").
+    "alt": frozenset(("left", "right", "up", "tab", "home")),
 }
+# Shift may sit beside these (select, reopen a tab, redo, paste plain); beside
+# other letters it makes a different shortcut (Ctrl+Shift+E shares the screen in Teams).
+_SHIFT_BESIDE = frozenset((
+    "home", "end", "left", "right", "up", "down", "tab", "pageup", "pagedown", "z", "t", "v",
+))
+# Controls a key press activates. With one of these focused in a dialog, a bare
+# letter presses the button that has that access key ("y" on "No" answers Yes).
+_PRESSABLE = frozenset((
+    "button", "pushbutton", "splitbutton", "menubutton", "checkbutton", "checkbox",
+    "radio", "radiobutton", "link", "hyperlink",
+))
+_NEW_LINE_ROLES = frozenset(("document", "richedit"))
+_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 _ENTER_KEYS = frozenset(("enter",))
 _SPACE_KEYS = frozenset(("space",))
 _DELETE_KEYS = frozenset(("delete",))
@@ -148,6 +164,13 @@ def _strip_hidden(value, categories):
     )
 
 
+def _gaps(name, gap):
+    """Line breaks, tabs and the odd-width spaces, read as `gap`. A button
+    label broken over two lines ("Pay\\nnow") must not become one word, and a
+    hair space inside "Send" must not split it: callers read the name both ways."""
+    return "".join(gap if char != " " and char.isspace() else char for char in name)
+
+
 def _fold(name):
     # NFKD after NFKC: a combining mark typed after a letter must come apart
     # again to be deleted ("Se\u0301nd" is "send"), and casefold can make new ones.
@@ -160,7 +183,7 @@ def _words(folded):
 
 
 def _normalise(name):
-    return _words(_fold(name).replace("&", ""))
+    return _words(_fold(_gaps(name, " ")).replace("&", ""))
 
 
 def _role(role):
@@ -188,13 +211,17 @@ def label_group(name, role="") -> str:
         return ""
     if _role(role) in _TEXT_ENTRY | _SEARCH:
         return ""
-    if len(_strip_hidden(name, _MATCH_HIDDEN).split()) > 12:
+    if len(_strip_hidden(_gaps(name, " "), _MATCH_HIDDEN).split()) > 12:
         return ""
     # "&" marks an access key inside a word ("E&xit") or joins two words
-    # ("Send&Close"): read it both ways and keep the stronger answer.
-    folded = _fold(name)
-    return _strongest({_group_of(_words(folded.replace("&", ""))),
-                       _group_of(_words(folded.replace("&", " ")))})
+    # ("Send&Close"), and a line break may or may not be a gap: read the name
+    # each way and keep the strongest answer.
+    groups = set()
+    for gap in (" ", ""):
+        folded = _fold(_gaps(name, gap))
+        for joiner in ("", " "):
+            groups.add(_group_of(_words(folded.replace("&", joiner))))
+    return _strongest(groups)
 
 
 def _enter_asks(name, role, group):
@@ -202,6 +229,10 @@ def _enter_asks(name, role, group):
         return False
     if role in _PLAIN:
         return bool(group)
+    # A role this module cannot name may be a button: a risky label asks even
+    # when it starts with a lookup word ("Find and delete duplicates").
+    if role not in _TEXT_ENTRY and label_group(name):
+        return True
     plain = _normalise(name)
     first_word = plain.partition(" ")[0]
     return not (
@@ -279,7 +310,7 @@ def _shortcut_asks(keys, key_set):
     if len(chord) == 2:
         for modifier, key in (chord, chord[::-1]):
             if key in _ALLOWED_SHORTCUTS.get(modifier, ()):
-                return False
+                return "shift" in key_set and key not in _SHIFT_BESIDE
     return True
 
 
@@ -303,7 +334,7 @@ def decide(action) -> Verdict:
         reasons.append("shortcut")
     presses_enter = submit or bool(key_set & _ENTER_KEYS)
     # Shift+Enter in a text field is a new line, not a submit.
-    if key_set == {"shift", "enter"} and role in _TEXT_ENTRY:
+    if key_set == {"shift", "enter"} and role in _NEW_LINE_ROLES:
         presses_enter = False
     # Space presses a focused control. Only a known text field is exempt: a web
     # button built from a plain element reports a role this module cannot name.
@@ -320,8 +351,15 @@ def decide(action) -> Verdict:
         reasons.append("key:delete")
         groups.add("delete")
 
+    if (kind == "key" and role in _PRESSABLE and not shortcut
+            and len(key_set - {"shift"}) == 1 and key_set & _LETTERS):
+        reasons.append("accesskey")
     if risky != "no":
         reasons.append(f"declared:{risky}")
+    # Whatever made a key press or typing ask, a payment control in focus
+    # makes it a payment for the voice rule.
+    if reasons and kind in ("key", "type"):
+        groups.add(label_group(name))
     # A step that already asks and whose stated purpose is a payment is a
     # payment for the voice rule, even when the control has no readable label.
     if reasons and _contains_term(_normalise(purpose), _PAY):
@@ -330,10 +368,11 @@ def decide(action) -> Verdict:
 
 
 def _control_name(name):
-    clean = _strip_hidden(name, _CARD_HIDDEN)
+    clean = _strip_hidden(_gaps(name, " "), _CARD_HIDDEN)
     quoted = "".join("'" if _quote_like(char) else char for char in clean)
-    # Runs of blank space would push the real label past the cut.
-    return " ".join(quoted.split())
+    # Two quote marks in a row read as a double quote; runs of blank space
+    # would push the real label past the cut.
+    return " ".join(re.sub("'{2,}", "'", quoted).split())
 
 
 def _ellipsise(value, limit):
