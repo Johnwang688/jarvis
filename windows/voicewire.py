@@ -15,6 +15,11 @@ import threading
 import time
 import wave
 
+if __package__:
+    from .voicetype import navigation_target
+else:
+    from voicetype import navigation_target
+
 PROTOCOL = "jarvis-voice-link/1"
 MAX_CLIP_S = 120
 MAX_LINE = 6 * 1024 * 1024
@@ -28,7 +33,7 @@ ERRORS = frozenset(("The clip could not be transcribed.", "That didn't sound lik
                     "The voice answer took too long. Check the selected chat in the HUD.",
                     "The voice answer took too long. Please check the Voice chat.",
                     "The clip must be a 16 kHz mono 16-bit WAV of at most 120 seconds."))
-KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
+KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection", "navigate"))
 
 
 class LinkError(Exception):
@@ -167,6 +172,7 @@ class Client:
         self.session = None
         self.shared_capable = False
         self.action_receipts = False
+        self.web_navigation = False
         self._request_lock = threading.Lock()
         self._speech_lock = threading.Lock()
         self._speaking_id = None
@@ -264,6 +270,7 @@ class Client:
         self.streaming = got.get("streaming") is True
         self.shared_capable = got.get("shared_mic") is True
         self.action_receipts = got.get("action_receipts") is True
+        self.web_navigation = got.get("web_navigation") is True
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
@@ -310,12 +317,18 @@ class Client:
             request["exact_open"] = True  # unaddressed launches check the local Start catalog
         if with_receipt and self.action_receipts:
             request["receipt"] = True
+        if self.web_navigation:
+            request["web_navigation"] = True
         got = self._request(request)
         value = got.get("intent")
         if (not isinstance(value, dict) or set(value) != {"kind", "text", "target"}
                 or not isinstance(value["kind"], str) or value["kind"] not in KINDS
                 or not isinstance(value["text"], str) or len(value["text"]) > 2000
-                or not isinstance(value["target"], str) or len(value["target"]) > 80):
+                or not isinstance(value["target"], str)
+                or (value["kind"] != "navigate" and len(value["target"]) > 80)
+                or (value["kind"] == "navigate" and
+                    (not request.get("web_navigation") or not value["target"]
+                     or value["target"] != navigation_target(text, source)))):
             self.close()
             raise LinkError("The voice link sent an invalid reply.")
         receipt = got.get("receipt")
@@ -373,6 +386,7 @@ class Client:
 
     def close(self):
         self.action_receipts = False
+        self.web_navigation = False
         self.session = None
         sock, stream = self._socket, self._stream
         self._socket = self._stream = None

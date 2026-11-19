@@ -10,11 +10,13 @@ from dataclasses import dataclass
 
 if __package__:
     from .voiceactions import LaunchStatus, action_scope
-    from .voicetype import JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, plan, sanitize, shortcut_open_target
+    from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, navigation_target, plan,
+                            sanitize, shortcut_open_target)
     from .voicewire import LinkError, VoiceQuestionError
 else:
     from voiceactions import LaunchStatus, action_scope
-    from voicetype import JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, plan, sanitize, shortcut_open_target
+    from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, navigation_target, plan,
+                            sanitize, shortcut_open_target)
     from voicewire import LinkError, VoiceQuestionError
 
 
@@ -460,6 +462,7 @@ class Flow:
                 self.typer.run([("text", text)])
                 self.ui.set_state("done")
                 return
+            url = navigation_target(text, source)
             addressed = source == "wake" or bool(JARVIS_ADDRESS.match(clean))
             self.ui.set_state("thinking")
             try:
@@ -468,14 +471,30 @@ class Flow:
                 else:
                     intent = self.client.route(text, source)
             except Exception as exc:
-                # Routing is optional: preserve the utterance on failure.
-                # Retain transport failures so the agent still reconnects.
+                # Preserve dictation on route failure. The complete navigation
+                # frame below still requires an agreed target before any action.
                 if isinstance(exc, LinkError):
                     self.link_error = exc
                 intent = {"kind": "ask" if addressed else "dictate",
                           "text": text, "target": "" if addressed else "literal"}
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
+            if url or kind == "navigate":
+                if not current():
+                    return
+                navigate = getattr(self.actions, "navigate", None)
+                if not url or kind != "navigate" or target != url or not callable(navigate):
+                    self.ui.set_state("error", "Website navigation is unavailable.")
+                    return
+                handed_off = _run_native(current, navigate, url)
+                if not current():
+                    return
+                if handed_off is not True:
+                    self.ui.set_state("error", "Could not send the website to the browser.")
+                    return
+                self._confirm_action(intent.get("receipt"), current)
+                self.ui.set_state("done", "Sent the website to the browser.")
+                return
             if not addressed and kind != "dictate":
                 # Check the original speech even with a daemon that guesses a
                 # target from prose. Only a unique exact Windows app may launch.

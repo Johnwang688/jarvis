@@ -8,7 +8,7 @@ from math import log, sqrt
 import re
 
 from windows.voicetype import (JARVIS_ADDRESS, NARRATIVE_VERB, OPEN_APP_FRAME, POLITE_PREFIX,
-                               app_name, sanitize, shortcut_open_target)
+                               WAKE_REQUEST, app_name, navigation_target, sanitize, shortcut_open_target)
 
 # Examples intentionally use varied slots. The token features include leading
 # words and adjacent pairs so "open Calendar" differs from "when I open Calendar".
@@ -81,7 +81,6 @@ _SEND_IN_SENTENCE = re.compile(
     r"\b(?:I|you|we|she|he|they|to|not|never|cannot|can|could|would|will|"
     r"should|may|might|must|shall|did|do|does|usually|already|always|"
     r"\w+['’](?:t|ll|d))\s+send it[.!?]*$", _FLAGS)
-_WAKE_REQUEST = re.compile(r"^(?:let['’]s|I(?:['’]d| would) like to)\s+", _FLAGS)
 _EDIT_WORDS = re.compile(r"\b(?:scratch that|new line|send it)\b", _FLAGS)
 _SWITCH = re.compile(r"(?:switch(?: over| back| me back| me)? to|go back to|return to|take me back to|focus|go to) (.+)|"
                      r"bring (.+) to the (?:front|foreground)|give (.+) focus", _FLAGS)
@@ -169,7 +168,7 @@ def addressed(text):
 
 
 def route(text, source):
-    """An unaddressed hotkey dictates or opens a named app. Addressed speech can ask or act."""
+    """Route routine commands and preserve ordinary dictation."""
     words = sanitize(text)[:2000]
     def result(kind, target="", content=words):
         return {"kind": kind, "text": content, "target": target}
@@ -177,13 +176,16 @@ def route(text, source):
     addressed = bool(JARVIS_ADDRESS.match(words))
     body = JARVIS_ADDRESS.sub("", words, count=1)
     if source == "wake" or addressed:
-        body = _WAKE_REQUEST.sub("", body, count=1)
+        body = WAKE_REQUEST.sub("", body, count=1)
     polite = bool(POLITE_PREFIX.match(body))
     body = POLITE_PREFIX.sub("", body, count=1).strip()
     fallback = "ask" if source == "wake" or addressed else "dictate"
     literal = _LITERAL.fullmatch(body)
     if literal and not _TYPE_NOUN.match(body):
         return result("dictate", "literal", _unquote(literal[1].strip()))
+    url = navigation_target(text, source)
+    if url:
+        return result("navigate", url)
     if source == "hotkey":
         if _SEND_IN_SENTENCE.search(body) or (body.endswith("?") and _EDIT_WORDS.search(body)):
             return result("dictate", "literal")

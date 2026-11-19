@@ -18,11 +18,11 @@ from urllib.parse import quote_plus
 if __package__:
     from . import chromepicker
     from .desktopwire import launch_name
-    from .voicetype import WindowsInput
+    from .voicetype import WindowsInput, web_destination
 else:
     import chromepicker
     from desktopwire import launch_name
-    from voicetype import WindowsInput
+    from voicetype import WindowsInput, web_destination
 
 
 def _normal(text):
@@ -124,6 +124,178 @@ def match_window(target, windows):
 
 def search_url(q):
     return "https://www.google.com/search?q=" + quote_plus(q)
+
+
+# -- Website navigation in the foreground Chrome --------------------------------
+# A browser window's AppUserModelID names its profile (measured on Chrome 157):
+# `Chrome` is the default user-data directory's Default profile, `Chrome.Profile1`
+# its "Profile 1", and another directory adds one shortened component of its own
+# (`Chrome.<dir>.Default`, `Chrome.<dir>.Profile1`). Only the directory names
+# Chrome itself creates are mapped back; anything else is refused.
+_CHROME_PROFILE_PART = re.compile(r"Profile([1-9][0-9]{0,3})", re.ASCII)
+
+
+def installed_chrome_path(path):
+    """Match the stable browser's executable in a Windows Chrome install location."""
+    chrome = r"Google\Chrome\Application\chrome.exe"
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        root = os.environ.get(variable)
+        if root and ntpath.normcase(path) == ntpath.normcase(ntpath.join(root, chrome)):
+            return True
+    return False
+
+
+def chrome_profile_directory(aumid, user_data_dir):
+    """The `--profile-directory` of a stable-Chrome browser window, or None."""
+    if not isinstance(aumid, str) or len(aumid) > 128 or not isinstance(user_data_dir, str):
+        return None
+    parts = aumid.split(".")
+    if parts[0] != "Chrome" or not all(part.isascii() and part.isalnum() for part in parts):
+        return None
+    if (user_data_dir and len(parts) != 3) or (not user_data_dir and len(parts) > 2):
+        return None  # the window and its process disagree about the directory
+    last = parts[-1] if len(parts) > 1 else "Default"
+    if last == "Default":
+        return "Default"
+    number = _CHROME_PROFILE_PART.fullmatch(last)
+    return f"Profile {number[1]}" if number else None
+
+
+def chrome_user_data_dir(argv):
+    """The browser process's `--user-data-dir` ("" for the default), or None if unsure.
+
+    Read as Chromium reads its Windows command line: `--`, `-` and `/` prefix a
+    switch, names are case-insensitive, and `--` or `--single-argument` ends them.
+    """
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
+        return None
+    found = []
+    for arg in argv[1:]:
+        if arg == "--":
+            break
+        prefix = next((p for p in ("--", "-", "/") if arg.startswith(p)), None)
+        if prefix is None:
+            continue
+        name, equals, value = arg[len(prefix):].partition("=")
+        name = name.casefold()
+        if name == "single-argument":
+            break
+        if name == "user-data-dir":
+            found.append(value if equals else None)
+    if not found:
+        return ""
+    value = found[0]
+    if len(found) > 1 or not value or not ntpath.isabs(value) or len(value) > 1024 \
+            or any(ch == '"' or ord(ch) < 0x20 for ch in value):
+        return None
+    return value
+
+
+def browser_window_names(client, UIA, hwnd):
+    """(BrowserRootView name, AvatarToolbarButton names) of a Chrome window, or None.
+
+    Read from Chrome's native views only (UI Automation thread): web content is
+    never entered, and the walk is bounded.
+    """
+    walker = client.RawViewWalker
+    root = client.ElementFromHandle(hwnd)
+    if not root:
+        return None
+    views, child, count = [], walker.GetFirstChildElement(root), 0
+    while child and count < 16:
+        count += 1
+        if child.CurrentClassName == "BrowserRootView" and child.CurrentFrameworkId == "Chrome":
+            views.append(child)
+        child = walker.GetNextSiblingElement(child)
+    if len(views) != 1:
+        return None
+    avatars, frontier, seen = [], [(views[0], 0)], 0
+    while frontier:
+        node, depth = frontier.pop(0)
+        child = walker.GetFirstChildElement(node)
+        while child:
+            seen += 1
+            if seen > 1500:
+                return None
+            kind = child.CurrentClassName or ""
+            if (child.CurrentControlType != chromepicker.DOCUMENT and kind != "Chrome_RenderWidgetHostHWND"
+                    and child.CurrentFrameworkId == "Chrome"):
+                if kind == "AvatarToolbarButton":
+                    avatars.append(child.CurrentName or "")
+                elif depth < 10:
+                    frontier.append((child, depth + 1))
+            child = walker.GetNextSiblingElement(child)
+    return views[0].CurrentName or "", tuple(avatars)
+
+
+def regular_browser_window(names):
+    """True only for a window that is positively a regular (not incognito or guest) one.
+
+    Measured on Chrome 157: the root view is named "<tab> - Google Chrome", with
+    " - <profile name>" appended when several profiles exist; an incognito window
+    is "<tab> - Google Chrome (Incognito)" and its avatar button says
+    "Incognito". The tab title comes first, so only what follows the *last*
+    product name counts.
+    """
+    if not isinstance(names, tuple) or len(names) != 2:
+        return False
+    title, avatars = names
+    if not isinstance(title, str) or not isinstance(avatars, tuple) or len(avatars) > 1:
+        return False
+    marker = " - Google Chrome"
+    at = title.rfind(marker)
+    if at < 0:
+        return False
+    rest = title[at + len(marker):]
+    if rest and not rest.startswith(" - "):
+        return False
+    return not any(_normal(name).startswith(("incognito", "guest")) for name in avatars if isinstance(name, str))
+
+
+def windows_command_line(pid):
+    """Another process's command line, split as CommandLineToArgvW does; None if unreadable."""
+    import ctypes
+    from ctypes import wintypes as w
+    k, nt, shell = ctypes.windll.kernel32, ctypes.windll.ntdll, ctypes.windll.shell32
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [("Length", w.USHORT), ("MaximumLength", w.USHORT), ("Buffer", ctypes.c_void_p)]
+
+    k.OpenProcess.argtypes, k.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
+    k.CloseHandle.argtypes = [w.HANDLE]
+    k.LocalFree.argtypes, k.LocalFree.restype = [ctypes.c_void_p], ctypes.c_void_p
+    nt.NtQueryInformationProcess.argtypes = [w.HANDLE, w.ULONG, ctypes.c_void_p, w.ULONG,
+                                             ctypes.POINTER(w.ULONG)]
+    nt.NtQueryInformationProcess.restype = ctypes.c_long
+    shell.CommandLineToArgvW.argtypes = [w.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype = ctypes.POINTER(w.LPWSTR)
+    process = k.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION is enough (8.1+)
+    if not process:
+        return None
+    try:
+        size = w.ULONG(0)
+        nt.NtQueryInformationProcess(process, 60, None, 0, ctypes.byref(size))  # ProcessCommandLineInformation
+        if not ctypes.sizeof(UNICODE_STRING) <= size.value <= 70000:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if nt.NtQueryInformationProcess(process, 60, buffer, size, ctypes.byref(size)) != 0:
+            return None
+        text = UNICODE_STRING.from_buffer(buffer)
+        first = ctypes.addressof(buffer)
+        if (not text.Buffer or text.Length % 2 or text.Buffer < first
+                or text.Buffer + text.Length > first + ctypes.sizeof(buffer)):
+            return None
+        line = ctypes.wstring_at(text.Buffer, text.Length // 2)
+    finally:
+        k.CloseHandle(process)
+    count = ctypes.c_int()
+    argv = shell.CommandLineToArgvW(line, ctypes.byref(count))
+    if not argv:
+        return None
+    try:
+        return [argv[i] for i in range(count.value)]
+    finally:
+        k.LocalFree(argv)
 
 
 class WindowsDesktop:
@@ -307,8 +479,12 @@ class WindowsDesktop:
 class Actions:
     def __init__(self, desktop=None, clock=time.monotonic, sleep=time.sleep,
                  runner=subprocess.run, launcher=subprocess.Popen, opener=None, *, warm_in_background=False,
-                 picker=None):
+                 picker=None, command_line=None, window_names=None):
         self.desktop = desktop if desktop is not None else WindowsDesktop()
+        # Reads a browser process's command line (only its --user-data-dir is used).
+        self.command_line = command_line
+        # hwnd -> `browser_window_names` result; defaults to the picker's UIA thread.
+        self.window_names = window_names
         # Only the real desktop (or an explicit adapter) can read a Chrome picker.
         self.picker = picker
         self.picker_context = None
@@ -566,6 +742,128 @@ class Actions:
     def search(self, query):
         (self.opener or os.startfile)(search_url(query))
         return True
+
+    # -- Website navigation -------------------------------------------------------
+    # `url` must already be canonical (`voicetype.web_destination`). With a Chrome
+    # browser window in front, the URL goes to that window's own profile: its
+    # running chrome.exe is started again with `--profile-directory` (and the
+    # process's `--user-data-dir`), which hands the URL to the running browser
+    # over Chrome's process singleton; Chrome opens it in a new tab of that
+    # profile's most recent window. Nothing is typed, and no key or click reaches
+    # any window. True means only that the running Chrome accepted the URL (its
+    # forwarding process exited with the handoff code); nobody saw a page load.
+    # Any other foreground app gets the Windows default handler for the URL.
+    # A Chrome window that cannot be resolved (the profile picker, an incognito,
+    # app or guest window, another Chrome channel, a moved focus) gets nothing:
+    # an incognito window shares its profile's AppUserModelID, and the handoff
+    # would open the site in that profile's regular window.
+    NAVIGATE_HANDOFF_WAIT = 8.0
+    NAVIGATE_READ_WAIT = 3.0
+    # A forwarding chrome.exe exits 0 once the running browser took the URL
+    # (measured on Chrome 157); a browser it started itself would keep running.
+    CHROME_HANDOFF_EXIT_CODES = frozenset({0})
+
+    def navigate(self, url):
+        guard = action_guard.get()  # this clip's revocation check, never re-looked-up
+        if not isinstance(url, str) or not url or web_destination(url) != url or not _allowed(guard):
+            return False
+        try:
+            window = self.desktop.foreground_window()
+        except Exception:  # noqa: BLE001  (an unreadable foreground decides nothing)
+            return False
+        if not _allowed(guard):
+            return False
+        if window is not None and ntpath.basename(window[2] or "").casefold() == "chrome.exe":
+            return self._navigate_chrome(window[0], url, guard)
+        (self.opener or os.startfile)(url)
+        return True
+
+    def _chrome_browser_window(self, backend, hwnd):
+        try:
+            identity = backend.identity(hwnd)
+        except Exception:  # noqa: BLE001
+            return None
+        if (not isinstance(identity, chromepicker.WindowIdentity) or identity.hwnd != hwnd
+                or identity.class_name != chromepicker.PICKER_CLASS or identity.visible is not True
+                or not isinstance(identity.exe, str) or not ntpath.isabs(identity.exe)
+                or not installed_chrome_path(identity.exe)
+                or not isinstance(identity.title, str)
+                or not identity.title.strip().casefold().endswith(chromepicker.BROWSER_TITLE_SUFFIX)
+                or chromepicker.is_picker_aumid(identity.aumid)):
+            return None
+        return identity
+
+    def _navigate_chrome(self, hwnd, url, guard):
+        backend = self._picker_backend()
+        if backend is None:
+            return False
+        seen = self._chrome_browser_window(backend, hwnd)
+        if seen is None:
+            return False
+        try:
+            if self.window_names is not None:
+                names = self.window_names(hwnd)
+            else:
+                names = backend.worker.call(lambda client, UIA: browser_window_names(client, UIA, hwnd),
+                                            self.NAVIGATE_READ_WAIT)[1]
+        except Exception:  # noqa: BLE001  (unreadable: never assume a regular window)
+            return False
+        if not regular_browser_window(names) or not _allowed(guard):
+            return False
+        # A private-mode marker can precede the tab title in localized UI.
+        # Only accept the browser root title itself or its regular profile suffix.
+        if names[0] != seen.title and not names[0].startswith(seen.title + " - "):
+            return False
+        read = self.command_line
+        if read is None:
+            if os.name != "nt":
+                return False
+            read = windows_command_line
+        try:
+            data_dir = chrome_user_data_dir(read(seen.pid))
+        except Exception:  # noqa: BLE001
+            return False
+        profile = chrome_profile_directory(seen.aumid, data_dir) if data_dir is not None else None
+        if profile is None:
+            return False
+        argv = [seen.exe] + ([f"--user-data-dir={data_dir}"] if data_dir else []) + [
+            f"--profile-directory={profile}", "--single-argument", url]
+        # The profile is bound to the window the owner was looking at: re-read
+        # both immediately before the one launch.
+        if not _allowed(guard):
+            return False
+        try:
+            again = self._chrome_browser_window(backend, hwnd)
+            front = self.desktop.foreground_window()
+        except Exception:  # noqa: BLE001
+            return False
+        if (again is None or front is None or front[0] != hwnd
+                or (again.pid, again.exe, again.aumid) != (seen.pid, seen.exe, seen.aumid)
+                or not _allowed(guard)):
+            return False
+        try:
+            process = self.launcher(argv, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+        return self._chrome_handoff(process, guard)
+
+    def _chrome_handoff(self, process, guard):
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return False  # no receipt from this launcher
+        deadline = self.clock() + self.NAVIGATE_HANDOFF_WAIT
+        while _allowed(guard):  # once revoked the launch stands, but proves nothing
+            try:
+                code = poll()
+            except Exception:  # noqa: BLE001
+                return False
+            if code is not None:
+                return code in self.CHROME_HANDOFF_EXIT_CODES and _allowed(guard)
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return False
+            self.sleep(min(remaining, 0.05))
+        return False
 
     def read_selection(self):
         previous = self.desktop.clipboard_text()

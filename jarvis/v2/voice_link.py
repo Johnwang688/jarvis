@@ -28,6 +28,7 @@ import unicodedata
 
 from jarvis import config
 from windows import voicewire as wire
+from windows.voicetype import navigation_target
 from . import remote_stt, dictation_guard, dictation_rules
 from .stores import StoreError
 from .voice_chat import NoVoiceTarget
@@ -51,7 +52,7 @@ CLEAN_CHARS = 2000
 CLEAN_PASSES = ("off", "rules", "raw", "model")
 ASK_TIMEOUT_S = 180.0
 ACTION_RECEIPT_S = 300.0
-KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection"))
+KINDS = wire.KINDS
 WAKE_STATUS = {
     "starting": "Starting the Windows wake listener…",
     "ready": "Say Jarvis, then a command.",
@@ -85,6 +86,11 @@ def parse_intent(raw, source, text):
                 or not isinstance(value.get("text", text), str)
                 or not isinstance(value.get("target", ""), str)):
             return fallback
+        if value["kind"] == "navigate":
+            url = navigation_target(text, source)
+            if not url or value.get("target") != url:
+                return fallback
+            return {"kind": "navigate", "text": fallback["text"], "target": url}
         return {"kind": value["kind"], "text": _clean(value.get("text", text), 2000),
                 "target": _clean(value.get("target", ""), 80)}
     except (ValueError, TypeError, RecursionError):
@@ -722,6 +728,7 @@ class VoiceLink:
                         if request.get("features") is True:
                             reply["streaming"] = True
                             reply["action_receipts"] = True
+                            reply["web_navigation"] = True
                             if self._instance is not None:
                                 reply["shared_mic"] = True
                 elif (type(ident) is int and request.get("op") == "action_done"
@@ -798,23 +805,30 @@ class VoiceLink:
                             addressed = source == "wake" or voice_intent.addressed(text)
                             shortcut_target = (voice_intent.shortcut_open_target(text)
                                                if not addressed and request.get("exact_open") is True else "")
-                            if request.get("receipt") is True and self._voice_chat and (addressed or shortcut_target):
+                            navigation = navigation_target(text, source)
+                            navigation_capable = request.get("web_navigation") is True
+                            if (request.get("receipt") is True and self._voice_chat
+                                    and (addressed or shortcut_target or (navigation and navigation_capable))):
                                 snapshot = self._voice_chat.selected()
                             try:
                                 raw = self.route_model(text[:2000], source)
                             except Exception:
                                 raw = None
                             intent = parse_intent(raw, source, text)
+                            if navigation and (not navigation_capable or intent["kind"] != "navigate"):
+                                # Empty literal dictation is safe on legacy helpers too:
+                                # it neither inserts text on a hotkey nor asks on wake.
+                                intent = {"kind": "dictate", "text": "", "target": "literal"}
                             kind = intent["kind"]
                             exact_open = (kind == "open_app" and shortcut_target
                                           and shortcut_target.casefold() == intent["target"].casefold())
-                            if not addressed and kind != "dictate" and not exact_open:
-                                # Legacy helpers can fuzzy-match an app. Only a helper
-                                # promising exact catalog resolution gets an unaddressed action.
+                            if not addressed and kind not in ("dictate", "navigate") and not exact_open:
+                                # Unaddressed launches require a helper that promises
+                                # exact catalog resolution.
                                 kind = "dictate"
                                 intent = {"kind": kind, "text": _clean(text, 2000), "target": "literal"}
                             reply = {"id": ident, "ok": True, "intent": intent}
-                            if snapshot and kind in ("open_app", "switch_app", "search", "read_selection"):
+                            if snapshot and kind in ("open_app", "switch_app", "search", "read_selection", "navigate"):
                                 token = wire.new_nonce()
                                 target = intent["target"] if kind in ("open_app", "switch_app") else ""
                                 pending_action = (token, time.monotonic() + ACTION_RECEIPT_S, snapshot, kind, target)

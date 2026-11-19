@@ -13,6 +13,20 @@ JARVIS_ADDRESS = re.compile(r"^(?:(?:hey|okay|ok)[,\s]+)?jarvis(?=$|[,.:!?\s-])[
 
 
 POLITE_PREFIX = re.compile(r"^(?:(?:(?:could|can|would|will) you(?: please)?|I(?:[’\']d| would) like you to|please|kindly)[,\s]+)+", re.I)
+WAKE_REQUEST = re.compile(r"^(?:let['’]s|I(?:['’]d| would) like to)\s+", re.I)
+_WEB_FRAME = re.compile(r"go to (.+)", re.I)
+_SPOKEN_DOT = re.compile(r" +dot(?: +|-)| *\. *", re.I | re.ASCII)
+_DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_WEB_HOST = re.compile(rf"(?:(https?)://)?((?:{_DNS_LABEL}\.)+[a-z]{{2,63}})/?",
+                       re.ASCII | re.I)
+_NON_WEB_SUFFIXES = frozenset("""
+    arpa bat chm cmd cpl dll doc docx example exe home hta inf internal intranet invalid lan local
+    localhost lnk msc msi onion pdf pif reg scr sh sys test txt vbe vbs wsf
+    xls xlsx
+""".split())
+_BLOCKED_WEB_HOSTS = ("command.com", "localhost.direct", "localtest.me", "lvh.me",
+                      "nip.io", "sslip.io", "xip.io")
+
 OPEN_APP_FRAME = re.compile(r"(?:open(?: up)?|launch|start(?: up)?|fire up|pull up|bring up) (.+)", re.I)
 _APP_SLOT = re.compile(r"[\w .'+&()–-]{1,80}", re.I)
 _APP_CLAUSE = re.compile(
@@ -55,6 +69,41 @@ def sanitize(text):
     text = "".join(" " if c in boundaries else c for c in text
                    if c in boundaries or unicodedata.category(c) not in {"Cc", "Cf"})
     return re.sub(" +", " ", text).strip()
+
+
+def web_destination(value: str) -> str:
+    """Canonicalize a bare public-style hostname or an HTTP(S) origin."""
+    if not isinstance(value, str) or len(value) > 262:
+        return ""
+    match = _WEB_HOST.fullmatch(value)
+    if not match:
+        return ""
+    scheme, host = match.groups()
+    host = host.lower()
+    if (len(host) > 253 or host.startswith("127.")
+            or host.rsplit(".", 1)[1] in _NON_WEB_SUFFIXES
+            or any(host == name or host.endswith("." + name) for name in _BLOCKED_WEB_HOSTS)):
+        return ""
+    return f"{(scheme or 'https').lower()}://{host}"
+
+
+def navigation_target(text: str, source: str) -> str:
+    """Recognize a complete destination command directly from the transcript."""
+    if (source not in ("hotkey", "wake") or not isinstance(text, str) or len(text) > 2000
+            or any(unicodedata.category(char).startswith("C") for char in text)):
+        return ""
+    words = re.sub(" +", " ", text).strip(" ")
+    address = JARVIS_ADDRESS.match(words)
+    body = words[address.end():] if address else words
+    if address or source == "wake":
+        body = WAKE_REQUEST.sub("", body, count=1)
+    body = POLITE_PREFIX.sub("", body, count=1)
+    body = re.sub(r"[, ]+please[.!?]?$", "", body, flags=re.I)
+    match = _WEB_FRAME.fullmatch(body)
+    if not match:
+        return ""
+    target = re.sub(r" *[,.!?]$", "", match[1])
+    return web_destination(_SPOKEN_DOT.sub(".", target))
 
 
 def app_name(target):

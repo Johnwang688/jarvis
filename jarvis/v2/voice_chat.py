@@ -78,6 +78,8 @@ class VoiceChat:
             text = f"Jarvis voice {verb} {label}."
         elif kind == "search":
             text = "Jarvis voice opened a web search."
+        elif kind == "navigate":
+            text = "Jarvis voice sent a website to the browser."
         elif kind == "read_selection":
             text = "Jarvis voice read the selected text aloud."
         else:

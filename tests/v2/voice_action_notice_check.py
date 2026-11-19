@@ -74,6 +74,25 @@ class ConfirmedAction(fixture.Base):
         self.assertNotIn("receipt", self.route("Jarvis, how does Chrome work?", "hotkey"))
         self.assertEqual(self.notices(), [])
 
+    def test_go_to_site_navigates_once_without_typing_the_command(self):
+        self.actions.navigate.return_value = True
+        for phrase, source in (("Go to youtube.com", "hotkey"), ("Go to YouTube dot com.", "hotkey"),
+                               ("Jarvis, go to youtube.com.", "hotkey"), ("Go to youtube.com.", "wake")):
+            with self.subTest(phrase=phrase, source=source):
+                self.actions.navigate.reset_mock()
+                self.ask_local(phrase, source)
+                self.actions.navigate.assert_called_once()
+                self.assertEqual(self.actions.navigate.call_args.args[0].rstrip("/"), "https://youtube.com")
+                self.typer.run.assert_not_called()
+                self.actions.search.assert_not_called()
+
+    def test_go_to_site_still_allows_explicit_dictation_and_ordinary_prose(self):
+        for words, expected in (("Type the words go to youtube.com", "go to youtube.com"),
+                                ("I usually go to youtube.com", "I usually go to youtube.com")):
+            self.ask_local(words, "hotkey")
+            self.assertEqual(self.typer.run.call_args.args[0][0][:2], ("text", expected))
+            self.actions.navigate.assert_not_called()
+
     def test_held_shortcut_types_other_unaddressed_commands_and_preserves_edit_controls(self):
         phrases = ["how do I open Chrome?", "could you search for maps?", "she said Jarvis open Chrome",
                    "would you please switch to Teams?", "Jarvis's shortcut opens the app"]

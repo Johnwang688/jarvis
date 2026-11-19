@@ -24,6 +24,8 @@ CASES = (
     ("Right Ctrl", "Open Google Chrome for me.", "Zira", "picker"),
     ("Right Ctrl", "When I open Google Chrome it restores my tabs.", "David", "ordinary"),
     ("Ctrl+D", "Type the words open Google Chrome for me.", "Zira", "literal"),
+    ("Right Ctrl", "Go to YouTube dot com.", "David", "website"),
+    ("Ctrl+D", "Go to youtube.com.", "Zira", "website"),
 )
 
 
@@ -106,11 +108,11 @@ def check():
             wav = base64.b64decode(sample["wav"])
             words = engine.transcribe(wav, "audio/wav", timeout=45)
             source = sample["source"]
-            launches, steps = [], []
+            launches, steps, destinations = [], [], []
             title = "Google Chrome" if expected == "picker" else "New Tab - Google Chrome"
             desktop = SimpleNamespace(foreground_window=lambda: (1, title, "chrome.exe") if launches else None)
             actions = Actions(desktop=desktop, runner=lambda *a, **k: index,
-                              launcher=lambda argv, **kw: launches.append(argv))
+                              launcher=lambda argv, **kw: launches.append(argv), opener=destinations.append)
             client = SimpleNamespace(route=voice_intent.route)
             typer = SimpleNamespace(run=steps.extend, category=lambda: "other")
             ui = Mock()
@@ -121,6 +123,9 @@ def check():
                 status = (("error", "Chrome needs a profile. Choose one in Chrome.")
                           if expected == "picker" else ("done", "Opened Google Chrome."))
                 ok = launches == [command] and not steps and ui.set_state.call_args.args == status
+            elif expected == "website":
+                ok = (len(destinations) == 1 and destinations[0].rstrip("/") == "https://youtube.com"
+                      and not launches and not steps)
             else:
                 content = " ".join(typed.casefold().split()).strip(" .,!?:")
                 ok = not launches and bool(steps) and all(row[0] == "text" for row in steps)
@@ -131,7 +136,7 @@ def check():
             failures += int(not ok)
             print(json.dumps({"ok": ok, "hotkey": alias, "source": source, "packets": sample["packets"],
                               "decoded": words, "launches": len(launches), "typed": typed,
-                              "overlay": ui.set_state.call_args.args}, ensure_ascii=True), flush=True)
+                              "destinations": destinations, "overlay": ui.set_state.call_args.args}, ensure_ascii=True), flush=True)
     finally:
         engine.unload()
     return int(bool(failures))
