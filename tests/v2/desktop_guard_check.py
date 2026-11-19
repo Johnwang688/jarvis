@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from windows.desktopguard import Grant, Guard, MaskedTree, Rect, Refused, black_out, require_expected_control
-from windows.uiatree import snapshot
+from windows.desktopguard import (
+    Grant, Guard, MaskedTree, Rect, Refused, black_out, own_image, require_expected_control,
+)
+from windows.uiatree import resolve, snapshot
 from windows.windowpolicy import DRIVABLE, SEE_ONLY, SEE_ONLY_MESSAGE, Window
 
 TARGET = Rect(0, 0, 100, 100)
@@ -31,6 +33,7 @@ class FakeDesktop:
         self.regions = {}
         self.front = 10
         self.hit = 10
+        self.transparent = set()
 
     def top_windows(self):
         return list(self.order)
@@ -40,6 +43,9 @@ class FakeDesktop:
 
     def rect(self, hwnd):
         return self.bounds[hwnd]
+
+    def see_through(self, hwnd):
+        return hwnd in self.transparent
 
     def title(self, hwnd):
         return self.titles[hwnd]
@@ -107,6 +113,17 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.guard.capture(self.window)
 
+    def test_repeating_id_cannot_be_reissued_to_another_live_window(self):
+        ids = iter(("repeated", "repeated", "another"))
+        guard = Guard(self.desktop, new_id=lambda: next(ids))
+        original = guard.windows()[0]["window"]
+        self.desktop.add(20, Window("paint.exe", False), TARGET, "Paint")
+        with self.assertRaisesRegex(Refused, "listed safely"):
+            guard.windows()
+        windows = {entry["title"]: entry["window"] for entry in guard.windows()}
+        self.assertEqual(windows, {"Notes": original, "Paint": "another"})
+        self.assertEqual(guard.capture(original).hwnd, 10)
+
     def test_recycled_handle_rechecks_pid_and_full_image(self):
         original = self.desktop.info[10]
         for pid, facts in (
@@ -160,6 +177,21 @@ class GuardTests(unittest.TestCase):
         self.desktop.pids[25] = None
         self.assertEqual([entry["title"] for entry in self.guard.windows()], ["Notes"])
 
+    def test_owner_manager_input_is_used_as_given(self):
+        names = (name for name in ["private.exe"])
+        for value in ("private.exe", 5, names):
+            with self.subTest(value=value):
+                guard = Guard(self.desktop, extra_password_managers=value)
+                self.assertEqual(guard.windows(), [])
+                self.assertEqual(guard.windows(), [])
+        self.assertEqual(next(names), "private.exe")
+        editable = []
+        guard = Guard(self.desktop, extra_password_managers=editable)
+        window = guard.windows()[0]["window"]
+        editable.append("notepad.exe")
+        with self.assertRaisesRegex(Refused, "protected"):
+            guard.capture(window)
+
     def test_capture_checks_intersection_and_only_windows_in_front(self):
         self.desktop.add(20, Window("keepass.exe", False), Rect(99, 99, 200, 200), SECRET)
         with self.assertRaisesRegex(Refused, "protected window") as exc:
@@ -187,6 +219,26 @@ class GuardTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 self.guard.act(self.window, point=(2, 2))
 
+    def test_checks_protected_window_below_frontmost_window(self):
+        self.desktop.add(20, Window("keepass.exe", False), TARGET, SECRET)
+        self.desktop.add(30, Window("paint.exe", False), TARGET, "Paint")
+        with self.assertRaisesRegex(Refused, "protected window"):
+            self.guard.capture(self.window)
+
+    def test_see_through_target_checks_windows_behind_it(self):
+        self.desktop.add(20, Window("keepass.exe", False), TARGET, SECRET, front=False)
+        self.assertEqual(self.guard.capture(self.window).rect, TARGET)
+        self.desktop.transparent.add(10)
+        for bounds in (TARGET, None):
+            self.desktop.bounds[20] = bounds
+            with self.subTest(bounds=bounds), self.assertRaisesRegex(Refused, "protected window"):
+                self.guard.capture(self.window)
+        self.desktop.bounds[20] = Rect(100, 0, 200, 100)
+        self.assertEqual(self.guard.capture(self.window).rect, TARGET)
+        with patch.object(self.desktop, "occlusion_rect", create=True, return_value=TARGET):
+            with self.assertRaisesRegex(Refused, "protected window"):
+                self.guard.capture(self.window)
+
     def test_point_bounds_and_topmost_owner(self):
         for point in ((0, 0), (99, 99)):
             self.assertEqual(self.guard.act(self.window, point=point).hwnd, 10)
@@ -212,6 +264,19 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "foreground"):
             self.guard.act(self.window, keys=["A"])
         self.assertEqual(self.guard.act(self.window, point=(2, 2)).hwnd, 10)
+
+    def test_keys_on_ordinary_windows_require_exactly_one_non_modifier(self):
+        modifiers = ("shift", "lshift", "rshift", "ctrl", "control", "lctrl", "rctrl",
+                     "alt", "lalt", "ralt", "altgr")
+        windows_keys = ("win", "windows", "lwin", "rwin", "meta", "super", "cmd", "command")
+        for keys in ([], ["shift"], modifiers, ["tab", "x"], ["shift", "tab", "x"],
+                     *[(f" {key.upper()} ",) for key in windows_keys],
+                     *[(f" {key.upper()} ", "r") for key in windows_keys]):
+            with self.subTest(keys=keys), self.assertRaisesRegex(Refused, "key combination"):
+                self.guard.act(self.window, keys=keys)
+        for modifier in modifiers:
+            with self.subTest(modifier=modifier):
+                self.assertEqual(self.guard.act(self.window, keys=[f" {modifier.upper()} ", "A"]).hwnd, 10)
 
     def test_hud_count_and_rectangles(self):
         self.make_hud()
@@ -241,6 +306,14 @@ class GuardTests(unittest.TestCase):
         self.desktop.regions[10][1] = Rect(10, 10, 10, 20)
         with self.assertRaises(Refused):
             self.guard.capture(self.window)
+
+    def test_nested_hud_regions_hide_window_and_refuse_input_with_existing_id(self):
+        self.make_hud()
+        self.guard.set_hud(2)
+        self.desktop.regions[10].append(Rect(45, 45, 55, 55))
+        self.assertEqual(self.guard.windows(), [])
+        with self.assertRaisesRegex(Refused, "protected"):
+            self.guard.act(self.window, point=(2, 2))
 
     def test_hud_cannot_relax_base_class(self):
         self.make_hud()
@@ -297,6 +370,7 @@ class GuardTests(unittest.TestCase):
             "top_windows": self.guard.windows,
             "facts": lambda: self.guard.capture(self.window),
             "rect": lambda: self.guard.capture(self.window),
+            "see_through": lambda: self.guard.capture(self.window),
             "title": self.guard.windows,
             "pid": lambda: self.guard.capture(self.window),
             "is_hud": lambda: self.guard.capture(self.window),
@@ -312,6 +386,38 @@ class GuardTests(unittest.TestCase):
                             call()
                         self.assertNotIn(SECRET, str(exc.exception))
                         self.assertIsNone(exc.exception.__cause__)
+
+    def test_lazy_desktop_reads_fail_with_fixed_refusal(self):
+        self.make_hud()
+        self.guard.set_hud(1)
+
+        def broken(first):
+            yield first
+            raise RuntimeError(SECRET)
+
+        for method, first in (("top_windows", 10), ("hud_regions", HUD_REGION)):
+            with self.subTest(method=method), patch.object(self.desktop, method, return_value=broken(first)):
+                with self.assertRaisesMessage(Refused, "Windows could not be inspected safely."):
+                    self.guard.capture(self.window)
+
+
+class OwnImageTests(unittest.TestCase):
+    def test_protects_bridge_home_and_both_python_installations(self):
+        locations = dict(executable=r"C:\Launcher\python.exe", prefix=r"C:\Jarvis\Bridge\venv",
+                         base_executable=r"D:\Launcher\python.exe", base_prefix=r"D:\Python")
+        for path in ("c:/launcher/PYTHON.EXE", r"C:\Jarvis\Bridge\venv\Scripts\helper.exe",
+                     r"C:\Jarvis\Bridge\helper.exe", r"C:\Jarvis\Bridge\venv\..\helper.exe",
+                     r"d:\LAUNCHER\python.exe", r"\\?\D:\Python\Scripts\helper.exe"):
+            with self.subTest(path=path):
+                self.assertTrue(own_image(path, **locations))
+        for path in (r"C:\Jarvis\BridgeBackup\helper.exe", r"C:\Jarvis\helper.exe",
+                     r"D:\PythonBackup\python.exe", r"C:\Windows\notepad.exe"):
+            with self.subTest(path=path):
+                self.assertFalse(own_image(path, **locations))
+        for path in (None, 5, "", "python.exe", r"C:python.exe", r"C:\JARVIS~1\helper.exe"):
+            with self.subTest(path=path):
+                self.assertTrue(own_image(path, **locations))
+        self.assertTrue(own_image(r"C:\Windows\notepad.exe", **(locations | {"base_prefix": None})))
 
 
 class RedactionTests(unittest.TestCase):
@@ -336,38 +442,45 @@ class RedactionTests(unittest.TestCase):
             with self.subTest(expect=expect), self.assertRaises(Refused):
                 require_expected_control(expect, live)
 
-    def test_snapshot_prunes_subtrees_before_rendering_or_assigning_refs(self):
-        root = {"rect": [0, 0, 1, 1], "children": [
-            {"name": "outside", "rect": [0, 0, 3, 3], "children": []},
-            {"name": SECRET, "rect": [4, 4, 8, 8], "children": [
-                {"name": "secret descendant", "rect": [10, 10, 20, 20], "children": []},
-            ]},
-            {"name": "unreadable", "rect": [0, 0, 0, 0], "children": []},
-        ]}
+    def test_snapshot_keeps_only_safe_nodes_through_masked_containers(self):
+        def node(name, rect, *children):
+            return {"name": name, "rect": rect, "children": children}
+
+        root = node("masked root", [0, 0, 20, 20],
+                    node(SECRET, [4, 4, 7, 7], node("secret descendant", [10, 10, 15, 15])),
+                    node("outside", [0, 0, 2, 2]),
+                    node("masked container", [0, 0, 20, 10],
+                         node("straddling leaf", [1, 1, 4, 4]),
+                         node("touching leaf", [1, 3, 3, 5]),
+                         node("unreadable", None, node("unreadable descendant", [9, 1, 10, 2])),
+                         node("outside grandchild one", [10, 1, 12, 3]),
+                         node("outside grandchild two", [13, 1, 15, 3])))
 
         class Backend:
             def children(self, node):
                 return node["children"]
 
             def describe(self, node):
-                return {"name": node.get("name", ""), "rect": node["rect"], "role": "button",
-                        "interactive": True, "value": "", "offscreen": False,
+                return {"name": node["name"], "rect": node["rect"], "role": "button",
+                        "interactive": True, "value": node["name"] + " value", "offscreen": False,
                         "enabled": True, "checked": None}
 
         backend = Backend()
         backend.root = root
-        mask = Rect(3, 3, 5, 5)
+        mask = Rect(3, 3, 8, 8)
         text, refs = snapshot(MaskedTree(backend, (mask,)), ref_prefix="opaque-e")
-        self.assertIn("outside", text)
-        self.assertNotIn(SECRET, text)
-        self.assertNotIn("descendant", text)
-        self.assertNotIn("unreadable", text)
-        self.assertEqual({ref: info["name"] for ref, info in refs.items()}, {"opaque-e1": "outside"})
+        expected = ["outside", "outside grandchild one", "outside grandchild two"]
+        self.assertEqual(text.splitlines(), [
+            f'[opaque-e{i}] button "{name}" value="{name} value"' for i, name in enumerate(expected, 1)
+        ])
+        self.assertEqual([entry["name"] for entry in refs.values()], expected)
+        for entry in refs.values():
+            self.assertEqual(resolve(MaskedTree(backend, (mask,)), entry)["name"], entry["name"])
         unmasked, refs = snapshot(MaskedTree(backend, ()))
         self.assertIn(SECRET, unmasked)
         self.assertIn("secret descendant", unmasked)
-        self.assertEqual(len(refs), 4)
-        root["rect"] = [0, 0, 20, 20]
+        self.assertEqual(len(refs), 10)
+        root["rect"] = [4, 4, 7, 7]
         self.assertEqual(snapshot(MaskedTree(backend, (mask,)))[1], {})
 
     def test_image_masks_are_translated_clipped_and_half_open(self):

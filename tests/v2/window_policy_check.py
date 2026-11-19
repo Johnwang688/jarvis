@@ -76,6 +76,10 @@ class Classify(unittest.TestCase):
         self.assertEqual(kind("x.exe", window_class="CASCADIA_HOSTING_WINDOW_CLASS"), SEE_ONLY)
         self.assertEqual(kind("python.exe", window_class="TkTopLevel"), DRIVABLE)
 
+    def test_wslg_is_see_only_by_image_or_class(self):
+        self.assertEqual(kind(r"C:\Windows\System32\MSRDC.EXE"), SEE_ONLY)
+        self.assertEqual(kind("other.exe", window_class=" RAIL_WINDOW "), SEE_ONLY)
+
     def test_protected_wins_over_see_only(self):
         self.assertEqual(kind("cmd.exe", elevated=True), PROTECTED)
         self.assertEqual(kind("keepass.exe", window_class="ConsoleWindowClass"), PROTECTED)
@@ -125,12 +129,22 @@ class Hud(unittest.TestCase):
 
     def test_nothing_sensitive_leaves_the_hud_open(self):
         self.assertEqual(wp.hud_view(0, None, None), (DRIVABLE, ()))
+        self.assertEqual(wp.hud_view(0, [self.card, None], None), (DRIVABLE, ()))
 
     def test_fresh_masks_keep_the_rest_drivable(self):
         state, masks = wp.hud_view(1, [self.card], 0.2)
         self.assertEqual(state, DRIVABLE)
         m = wp.MASK_MARGIN
         self.assertEqual(masks, (Rect(100 - m, 100 - m, 300 + m, 200 + m),))
+
+    def test_exact_distinct_count_and_disjoint_padded_masks(self):
+        separate = Rect(316, 100, 350, 200)
+        self.assertEqual(wp.hud_view(2, [self.card, self.card, separate], 0)[0], DRIVABLE)
+        self.assertEqual(wp.hud_view(1, [self.card, separate], 0), (PROTECTED, ()))
+        for other in (Rect(110, 110, 200, 160), Rect(250, 90, 320, 150),
+                      Rect(300, 100, 350, 200), Rect(315, 100, 350, 200)):
+            with self.subTest(other=other):
+                self.assertEqual(wp.hud_view(2, [self.card, other], 0), (PROTECTED, ()))
 
     def test_missing_stale_or_short_reports_protect_the_whole_hud(self):
         bad = [

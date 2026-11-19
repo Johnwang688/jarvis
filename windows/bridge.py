@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from desktopwire import APPS, NAV_KEYS, launch_name, private_key, prove_windows, wire
 from desktopguard import (
     Guard, HUD_REGION_NAME, MaskedTree, Rect as ScreenRect, Refused, black_out,
-    require_expected_control,
+    own_image, require_expected_control,
 )
 import windowpolicy as window_policy
 from voiceactions import Actions, exact_start_app
@@ -972,19 +972,29 @@ _BROWSER_IMAGES = frozenset({
 })
 
 
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
 class WindowsDesktop:
     def __init__(self):
         # CU1 Win32 signatures and last-error handling require Windows verification.
         self.user = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
         signatures = (
             (self.user.GetTopWindow, [wt.HWND], wt.HWND),
             (self.user.GetWindow, [wt.HWND, wt.UINT], wt.HWND),
             (self.user.IsWindowVisible, [wt.HWND], wt.BOOL),
             (self.user.IsIconic, [wt.HWND], wt.BOOL),
             (self.user.GetWindowThreadProcessId, [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
-            (self.user.GetWindowRect, [wt.HWND, ctypes.POINTER(wt.RECT)], wt.BOOL),
+            (self.dwm.DwmGetWindowAttribute,
+             [wt.HWND, wt.DWORD, ctypes.POINTER(wt.RECT), wt.DWORD], ctypes.c_long),
+            (self.user.MonitorFromWindow, [wt.HWND, wt.DWORD], wt.HMONITOR),
+            (self.user.GetMonitorInfoW, [wt.HMONITOR, ctypes.POINTER(_MonitorInfo)], wt.BOOL),
+            (self.user.GetWindowLongW, [wt.HWND, ctypes.c_int], wt.LONG),
             (self.user.GetWindowTextW, [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
             (self.user.GetClassNameW, [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
             (self.user.GetForegroundWindow, [], wt.HWND),
@@ -1070,14 +1080,38 @@ class WindowsDesktop:
         size = self.user.GetClassNameW(hwnd, name, len(name))
         if pid is None or pid != self.pid(hwnd):
             return window_policy.Window(None, None, None, None)
-        return window_policy.Window(image, elevated, name.value if size else None, pid == os.getpid())
+        # This also protects any other program run by the base Python, as intended.
+        own = pid == os.getpid() or own_image(
+            image, executable=sys.executable, prefix=sys.prefix,
+            base_executable=getattr(sys, "_base_executable", None), base_prefix=sys.base_prefix)
+        return window_policy.Window(image, elevated, name.value if size else None, own)
+
+    def occlusion_rect(self, hwnd):
+        # Windows verification pending: use the DWM visible frame in physical screen pixels.
+        rect = wt.RECT()
+        # DWMWA_EXTENDED_FRAME_BOUNDS
+        if self.dwm.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+            return None
+        return ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
 
     def rect(self, hwnd):
-        # Windows verification pending: GetWindowRect coordinates must match UIA and ImageGrab.
-        rect = wt.RECT()
-        if self.user.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
-        return None
+        # Windows verification pending: clip to the monitor Windows assigns to the window.
+        frame = self.occlusion_rect(hwnd)
+        monitor = self.user.MonitorFromWindow(hwnd, 0)  # MONITOR_DEFAULTTONULL
+        info = _MonitorInfo(cbSize=ctypes.sizeof(_MonitorInfo))
+        if frame is None or not monitor or not self.user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        bounds = info.rcMonitor
+        return ScreenRect(max(frame.left, bounds.left), max(frame.top, bounds.top),
+                          min(frame.right, bounds.right), min(frame.bottom, bounds.bottom))
+
+    def see_through(self, hwnd):
+        # Windows verification pending: zero style is valid unless last-error was set.
+        ctypes.set_last_error(0)
+        style = self.user.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+        if style == 0 and ctypes.get_last_error():
+            return True
+        return bool(style & (0x00080000 | 0x00000020))  # WS_EX_LAYERED | WS_EX_TRANSPARENT
 
     def title(self, hwnd):
         # Windows verification pending: zero length can also be a valid empty caption.
@@ -1345,9 +1379,13 @@ def op_window_scroll(req):
     return {"scrolled": amount}
 
 
+_WINDOW_MODIFIER_CODES = {
+    "shift": 0xA0, "lshift": 0xA0, "rshift": 0xA1,
+    "ctrl": 0xA2, "control": 0xA2, "lctrl": 0xA2, "rctrl": 0xA3,
+    "alt": 0xA4, "lalt": 0xA4, "ralt": 0xA5, "altgr": 0xA5,
+}
 _WINDOW_KEY_CODES = {
-    "shift": 0x10, "lshift": 0xA0, "rshift": 0xA1,
-    "ctrl": 0x11, "control": 0x11, "alt": 0x12, "win": 0x5B,
+    **_WINDOW_MODIFIER_CODES,
     "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "return": 0x0D,
     "esc": 0x1B, "escape": 0x1B, "space": 0x20,
     "pageup": 0x21, "pagedown": 0x22, "end": 0x23, "home": 0x24,
@@ -1359,19 +1397,18 @@ _WINDOW_KEY_CODES = {
 
 
 def _window_keys(keys):
-    if not isinstance(keys, list) or not 1 <= len(keys) <= 8:
-        raise Refused("Supply a list of one to eight key names.")
+    if not isinstance(keys, list) or not 1 <= len(keys) <= len(_WINDOW_MODIFIER_CODES) + 1:
+        raise Refused("Supply one key name and any modifiers as a list.")
     codes = [_WINDOW_KEY_CODES.get(key.strip().casefold()) if isinstance(key, str) else None
              for key in keys]
     if None in codes or len(set(codes)) != len(codes):
         raise Refused("Use distinct supported key names.")
-    modifiers = {0x10, 0x11, 0x12, 0x5B, 0xA0, 0xA1}
-    return sorted(codes, key=lambda vk: vk not in modifiers)
+    return sorted(codes, key=lambda vk: vk not in _WINDOW_MODIFIER_CODES.values())
 
 
 def _send_window_keys(backend, codes):
     # Windows verification pending: virtual-key chord down/up order and extended flags.
-    extended = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B}
+    extended = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0xA3, 0xA5}
     down = [(vk, 0, int(vk in extended)) for vk in codes]
     up = [(vk, scan, flags | 2) for vk, scan, flags in reversed(down)]
     try:

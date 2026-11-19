@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ntpath
+import re
 import secrets
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol
 
 if __package__:
     from . import windowpolicy as policy
@@ -13,10 +15,15 @@ else:
 
 Rect = policy.Rect
 HUD_REGION_NAME = "Jarvis protected area"
+_MODIFIERS = frozenset({
+    "shift", "lshift", "rshift", "ctrl", "control", "lctrl", "rctrl",
+    "alt", "lalt", "ralt", "altgr",
+})
+_WINDOWS_KEYS = frozenset({"win", "windows", "lwin", "rwin", "meta", "super", "cmd", "command"})
 
 
 class Desktop(Protocol):
-    def top_windows(self) -> list[int]:
+    def top_windows(self) -> Iterable[int]:
         """Return visible, non-minimised top-level handles, front-most first."""
         ...
 
@@ -25,7 +32,11 @@ class Desktop(Protocol):
         ...
 
     def rect(self, hwnd: int) -> Rect | None:
-        """Read the window rectangle in screen pixels, or None."""
+        """Read the visible window frame clipped to its monitor, or None."""
+        ...
+
+    def see_through(self, hwnd: int) -> bool:
+        """Return True for layered, transparent or unreadable window styles."""
         ...
 
     def title(self, hwnd: int) -> str:
@@ -40,7 +51,7 @@ class Desktop(Protocol):
         """Identify the Jarvis HUD window."""
         ...
 
-    def hud_regions(self, hwnd: int) -> list[Rect] | None:
+    def hud_regions(self, hwnd: int) -> Iterable[Rect] | None:
         """Read screen rectangles of nodes named HUD_REGION_NAME, or None."""
         ...
 
@@ -90,6 +101,53 @@ def usable_rect(rect: Rect | None) -> bool:
     return not policy.overlaps(rect, ())
 
 
+def _absolute_image_path(value):
+    if not isinstance(value, str) or not value:
+        return None
+    path = value.replace("/", "\\")
+    if path[:8].casefold() == "\\\\?\\unc\\":
+        path = "\\\\" + path[8:]
+    elif path.startswith("\\\\?\\"):
+        path = path[4:]
+    drive, rest = ntpath.splitdrive(path)
+    if re.fullmatch(r"[a-zA-Z]:", drive):
+        if not rest.startswith("\\"):
+            return None
+        components = rest.split("\\")
+    elif drive.startswith("\\\\") and len(drive[2:].split("\\")) == 2:
+        server, share = drive[2:].split("\\")
+        if not server or not share or server in (".", "?"):
+            return None
+        components = [server, share, *rest.split("\\")]
+    else:
+        return None
+    if any(re.search(r'[\x00-\x1f\x7f<>:"|?*]|~[0-9]', part)
+           or (part not in (".", "..") and part.endswith((".", " ")))
+           for part in components):
+        return None
+    return ntpath.normpath(path).casefold()
+
+
+def own_image(image_path, *, executable, prefix, base_executable, base_prefix) -> bool:
+    """Identify bridge interpreter and helper paths. Unreadable paths are protected."""
+    image, python, venv, base_python, base = map(
+        _absolute_image_path, (image_path, executable, prefix, base_executable, base_prefix))
+    if None in (image, python, venv, base_python, base) or not ntpath.basename(image):
+        return True
+    if image in (python, base_python):
+        return True
+    return any(image.startswith(folder.rstrip("\\") + "\\")
+               for folder in (venv, ntpath.dirname(venv), base))
+
+
+def _one_key_chord(keys) -> bool:
+    if policy.refused_keys(keys):
+        return False
+    names = [key.strip().casefold() for key in keys]
+    return (all(names) and _WINDOWS_KEYS.isdisjoint(names)
+            and sum(name not in _MODIFIERS for name in names) == 1)
+
+
 def require_expected_control(expect, info):
     if (not isinstance(expect, dict)
             or any(not isinstance(expect.get(key), str) or expect[key] != info[key]
@@ -104,7 +162,7 @@ def _new_id() -> str:
 class Guard:
     def __init__(self, desktop: Desktop, *, extra_password_managers=(), new_id=_new_id):
         self._desktop = desktop
-        self._extra_password_managers = tuple(extra_password_managers)
+        self._extra_password_managers = extra_password_managers
         self._new_id = new_id
         self._sensitive = None
         self._ids = {}
@@ -116,9 +174,11 @@ class Guard:
             and sensitive >= 0 else None
         )
 
-    def _read(self, method, *args):
+    def _read(self, method, *args, materialize=False, fallback=None):
         try:
-            return getattr(self._desktop, method)(*args)
+            read = getattr(self._desktop, method, fallback)
+            result = read(*args)
+            return tuple(result) if materialize and result is not None else result
         except Exception:
             raise Refused("Windows could not be inspected safely.") from None
 
@@ -135,7 +195,7 @@ class Guard:
             kind = policy.PROTECTED
         if kind == policy.PROTECTED or not self._read("is_hud", hwnd):
             return kind, ()
-        regions = self._read("hud_regions", hwnd) if self._sensitive else None
+        regions = self._read("hud_regions", hwnd, materialize=True) if self._sensitive else None
         hud_kind, masks = policy.hud_view(self._sensitive, regions, 0.0)
         return (kind if hud_kind == policy.DRIVABLE else hud_kind), masks
 
@@ -143,7 +203,7 @@ class Guard:
         previous = {identity: window_id for window_id, identity in self._ids.items()}
         current = {}
         result = []
-        for hwnd in self._read("top_windows"):
+        for hwnd in self._window_order():
             facts = self._read("facts", hwnd)
             identity = self._identity(hwnd, facts)
             if identity is None:
@@ -170,7 +230,7 @@ class Guard:
         if identity is None:
             raise Refused("Unknown window. List windows first.")
         hwnd = identity[0]
-        order = self._read("top_windows")
+        order = self._window_order()
         if hwnd not in order:
             self._ids.pop(window_id)
             raise Refused("The window is no longer available.")
@@ -180,6 +240,12 @@ class Guard:
             raise Refused("The window has changed. List windows again.")
         kind, masks = self._classify(hwnd, facts)
         return hwnd, order, kind, masks
+
+    def _window_order(self):
+        order = self._read("top_windows", materialize=True)
+        if order is None:
+            raise Refused("Windows could not be inspected safely.")
+        return order
 
     def _rect(self, hwnd):
         rect = self._read("rect", hwnd)
@@ -193,8 +259,13 @@ class Guard:
             raise Refused(policy.refusal(kind))
         rect = self._rect(hwnd)
         overlapping = []
-        for other in order[:order.index(hwnd)]:
-            bounds = self._read("rect", other)
+        if self._read("see_through", hwnd, fallback=lambda _: True) is False:
+            order = order[:order.index(hwnd)]
+        for other in order:
+            if other == hwnd:
+                continue
+            # An overlapping window can extend onto the target's monitor.
+            bounds = self._read("occlusion_rect", other, fallback=lambda h: self._desktop.rect(h))
             if not usable_rect(bounds):
                 overlapping.append(policy.PROTECTED)
             elif policy.overlaps(rect, (bounds,)):
@@ -213,7 +284,7 @@ class Guard:
             raise Refused("Specify a point, element, or keys.")
         rect = self._rect(hwnd)
         if keys is not None:
-            if isinstance(keys, (str, bytes)) or policy.refused_keys(keys):
+            if not _one_key_chord(keys):
                 raise Refused("This key combination is refused.")
             if self._read("foreground") != hwnd:
                 raise Refused("The target window must be in the foreground.")
@@ -235,7 +306,7 @@ class Guard:
 
 
 class MaskedTree:
-    """Prune masked nodes before the snapshot renderer can assign them refs."""
+    """Prune masked nodes and traverse partially masked containers without exposing them."""
 
     def __init__(self, backend, masks):
         self.root = backend.root
@@ -251,16 +322,33 @@ class MaskedTree:
     def children(self, node):
         if not self._masks:
             return self._backend.children(node)
-        if node is self.root and self._hidden(node):
+        if node is self.root and not self._inspect(node):
             return []
-        return [child for child in self._backend.children(node) if not self._hidden(child)]
+        children = self._visible[id(node)][2]
+        if children is None:
+            children = self._backend.children(node)
+        return [child for child in children if self._inspect(child)]
 
-    def _hidden(self, node):
+    def _inspect(self, node):
         info = self._backend.describe(node)
-        if policy.overlaps(Rect(*info["rect"]), self._masks):
-            return True
-        self._visible[id(node)] = (node, info)
-        return False
+        bounds = info.get("rect")
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            bounds = Rect(*bounds)
+        if not usable_rect(bounds) or any(not usable_rect(mask) for mask in self._masks):
+            return False
+        if any(mask.left <= bounds.left and bounds.right <= mask.right
+               and mask.top <= bounds.top and bounds.bottom <= mask.bottom for mask in self._masks):
+            return False
+        children = None
+        if any(bounds.left <= mask.right and mask.left <= bounds.right
+               and bounds.top <= mask.bottom and mask.top <= bounds.bottom for mask in self._masks):
+            children = tuple(self._backend.children(node))
+            if not children:
+                return False
+            info = {"role": "group", "name": "", "value": "", "interactive": False,
+                    "offscreen": info["offscreen"], "enabled": False, "checked": None}
+        self._visible[id(node)] = (node, info, children)
+        return True
 
 
 def black_out(image, origin: tuple[int, int], masks):

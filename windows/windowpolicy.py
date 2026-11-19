@@ -23,6 +23,7 @@ hold a secret or run a command.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 import re
 from typing import Iterable, Optional, Sequence
 
@@ -50,13 +51,13 @@ TERMINAL_IMAGES = frozenset({
     "wslhost.exe", "bash.exe", "ubuntu.exe", "mintty.exe", "putty.exe",
     "alacritty.exe", "wezterm-gui.exe", "kitty.exe", "tabby.exe",
     "hyper.exe", "conemu.exe", "conemu64.exe", "cmder.exe", "mobaxterm.exe",
-    "securecrt.exe", "xshell.exe", "termius.exe", "warp.exe",
+    "securecrt.exe", "xshell.exe", "termius.exe", "warp.exe", "msrdc.exe",
 })
 # A console program (python.exe, ssh.exe, ...) is shown in a console window
 # whatever its own image is, so the class decides too.
 TERMINAL_CLASSES = frozenset({
     "consolewindowclass", "cascadia_hosting_window_class", "pseudoconsolewindow",
-    "mintty", "virtualconsoleclass",
+    "mintty", "virtualconsoleclass", "rail_window",
 })
 
 # A HUD mask older than this is not trusted to still cover its card.
@@ -195,9 +196,9 @@ def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
     `sensitive` is how many approval cards and credential editors the daemon
     knows are showing. `masks` are the rectangles the HUD last reported for
     them and `age_s` how old that report is. The HUD stays drivable around
-    its masks only when every sensitive thing has a fresh rectangle; a
-    missing, stale, short or malformed report protects the whole window.
-    Equal rectangles count once, so one area cannot stand for two cards.
+    its masks only when a fresh report has exactly that many distinct valid
+    rectangles and their padded masks share no pixels. Equal rectangles
+    count once. With nothing sensitive, the report is ignored.
     """
     if not _whole(sensitive) or sensitive < 0:
         return PROTECTED, ()
@@ -207,11 +208,18 @@ def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
             or not 0 <= age_s <= MASK_MAX_AGE_S):
         return PROTECTED, ()
     masks = _mask_list(masks)
-    if masks is None or len(set(masks)) < sensitive:
+    if masks is None:
         return PROTECTED, ()
-    return DRIVABLE, tuple(
+    masks = tuple(dict.fromkeys(masks))
+    if len(masks) != sensitive:
+        return PROTECTED, ()
+    padded = tuple(
         Rect(m.left - MASK_MARGIN, m.top - MASK_MARGIN, m.right + MASK_MARGIN, m.bottom + MASK_MARGIN)
         for m in masks)
+    if any(a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom
+           for a, b in combinations(padded, 2)):
+        return PROTECTED, ()
+    return DRIVABLE, padded
 
 
 def masked(x, y, masks: Iterable[Rect]) -> bool:
