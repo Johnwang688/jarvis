@@ -3735,7 +3735,6 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
             i += 1
             body_start = i
             in_tick = "`" in stack
-            body_start = i
             for delimiter, strip, quoted, slot, written, _depth, in_sub, start in pending:
                 lines: list[str] = []
                 while i < n:
