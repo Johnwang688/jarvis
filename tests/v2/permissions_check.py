@@ -894,7 +894,7 @@ def brace_glob_broad_checks():
 
 # Jarvis's own records under the v2 data root, every one refused (2026-10-25).
 RECORD_TREES = ("threads", "tasks", "projects", "schedules", "ledger", "diff_reviews",
-                "discord", "chat-git", "deleting", "vex")
+                "discord", "chat-git", "deleting", "vex", "route-feedback")
 
 
 def record_tree_checks():
