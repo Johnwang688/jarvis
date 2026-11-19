@@ -11,7 +11,7 @@ import queue
 import struct
 import time
 
-STATES = ("hidden", "listening", "transcribing", "thinking", "answering", "done", "error")
+STATES = ("hidden", "listening", "transcribing", "thinking", "answering", "profile_choice", "done", "error")
 CYAN, AMBER, RED = "#67e8f9", "#fbbf24", "#fb7185"
 PANEL, INK = "#14232e", "#edf6fa"
 HEADER_HEIGHT = 29
@@ -45,14 +45,14 @@ class _DisplayState:
         self.state, self.text, self.hide_at = "hidden", "", None
         self.dismissed = True
 
-    def set(self, state, text=None):
+    def set(self, state, text=None, hide_at=None):
         # A wake timeout or the previous reply may already be queued when
         # the hotkey acquires the mic. Only its listening state belongs here.
         if self.recording() and state != "listening":
             return False
         if self.dismissed:
             if state != "listening":
-                if state in ("done", "error", "hidden"):
+                if state in ("done", "error", "hidden", "profile_choice"):
                     self.dismissed = False
                 return False
             self.dismissed = False
@@ -61,7 +61,7 @@ class _DisplayState:
                   "thinking": "Thinking…", "done": "Done", "error": "Voice unavailable"}
         self.text = "" if state == "hidden" else str(text if text is not None else labels.get(state, ""))
         delay = {"done": 4.0, "error": 5.0}.get(state)
-        self.hide_at = self.clock() + delay if delay is not None else None
+        self.hide_at = self.clock() + delay if delay is not None else hide_at
         return True
 
     def expire(self):
@@ -113,6 +113,7 @@ class Overlay:
                         for _ in range(24)]
         self.label = self.canvas.create_text(220, 66, text="", anchor="n", width=400,
                                              fill=INK, font=("Segoe UI", 12))
+        self.profile_list = None
         self.user32 = None
         if os.name == "nt":
             self._native_window()
@@ -141,10 +142,10 @@ class Overlay:
         style = u.GetWindowLongW(self.hwnd, -20)
         u.SetWindowLongW(self.hwnd, -20, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
 
-    def set_state(self, state, text=None):
+    def set_state(self, state, text=None, *deadline):
         if state not in STATES:
             raise ValueError("Unknown voice state")
-        self.events.put(("state", state, text))
+        self.events.put(("state", state, text, *deadline))
 
     def timing(self, label, milliseconds):
         self.events.put(("timing", label, milliseconds))
@@ -204,8 +205,34 @@ class Overlay:
         else:
             self.window.geometry(f"{w}x{h}{x:+d}{y:+d}")
 
+    def _scroll_profiles(self, names, top):
+        """Keep the spoken reply instructions visible while the owner browses names."""
+        import tkinter as tk
+
+        if self.profile_list is None:
+            self.profile_list = tk.Frame(self.canvas, bg=PANEL, takefocus=False)
+            self.profile_text = tk.Canvas(self.profile_list, bg=PANEL, highlightthickness=0,
+                                          takefocus=False, yscrollincrement=24)
+            self.profile_names = self.profile_text.create_text(0, 0, anchor="nw", fill=INK,
+                                                                font=("Segoe UI", 12))
+            scroll = tk.Scrollbar(self.profile_list, command=self.profile_text.yview, takefocus=False)
+            self.profile_text.configure(yscrollcommand=scroll.set)
+            self.profile_text.bind("<MouseWheel>", lambda e: self.profile_text.yview_scroll(
+                -1 if e.delta > 0 else 1, "units"))
+            scroll.pack(side="right", fill="y")
+            self.profile_text.pack(side="left", fill="both", expand=True)
+            self.profile_scroll = scroll
+        wrap_width = self.width - 40 - self.profile_scroll.winfo_reqwidth() - 4
+        self.profile_text.itemconfigure(self.profile_names, text=names, width=wrap_width)
+        self.profile_text.configure(scrollregion=self.profile_text.bbox(self.profile_names))
+        self.profile_text.yview_moveto(0)
+        self.profile_list.place(x=20, y=top, width=self.width - 40, height=self.height - top - 18)
+
     def _layout(self):
         state = self.display.state
+        if self.profile_list is not None:
+            self.profile_list.place_forget()
+            self.profile_text.itemconfigure(self.profile_names, text="")
         if state == "hidden":
             if self.user32:
                 self.user32.ShowWindow(self.hwnd, 0)
@@ -214,12 +241,21 @@ class Overlay:
             self.canvas.itemconfigure(self.label, text="")
             return
         self.width = 640 if state == "answering" else 440
+        max_height = 254
+        if state == "profile_choice":
+            self.width = min(640, self.window.winfo_screenwidth() - 16)
+            max_height = self.window.winfo_screenheight() - 80
         self.canvas.itemconfigure(self.label, text=self.display.text, width=self.width - 40,
                                   fill=RED if state == "error" else
                                   AMBER if state in ("transcribing", "thinking") else INK)
         self.canvas.coords(self.label, self.width / 2, 78)
         box = self.canvas.bbox(self.label)
-        self.height = min(254, max(110, (box[3] if box else 94) + 18))
+        required_height = max(110, (box[3] if box else 94) + 18)
+        self.height = min(max_height, required_height)
+        if state == "profile_choice" and required_height > max_height:
+            question, names, instruction = self.display.text.split("\n", 2)
+            self.canvas.itemconfigure(self.label, text=f"{question}\n{instruction}")
+            self._scroll_profiles(names, self.canvas.bbox(self.label)[3] + 8)
         w, h, r = self.width, self.height, 18
         self.canvas.configure(width=w, height=h)
         self.canvas.coords(self.panel, r, 1, w-r, 1, w-1, 1, w-1, r,
@@ -242,7 +278,7 @@ class Overlay:
         # Bound a single drain so a busy producer cannot starve Tk's event loop.
         for _ in range(256):
             try:
-                kind, value, text = self.events.get_nowait()
+                kind, value, text, *deadline = self.events.get_nowait()
             except queue.Empty:
                 break
             if kind == "timing":
@@ -250,7 +286,7 @@ class Overlay:
             elif kind == "level":
                 self.levels.append(value)
             else:
-                if not self.display.set(value, text):
+                if not self.display.set(value, text, *deadline):
                     continue
                 if value == "listening":
                     self.canvas.itemconfigure(self.metric, text="")

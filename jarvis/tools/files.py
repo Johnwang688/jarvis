@@ -69,6 +69,7 @@ SELF_PROTECTED = frozenset(
         # overlay run in the same owner-started process.
         "windows/voicetype.py",
         "windows/voiceactions.py",
+        "windows/chromepicker.py",
         "windows/voiceflow.py",
         "windows/voiceui.py",
         "windows/voicewake.py",

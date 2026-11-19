@@ -1,20 +1,26 @@
 """Indexed Windows app actions. Model text is never a command line."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import replace
 import difflib
-import re
+from enum import IntEnum
 import json
 import ntpath
 import os
+import re
 import subprocess
 import threading
 import time
 from urllib.parse import quote_plus
 
 if __package__:
+    from . import chromepicker
     from .desktopwire import launch_name
     from .voicetype import WindowsInput
 else:
+    import chromepicker
     from desktopwire import launch_name
     from voicetype import WindowsInput
 
@@ -25,6 +31,34 @@ def _normal(text):
 
 ALIASES = {"vs code": "visual studio code", "vscode": "visual studio code",
            "code": "visual studio code", "chrome": "google chrome", "edge": "microsoft edge"}
+
+
+# Each voice clip supplies its own revocation check. Capture the callable
+# before passing an operation to a different thread or COM apartment.
+action_guard = ContextVar("voice_action_guard", default=lambda: True)
+
+
+def _allowed(guard):
+    try:
+        return guard() is True
+    except Exception:  # noqa: BLE001  (an unreadable revocation check revokes)
+        return False
+
+
+@contextmanager
+def action_scope(current):
+    token = action_guard.set(current)
+    try:
+        yield
+    finally:
+        action_guard.reset(token)
+
+
+class LaunchStatus(IntEnum):
+    NOT_FOUND = 0
+    LAUNCHED = 1
+    CHROME_PROFILE_REQUIRED = 2
+    CHROME_WINDOW_UNCONFIRMED = 3
 
 
 def _sound(text):
@@ -127,33 +161,47 @@ class WindowsDesktop:
         k.GlobalFree.argtypes, k.GlobalFree.restype = [w.HGLOBAL], w.HGLOBAL
         self.keys = WindowsInput()
         self.clipboard_hwnd = None
+        self._chrome_picker = None
+
+    def chrome_picker(self):
+        if self._chrome_picker is None:
+            self._chrome_picker = chromepicker.WindowsChromePicker()
+        return self._chrome_picker
+
+    def _visible_window(self, hwnd):
+        c, w, u, k = self.ctypes, self.w, self.user32, self.kernel32
+        if not hwnd or not u.IsWindowVisible(hwnd):
+            return None
+        size = u.GetWindowTextLengthW(hwnd)
+        if not size:
+            return None
+        title = c.create_unicode_buffer(size + 1)
+        u.GetWindowTextW(hwnd, title, len(title))
+        pid = w.DWORD()
+        u.GetWindowThreadProcessId(hwnd, c.byref(pid))
+        process = k.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+        exe = ""
+        if process:
+            try:
+                path, length = c.create_unicode_buffer(32768), w.DWORD(32768)
+                if k.QueryFullProcessImageNameW(process, 0, path, c.byref(length)):
+                    exe = path.value
+            finally:
+                k.CloseHandle(process)
+        return hwnd, title.value, exe
+
+    def foreground_window(self):
+        return self._visible_window(self.user32.GetForegroundWindow())
 
     def windows(self):
-        c, w, u, k = self.ctypes, self.w, self.user32, self.kernel32
+        c, w, u = self.ctypes, self.w, self.user32
         result = []
         callback_type = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
         @callback_type
         def visit(hwnd, unused):
-            if not u.IsWindowVisible(hwnd):
-                return True
-            size = u.GetWindowTextLengthW(hwnd)
-            if not size:
-                return True
-            title = c.create_unicode_buffer(size + 1)
-            u.GetWindowTextW(hwnd, title, len(title))
-            pid = w.DWORD()
-            u.GetWindowThreadProcessId(hwnd, c.byref(pid))
-            process = k.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
-            exe = ""
-            if process:
-                try:
-                    path, length = c.create_unicode_buffer(32768), w.DWORD(32768)
-                    if k.QueryFullProcessImageNameW(process, 0, path, c.byref(length)):
-                        exe = path.value
-                finally:
-                    k.CloseHandle(process)
-            result.append((hwnd, title.value, exe))
+            if (window := self._visible_window(hwnd)) is not None:
+                result.append(window)
             return True
 
         u.EnumWindows.argtypes = [callback_type, w.LPARAM]
@@ -249,6 +297,8 @@ class WindowsDesktop:
         self.keys.key("ctrl+c")
 
     def close(self):
+        if self._chrome_picker is not None:
+            self._chrome_picker.close()
         if self.clipboard_hwnd:
             self.user32.DestroyWindow(self.clipboard_hwnd)
             self.clipboard_hwnd = None
@@ -256,8 +306,13 @@ class WindowsDesktop:
 
 class Actions:
     def __init__(self, desktop=None, clock=time.monotonic, sleep=time.sleep,
-                 runner=subprocess.run, launcher=subprocess.Popen, opener=None, *, warm_in_background=False):
+                 runner=subprocess.run, launcher=subprocess.Popen, opener=None, *, warm_in_background=False,
+                 picker=None):
         self.desktop = desktop if desktop is not None else WindowsDesktop()
+        # Only the real desktop (or an explicit adapter) can read a Chrome picker.
+        self.picker = picker
+        self.picker_context = None
+        self.picker_offered = None  # (picker identity, cards the owner was shown)
         self.clock, self.sleep = clock, sleep
         self.runner, self.launcher = runner, launcher
         self.opener = opener
@@ -298,21 +353,211 @@ class Actions:
             pass  # keep the previous index if PowerShell is temporarily unavailable
 
     def open_app(self, target, *, exact=False):
+        guard = action_guard.get()  # captured here: the index wait may outlive the clip
         if exact and launch_name(target) is None:
-            return False
+            return LaunchStatus.NOT_FOUND
         self.refresh_apps()
+        if not _allowed(guard):
+            return LaunchStatus.NOT_FOUND  # stopped while the Start catalog loaded: launch nothing
         if exact:
             try:
                 app = exact_start_app(target, self.apps, reject_alias_conflicts=True)
             except ValueError:
-                return False
+                return LaunchStatus.NOT_FOUND
         else:
             app = match_app(target, self.apps)
         if app is None:
-            return False
+            return LaunchStatus.NOT_FOUND
+        is_chrome = _normal(app["name"]) == "google chrome"
+        self.picker_context = self.picker_offered = None  # a new launch never inherits an older picker
+        previous, existing = None, frozenset()
+        if is_chrome:
+            previous = self.desktop.foreground_window()
+            try:  # browser windows already open can never confirm this launch
+                existing = frozenset(window[0] for window in self.desktop.windows())
+            except Exception:  # noqa: BLE001  (adapters without enumeration keep the focus rule)
+                existing = frozenset()
+            if not _allowed(guard):
+                return LaunchStatus.NOT_FOUND
         self.launcher(["explorer.exe", "shell:AppsFolder\\" + app["id"]],
                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return True
+        if is_chrome:
+            return self._chrome_launch_status(previous[0] if previous else None, existing, guard)
+        return LaunchStatus.LAUNCHED
+
+    def _chrome_launch_status(self, previous_hwnd, existing=frozenset(), guard=lambda: True):
+        deadline = self.clock() + 3.0
+        while _allowed(guard):  # once revoked, the launch stands but is never confirmed
+            window = self.desktop.foreground_window()
+            if window is not None:
+                hwnd, title, exe = window
+                if ntpath.basename(exe).casefold() == "chrome.exe":
+                    # Chrome's profile picker uses the product name as its
+                    # native window title. Browser windows include a tab title.
+                    if (hwnd != previous_hwnd and hwnd not in existing
+                            and title.strip().casefold().endswith(" - google chrome")):
+                        return LaunchStatus.LAUNCHED if _allowed(guard) else LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+                    if _normal(title) in {"google chrome", "who s using chrome",
+                                           "who is using chrome", "select profile"}:
+                        self._remember_picker(hwnd)
+                        if not _allowed(guard):
+                            self.picker_context = None
+                            return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+                        return LaunchStatus.CHROME_PROFILE_REQUIRED
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+            self.sleep(min(remaining, 0.1))
+        return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+
+    # -- Chrome's profile picker -------------------------------------------------
+    # The picker a voice open met is remembered by its handle and identity, and
+    # only that window is ever read or invoked. Choosing invokes one card at most
+    # once, and reports LAUNCHED only when that picker closed and a new browser
+    # window of the same Chrome process took the foreground before the deadline.
+    # The clip's revocation check (`action_guard`) is captured on entry, re-read
+    # after every blocking read, and carried on the card to the UIA thread.
+    PICKER_TTL = 180.0
+    PICKER_READ_WAIT = 2.0
+    PICKER_CONFIRM_WAIT = 6.0
+
+    def _picker_backend(self):
+        if self.picker is None and isinstance(self.desktop, WindowsDesktop):
+            try:
+                self.picker = self.desktop.chrome_picker()
+            except (OSError, AttributeError, ImportError):
+                return None
+        return self.picker
+
+    def _remember_picker(self, hwnd):
+        backend = self._picker_backend()
+        if backend is None:
+            return
+        try:
+            identity = backend.identity(hwnd)
+        except Exception:  # noqa: BLE001  (an unreadable window is never trusted)
+            return
+        if chromepicker.is_picker_identity(identity):
+            self.picker_context = (identity, self.clock())
+
+    def _live_picker(self, backend):
+        if self.picker_context is None:
+            return None
+        recorded, started = self.picker_context
+        if self.clock() - started > self.PICKER_TTL:
+            self.picker_context = None
+            return None
+        try:
+            identity = backend.identity(recorded.hwnd)
+        except Exception:  # noqa: BLE001
+            identity = None
+        if not chromepicker.same_picker(identity, recorded):
+            self.picker_context = None  # closed, replaced or changed: never follow it
+            return None
+        return identity
+
+    def _picker_cards(self, backend, identity, wait, guard=lambda: True):
+        # Chrome builds its accessibility tree on first request; read until the
+        # trusted structure appears or the bounded wait ends.
+        deadline = self.clock() + wait
+        while True:
+            try:
+                cards = backend.cards(identity)
+            except Exception:  # noqa: BLE001
+                cards = None
+            if cards or not _allowed(guard):
+                return cards
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return None
+            self.sleep(min(remaining, 0.15))
+
+    def chrome_profile_options(self):
+        backend = self._picker_backend()
+        identity = self._live_picker(backend) if backend is not None else None
+        if identity is None:
+            return ()
+        cards = self._picker_cards(backend, identity, self.PICKER_READ_WAIT)
+        shown = [card for card in cards or () if chromepicker.card_ok(card)]
+        self.picker_offered = (identity, frozenset((c.key, c.label, c.button_name) for c in shown))
+        return chromepicker.options(shown)
+
+    def choose_chrome_profile(self, display_name):
+        guard = action_guard.get()  # this clip's revocation check, never re-looked-up
+        unconfirmed = LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+        backend = self._picker_backend()
+        picker = self._live_picker(backend) if backend is not None else None
+        if picker is None or not _allowed(guard):
+            return unconfirmed
+        if not chromepicker.normal(display_name):
+            return LaunchStatus.CHROME_PROFILE_REQUIRED
+        try:
+            if backend.foreground() != picker.hwnd:
+                return unconfirmed  # focus moved; never act on a background picker
+        except Exception:  # noqa: BLE001
+            return unconfirmed
+        cards = self._picker_cards(backend, picker, self.PICKER_READ_WAIT, guard)
+        if not _allowed(guard):
+            return unconfirmed
+        card = chromepicker.unique_card(cards, display_name)
+        if card is None:
+            return LaunchStatus.CHROME_PROFILE_REQUIRED  # nothing pressed; the picker still waits
+        offered = self.picker_offered
+        if offered is not None and (not chromepicker.same_picker(picker, offered[0])
+                                    or (card.key, card.label, card.button_name) not in offered[1]):
+            return unconfirmed  # renamed, replaced or never shown: not what the owner chose
+        # Re-read everything immediately before the one Invoke; foreground last.
+        try:
+            again = backend.identity(picker.hwnd)
+            if not chromepicker.same_picker(again, picker) or backend.foreground() != picker.hwnd:
+                return unconfirmed
+            fresh = chromepicker.unique_card(backend.cards(again), display_name)
+            if fresh is None or (fresh.key, fresh.label, fresh.button_name) != (
+                    card.key, card.label, card.button_name):
+                return unconfirmed
+            before = backend.process_windows(picker.pid)
+            if not chromepicker.same_picker(backend.identity(picker.hwnd), picker) \
+                    or backend.foreground() != picker.hwnd or not _allowed(guard):
+                return unconfirmed
+        except Exception:  # noqa: BLE001
+            return unconfirmed
+        self.picker_context = self.picker_offered = None  # one press per picker: no retries, ever
+
+        def allowed():  # runs on the UIA thread just before Invoke
+            return _allowed(guard) and backend.foreground() == picker.hwnd
+
+        deadline = self.clock() + self.PICKER_CONFIRM_WAIT
+        try:
+            backend.invoke(replace(fresh, allowed=allowed))
+        except Exception:  # noqa: BLE001
+            # Withdrawn, failed or sent without an answer (chromepicker.ClickSent):
+            # a window that appears now may be the owner's own choice. No receipt.
+            return unconfirmed
+        return self._confirm_profile_window(backend, picker, before, deadline, guard)
+
+    def _confirm_profile_window(self, backend, picker, before, deadline, guard=lambda: True):
+        while _allowed(guard):
+            try:
+                now = backend.identity(picker.hwnd)
+                closed = now is None or not now.visible or not chromepicker.same_picker(now, picker)
+                hwnd = backend.foreground()
+                window = backend.identity(hwnd) if hwnd and hwnd != picker.hwnd else None
+                # A window that vanished between the two reads decides nothing.
+                if window is not None:
+                    if window.pid != picker.pid:
+                        return LaunchStatus.CHROME_WINDOW_UNCONFIRMED  # focus left this Chrome
+                    if closed and chromepicker.is_profile_window(window, picker, before):
+                        # Seen after the deadline, or after the clip was revoked, proves nothing.
+                        if self.clock() <= deadline and _allowed(guard):
+                            return LaunchStatus.LAUNCHED
+                        return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+            except Exception:  # noqa: BLE001
+                return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+            self.sleep(min(remaining, 0.1))
+        return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
 
     def switch_app(self, target):
         hwnd = match_window(target, self.desktop.windows())
@@ -338,6 +583,8 @@ class Actions:
             self.desktop.set_clipboard_text(previous)
 
     def close(self):
-        close = getattr(self.desktop, "close", None)
-        if close:
-            close()
+        self.picker_context = self.picker_offered = None
+        for owner in (self.picker, self.desktop):  # the picker's UIA thread retires too
+            close = getattr(owner, "close", None)
+            if close:
+                close()

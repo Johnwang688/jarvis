@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import voice_link_va245_impl_check as fixture
 from jarvis.v2 import chat_reads, projects, voice_link
+from windows.voiceactions import LaunchStatus
 from windows.voiceflow import Flow
 
 
@@ -107,6 +108,158 @@ class ConfirmedAction(fixture.Base):
             expired = self.route("open Teams")["receipt"]
         self.assertFalse(self.wire.confirm_action(expired))
         self.assertEqual([r["data"]["text"] for r in self.notices(other)], ["Jarvis voice opened Paint."])
+
+    def test_profile_reply_finishes_original_launch_in_original_chat(self):
+        self.actions.open_app.return_value = LaunchStatus.CHROME_PROFILE_REQUIRED
+        self.actions.chrome_profile_options.return_value = ("Private profile name",)
+        self.actions.choose_chrome_profile.return_value = LaunchStatus.LAUNCHED
+        self.ask_local("Open Chrome.", "hotkey")
+        self.assertEqual(self.notices(), [])
+        other = self.d.open_thread(self.chosen.project_id, "chat", "fast", {})
+        self.select(other.id)
+        # The network worker constructs a new Flow for the next capture.
+        followup = Flow(self.wire, self.typer, self.actions, self.ui, self.player)
+        followup.on_clip(None, "hotkey", transcript="Private profile name.")
+        self.actions.choose_chrome_profile.assert_called_once_with("Private profile name")
+        self.assertEqual([n["data"]["text"] for n in self.notices()], ["Jarvis voice opened Chrome."])
+        self.assertEqual(self.notices(other), [])
+        self.assertEqual(self.fast.messages, [])
+        self.typer.run.assert_not_called()
+
+    def test_natural_and_repeated_profile_replies_stay_in_the_picker_conversation(self):
+        from tests.voice_chrome_picker_check import Choose
+
+        for reply, selected in [("Cancel, please.", False), ("I'd like Work.", True)]:
+            with self.subTest(reply=reply):
+                fixture = Choose()
+                self.flow.actions = fixture.make()
+                notices_before = len(self.notices())
+                self.ask_local("Open Chrome.", "hotkey")
+                self.ask_local(reply, "hotkey")
+                if not selected:
+                    self.ui.set_state.assert_called_with("done", "Chrome profile selection canceled.")
+                self.ask_local("Work.", "hotkey")
+                self.assertEqual(fixture.backend.invoked, ["Work"] if selected else [])
+                self.assertEqual(len(self.notices()) - notices_before, int(selected))
+                self.typer.run.assert_not_called()
+
+    def start_work_profile_prompt(self):
+        from tests.voice_chrome_picker_check import Choose
+
+        fixture = Choose()
+        self.flow.actions = fixture.make()
+        self.ask_local("Open Chrome.", "hotkey")
+        return fixture.backend
+
+    def test_expired_prompt_recognizes_multiple_late_replies_inside_grace(self):
+        from dataclasses import replace
+        import time
+
+        backend = self.start_work_profile_prompt()
+        pending = self.wire._pending_chrome_profile
+        self.wire._pending_chrome_profile = replace(pending, expires_at=time.monotonic() - 0.01)
+        self.ask_local("Work.", "hotkey")
+        self.ask_local("I'd like Work.", "hotkey")
+        self.assertEqual(backend.invoked, [])
+        self.assertEqual(self.notices(), [])
+        self.typer.run.assert_not_called()
+
+    def test_unrelated_dictation_during_grace_preserves_repeat_recognition(self):
+        backend = self.start_work_profile_prompt()
+        self.ask_local("Work.", "hotkey")
+        self.ask_local("Add milk to the shopping list.", "hotkey")
+        self.typer.run.assert_called_once()
+        self.typer.run.reset_mock()
+        self.ask_local("Work.", "hotkey")
+        self.assertEqual(backend.invoked, ["Work"])
+        self.assertEqual(len(self.notices()), 1)
+        self.typer.run.assert_not_called()
+
+    def test_grace_ends_at_original_expiry_even_if_transcription_delays_check(self):
+        from dataclasses import replace
+        import time
+
+        backend = self.start_work_profile_prompt()
+        pending = self.wire._pending_chrome_profile
+        self.wire._pending_chrome_profile = replace(pending, expires_at=time.monotonic() - 11)
+        self.ask_local("Work.", "hotkey")
+        self.typer.run.assert_called_once()
+        self.assertEqual(backend.invoked, [])
+        self.assertEqual(self.notices(), [])
+
+    def test_first_replacement_capture_sets_deadline_even_when_picker_returns_later(self):
+        import queue
+        from types import SimpleNamespace
+
+        from tests.voice_chrome_picker_check import Choose
+        from windows import voice_agent, voiceflow
+
+        picker = Choose()
+        actions = picker.make()
+        clock = picker.clock
+        clock.monotonic = clock
+        agent = voice_agent.Agent.__new__(voice_agent.Agent)
+        agent.done, agent.stop_requested, agent.profile_cancelled = (threading.Event() for _ in range(3))
+        agent.recording, agent.flow_running = threading.Event(), threading.Event()
+        agent.generation_lock = threading.Lock()
+        agent.generation = 1
+        agent.clips = Mock(spec=queue.Queue)
+        agent.overlay, agent.player = self.ui, self.player
+        agent.player.begin.side_effect = agent.player.cancelled.clear
+        agent.host, agent.port, agent.key_path = "unused", 0, "unused"
+        agent.user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
+        typed = []
+        self.typer.run.side_effect = lambda steps: typed.append((clock.now, steps[0][1]))
+
+        def interrupt_lookup(_):
+            clock.now = 104
+            agent.player.cancelled.set()
+            agent.next_generation()
+            clock.now = 104.75
+            agent.next_generation()
+            clock.now = 105
+
+        def clips():
+            yield agent.generation, b"Open Chrome.", "hotkey"
+            picker.backend.on_read = interrupt_lookup
+            yield agent.next_generation(), b"Work.", "hotkey"
+            self.assertEqual(clock.now, 105)
+            clock.now = 113.99
+            yield agent.generation, b"Work.", "hotkey"
+            clock.now = 114
+            yield agent.next_generation(), b"Work.", "hotkey"
+            agent.done.set()
+            raise queue.Empty
+
+        agent.clips.get.side_effect = clips()
+        for module in (voiceflow, voice_agent):
+            self.enterContext(patch.object(module, "time", clock))
+        for name, value in (("Client", self.wire), ("load_key", b"test-key"),
+                            ("Actions", actions), ("Typer", self.typer)):
+            self.enterContext(patch.object(voice_agent, name, return_value=value))
+        self.enterContext(patch.object(self.wire, "connect"))
+        self.enterContext(patch.object(self.wire, "dictate", side_effect=lambda wav, **kw: {"text": wav.decode()}))
+        agent.network()
+
+        self.assertEqual((picker.backend.invoked, self.notices()), ([], []))
+        self.assertEqual(typed, [(114, "Work.")])
+
+    def test_failed_profile_invoke_cannot_confirm_a_manual_profile_switch(self):
+        from tests.voice_chrome_picker_check import Choose, PICKER, window
+        from windows.chromepicker import PickerUnavailable
+
+        fixture = Choose()
+        actions = fixture.make()
+        def manual_selection(_):
+            fixture.backend.windows.pop(PICKER.hwnd)
+            fixture.backend.windows[30] = window(30, aumid="Chrome")
+            fixture.backend.fg = 30
+            raise PickerUnavailable("invoke failed")
+        fixture.backend.on_invoke = manual_selection
+        flow = Flow(self.wire, self.typer, actions, self.ui, self.player)
+        flow.on_clip(None, "hotkey", transcript="Open Chrome.")
+        flow.on_clip(None, "hotkey", transcript="Work.")
+        self.assertEqual(self.notices(), [])
 
     def test_selection_is_pinned_before_routing_finishes(self):
         other = self.d.open_thread(self.chosen.project_id, "chat", "fast", {})

@@ -342,7 +342,7 @@ class BoundaryTests(unittest.TestCase):
     def test_link_and_agent_code_are_self_protected(self):
         from jarvis.tools.files import SELF_PROTECTED
         for path in ("jarvis/v2/voice_link.py", "windows/voicewire.py", "windows/voice_agent.py",
-                     "jarvis/voice_link_setup.py"):
+                     "jarvis/voice_link_setup.py", "windows/chromepicker.py"):
             self.assertIn(path, SELF_PROTECTED)
 
 

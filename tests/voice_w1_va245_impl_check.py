@@ -281,7 +281,8 @@ class ActionGlue(unittest.TestCase):
     def test_exact_launch_accepts_display_or_alias_but_no_fuzzy_or_ambiguous_match(self):
         a = self.make()
         for name in ("Google Chrome", "CHROME"):
-            self.assertTrue(a.open_app(name, exact=True))
+            self.desktop.foreground_window = Mock(side_effect=[None, (1, "New Tab - Google Chrome", "chrome.exe")])
+            self.assertEqual(a.open_app(name, exact=True), actions.LaunchStatus.LAUNCHED)
             self.launcher.assert_called_once_with(
                 ["explorer.exe", "shell:AppsFolder\\chrome-id"],
                 creationflags=getattr(actions.subprocess, "CREATE_NO_WINDOW", 0))
@@ -297,6 +298,26 @@ class ActionGlue(unittest.TestCase):
         self.assertFalse(a.open_app("Google Chrome", exact=True))
         self.launcher.assert_not_called()
         self.assertEqual(self.runner.call_count, 1)
+
+    def test_chrome_waits_for_its_own_foreground_window_after_launch(self):
+        a = self.make()
+        self.desktop.foreground_window = Mock(side_effect=[
+            (1, "Existing Tab - Google Chrome", "chrome.exe"),
+            (1, "Existing Tab - Google Chrome", "chrome.exe"),
+            (3, "Google Chrome", "notepad.exe"),
+            None,
+            (2, "Google Chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        ])
+        self.assertEqual(a.open_app("chrome", exact=True), actions.LaunchStatus.CHROME_PROFILE_REQUIRED)
+        self.launcher.assert_called_once()
+        self.assertEqual(self.desktop.foreground_window.call_count, 5)
+
+    def test_chrome_without_a_confirmed_window_stops_waiting(self):
+        a = self.make()
+        self.desktop.foreground_window = Mock(return_value=(1, "New Tab - Google Chrome", "notepad.exe"))
+        self.assertEqual(a.open_app("chrome"), actions.LaunchStatus.CHROME_WINDOW_UNCONFIRMED)
+        self.assertAlmostEqual(self.clock.now, 103)
+        self.launcher.assert_called_once()
 
     def test_failed_refresh_keeps_cache_and_is_throttled(self):
         a = self.make()
@@ -365,6 +386,24 @@ class FlowErrors(unittest.TestCase):
         self.client.ask.return_value, self.client.say.return_value = "answer", b"audio"
         self.typer, self.actions, self.ui, self.player = Mock(), Mock(), Mock(), Mock()
         return voiceflow.Flow(self.client, self.typer, self.actions, self.ui, self.player)
+
+    def test_incomplete_chrome_launch_shows_status_without_dictating_or_receipt(self):
+        for source, spoken in (("hotkey", "Open Chrome."), ("wake", "Jarvis, open Chrome.")):
+            for status, message in (
+                (actions.LaunchStatus.CHROME_PROFILE_REQUIRED, "Chrome needs a profile. Choose one in Chrome."),
+                (actions.LaunchStatus.CHROME_WINDOW_UNCONFIRMED, "Chrome launch requested. Check the Chrome window."),
+            ):
+                with self.subTest(source=source, status=status):
+                    flow = self.make("open_app")
+                    self.client.route.return_value = {"kind": "open_app", "text": spoken,
+                                                      "target": "Chrome", "receipt": "ticket"}
+                    self.actions.open_app.return_value = status
+                    flow.on_clip(None, source, transcript=spoken)
+                    self.actions.open_app.assert_called_once_with("Chrome", **({"exact": True} if source == "hotkey" else {}))
+                    self.ui.set_state.assert_called_with("error", message)
+                    self.client.confirm_action.assert_not_called()
+                    self.typer.run.assert_not_called()
+                    self.client.ask.assert_not_called()
 
     def test_windows_does_not_override_classified_mentions_or_literal_dictation(self):
         for source, spoken, payload in (

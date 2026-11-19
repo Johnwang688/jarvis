@@ -5,6 +5,7 @@ venv\Scripts\python.exe voice_agent.py 127.0.0.1 8409 <key path>
 """
 from __future__ import annotations
 
+import contextlib
 import io
 from pathlib import Path
 import queue
@@ -200,9 +201,23 @@ class _FlowUI:
     def __init__(self, agent, generation):
         self.agent, self.generation = agent, generation
 
-    def set_state(self, state, text=None):
+    def set_state(self, state, text=None, *deadline):
         if self.generation == self.agent.generation:
-            self.agent.overlay.set_state(state, text)
+            self.agent.overlay.set_state(state, text, *deadline)
+
+
+class _Authority:
+    """One generation's right to act, and when it was first taken away.
+
+    ``revoked_at`` is the monotonic time of the generation transition that
+    superseded it, written once under the generation lock before the counter
+    moves. Later transitions never move it, so a selection settled after
+    several replacement captures still anchors on the first interruption.
+    """
+    __slots__ = ("generation", "revoked_at")
+
+    def __init__(self, generation, revoked_at=None):
+        self.generation, self.revoked_at = generation, revoked_at
 
 
 class Agent:
@@ -219,6 +234,7 @@ class Agent:
         self.online = threading.Event()
         self.recording = threading.Event()
         self.flow_running = threading.Event()
+        self.profile_cancelled = threading.Event()
         self.clips = queue.Queue(maxsize=4)
         self.generation = 0
         self.generation_lock = threading.Lock()
@@ -251,8 +267,32 @@ class Agent:
 
     def next_generation(self):
         with self.generation_lock:
+            # Stamp the superseded generation before the counter moves, so a
+            # worker that sees the new generation also sees when it changed.
+            authority = getattr(self, "authority", None)
+            if (authority is not None and authority.generation == self.generation
+                    and authority.revoked_at is None):
+                authority.revoked_at = time.monotonic()
+            self.authority = None
             self.generation += 1
             return self.generation
+
+    def bind_authority(self, generation):
+        """The authority record for a dequeued clip of ``generation``.
+
+        Only the current generation's record is kept on the agent, so state
+        stays one object however many clips were superseded. A clip that is
+        already stale gets a record revoked now: it can never act, so its
+        stamp is never used to settle anything.
+        """
+        lock = getattr(self, "generation_lock", None)
+        with lock if lock is not None else contextlib.nullcontext():
+            if generation != self.generation:
+                return _Authority(generation, time.monotonic())
+            authority = getattr(self, "authority", None)
+            if authority is None or authority.generation != generation:
+                authority = self.authority = _Authority(generation)
+            return authority
 
     def show(self, generation, text, transient=False):
         # Keep the VA-1 headless recorder seam usable without creating Win32/Tk.
@@ -342,6 +382,8 @@ class Agent:
 
     def finish_capture(self, cancel=False):
         release_at = time.monotonic()
+        if cancel and hasattr(self, "profile_cancelled"):
+            self.profile_cancelled.set()
         if getattr(self, "tapped", False):
             self.tapped = False
             self.wake.tap(None)
@@ -481,6 +523,9 @@ class Agent:
 
     def network(self):
         client = None
+        retired_profile_labels = ()
+        stop_requested = getattr(self, "stop_requested", None)
+        profile_cancelled = getattr(self, "profile_cancelled", None)
         delay, last_ping, reported_wake = 1.0, 0.0, None
         # These objects and every Client call belong to this one worker.
         typer = Typer() if hasattr(self, "overlay") else None
@@ -494,6 +539,10 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
+                        if retired_profile_labels:
+                            # Carry only reply recognition across a reconnect.
+                            client._pending_chrome_profile = retired_profile_labels
+                            retired_profile_labels = ()
                         delay, last_ping, reported_wake = 1.0, 0.0, None
                         if hasattr(self, "online"):
                             # Drop anything captured during the failed/offline interval.
@@ -530,13 +579,18 @@ class Agent:
                     except LinkError:
                         if hasattr(self, "online"):
                             self.online.clear()
+                        retired_profile_labels = Flow.retire_profile_choice(client)
                         client.close()
                         client = None
                         self.discard_clips("Jarvis isn't running")
                         continue
+                if profile_cancelled is not None and profile_cancelled.is_set():
+                    profile_cancelled.clear()
+                    Flow.retire_profile_choice(client)
                 try:
                     item = self.clips.get(timeout=0.2)
                 except queue.Empty:
+                    Flow.expire_profile_choice(client)
                     continue
                 generation, clip = item[:2]
                 source = item[2] if len(item) > 2 else "hotkey"
@@ -546,24 +600,43 @@ class Agent:
                     else:
                         if source == "wake" and self.recording.is_set():
                             continue
+                        session = getattr(client, "session", None)
+                        # Bound at dequeue, before a streamed capture's dictation
+                        # blocks, so a replacement during it is stamped too.
+                        authority = self.bind_authority(generation)
+
+                        # Queued native work may call this after the network loop
+                        # has advanced. Bind this clip's generation and client.
+                        def can_act(generation=generation, client=client, session=session):
+                            return (generation == self.generation and not self.done.is_set()
+                                    and (stop_requested is None or not stop_requested.is_set())
+                                    and (profile_cancelled is None or not profile_cancelled.is_set())
+                                    and session == getattr(client, "session", None))
+
                         self.flow_running.set()
                         transcript = None
                         capture = clip if isinstance(clip, Capture) else None
                         if capture is not None:
                             got = client.dictate_capture(capture)
                             if got is None:
+                                if capture.cancelled and generation == self.generation:
+                                    Flow.retire_profile_choice(client)
                                 continue
                             transcript = got["text"]
                         # Toggle-stop can enqueue while either Ctrl key is still down.
                         # Let the physical modifier up before any synthetic typing.
                         while self.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000:
-                            if self.done.wait(0.015):
+                            if (self.done.wait(0.015)
+                                    or (stop_requested is not None and stop_requested.is_set())):
                                 break
-                        if self.done.is_set():
+                        if self.done.is_set() or (stop_requested is not None and stop_requested.is_set()):
                             break
+                        if session != getattr(client, "session", None):
+                            continue
                         if generation == self.generation:
                             self.player.begin()
-                        flow = Flow(client, typer, actions, _FlowUI(self, generation), self.player)
+                        flow = Flow(client, typer, actions, _FlowUI(self, generation), self.player,
+                                    can_act=can_act, revoked_at=lambda authority=authority: authority.revoked_at)
                         speech_end = capture.speech_end if capture else item[3] if len(item) > 3 else None
                         def metric(label, start, end):
                             if start is not None and generation == self.generation:
@@ -581,6 +654,7 @@ class Agent:
                     self.show(generation, str(exc), True)
                     if hasattr(self, "online"):
                         self.online.clear()
+                    retired_profile_labels = Flow.retire_profile_choice(client)
                     client.close()
                     client = None
                     self.discard_clips("Jarvis isn't running")

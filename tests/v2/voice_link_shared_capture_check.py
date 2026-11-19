@@ -188,19 +188,21 @@ class StartupAndPolling(Case):
         self.assertEqual(checks, [VK_RCONTROL] * 20)
 
     def test_app_index_built_once_while_network_can_connect(self):
-        from windows.voiceactions import Actions
+        from windows.voiceactions import Actions, LaunchStatus
         waiting, ready = threading.Event(), threading.Event()
         def index(*args, **kwargs):
             waiting.set()
             ready.wait(3)
             return Mock(returncode=0, stdout='[{"Name":"Google Chrome","AppID":"test"}]')
         runner, launch = Mock(side_effect=index), Mock()
-        actions = Actions(desktop=Mock(), runner=runner, launcher=launch, warm_in_background=True)
+        desktop = Mock()
+        desktop.foreground_window.side_effect = [None, (1, "New Tab - Google Chrome", "chrome.exe")]
+        actions = Actions(desktop=desktop, runner=runner, launcher=launch, warm_in_background=True)
         self.assertTrue(waiting.wait(1))
         with concurrent.futures.ThreadPoolExecutor() as pool:
             opened = pool.submit(actions.open_app, "Chrome")
             self.client.ping()  # The index is deliberately still pending.
             ready.set()
-            self.assertTrue(opened.result(1))
+            self.assertEqual(opened.result(1), LaunchStatus.LAUNCHED)
         runner.assert_called_once()
         launch.assert_called_once()
