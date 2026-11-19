@@ -153,6 +153,10 @@ class VoiceLink:
         self._lost_instance = None
         self._agent_wake = None
         self._control_session = self._instance = self._mic = None
+        self._desktop = None
+        self._desktop_changed = threading.Condition(self._lock)
+        self._desktop_driving = self._desktop_badge = False
+        self._desktop_revision = 0
         self._subscribers = set()
         self._stopped_instance = None
         self._release = None
@@ -168,6 +172,37 @@ class VoiceLink:
             result["can_stop"] = self._instance is not None and self._mic is not None
             result["hud_mic_paused"] = self._hud_mic_paused
             return result
+
+    def desktop_badge_showing(self):
+        with self._lock:
+            return self._desktop_badge
+
+    def desktop_driving_changed(self, driving):
+        with self._lock:
+            self._desktop_driving = driving
+            self._desktop_revision += 1
+            self._desktop_badge = False
+            self._desktop_changed.notify_all()
+
+    def _set_desktop_badge_locked(self, showing):
+        changed = self._desktop_badge != showing
+        self._desktop_badge = showing
+        return changed
+
+    def _drop_desktop_locked(self):
+        if self._desktop is not None:
+            _shutdown(self._desktop)
+            self._desktop = None
+            self._desktop_changed.notify_all()
+            return self._set_desktop_badge_locked(False)
+        return False
+
+    def _publish_desktop_badge(self, changed):
+        if changed:
+            self.daemon.bus.publish({"kind": "desktop_driving"})
+
+    def _desktop_stop(self, request):
+        self.daemon.stop_desktop_driving("esc" if request.get("reason") == "esc" else "badge")
 
     def _settle_exited_locked(self):
         # An interop child handle is release evidence only for the same
@@ -761,6 +796,7 @@ class VoiceLink:
             server, self._server = self._server, None
             sockets = list(self._connections)
             self._active = None
+            badge_changed = self._drop_desktop_locked()
             self._end_subscriptions_locked()
             self.address = None
             self.status = "Stopped."
@@ -770,6 +806,7 @@ class VoiceLink:
             with self._laya_lock:
                 self._laya_open, self._laya_owner = False, None
                 router, self._laya = self._laya, None
+        self._publish_desktop_badge(badge_changed)
         if server:
             _shutdown(server)
         for conn in sockets:
@@ -813,12 +850,14 @@ class VoiceLink:
             hello = wire.read_json(stream, 4096)
             a = hello.get("nonce_a")
             microphone = hello.get("hello") == "jarvis-hud-microphone"
+            desktop = hello.get("hello") == "jarvis-desktop-control"
             session = hello.get("session")
-            if microphone:
+            if microphone or desktop:
                 if not isinstance(session, str) or not wire.HEX64.fullmatch(session):
                     return
-                key = wire.microphone_key(key, session)
-            if ((not microphone and hello.get("hello") != "jarvis-voice-agent") or type(hello.get("v")) is not int
+                key = (wire.microphone_key if microphone else wire.desktop_control_key)(key, session)
+            if ((not (microphone or desktop) and hello.get("hello") != "jarvis-voice-agent")
+                    or type(hello.get("v")) is not int
                     or hello["v"] != 1 or not isinstance(a, str) or not wire.HEX64.fullmatch(a)):
                 return
             d = wire.new_nonce()
@@ -830,6 +869,7 @@ class VoiceLink:
                 return
             timer.cancel()
             conn.settimeout(None)
+            badge_changed = False
             with self._lock:
                 if self._server is not server:
                     return
@@ -839,7 +879,13 @@ class VoiceLink:
                         return
                     self._mic = conn
                     session_instance = self._instance
+                elif desktop:
+                    if (session != self._control_session or self._active is None
+                            or self._desktop is not None or self.daemon is None):
+                        return
+                    self._desktop = conn
                 else:
+                    badge_changed = self._drop_desktop_locked()
                     old, self._active = self._active, conn
                     self._laya_helper = None
                     self._control_session = d
@@ -855,8 +901,12 @@ class VoiceLink:
                         _shutdown(old)
                 self._pending -= 1
                 pending = False
+            self._publish_desktop_badge(badge_changed)
             if microphone:
                 self._serve_microphone(conn, stream, session_instance)
+                return
+            if desktop:
+                self._serve_desktop(conn, stream)
                 return
             # One in-flight action per sequential helper, bound to this authenticated
             # connection. Only a non-sensitive action description survives routing.
@@ -875,7 +925,7 @@ class VoiceLink:
                 with self._lock:
                     if self._active is not conn or self._server is not server:
                         return
-                    if (request.get("op") != "ping" and self._instance is not None
+                    if (request.get("op") not in ("ping", "desktop_stop") and self._instance is not None
                             and self._instance == self._stopped_instance):
                         return
                 ident = request.get("id")
@@ -883,7 +933,10 @@ class VoiceLink:
                 if type(ident) is int and request.get("op") == "interrupt":
                     # A release may race the final reply. It has no response.
                     continue
-                if type(ident) is int and request.get("op") == "ping":
+                if type(ident) is int and request.get("op") == "desktop_stop" and self.daemon is not None:
+                    self._desktop_stop(request)
+                    reply = {"id": ident, "ok": True}
+                elif type(ident) is int and request.get("op") == "ping":
                     wake = request.get("wake")
                     if "wake" not in request or (isinstance(wake, str) and wake in WAKE_STATUS):
                         with self._lock:
@@ -1096,12 +1149,15 @@ class VoiceLink:
                 except OSError:
                     pass
             with self._lock:
+                badge_changed = False
                 self._connections.discard(conn)
                 if pending:
                     self._pending -= 1
                 if self._mic is conn:
                     self._mic = None
                     self._end_subscriptions_locked()
+                if self._desktop is conn or self._active is conn:
+                    badge_changed = self._drop_desktop_locked()
                 if self._active is conn:
                     if self._server is server and not self._hud_mic_paused:
                         # TCP EOF can arrive just before WSL reaps the helper.
@@ -1117,6 +1173,36 @@ class VoiceLink:
                     if self._mic is not None and self._release is None:
                         _shutdown(self._mic)
                         self._mic = None
+            self._publish_desktop_badge(badge_changed)
+
+    def _serve_desktop(self, conn, stream):
+        # The heartbeat is also a short lease if TCP cannot report the disconnect.
+        conn.settimeout(wire.DESKTOP_TIMEOUT_S)
+        while True:
+            with self._lock:
+                if self._desktop is not conn:
+                    return
+                driving, revision = self._desktop_driving, self._desktop_revision
+            wire.send_json(stream, {"op": "desktop_state", "driving": driving, "revision": revision})
+            request = wire.read_json(stream, 256)
+            stopping = request.get("op") == "desktop_stop"
+            badge_changed = False
+            with self._lock:
+                if self._desktop is not conn:
+                    return
+                if request.get("op") == "desktop_badge" and type(request.get("shown")) is bool:
+                    if revision == self._desktop_revision:
+                        badge_changed = self._set_desktop_badge_locked(driving and request["shown"])
+                elif not stopping:
+                    return
+            self._publish_desktop_badge(badge_changed)
+            if stopping:
+                self._desktop_stop(request)
+            else:
+                with self._desktop_changed:
+                    self._desktop_changed.wait_for(
+                        lambda: self._desktop is not conn or self._desktop_revision != revision,
+                        wire.DESKTOP_HEARTBEAT_S)
 
     def _serve_microphone(self, conn, stream, session_instance):
         # Each heartbeat or fixed-size PCM frame is followed by exactly one

@@ -588,7 +588,9 @@ export default function App() {
     dispatch(action);
   }, [approvalSync, dispatch]);
 
-  const [desktopDriving, setDesktopDriving] = useState<DesktopDrivingState>({ enabled: false, thread_id: null });
+  const [desktopDriving, setDesktopDriving] = useState<DesktopDrivingState>({
+    enabled: false, thread_id: null, badge_showing: false,
+  });
   const [desktopBusy, setDesktopBusy] = useState(false);
   const desktopRead = useRef(0);
   const refreshDesktopDriving = useCallback(async () => {

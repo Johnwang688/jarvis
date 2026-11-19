@@ -3138,9 +3138,15 @@ class Daemon:
     def desktop_driving_state(self):
         with self._lock:
             enabled = self.desktop_driver.enabled and config.desktop_drive()
-            return {"enabled": enabled, "thread_id": self.desktop_driver.thread_id() if enabled else None}
+            thread_id = self.desktop_driver.thread_id() if enabled else None
+            link = getattr(self, "voice_link", None)
+            return {"enabled": enabled, "thread_id": thread_id,
+                    "badge_showing": bool(thread_id and link and link.desktop_badge_showing())}
 
     def _desktop_driving_changed(self):
+        link = getattr(self, "voice_link", None)
+        if link is not None:
+            link.desktop_driving_changed(self.desktop_driver.grant(self.desktop_driver.thread_id()) is not None)
         self.bus.publish({"kind": "desktop_driving"})
 
     def _revoke_desktop_driver(self, thread_id):

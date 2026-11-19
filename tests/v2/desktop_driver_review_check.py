@@ -159,12 +159,14 @@ class Review(fixture.DaemonHarness):
         self.assertEqual([self.catalog(chat) for chat in chats], [NAMES, set()])
         self.assertEqual(asdict(self.stores.threads.get(chats[0].id)), saved)
         cold = self.new_daemon(Stores())
-        self.assertEqual(cold.desktop_driving_state(), {"enabled": True, "thread_id": None})
+        self.assertEqual(cold.desktop_driving_state(),
+                         {"enabled": True, "thread_id": None, "badge_showing": False})
 
         with patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": "0"}):
             self.assertEqual([self.catalog(chat) for chat in chats], [set(), set()])
             disabled_at_launch = self.new_daemon(self.stores)
-        self.assertEqual(disabled_at_launch.desktop_driving_state(), {"enabled": False, "thread_id": None})
+        self.assertEqual(disabled_at_launch.desktop_driving_state(),
+                         {"enabled": False, "thread_id": None, "badge_showing": False})
 
     # Lead: known edge case E20 (plan section 11).
     @unittest.expectedFailure
@@ -473,7 +475,7 @@ class Review(fixture.DaemonHarness):
                 def stop():
                     if route:
                         self.assertEqual(self.hud("POST", self.path(chat) + "/stop", {}),
-                                         (200, {"enabled": True, "thread_id": None}))
+                                         (200, {"enabled": True, "thread_id": None, "badge_showing": False}))
                     else:
                         self.d.stop_desktop_driving("review")
 

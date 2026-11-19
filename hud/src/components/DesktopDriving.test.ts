@@ -24,13 +24,13 @@ afterEach(async () => {
 
 const render = (props: Partial<Parameters<typeof DesktopDriving>[0]> = {}) => act(async () => {
   root.render(createElement(DesktopDriving, {
-    state: { enabled: true, thread_id: null }, thread: chat, busy: false, canCreate: true,
+    state: { enabled: true, thread_id: null, badge_showing: false }, thread: chat, busy: false, canCreate: true,
     onToggle: () => {}, onStop: () => {}, onCreate: () => {}, ...props,
   }));
 });
 
 it("shows the toggle only for eligible native chats with master enabled", async () => {
-  await render({ state: { enabled: false, thread_id: chat.id } });
+  await render({ state: { enabled: false, thread_id: chat.id, badge_showing: false } });
   expect(host.textContent).toBe("");
   for (const thread of [null, { ...chat, provider: "fast" }, { ...chat, task_id: "task" } ] as const) {
     await render({ thread });
@@ -47,7 +47,7 @@ it("uses the daemon state for the checkbox and sends toggle, Stop and create sep
   const calls: [string, RequestInit | undefined][] = [];
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     calls.push([url, init]);
-    return new Response(JSON.stringify({ enabled: true, thread_id: chat.id }), { status: 200 });
+    return new Response(JSON.stringify({ enabled: true, thread_id: chat.id, badge_showing: true }), { status: 200 });
   });
   const props = {
     onToggle: (id: string, on: boolean) => void api.setDesktopDriving(id, on),
@@ -60,7 +60,7 @@ it("uses the daemon state for the checkbox and sends toggle, Stop and create sep
   expect(host.querySelector("[role=status]")).toBeNull();
   await act(async () => toggle.click());
   expect(toggle.checked).toBe(false);
-  await render({ ...props, state: { enabled: true, thread_id: chat.id } });
+  await render({ ...props, state: { enabled: true, thread_id: chat.id, badge_showing: true } });
   expect(toggle.checked).toBe(true);
   expect(host.querySelector("[role=status]")?.textContent).toBe("Driving the desktop");
   await act(async () => toggle.click());
@@ -73,6 +73,19 @@ it("uses the daemon state for the checkbox and sends toggle, Stop and create sep
     ["/threads", "POST", { project_id: "project", role: "chat", provider: "codex",
       brief: { model: "gpt-6.2-sol", effort: "medium", speed: "ultrafast" } }],
   ]);
+});
+
+it("shows the unavailable badge and Esc message only while driving without the badge", async () => {
+  const stop = vi.fn();
+  const warning = "Stop badge and Esc unavailable: the voice helper is not connected";
+  await render({ onStop: stop });
+  expect(host.textContent).not.toContain(warning);
+  await render({ onStop: stop, state: { enabled: true, thread_id: chat.id, badge_showing: false } });
+  expect(host.querySelector("[role=status]")?.textContent).toContain(warning);
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Stop desktop driving"]')!.click());
+  expect(stop).toHaveBeenCalledExactlyOnceWith(chat.id);
+  await render({ state: { enabled: true, thread_id: chat.id, badge_showing: true } });
+  expect(host.querySelector("[role=status]")?.textContent).toBe("Driving the desktop");
 });
 
 it("keeps Stop reachable on the driver's desktop approval card", async () => {
