@@ -1200,20 +1200,27 @@ def _glob_reaches(pattern: str) -> bool:
 
 
 _VEX_SDK_PROFILES = 64
+# What a piece of an excepted path may be made of. Anything else (`:` and `=`
+# join a second path onto the word, `\` is a separator to Windows, a stream
+# name follows `:`) gets no exception.
+_VEX_SDK_PIECE = re.compile(r"[\w .+\-@#,()~%]+")
 
 
 def _vex_sdk_parts(path: str) -> list[str] | None:
     """The pieces of `path` below the Windows users folder when it is at or
     below a profile's VEX extension folder as written (`config.WINDOWS_VEX_SDK`),
-    else None. No `..` or `.` piece, no empty piece, and no piece Windows
-    would read as another name (a trailing dot or space)."""
+    else None. No `..` or `.` piece, no empty piece, no piece Windows would
+    read as another name (a trailing dot or space), and only plain name
+    characters (`_VEX_SDK_PIECE`; `*` alone may stand for the profile)."""
     root = os.path.abspath(config.windows_users_root()).rstrip("/")
     if not path.startswith("/") or len(path) > 4096 or "\0" in path:
         return None
     if not path.casefold().startswith(root.casefold() + "/"):
         return None
     parts = path[len(root) + 1:].rstrip("/").split("/")
-    if any(part in ("", ".", "..") or part != part.rstrip(". ") for part in parts):
+    if any(part in ("", ".", "..") or part != part.rstrip(". ")
+           or not (_VEX_SDK_PIECE.fullmatch(part) or (index == 0 and part == "*"))
+           for index, part in enumerate(parts)):
         return None
     below = tuple(part.casefold() for part in parts[1:])
     if not any(below[:len(sdk)] == sdk for sdk in config.WINDOWS_VEX_SDK):

@@ -56,6 +56,14 @@ class VexSdkPath(unittest.TestCase):
         for command in (
                 f"cat {self.one}/sdk/../tools/x",                   # any `..` gets no exception
                 f"cat {self.one}/../github.auth/x",                 # out of the folder through `..`
+                f"cat {self.one}/sdk:{self.users}/Fixture/AppData/Roaming/secret/token",  # a second path
+                f"cat {self.one}/sdk={self.users}/Fixture/AppData/Roaming/secret/token",
+                f"cat {self.one}/sdk/a:stream",                     # an alternate data stream
+                f"cat {self.one}/sdk\\\\..\\\\..\\\\github.auth",    # Windows separators, escaped for the shell
+                f"cat {self.one}//sdk/a",
+                f"cat {self.one}/sdk/a {self.users}/Fixture/AppData/Roaming/secret/token",
+                f"cp {self.users}/Fixture/AppData/Roaming/secret/token {self.one}/sdk/",
+                f"cd {self.one} && cat ../github.auth/x",
                 f"cat {self.one}/sdk/../../github.auth/x",
                 f"cat {self.one}./x",                               # Windows trims the dot: another spelling
                 f"cat '{self.one} /x'",
