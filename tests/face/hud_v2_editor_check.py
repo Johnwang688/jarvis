@@ -542,12 +542,19 @@ def _persist_checks(page, mock, check, until):
 
 
 def _env_checks(page, mock, check, until):
+    reports = len(mock.sent("POST", "/hud/sensitive"))
     page.locator(_pane(2, '[data-testid="file-.env.production"]')).click()
     path = page.locator(_pane(2, '[data-testid="file-path"]'))
     until(lambda: path.inner_text() == ".env.production", timeout=4)
     host = page.locator(_pane(2, '[data-testid="editor"]'))
     until(lambda: host.count() == 1 and host.get_attribute("data-language") is not None, timeout=10)
     lock = page.locator(_pane(2, '[data-testid="editor-lock"]'))
+    protected = page.get_by_role("group", name="Jarvis protected area", exact=True)
+    check("one named group contains the credential editor and its text",
+          protected.count() == 1 and protected.locator('[data-testid="editor"] .view-lines').count() == 1)
+    check("the HUD reports its rendered editor count",
+          until(lambda: any(r.get("cards") == 0 and r.get("editors") == 1
+                            for r in mock.sent("POST", "/hud/sensitive")[reports:]), timeout=4))
     check("an env file opens with the lock badge: Jarvis can't read this file",
           lock.count() == 1 and "Jarvis can't read this file" in lock.inner_text())
     check("its tab and its tree row say so too",

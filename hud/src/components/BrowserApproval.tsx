@@ -4,6 +4,7 @@ import { noPointerFocus } from "../lib/talkkey";
 import { browserApprovalDeadline, browserApprovalKey, parseBrowserPrivateApproval, isBrowserPrivateRequest, type BrowserPrivateDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { browserBody } from "../lib/approvalCard";
 import { useArmed } from "../lib/armed";
+import { approvalRegion } from "../lib/hudSensitive";
 import "./BrowserApproval.css";
 
 export const PRIVATE_DETAIL_UNAVAILABLE = "The Browser action details are unavailable. Deny this request.";
@@ -79,11 +80,11 @@ export function BrowserApprovalCard({ request, onDecide, onPresent }: {
     onDecide(request.req_id, allow, false);
   };
   return <div className="auth browserauth" data-testid="approval-card" data-req={request.req_id} tabIndex={-1}
-    role="alertdialog" aria-modal="true" aria-label="Browser authorization required"
+    {...approvalRegion}
     onKeyDownCapture={event => {
       if ((event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest('[data-testid="approval-deny"]'))) event.preventDefault();
     }}>
-    <h3>AUTHORIZATION REQUIRED</h3>
+    <h3 id="approval-title" aria-label="Browser authorization required">AUTHORIZATION REQUIRED</h3>
     {/* AS-12: the buttons first; AUTHORIZE armed ARM_MS after the card and again after its detail lands (AS-13). */}
     <div className="btns" data-testid="approval-buttons">
       <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">DENY</button>

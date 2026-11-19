@@ -15,6 +15,7 @@ from jarvis.desktop import DesktopError, DesktopSession
 from jarvis.v2 import bridge, desktop_risk as risk, session_tools
 from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
 from jarvis.v2.daemon import APIError
+from jarvis.v2.hud_sensitive import Reports
 from jarvis.v2.mcp_catalog import MCP_TOOLS
 from jarvis.v2.model import ProviderName, Role
 from jarvis.v2.permissions import denied_file
@@ -55,6 +56,9 @@ class Approvals:
         self.during()
         return self.answer
 
+    def pending(self):
+        return []
+
 
 class Checks(unittest.TestCase):
     def setUp(self):
@@ -68,7 +72,9 @@ class Checks(unittest.TestCase):
             guard.start()
             self.addCleanup(guard.stop)
         self.approvals = Approvals()
-        self.daemon = SimpleNamespace(approvals=self.approvals)
+        reports = Reports()
+        self.addCleanup(reports.close)
+        self.daemon = SimpleNamespace(approvals=self.approvals, hud_sensitive_reports=reports)
         self.service = hud.WindowDrive(self.daemon)
         self.service.install()
         self.addCleanup(self.service.stop)

@@ -100,6 +100,8 @@ export const api = {
   /** How many panes a chat's ask showed in this window (counts only; docs/hud-api.md "Agent panes"). */
   agentPanesReport: (body: { window: string; request_id: string; placed: number; not_placed: number }) =>
     req<unknown>("/agent-panes/report", json(body)),
+  reportHudSensitive: (body: { client_id: string; cards: number; editors: number }, signal: AbortSignal) =>
+    req<unknown>("/hud/sensitive", { ...json(body), signal }),
   setBrowserSound: (sound: boolean) => req<unknown>("/browser/settings", patch({ sound })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 

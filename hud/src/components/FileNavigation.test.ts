@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const seen = vi.hoisted(() => ({ positions: [] as any[], focus: 0, model: null as any }));
 vi.mock("./Editor", async () => {
-  const { useLayoutEffect } = await import("react");
+  const { createElement, useLayoutEffect } = await import("react");
   return { PaneEditor: (p: any) => {
     useLayoutEffect(() => {
       seen.model = p.model;
@@ -11,7 +11,7 @@ vi.mock("./Editor", async () => {
         setPosition: (pos: any) => seen.positions.push(pos),
         revealLineInCenter: () => {}, focus: () => { seen.focus++; } });
     }, [p.model]);
-    return null;
+    return p.model ? createElement("textarea", { "data-testid": "mock-editor-input" }) : null;
   }, CompareEditor: () => null };
 });
 vi.mock("./EditorStatus", () => ({ EditorStatus: () => null }));
@@ -24,7 +24,7 @@ import { TABS_MAX, type Tabs } from "../lib/buffers";
 let host: HTMLDivElement, root: Root, change: (x: Partial<{ ask: FileAsk|null; blocked: boolean; tabs: Tabs|null }>) => void;
 let state: { ask: FileAsk|null; blocked: boolean; tabs: Tabs|null };
 let deferred = new Map<string, { resolve: (r: any) => void; reject: (e: any) => void }>();
-const row = (path: string) => ({ path, abs: `/w/${path}`, content: "one\ntwo\nthree\nfour\nfive", kind: "text", protected: false, editable: true, etag: "abc" });
+const row = (path: string) => ({ path, abs: `/w/${path}`, content: "one\ntwo\nthree\nfour\nfive", kind: path.startsWith(".env") ? "env" : "text", protected: false, editable: true, etag: "abc" });
 const flush = () => act(async () => { for(let i=0;i<12;i++) await Promise.resolve(); });
 async function ask(path: string, nonce: number, line = 4, col = 2) {
   act(() => change({ ask: {kind: "open", path, nonce, line, col} })); await flush();
@@ -43,6 +43,18 @@ beforeEach(async () => {
   act(()=>root.render(createElement(Window)));await flush();
 });
 afterEach(()=>{ act(()=>root.unmount());host.remove();buffers.reset(); });
+it("labels one complete credential editor pane and clears the label on a normal tab", async () => {
+  await ask(".env.fixture", 1);
+  const selector = '[aria-label="Jarvis protected area"]';
+  const regions = host.querySelectorAll(selector);
+  expect(regions).toHaveLength(1);
+  expect(regions[0].getAttribute("role")).toBe("group");
+  expect(regions[0].querySelector('[data-testid="editor-lock"]')).not.toBeNull();
+  expect(regions[0].querySelector('textarea[data-testid="mock-editor-input"]')).not.toBeNull();
+  await ask("main.cpp", 2);
+  expect(host.querySelector(selector)).toBeNull();
+  expect(host.querySelector('textarea[data-testid="mock-editor-input"]')).not.toBeNull();
+});
 describe("one editor navigation request",()=>{
   it("opens pinned and reveals exactly once, with a new nonce for a repeated location",async()=>{
     await ask("main.cpp",1,99,-2);

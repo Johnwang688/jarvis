@@ -719,6 +719,8 @@ class Daemon:
         self.browser_opens = BrowserOpens(self)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
+        from .hud_sensitive import Reports
+        self.hud_sensitive_reports = Reports()
         from .tools.hud_window import WindowDrive
         self.window_drive = WindowDrive(self)
         from .devservers import DevServers
@@ -3391,6 +3393,7 @@ class Daemon:
 
     def stop(self):
         self._end_claude_catalog()
+        self.hud_sensitive_reports.close()
         voice_link = getattr(self, "voice_link", None)
         if voice_link is not None:
             voice_link.stop()

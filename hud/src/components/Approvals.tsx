@@ -30,6 +30,7 @@ import {
   whereFields, whereParts, type SummaryView, type WhereParts,
 } from "../lib/approvalSummary";
 import { useArmed, useWakeAt } from "../lib/armed";
+import { approvalRegion } from "../lib/hudSensitive";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
@@ -231,8 +232,8 @@ function OrdinaryApprovalCard(props: {
     // Focusable (tabIndex -1) so the veil can take focus off a frame or an
     // editor behind it — but no button on it is ever focused for the owner.
     <div className="auth" data-testid="approval-card" data-req={r.req_id} tabIndex={-1}
-         role="alertdialog" aria-modal="true" aria-label="Authorization required">
-      <h3>AUTHORIZATION REQUIRED</h3>
+         {...approvalRegion}>
+      <h3 id="approval-title" aria-label="Authorization required">AUTHORIZATION REQUIRED</h3>
       {headlineLine(r.headline) ? (
         <div className="headline" data-testid="approval-headline">{headlineLine(r.headline)}</div>
       ) : null}
@@ -418,7 +419,7 @@ export function ApprovalVeil(props: {
 
   if (!top) return null;
   return (
-    <div id="authveil" data-testid="authveil">
+    <div id="authveil" data-testid="authveil" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
       {/* Keyed by its request: the next queued card is a new card, with its
           own countdown and live buttons — not the answered card's busy state
           (re-review of PR #27; main had the same bug). */}

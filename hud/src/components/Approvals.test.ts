@@ -12,6 +12,23 @@ const request=(id:string,extra:Partial<ApprovalRequest>={}):ApprovalRequest=>({r
 const detail=(r:ApprovalRequest)=>{const args={action:"click",pane:"1",target:"e1",text:"",file:""};return{...r,args,command:JSON.stringify(args),browser:{tab_id:"0123abcd",action_id:"a".repeat(32),pane:1,page_identity:1,document_generation:2,rect:null,action:"click",category:"ordinary",host:"example.test",path:"/one",target:"PRIVATE ACTIVE LABEL",text:""}};};
 beforeEach(()=>{host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);mocks.get.mockReset();});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();});
+it.each([false, true])("labels exactly one complete approval card (Browser: %s)", async (browser) => {
+  const top = request("request_1234", { hud_only: browser, command: "fixture command" });
+  mocks.get.mockResolvedValue(detail(top));
+  await act(async () => root.render(createElement("div", {},
+    createElement(ApprovalQueue, { requests: [top, request("request_5678")] }),
+    createElement(ApprovalVeil, { requests: [top], onDecide: vi.fn() }))));
+  const regions = host.querySelectorAll('[aria-label="Jarvis protected area"]');
+  const card = host.querySelector('[data-testid="approval-card"]');
+  expect([...regions]).toEqual([card]);
+  expect(card?.getAttribute("role")).toBe("group");
+  expect(card?.querySelector('[data-testid="approval-allow"]')).not.toBeNull();
+  expect(card?.querySelector('[data-testid="approval-deny"]')).not.toBeNull();
+  expect(card?.textContent).toContain(browser ? "PRIVATE ACTIVE LABEL" : "fixture command");
+  expect(card?.querySelector("h3")?.getAttribute("aria-label")).toBe(
+    browser ? "Browser authorization required" : "Authorization required");
+  expect(card?.closest('[role="alertdialog"]')?.getAttribute("aria-labelledby")).toBe("approval-title");
+});
 it("the veil fetches only the top private request and queues generic wording",async()=>{
   const a=request("request_1234"),b=request("request_5678",{command:"PRIVATE QUEUED",origin:"PRIVATE ORIGIN"}),onDecide=vi.fn();mocks.get.mockResolvedValue(detail(a));
   await act(async()=>root.render(createElement("div",{},createElement(ApprovalQueue,{requests:[a,b]}),createElement(ApprovalVeil,{requests:[a,b],onDecide}))));

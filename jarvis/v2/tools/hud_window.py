@@ -256,8 +256,9 @@ class WindowDrive:
         current = self.current if current is None else current
         if not current():
             raise Refused("The owner chat turn is no longer current. Inspect the window again.")
+        sensitive = self.daemon.hud_sensitive_reports.count(len(self.daemon.approvals.pending()))
         result = SESSION.request(op, require_pair=True, current=current, scope=thread,
-                                 hud_sensitive=None, **fields)
+                                 hud_sensitive=sensitive, **fields)
         if not acting and not current():
             raise Refused("The owner chat turn or snapshot is no longer current.")
         return result
