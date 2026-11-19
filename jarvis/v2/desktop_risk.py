@@ -15,12 +15,13 @@ _PAY = (
 _SEND = (
     "send", "submit", "post", "publish", "reply", "forward", "share", "tweet",
     "comment", "send message", "reply all", "email", "invite", "apply", "sign up",
-    "register", "book", "reserve", "rsvp", "upload",
+    "register", "book", "reserve", "rsvp", "upload", "resend",
 )
 _DELETE = (
     "delete", "remove", "erase", "discard", "trash", "uninstall",
     "empty recycle bin", "clear all", "clear history", "format", "reset",
-    "wipe", "unsubscribe", "cancel subscription",
+    "wipe", "unsubscribe", "cancel subscription", "cancel my subscription",
+    "cancel membership", "cancel order", "cancel plan",
 )
 _INSTALL = (
     "install", "update", "upgrade", "run anyway", "allow access", "grant",
@@ -32,7 +33,11 @@ _CONFIRM = (
     "proceed", "finish", "approve",
 )
 _LABEL_GROUPS = tuple(zip(GROUPS, (_PAY, _SEND, _DELETE, _INSTALL, _CONFIRM)))
-_SEARCH_TERMS = ("search", "find", "address", "url", "filter", "look up")
+# Enter in these fields looks something up; it does not submit a form. "Address"
+# counts only as the whole name (a browser or Explorer address box): Enter in
+# an "Email address" field submits the form around it.
+_SEARCH_TERMS = ("search", "find", "url", "filter", "look up")
+_SEARCH_NAMES = ("address", "address bar", "address and search bar")
 _TEXT_ENTRY = ("editable", "combobox", "document")
 _HIDDEN_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 _KNOWN_KEYS = (
@@ -79,10 +84,14 @@ def _contains_term(normalised, terms):
     return any(f" {term} " in padded for term in terms)
 
 
+def _role(role):
+    return role.strip().casefold()
+
+
 def label_group(name, role="") -> str:
     if not isinstance(name, str) or not isinstance(role, str):
         return ""
-    if role in ("editable", "combobox", "search"):
+    if _role(role) in ("editable", "combobox", "search"):
         return ""
     name = _normalise(name)
     if len(name.split()) > 12 or not any(char.isalpha() for char in name):
@@ -96,9 +105,13 @@ def label_group(name, role="") -> str:
 def enter_asks(name, role) -> bool:
     if not isinstance(name, str) or not isinstance(role, str):
         return True
-    if role == "search" or _contains_term(_normalise(name), _SEARCH_TERMS):
+    role, plain = _role(role), _normalise(name)
+    if role == "search":
         return False
-    return role in _TEXT_ENTRY or bool(label_group(name))
+    if role in _TEXT_ENTRY:
+        return not (plain in _SEARCH_NAMES or _contains_term(plain, _SEARCH_TERMS))
+    # Not a text field: Enter presses the focused control, so its label decides.
+    return bool(label_group(name))
 
 
 def _invalid_reasons(action):

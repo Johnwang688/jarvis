@@ -26,7 +26,7 @@ class Labels(unittest.TestCase):
 
     def test_safe_words_and_near_misses(self):
         for name in (
-            "Sender", "Sent", "descend", "payload", "Resend", "postage", "unpaid",
+            "Sender", "Sent", "descend", "payload", "Resent", "postage", "unpaid",
             "buyers", "deployment", "formatter", "preview", "unconfirmed", "bookcase",
             "backup", "bookmark", "checked out", "clear selected history", "sign then out",
             "ok", "yes", "next", "close", "cancel", "back", "save", "open", "search",
@@ -65,7 +65,7 @@ class Labels(unittest.TestCase):
                 self.assertEqual(label_group(name), group)
 
     def test_roles_length_and_unreadable_inputs(self):
-        for role in ("", "button", "link", "menuitem", "document", "other", "Search"):
+        for role in ("", "button", "link", "menuitem", "document", "other"):
             with self.subTest(role=role):
                 self.assertEqual(label_group("Send", role), "send")
         for role in ("editable", "combobox", "search"):
@@ -80,11 +80,12 @@ class Labels(unittest.TestCase):
 class Enter(unittest.TestCase):
     def test_search_role_and_label_exceptions(self):
         self.assertFalse(enter_asks("Send", "search"))
-        for name in ("ＳＥＡＲＣＨ messages", "Find", "Address bar", "Enter a URL",
+        for name in ("ＳＥＡＲＣＨ messages", "Find", "Address bar", "Address", "Enter a URL",
                      "Filter replies", "Look…up", "Search and pay"):
             with self.subTest(name=name):
                 self.assertFalse(enter_asks(name, "editable"))
-                self.assertFalse(enter_asks(name + " and send", "button"))
+                # A focused button is pressed by Enter whatever else its label says.
+                self.assertTrue(enter_asks(name + " and send", "button"))
 
     def test_text_entry_defaults_to_asking(self):
         for role in ("editable", "combobox", "document"):
@@ -238,6 +239,28 @@ class Voice(unittest.TestCase):
         self.assertFalse(voice_may_approve(decide(payment_chord)))
         for group in ("", "send", "delete", "install", "confirm"):
             self.assertTrue(voice_may_approve(Verdict(ASK, group)))
+
+
+class LeadAdditions(unittest.TestCase):
+    def test_role_spelling_does_not_change_the_answer(self):
+        self.assertEqual(label_group("Send", " Editable "), "")
+        self.assertEqual(label_group("Send", "SEARCH"), "")
+        self.assertFalse(enter_asks("anything", " Search"))
+        self.assertTrue(enter_asks("Message", "EDITABLE"))
+
+    def test_address_only_as_the_whole_name(self):
+        self.assertFalse(enter_asks("Address", "editable"))
+        self.assertFalse(enter_asks("Address and search bar", "editable"))
+        self.assertTrue(enter_asks("Email address", "editable"))
+        self.assertTrue(enter_asks("Send to address", "editable"))
+        self.assertTrue(enter_asks("Shipping address", "combobox"))
+
+    def test_added_words(self):
+        self.assertEqual(label_group("Resend"), "send")
+        self.assertEqual(label_group("Cancel my subscription"), "delete")
+        self.assertEqual(label_group("Cancel order"), "pay")
+        self.assertEqual(label_group("Cancel membership"), "delete")
+        self.assertEqual(label_group("Cancel"), "")
 
 
 if __name__ == "__main__":
