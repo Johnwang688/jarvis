@@ -114,10 +114,14 @@ class OneAreaCannotStandForTwo(unittest.TestCase):
     def test_unlabelled_editor_is_not_clickable(self):
         desk = Desk()
         inner = Rect(CARD.left + 4, CARD.top + 4, CARD.right - 4, CARD.bottom - 4)
-        desk.regions[1] = [CARD, inner]
         guard = Guard(desk)
-        guard.set_hud(2)
+        # Lead's rewrite after the fix: nested masks now protect the whole HUD,
+        # so it is no longer listed. Take its id first, then nest the masks.
+        guard.set_hud(0)
         hud = listed(guard)["chrome.exe"]
+        desk.regions[1] = [CARD, inner]
+        guard.set_hud(2)
+        self.assertNotIn("chrome.exe", listed(guard))
         with self.assertRaises(Refused):
             guard.act(hud, point=(EDITOR.left + 5, EDITOR.top + 5))
 
