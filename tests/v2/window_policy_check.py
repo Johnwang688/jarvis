@@ -177,5 +177,39 @@ class Hud(unittest.TestCase):
         self.assertFalse(wp.overlaps(Rect(0, 0, 9, 9), ()))
 
 
+class ReviewFixes(unittest.TestCase):
+    """Lead's additions after the first review (spec questions it raised)."""
+
+    def test_equal_masks_count_once(self):
+        card = Rect(100, 100, 300, 200)
+        self.assertEqual(wp.hud_view(2, [card, Rect(100, 100, 300, 200)], 0.1), (PROTECTED, ()))
+        self.assertEqual(wp.hud_view(2, [card, Rect(100, 300, 300, 400)], 0.1)[0], DRIVABLE)
+
+    def test_coordinates_past_32_bits_are_unreadable(self):
+        huge = Rect(-2 ** 40, 0, 10, 10)
+        self.assertEqual(wp.hud_view(1, [huge], 0.1), (PROTECTED, ()))
+        self.assertTrue(wp.masked(5, 5, [huge]))
+        self.assertTrue(wp.overlaps(huge, ()))
+        self.assertEqual(wp.hud_view(1, [Rect(0, 0, 2 ** 31 - 9, 10)], 0.1)[0], DRIVABLE)
+        self.assertEqual(wp.hud_view(1, [Rect(0, 0, 2 ** 31 - 8, 10)], 0.1), (PROTECTED, ()))
+
+    def test_account_sign_in_broker_is_protected(self):
+        self.assertEqual(kind("Microsoft.AAD.BrokerPlugin.exe"), PROTECTED)
+
+    def test_subclasses_are_not_trusted(self):
+        class Loose(Window):
+            pass
+
+        class Wide(Rect):
+            pass
+        self.assertEqual(wp.classify(Loose("chrome.exe", False, "")), PROTECTED)
+        self.assertTrue(wp.overlaps(Wide(0, 0, 5, 5), ()))
+
+    def test_default_owner_list_and_sets(self):
+        self.assertEqual(kind("vault.exe", extra_password_managers={"vault.exe"}), PROTECTED)
+        self.assertEqual(kind("chrome.exe", extra_password_managers=()), DRIVABLE)
+        self.assertEqual(kind("chrome.exe", extra_password_managers=None), PROTECTED)
+
+
 if __name__ == "__main__":
     unittest.main()

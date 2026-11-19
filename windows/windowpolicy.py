@@ -23,6 +23,7 @@ hold a secret or run a command.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable, Optional, Sequence
 
 PROTECTED = "protected"
@@ -32,7 +33,7 @@ DRIVABLE = "drivable"
 # Windows' own prompts for a password, a PIN or consent to elevate.
 SYSTEM_PROMPT_IMAGES = frozenset({
     "consent.exe", "credentialuibroker.exe", "logonui.exe", "lockapp.exe",
-    "credentialenrollmentmanager.exe",
+    "credentialenrollmentmanager.exe", "microsoft.aad.brokerplugin.exe",
 })
 SYSTEM_PROMPT_CLASSES = frozenset({"credential dialog xaml host"})
 
@@ -48,7 +49,8 @@ TERMINAL_IMAGES = frozenset({
     "powershell.exe", "pwsh.exe", "powershell_ise.exe", "wsl.exe",
     "wslhost.exe", "bash.exe", "ubuntu.exe", "mintty.exe", "putty.exe",
     "alacritty.exe", "wezterm-gui.exe", "kitty.exe", "tabby.exe",
-    "hyper.exe", "conemu.exe", "conemu64.exe", "cmder.exe",
+    "hyper.exe", "conemu.exe", "conemu64.exe", "cmder.exe", "mobaxterm.exe",
+    "securecrt.exe", "xshell.exe", "termius.exe", "warp.exe",
 })
 # A console program (python.exe, ssh.exe, ...) is shown in a console window
 # whatever its own image is, so the class decides too.
@@ -61,6 +63,8 @@ TERMINAL_CLASSES = frozenset({
 MASK_MAX_AGE_S = 1.0
 # Pixels added on every side of a mask.
 MASK_MARGIN = 8
+# Screen coordinates fit a signed 32-bit value; anything larger would wrap.
+_COORDINATE_LIMIT = 2 ** 31 - MASK_MARGIN
 
 SEE_ONLY_MESSAGE = (
     "This is a terminal window: you can look at it but not type or click in "
@@ -86,11 +90,16 @@ class Rect:
     bottom: int
 
 
+_SHORT_NAME = re.compile(r"~[0-9]")
+
+
 def image_name(value) -> Optional[str]:
     """The folded basename of a process image, or None when it cannot be trusted.
 
     Windows ignores trailing dots and spaces in a file name and folds case, so
-    `KeePass.EXE. ` is the same program as `keepass.exe`.
+    `KeePass.EXE. ` is the same program as `keepass.exe`. A short (8.3) name
+    such as `KEEPAS~1.EXE` hides which program it is, so it is not trusted:
+    the bridge resolves the long path before asking.
     """
     if not isinstance(value, str):
         return None
@@ -98,34 +107,39 @@ def image_name(value) -> Optional[str]:
     name = name.rstrip(" .").casefold()
     if not name or name != name.strip() or any(ord(c) < 32 or c in '<>:"|?*' for c in name):
         return None
+    if _SHORT_NAME.search(name):
+        return None
     return name if name.endswith(".exe") else name + ".exe"
 
 
 def _class_name(value) -> Optional[str]:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
         return None
     return value.strip().casefold()
 
 
-def _images(values) -> frozenset:
-    return frozenset(name for name in map(image_name, values or ()) if name)
+def _images(values) -> Optional[frozenset]:
+    """The owner's extra list. It must be a list, tuple or set of names; any
+    other shape (one string, a number, a generator) is unreadable."""
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return None
+    return frozenset(name for name in map(image_name, values) if name)
 
 
 def classify(window: Window, *, extra_password_managers: Iterable[str] = ()) -> str:
     """PROTECTED, SEE_ONLY or DRIVABLE for one window. Unreadable is PROTECTED."""
-    if not isinstance(window, Window):
+    if type(window) is not Window:
         return PROTECTED
     image = image_name(window.image)
     window_class = _class_name(window.window_class)
-    if image is None or window_class is None:
+    extra = _images(extra_password_managers)
+    if image is None or window_class is None or extra is None:
         return PROTECTED
     if window.elevated is not False or window.own is not False:
         return PROTECTED
     if image in SYSTEM_PROMPT_IMAGES or window_class in SYSTEM_PROMPT_CLASSES:
         return PROTECTED
-    if image in PASSWORD_MANAGER_IMAGES or image in _images(extra_password_managers):
+    if image in PASSWORD_MANAGER_IMAGES or image in extra:
         return PROTECTED
     if image in TERMINAL_IMAGES or window_class in TERMINAL_CLASSES:
         return SEE_ONLY
@@ -137,7 +151,10 @@ def may_capture(target: str, overlapping: Iterable[str] = ()) -> bool:
     protected window lies over any part of it."""
     if target not in (SEE_ONLY, DRIVABLE):
         return False
-    return all(kind in (SEE_ONLY, DRIVABLE) for kind in overlapping)
+    try:
+        return all(kind in (SEE_ONLY, DRIVABLE) for kind in overlapping)
+    except Exception:
+        return False
 
 
 def may_input(target: str) -> bool:
@@ -156,8 +173,20 @@ def _whole(value) -> bool:
 
 
 def _valid(rect) -> bool:
-    return (isinstance(rect, Rect) and all(map(_whole, (rect.left, rect.top, rect.right, rect.bottom)))
+    return (type(rect) is Rect and all(map(_whole, (rect.left, rect.top, rect.right, rect.bottom)))
+            and all(abs(v) < _COORDINATE_LIMIT for v in (rect.left, rect.top, rect.right, rect.bottom))
             and rect.left < rect.right and rect.top < rect.bottom)
+
+
+def _mask_list(masks) -> Optional[tuple]:
+    """The masks as a tuple, or None when any of them cannot be trusted."""
+    if masks is None or isinstance(masks, (str, bytes)):
+        return None
+    try:
+        masks = tuple(masks)
+    except Exception:
+        return None
+    return masks if all(map(_valid, masks)) else None
 
 
 def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
@@ -168,19 +197,17 @@ def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
     them and `age_s` how old that report is. The HUD stays drivable around
     its masks only when every sensitive thing has a fresh rectangle; a
     missing, stale, short or malformed report protects the whole window.
+    Equal rectangles count once, so one area cannot stand for two cards.
     """
     if not _whole(sensitive) or sensitive < 0:
         return PROTECTED, ()
     if sensitive == 0:
         return DRIVABLE, ()
-    if (masks is None or isinstance(masks, (str, bytes)) or isinstance(age_s, bool)
-            or not isinstance(age_s, (int, float)) or not 0 <= age_s <= MASK_MAX_AGE_S):
+    if (isinstance(age_s, bool) or not isinstance(age_s, (int, float))
+            or not 0 <= age_s <= MASK_MAX_AGE_S):
         return PROTECTED, ()
-    try:
-        masks = tuple(masks)
-    except TypeError:
-        return PROTECTED, ()
-    if len(masks) < sensitive or not all(map(_valid, masks)):
+    masks = _mask_list(masks)
+    if masks is None or len(set(masks)) < sensitive:
         return PROTECTED, ()
     return DRIVABLE, tuple(
         Rect(m.left - MASK_MARGIN, m.top - MASK_MARGIN, m.right + MASK_MARGIN, m.bottom + MASK_MARGIN)
@@ -189,34 +216,35 @@ def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
 
 def masked(x, y, masks: Iterable[Rect]) -> bool:
     """True when a point may not be clicked or shown. Unreadable is masked."""
-    if not (_whole(x) and _whole(y)):
+    masks = _mask_list(masks)
+    if masks is None or not (_whole(x) and _whole(y)):
         return True
-    try:
-        return any(m.left <= x < m.right and m.top <= y < m.bottom for m in masks)
-    except (AttributeError, TypeError):
-        return True
+    return any(m.left <= x < m.right and m.top <= y < m.bottom for m in masks)
 
 
 def overlaps(rect: Rect, masks: Iterable[Rect]) -> bool:
     """True when any part of `rect` (an element's bounds) lies under a mask."""
-    if not _valid(rect):
+    masks = _mask_list(masks)
+    if masks is None or not _valid(rect):
         return True
-    try:
-        return any(rect.left < m.right and m.left < rect.right
-                   and rect.top < m.bottom and m.top < rect.bottom for m in masks)
-    except (AttributeError, TypeError):
-        return True
+    return any(rect.left < m.right and m.left < rect.right
+               and rect.top < m.bottom and m.top < rect.bottom for m in masks)
 
 
-_KEY_NAMES = {"del": "delete", "lshift": "shift", "rshift": "shift"}
-
-
-def refused_keys(keys: Iterable[str]) -> bool:
+def refused_keys(keys) -> bool:
     """True for a key press held to be destructive by itself: Shift+Delete
     (permanent delete, past the Recycle Bin), with any other keys beside it.
-    `keys` are the names pressed together. Unreadable is refused."""
-    try:
-        names = {_KEY_NAMES.get(k.strip().casefold(), k.strip().casefold()) for k in keys}
-    except (AttributeError, TypeError):
+
+    `keys` is ONE chord: a list, tuple or set of key names pressed together.
+    Any spelling of a name that contains "shift" beside one that contains
+    "del" is refused ("Shift", "LShift", "VK_SHIFT", "Del", "{DELETE}",
+    "Shift+Del"). A bare string is refused: a SendKeys string such as
+    "+{DEL}" is not a list of names, and the caller must split it. Holding
+    Shift in one call and pressing Delete in the next is the caller's to
+    catch: this sees a single chord. Unreadable is refused."""
+    if not isinstance(keys, (list, tuple, set, frozenset)):
         return True
-    return {"shift", "delete"} <= names
+    if not all(isinstance(k, str) for k in keys):
+        return True
+    names = [k.casefold() for k in keys]
+    return any("shift" in n for n in names) and any("del" in n for n in names)
