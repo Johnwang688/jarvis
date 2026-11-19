@@ -3922,3 +3922,19 @@ backstop) still read bodies as commands: the owner deferred them
 (`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
 (layer 2 reads no `$(…)` or shell-fed here-string). Regression:
 `tests/v2/heredoc_credentials_read_check.py`.
+
+**GB-1 extends the HD-0 reading (2026-11-18).** The shared
+`rules.heredoc_data_reading` keeps the whole-line gate above. When it passes,
+every v2 always-ask rule and the nested credential scan judge the shell
+around the bodies. Both versions' protected-state detector keeps the
+operator's redirects and interpreter source checks. ANSI-C decoding stays
+outside the synthetic here-string payloads. The VEX body backstop
+still checks bodies when any variant lacks the proof. A redirect into the
+allowlist still denies, including in mode `all`.
+
+Single-quoted `sed -i`, `node -e` and `python3 -c` arguments already stay
+in their shell segment. Quoted substitutions and protected names in
+interpreter source have separate gate-state checks. The merge gate also
+keeps its own interpreter-source scan. Git is outside HD-0's inert program
+list, so a direct `git commit -F -` keeps the raw reading.
+Regression: `tests/v2/heredoc_layer2_check.py`.

@@ -1328,15 +1328,17 @@ def _word_starts(text: str, k: int) -> bool:
     return before in " \t\n;|("
 
 
-def strip_redirections(segment: str) -> str:
+def strip_redirections(segment: str, *, redirects: list[Redirect] | None = None) -> str:
     """The segment with every redirection cut out, so what is left is the
     command and its own arguments. Quote-aware, unlike stripping tokens after
     shlex, which cannot tell a quoted `'>name'` argument from a redirect."""
-    spans = [(r.start, r.end) for r in redirections(segment)]
-    if not spans:
+    if redirects is None:
+        redirects = redirections(segment)
+    if not redirects:
         return segment
     out, last = [], 0
-    for start, end in spans:
+    for redirect in redirects:
+        start, end = redirect.start, redirect.end
         if start < last:
             start = last
         out.append(segment[last:start])
@@ -3742,6 +3744,135 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
     return "".join(out)
 
 
+# The data reading (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md) is
+# taken only on a line where **every** program is on these lists, so nothing
+# on it can run a body: a list of what is safe, never of what is dangerous
+# (the review of #396 found executors no deny-list held: `make`, `awk
+# system()`, `at -f`, `taskset dash`, `$l` read from a file). A missing entry
+# costs a prompt, never a hole. None of these runs its input or arguments.
+HEREDOC_INERT_PROGRAMS = frozenset({"cat", "tee", "wc", "grep", "head", "tail", "ls", "echo",
+                                    "cd", "pwd", "mkdir", "true"})
+# Programs allowed only when the body *is* their source, like an inline
+# code argument for shell segmentation. Checks for actions in interpreter
+# source are separate. Without a body on their segment, or with `-c`/`-e`/a
+# script, they are not on the list.
+_HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
+_HEREDOC_NODE_ARGS = frozenset({"-"})
+# Shell syntax that can route a body's output into a program not judged
+# here, or change which program a name runs: a group, subshell, function
+# body or process substitution (`{ cat <<E; } | sh`, `cat() { sh; }`,
+# `> >(sh)`).
+_HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
+_HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
+_HEREDOC_SHELL_QUOTES = str.maketrans("", "", "'\"\\")
+# Redirections a segment may carry: plain reads and writes of a path
+# (`cat > notes.txt <<'EOF'`), never an fd duplication.
+_HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
+_HEREDOC_SPECIAL_PATHS = ("/dev/fd", "/proc", "/dev/tcp", "/dev/udp")
+# `grep` may be ugrep (Claude Code's shell wraps it), whose filter, pager,
+# viewer, opener and config options run commands; refused in any spelling,
+# with `-Q`/`--query` (its TUI can open an editor) and rg's `--pre`.
+_HEREDOC_GREP_RUNS = re.compile(
+    r"---|-@|--[a-z-]*(?:filter|pager|view|open|config|pre|query)|-[A-Za-z]*Q")
+
+
+def _heredoc_segment_ok(words: list[str], redirects: list[Redirect], here: bool) -> bool:
+    """The segment runs only an inert program (`HEREDOC_INERT_PROGRAMS`),
+    or, when it is fed a body (`here`), a `python3 -`/`node -` whose program
+    the body is; named as written (no wrapper, no path, no expansion), with
+    only plain path redirections and no `/dev/fd`/`/proc` argument."""
+    if not words:
+        return False                # a compound command's closing word (`fi | sh`)
+    program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
+    if program in HEREDOC_INERT_PROGRAMS:
+        if program == "grep" and any(_HEREDOC_GREP_RUNS.match(a) for a in args):
+            return False
+    elif here and _PYTHON.fullmatch(program):
+        if not set(args) <= _HEREDOC_PYTHON_ARGS:
+            return False
+    elif here and program == "node":
+        if not set(args) <= _HEREDOC_NODE_ARGS:
+            return False
+    else:
+        return False
+    for redirect in redirects:
+        if redirect.op not in _HEREDOC_REDIRECTS:
+            return False
+        if redirect.op != "<<<":
+            word = redirect.word.strip("'\"")
+            if not word or word[0] in "(&" or word.startswith(_HEREDOC_SPECIAL_PATHS):
+                return False
+    return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
+
+
+def heredoc_data_reading(text: str, *, keep: bool = True) -> str | None:
+    """`text` with its here-document bodies moved into their operators as
+    here-strings (`_inline_heredocs`), when nothing on the line can
+    run a body: every segment passes `_heredoc_segment_ok` (only inert
+    programs, and a body fed only to one of them or to `python3 -`/`node -`),
+    with no group, subshell, function or process substitution, nothing live
+    (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
+    assignment. None otherwise (the inlining raised or flagged itself
+    unsure, a segment or here-string could not be placed), and the caller
+    keeps the raw line, every body line a command. With `keep=False`,
+    the proven data is omitted from the synthetic here-strings."""
+    if "<<" not in text:
+        return None
+    flagged: list = []
+    try:
+        inlined = _inline_heredocs(text, unsure=flagged)
+    except Exception:       # noqa: BLE001 — too complex: the raw reading
+        return None
+    if flagged or inlined == text:
+        return None
+    joined = join_continuations(inlined)
+    if first_unquoted(joined, _HEREDOC_LINE_SYNTAX):
+        return None
+    # Anything live outside single quotes, a body's included (an unquoted
+    # delimiter leaves its `$(…)` and backticks running).
+    if first_unquoted(joined, ("$(", "`"), double_is_quote=False):
+        return None
+    found = 0
+    cursor = 0
+    interpreted = False
+    try:
+        for segment in segments(inlined):
+            at = joined.find(segment, cursor)
+            if at < 0:
+                return None
+            cursor = at + len(segment)
+            # Shlex can remove quoting, but cannot invent an assignment
+            # name. Screen for those spellings before tokenizing a large body.
+            unquoted = segment.translate(_HEREDOC_SHELL_QUOTES)
+            if (any(name in unquoted for name in ("PATH", "ENV", "BASH_FUNC_"))
+                    and any(_HEREDOC_NAME_ENV.match(word) for word in _tokens(segment))):
+                return None
+            redirects = redirections(segment)
+            heres = sum(r.op == "<<<" for r in redirects)
+            found += heres
+            words = command_start(_tokens(strip_redirections(segment, redirects=redirects)))
+            if not _heredoc_segment_ok(words, redirects, bool(heres)):
+                return None
+            interpreted = interpreted or bool(heres and words[0] not in HEREDOC_INERT_PROGRAMS)
+    except Exception:       # noqa: BLE001 — unreadable: the raw reading
+        return None
+    # Every here-string the inlined text holds was placed above (one inside a
+    # substitution or a quote was not): otherwise its program is unknown.
+    if found != joined.count("<<<"):
+        return None
+    # A Python or node body beside another body could run what that one wrote
+    # (`cat > x.sh <<A … ; python3 - <<P os.system('sh x.sh')`): only alone
+    # (review round 3 of #396).
+    if interpreted and found > 1:
+        return None
+    if keep:
+        return inlined
+    try:
+        return _inline_heredocs(text, keep=False)
+    except Exception:       # noqa: BLE001 — unreadable: the raw reading
+        return None
+
+
 def _shell_words(segment: str) -> list[str]:
     """One segment's words as bash splits them, as `_Word`s. Quotes are
     removed and what they held is inactive; `$'…'` is decoded; a `$(…)` or
@@ -4143,7 +4274,8 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
     unsure = TOO_COMPLEX if named == COMPLEX else None
     vexbuild = False
     bodies: list[str] = []
-    for text in _program_variants(command):
+    variants = _program_variants(command)
+    for text in variants:
         walk = _Walk()
         try:
             walk.line(text, True, 0)
@@ -4169,11 +4301,15 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
                 unsure = unsure or TOO_COMPLEX
             vexbuild = vexbuild or kind == VEXBUILD
     if unsure is None and backstop and bodies:
-        unsure = _body_marker(bodies)
+        # Keep the backstop if any variant lacks the HD-0 proof.
+        if not all(heredoc_data_reading(text) is not None for text in variants):
+            unsure = _body_marker(bodies)
     return VexLine(unsure=unsure, vexbuild=vexbuild)
 
 
-# **The body backstop** (round 4). Three review rounds each found a shape
+# **The body backstop** (round 4). GB-1 keeps it when HD-0 cannot prove
+# that every here-document on the line can be read as data.
+# Three review rounds each found a shape
 # whose here-document body the lexer kept open past bash's own end (a
 # delimiter formed differently, a terminator joined from a continuation), so
 # the lines after it — commands to bash — were read as data. Whatever the

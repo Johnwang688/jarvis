@@ -3430,8 +3430,8 @@ class Polish(Base):
 
 R3 = "./v*.exe --user"
 # Ordinary commands that hold a here-document: never DENY, as on main (each was DENY at c12959c).
-# Each body holds a `*` or `/*` line, which read alone as a command would run a glob that could be
-# vexcom, so since round 4 the body backstop asks about each (approvable, never covered).
+# Each body holds a `*` or `/*` line that would run a glob if read as a command. GB-1 skips
+# the backstop for the HD-0 data shapes below and keeps it for the remaining shapes.
 HEREDOC_ORDINARY = {
     "a commit message": "git commit -m \"$(cat <<'EOF'\nFix the drivetrain PID\n\n* raise kP\n* clamp output\nEOF\n)\"",
     "gh pr create": "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\n* one\nEOF\n)\"",
@@ -3452,6 +3452,11 @@ HEREDOC_ORDINARY = {
     "a quote in a message": "git commit -m \"$(cat <<'EOF'\nMount the 5\" wheel\n* one\nEOF\n)\"",
     "a paren in an unquoted substitution": "notes=$(cat <<'EOF'\n1) first\n* second\nEOF\n)",
     "a backtick body with no terminator": "echo `cat <<X\n* a\n* b`",
+}
+HEREDOC_ORDINARY_DATA = {
+    "a C doc comment", "a C comment, unquoted", "a markdown file", "tee", "tab-stripped",
+    "python on stdin", "two on one line", "a spaced operator", "a double-quoted delimiter",
+    "a command after it",
 }
 # Still read: a body fed to a shell, a substitution an unquoted body runs, and
 # every line the lexer must not mistake for a body (each would hide a command).
@@ -3529,8 +3534,7 @@ HEREDOC_TICK_CLOSES = {
     "nested in $(…)": "x=$(echo `cat <<X`\nbody\nX\n)",
     "in a sh -c string": "sh -c 'echo `cat <<X`\nbody\nX'",
 }
-# A body bash does not end there: its lines are data — asked by the body backstop (round 4) when
-# one would be DENY read as a command, never DENY.
+# Bash keeps these lines in the body. Each top-level line passes the HD-0 data guard.
 HEREDOC_DATA = {
     "a terminator with trailing whitespace": f"cat <<'EOF'\nx\nEOF \n{M}",
     "an empty delimiter's body": f"cat <<''\n{M}\n\nls",
@@ -3561,7 +3565,7 @@ HEREDOC_JOINED = {
     '<<-: a tab-led "…" delimiter, unstripped': f'cat <<-"\tE"\nx\n\tE\n{M}',
 }
 # Bash does not join these (a quoted delimiter, an even run, a tab after the join point, a join
-# that makes another word): the marker is body, asked by the backstop, never DENY.
+# that makes another word). Their markers stay inside proven data bodies.
 HEREDOC_UNJOINED = {
     "a quoted delimiter": f"cat <<'EOF'\nx\nEO{BS}\nF\n{M}",
     "a double-quoted delimiter": f'cat <<"EOF"\nx\nEO{BS}\nF\n{M}',
@@ -3575,9 +3579,7 @@ HEREDOC_UNJOINED = {
     "a CR after the backslash": f"cat <<EOF\nx\nEO{BS}\r\nF\n{M}",
 }
 
-# Round 4 (the body backstop): a marker anywhere in a body — any here-document, any quoting —
-# is asked, never DENY, never allowlist-covered, always asked in v2. At 243b0cf each was ASK
-# and coverable.
+# Round 4 body markers, with the GB-1 data cases checked both with and without the guard.
 HEREDOC_BACKSTOP = {
     "a quoted body": f"cat > notes.txt <<'EOF'\n{M} --user\nEOF",
     "an unquoted body": f"cat > notes.txt <<EOF\nrun {M} later\n{M}\nEOF",
@@ -3649,11 +3651,19 @@ class HereDocuments(Base):
         self.assertIsNone(v2_permissions.denied_command(command))
         self.assertIn("here-document's body", rules.vex_uncoverable(command) or "", command)
 
+    def assert_data_body(self, command):
+        self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
+        self.assertIsNone(rules.vex_uncoverable(command), command)
+        self.assertIsNone(v2_permissions.denied_command(command), command)
+
     def test_ordinary_here_documents_are_never_refused(self):
         approve = v1_permissions.gate(lambda tool, args: True)
         for label, command in HEREDOC_ORDINARY.items():
             with self.subTest(label):
-                self.assert_backstop(command)
+                if label in HEREDOC_ORDINARY_DATA:
+                    self.assert_data_body(command)
+                else:
+                    self.assert_backstop(command)
                 tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
                                approve)
         self.assertEqual(sorted(self.ran), sorted(HEREDOC_ORDINARY.values()), "a yes runs each")
@@ -3734,7 +3744,7 @@ class HereDocuments(Base):
     def test_a_body_bash_does_not_end_stays_data(self):
         for label, command in HEREDOC_DATA.items():
             with self.subTest(label):
-                self.assert_backstop(command)       # data, so never DENY; asked (round 4)
+                self.assert_data_body(command)
         for label, command in HEREDOC_NO_BODY.items():
             with self.subTest(label):
                 self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
@@ -3750,14 +3760,21 @@ class HereDocuments(Base):
                 self.assertIsNotNone(v2_permissions.denied_command(command))
         for label, command in HEREDOC_UNJOINED.items():
             with self.subTest(label):
-                self.assert_backstop(command)
+                self.assert_data_body(command)
 
-    def test_a_marker_in_any_body_is_asked_never_denied_never_covered(self):
+    def test_a_marker_without_the_data_proof_is_asked_never_denied_never_covered(self):
         asked = []
         gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        commands = {}
         for label, command in HEREDOC_BACKSTOP.items():
             with self.subTest(label):
+                if label not in ("a body in $(…)", "a body in a sh -c string"):
+                    self.assert_data_body(command)
+                    # An unlisted program before the heredoc invalidates the
+                    # whole-line proof even if it has nothing to do with the body.
+                    command = "sort notes.txt; " + command
                 self.assert_backstop(command)
+                commands[label] = command
                 stems = {w for pair in rules.command_targets(command) for w in pair}
                 stems |= {"cat", "git", "sh", "ls", "bin/*", "*"}
                 Path(config.ALLOWLIST_PATH).write_text(json.dumps(
@@ -3766,15 +3783,15 @@ class HereDocuments(Base):
                                  "an allowlist entry covered it")
                 tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
                                gate)
-        self.assertEqual(sorted(asked), sorted(HEREDOC_BACKSTOP.values()), "v1 asked about each")
+        self.assertEqual(sorted(asked), sorted(commands.values()), "v1 asked about each")
         self.assertEqual(self.ran, [], "a no ran nothing")
         for profile in (PP.AUTO, PP.ASK):
             asker = Asker(Decision.DENY)
             permit = v2_permissions.build_permit(context(self.root, profile), asker)
-            for label, command in HEREDOC_BACKSTOP.items():
+            for label, command in commands.items():
                 with self.subTest(profile=profile.value, shape=label):
                     self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
-            self.assertEqual(len(asker.seen), len(HEREDOC_BACKSTOP), f"v2 asked ({profile})")
+            self.assertEqual(len(asker.seen), len(commands), f"v2 asked ({profile})")
 
     @staticmethod
     def alone(line):
@@ -3793,7 +3810,8 @@ class HereDocuments(Base):
                 self.assertIsNone(reading.deny, line)
                 self.assertIsNotNone(reading.unsure, line)
                 self.assertEqual(general, rules.ALLOW, line)
-                command = in_a_body(line)
+                self.assert_data_body(in_a_body(line))
+                command = "sort notes.txt; " + in_a_body(line)
                 commands.append(command)
                 self.assert_backstop(command)
                 Path(config.ALLOWLIST_PATH).write_text(json.dumps(
@@ -3827,7 +3845,8 @@ class HereDocuments(Base):
             with self.subTest(label):
                 reading, _ = self.alone(line)
                 self.assertIsNotNone(reading.deny, line)
-                self.assert_backstop(in_a_body(line))
+                self.assert_data_body(in_a_body(line))
+                self.assert_backstop("sort notes.txt; " + in_a_body(line))
 
     def test_a_marker_on_a_command_line_after_the_body_is_still_deny(self):
         for label, command in {"after a quoted body": f"cat <<'EOF'\n{M}\nEOF\n{M}",
