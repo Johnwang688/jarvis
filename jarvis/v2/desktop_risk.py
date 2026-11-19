@@ -1,7 +1,7 @@
 """Classify desktop actions and render their approval statements."""
 
 from dataclasses import dataclass
-from unicodedata import category, normalize
+from unicodedata import category, name as _unicode_name, normalize
 
 
 RUN, ASK, REFUSE = "run", "ask", "refuse"
@@ -12,7 +12,8 @@ _PAY = (
     "place order", "order now", "complete order", "submit order", "buy now",
     "pay now", "complete purchase", "add funds", "send tip", "add tip", "bid",
     "transfer", "withdraw", "payment", "make a payment", "renew", "top up",
-    "start free trial", "rent",
+    "start free trial", "rent", "place your order", "confirm order", "send money",
+    "redeem", "claim",
 )
 _SEND = (
     "send", "submit", "post", "publish", "reply", "reply all", "share", "tweet",
@@ -43,19 +44,34 @@ _LOOKUP_WORDS = frozenset(("search", "find", "filter"))
 _LOOKUP_NAMES = frozenset((
     "address", "address bar", "address and search bar", "url", "enter url", "enter a url",
 ))
-_TEXT_ENTRY = frozenset(("editable", "edit", "textbox", "text", "richedit", "combobox", "document"))
+# Role names are compared with spaces, hyphens and underscores removed, so MSAA's
+# "push button" and "editable text" are the same roles as their one-word forms.
+# UI Automation's "text" is static text, not a field: it stays an unknown role.
+_TEXT_ENTRY = frozenset(("editable", "editabletext", "edit", "textbox", "richedit", "combobox", "document"))
 _SEARCH = frozenset(("search", "searchbox"))
 _PLAIN = frozenset((
     "button", "splitbutton", "link", "hyperlink", "menuitem", "menu", "listitem",
     "list", "tab", "tabitem", "checkbox", "radio", "radiobutton", "treeitem",
-    "toolbar", "image", "cell", "row", "option", "switch",
+    "toolbar", "image", "cell", "row", "option", "switch", "pushbutton",
+    "menubutton", "checkbutton", "pagetab", "outlineitem",
 ))
 
-_MATCH_HIDDEN = frozenset(("Cf", "Cs", "Mn", "Me", "Cc"))
+# Cn and Co: unassigned and private-use code points draw as nothing or as boxes.
+_MATCH_HIDDEN = frozenset(("Cf", "Cs", "Mn", "Me", "Cc", "Cn", "Co"))
 _CARD_HIDDEN = _MATCH_HIDDEN | {"Zl", "Zp"}
 _PURPOSE_INVALID = frozenset(("Cc", "Cf", "Cs", "Zl", "Zp"))
 _BLANK_CHARACTERS = frozenset("\u034f\u115f\u1160\u3164\uffa0\u2800")
-_DOUBLE_QUOTES = frozenset('"\uff02\u02ba\u201c\u201d\u201e\u201f\u00ab\u00bb\u2033\u3003')
+_QUOTE_NAMES = ("QUOTATION", "PRIME", "DOUBLE ACUTE", "GERSHAYIM", "DITTO", "DOUBLE APOSTROPHE")
+
+
+def _quote_like(char):
+    """Any character a reader could take for the card's own closing quote."""
+    if char == '"' or category(char) in ("Pi", "Pf"):
+        return True
+    title = _unicode_name(char, "")
+    return any(word in title for word in _QUOTE_NAMES)
+
+
 _ASCII_ALPHANUMERIC = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 KEYS = frozenset((
@@ -68,20 +84,40 @@ KEYS = frozenset((
     *"abcdefghijklmnopqrstuvwxyz0123456789",
     *(f"f{number}" for number in range(1, 25)),
 ))
+_KEY_ALIASES = {
+    "control": "ctrl", "return": "enter", "del": "delete", "spacebar": "space",
+    "esc": "escape", "ins": "insert", "pgup": "pageup", "pgdn": "pagedown",
+    "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right",
+    "windows": "win", "meta": "win", "super": "win", "cmd": "win", "command": "win",
+}
 _KEY_NAMES = {key: key.title() for key in KEYS}
-_SHORTCUT_MODIFIERS = frozenset((
-    "ctrl", "control", "alt", "altgr", "win", "windows", "meta", "super", "cmd", "command",
-))
+
+
+def canonical_keys(keys):
+    """The chord in the one spelling this module judged, for the caller to send:
+    ASCII names from `KEYS`, aliases folded, no key twice. None when invalid."""
+    if type(keys) is not tuple or not keys or any(type(key) is not str for key in keys):
+        return None
+    chord = []
+    for key in keys:
+        if not key.isascii():
+            return None
+        key = key.strip().lower()
+        if key not in KEYS:
+            return None
+        chord.append(_KEY_ALIASES.get(key, key))
+    return tuple(chord) if len(set(chord)) == len(chord) else None
+_SHORTCUT_MODIFIERS = frozenset(("ctrl", "alt", "altgr", "win"))
 _ALLOWED_SHORTCUTS = {
     "ctrl": frozenset((
-        *"acvxzyfltnrsp0", "home", "end", "left", "right", "up", "down", "tab",
+        *"acvxzyfltnrsp0", *"wbiuhke", "home", "end", "left", "right", "up", "down", "tab",
         "pageup", "pagedown", "plus", "minus", "backspace",
     )),
-    "alt": frozenset(("left", "right", "tab", "home")),
+    "alt": frozenset(("left", "right", "up", "tab", "home", "d")),
 }
-_ENTER_KEYS = frozenset(("enter", "return"))
-_SPACE_KEYS = frozenset(("space", "spacebar"))
-_DELETE_KEYS = frozenset(("delete", "del"))
+_ENTER_KEYS = frozenset(("enter",))
+_SPACE_KEYS = frozenset(("space",))
+_DELETE_KEYS = frozenset(("delete",))
 _VOICE_GROUPS = ("", *GROUPS[1:])
 _CARD_LIMIT = 200
 _INVALID_CARD = "An invalid desktop action"
@@ -112,10 +148,34 @@ def _strip_hidden(value, categories):
     )
 
 
-def _normalise(name):
-    clean = _strip_hidden(normalize("NFKC", name), _MATCH_HIDDEN)
-    folded = _strip_hidden(clean.casefold(), _MATCH_HIDDEN).replace("&", "")
+def _fold(name):
+    # NFKD after NFKC: a combining mark typed after a letter must come apart
+    # again to be deleted ("Se\u0301nd" is "send"), and casefold can make new ones.
+    clean = _strip_hidden(normalize("NFKD", normalize("NFKC", name)), _MATCH_HIDDEN)
+    return _strip_hidden(normalize("NFKD", clean.casefold()), _MATCH_HIDDEN)
+
+
+def _words(folded):
     return " ".join("".join(char if char.isalnum() else " " for char in folded).split())
+
+
+def _normalise(name):
+    return _words(_fold(name).replace("&", ""))
+
+
+def _role(role):
+    return "".join(char for char in role.casefold() if char.isalnum())
+
+
+def _group_of(plain):
+    for group, terms in _LABEL_GROUPS:
+        if _contains_term(plain, terms):
+            return group
+    return ""
+
+
+def _strongest(groups):
+    return next((group for group in GROUPS if group in groups), "")
 
 
 def _contains_term(normalised, terms):
@@ -126,15 +186,15 @@ def _contains_term(normalised, terms):
 def label_group(name, role="") -> str:
     if type(name) is not str or type(role) is not str:
         return ""
-    if role.strip().casefold() in _TEXT_ENTRY | _SEARCH:
+    if _role(role) in _TEXT_ENTRY | _SEARCH:
         return ""
     if len(_strip_hidden(name, _MATCH_HIDDEN).split()) > 12:
         return ""
-    plain = _normalise(name)
-    for group, terms in _LABEL_GROUPS:
-        if _contains_term(plain, terms):
-            return group
-    return ""
+    # "&" marks an access key inside a word ("E&xit") or joins two words
+    # ("Send&Close"): read it both ways and keep the stronger answer.
+    folded = _fold(name)
+    return _strongest({_group_of(_words(folded.replace("&", ""))),
+                       _group_of(_words(folded.replace("&", " ")))})
 
 
 def _enter_asks(name, role, group):
@@ -153,7 +213,7 @@ def _enter_asks(name, role, group):
 def enter_asks(name, role) -> bool:
     if type(name) is not str or type(role) is not str:
         return True
-    role = role.strip().casefold()
+    role = _role(role)
     return _enter_asks(name, role, label_group(name) if role in _PLAIN else "")
 
 
@@ -182,8 +242,9 @@ def _read_action(action):
     if type(keys) is not tuple or any(type(key) is not str for key in keys):
         reasons.append("invalid:keys")
     elif type(kind) is str and kind == "key":
-        keys = tuple(key.strip().casefold() for key in keys)
-        if not keys or any(key not in KEYS for key in keys):
+        keys = canonical_keys(keys)
+        if keys is None:
+            keys = ()
             reasons.append("invalid:keys")
     elif keys:
         reasons.append("invalid:keys")
@@ -192,7 +253,7 @@ def _read_action(action):
     for field, value in (("app", app), ("name", name), ("role", role)):
         if type(value) is not str:
             reasons.append(f"invalid:{field}")
-    return (kind, app, name, role, keys, submit, risky), tuple(reasons)
+    return (kind, app, name, role, keys, submit, risky, purpose), tuple(reasons)
 
 
 def _read_verdict(verdict):
@@ -214,13 +275,9 @@ def _read_verdict(verdict):
 def _shortcut_asks(keys, key_set):
     if len(keys) <= 1 or not key_set & _SHORTCUT_MODIFIERS:
         return False
-    if keys.count("shift") > 1:
-        return True
     chord = tuple(key for key in keys if key != "shift")
     if len(chord) == 2:
         for modifier, key in (chord, chord[::-1]):
-            if modifier == "control":
-                modifier = "ctrl"
             if key in _ALLOWED_SHORTCUTS.get(modifier, ()):
                 return False
     return True
@@ -230,8 +287,8 @@ def decide(action) -> Verdict:
     fields, invalid = _read_action(action)
     if invalid:
         return Verdict(REFUSE, reasons=invalid)
-    kind, _, name, role, keys, submit, risky = fields
-    role = role.strip().casefold()
+    kind, _, name, role, keys, submit, risky, purpose = fields
+    role = _role(role)
     reasons = []
     groups = set()
     if kind == "click":
@@ -245,7 +302,12 @@ def decide(action) -> Verdict:
     if shortcut:
         reasons.append("shortcut")
     presses_enter = submit or bool(key_set & _ENTER_KEYS)
-    presses_space = role in _PLAIN and bool(key_set & _SPACE_KEYS)
+    # Shift+Enter in a text field is a new line, not a submit.
+    if key_set == {"shift", "enter"} and role in _TEXT_ENTRY:
+        presses_enter = False
+    # Space presses a focused control. Only a known text field is exempt: a web
+    # button built from a plain element reports a role this module cannot name.
+    presses_space = role not in _TEXT_ENTRY | _SEARCH and bool(key_set & _SPACE_KEYS)
     if presses_enter or presses_space:
         group = label_group(name)
         if presses_enter and (shortcut or _enter_asks(name, role, group)):
@@ -260,16 +322,18 @@ def decide(action) -> Verdict:
 
     if risky != "no":
         reasons.append(f"declared:{risky}")
-    group = next((group for group in GROUPS if group in groups), "")
-    return Verdict(ASK if reasons else RUN, group, tuple(reasons))
+    # A step that already asks and whose stated purpose is a payment is a
+    # payment for the voice rule, even when the control has no readable label.
+    if reasons and _contains_term(_normalise(purpose), _PAY):
+        groups.add("pay")
+    return Verdict(ASK if reasons else RUN, _strongest(groups), tuple(reasons))
 
 
 def _control_name(name):
     clean = _strip_hidden(name, _CARD_HIDDEN)
-    return "".join(
-        "'" if char in _DOUBLE_QUOTES or category(char) in ("Pi", "Pf") else char
-        for char in clean
-    ).strip()
+    quoted = "".join("'" if _quote_like(char) else char for char in clean)
+    # Runs of blank space would push the real label past the cut.
+    return " ".join(quoted.split())
 
 
 def _ellipsise(value, limit):
@@ -283,7 +347,7 @@ def _control_text(name, limit=60):
 def _app_text(app):
     clean = _strip_hidden(app, _CARD_HIDDEN)
     allowed = "".join(char for char in clean if char.isalpha() or char.isdigit() or char in " .-_+()")
-    app = allowed.strip()[:60].rstrip()
+    app = " ".join(allowed.split())[:60].rstrip()
     return app if _ASCII_ALPHANUMERIC.intersection(app) else "an unknown app"
 
 
@@ -291,7 +355,7 @@ def statement(action, verdict) -> str:
     fields, invalid = _read_action(action)
     if invalid:
         return _INVALID_CARD
-    kind, app, name, _, keys, submit, _ = fields
+    kind, app, name, _, keys, submit, _, _ = fields
     app = _app_text(app)
     result = _read_verdict(verdict)
     suffix = f" ({result[1]})" if result and result[1] else ""

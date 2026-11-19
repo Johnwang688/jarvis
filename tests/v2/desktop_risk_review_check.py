@@ -202,7 +202,14 @@ class F11RoleVocabulary(unittest.TestCase):
         for role in ("Edit", "textbox", "text"):
             with self.subTest(role=role):
                 self.assertTrue(enter_asks("Type a message", role))
+        # Lead's change after the second review: UI Automation's "text" is
+        # static text (a clickable "Send" inside a plain element reports it), so
+        # it is an unknown role and its label is read. The two real text-box
+        # roles still do not ask on a click into them.
+        for role in ("Edit", "textbox"):
+            with self.subTest(role=role):
                 self.assertEqual(label_group("Add a comment", role), "")
+        self.assertEqual(label_group("Add a comment", "text"), "send")
 
 
 class F12WordCountInflation(unittest.TestCase):

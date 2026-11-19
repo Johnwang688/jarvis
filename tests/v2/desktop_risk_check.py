@@ -9,10 +9,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis.v2.desktop_risk import (
-    ASK, GROUPS, KEYS, REFUSE, RUN, Action, Verdict, decide, enter_asks, label_group,
+    ASK, GROUPS, KEYS, REFUSE, RUN, Action, Verdict, canonical_keys, decide, enter_asks, label_group,
     statement, voice_may_approve,
 )
 
+
+# Every key once, in its judged spelling: a chord cannot repeat a key.
+LONG_CHORD = tuple(sorted({canonical_keys((key,))[0] for key in KEYS} - {"ctrl", "escape"}))
 
 BASE = Action("click", "Outlook", "Send", "button", purpose="Send the reply.", risky="no")
 
@@ -87,8 +90,8 @@ class Labels(unittest.TestCase):
         for role in ("", "button", "link", "menuitem", "other"):
             with self.subTest(role=role):
                 self.assertEqual(label_group("Send", role), "send")
-        for role in ("editable", "edit", "textbox", "text", "richedit", "combobox", "document",
-                     "search", "searchbox"):
+        for role in ("editable", "edit", "textbox", "richedit", "combobox", "document",
+                     "search", "searchbox", "Editable Text", "search_box"):
             with self.subTest(role=role):
                 self.assertEqual(label_group("Search or send a command", role), "")
         self.assertEqual(label_group("Send " + "word " * 11), "send")
@@ -253,13 +256,18 @@ class Decisions(unittest.TestCase):
             action = replace(BASE, kind="key", keys=(key,), name="Amount to pay")
             self.assertEqual(decide(action), Verdict(ASK, "pay", ("press",)))
             self.assertEqual(decide(replace(action, name="Next")), Verdict(RUN))
-            for role in ("editable", "searchbox", "", "unrecognized"):
+            for role in ("editable", "searchbox"):
                 self.assertEqual(decide(replace(action, role=role)), Verdict(RUN))
+            # A role this module cannot name may be a button built from a plain
+            # element: Space presses it, so its label decides.
+            for role in ("", "unrecognized", "text", "push button"):
+                self.assertEqual(decide(replace(action, role=role)), Verdict(ASK, "pay", ("press",)))
+                self.assertEqual(decide(replace(action, role=role, name="Next")), Verdict(RUN))
         for key in ("Del", "Delete"):
             action = replace(BASE, kind="key", keys=(key,), name="Selection")
             for role in ("button", "", "unrecognized"):
                 self.assertEqual(decide(replace(action, role=role)), Verdict(ASK, "delete", ("key:delete",)))
-            for role in ("text", "edit", "richedit", "search", "searchbox"):
+            for role in ("edit", "richedit", "search", "searchbox"):
                 self.assertEqual(decide(replace(action, role=role)), Verdict(RUN))
         action = replace(BASE, kind="key", keys=("space", "delete"), name="Pay")
         self.assertEqual(decide(action), Verdict(ASK, "pay", ("press", "key:delete")))
@@ -274,17 +282,35 @@ class Decisions(unittest.TestCase):
     def test_shortcut_allowlist(self):
         action = replace(BASE, kind="key", role="textbox", name="Search")
         for modifier, allowed in (
-            ("control", (*"acvxzyfltnrsp0", "home", "end", "left", "right", "up", "down",
+            ("control", (*"acvxzyfltnrsp0", *"wbiuhke", "home", "end", "left", "right", "up", "down",
                          "tab", "pageup", "pagedown", "plus", "minus", "backspace")),
-            ("alt", ("left", "right", "tab", "home")),
+            ("alt", ("left", "right", "up", "tab", "home", "d")),
         ):
+            # The list is pinned whole: a key added to it must be added here.
+            for key in sorted(KEYS - set(allowed) - {"shift", "enter", "return"}):
+                if canonical_keys((modifier, key)) is None or canonical_keys((key,))[0] in allowed:
+                    continue
+                with self.subTest(modifier=modifier, asks=key):
+                    self.assertIn("shortcut", decide(replace(action, keys=(modifier, key))).reasons)
             for key in allowed:
                 with self.subTest(modifier=modifier, key=key):
                     self.assertEqual(decide(replace(action, keys=(modifier, key))), Verdict(RUN))
                     self.assertEqual(decide(replace(action, keys=(key, "shift", modifier))), Verdict(RUN))
-        for keys in (("ctrl", "b"), ("ctrl", "a", "c"), ("ctrl", "a", "a"),
+        for keys in (("ctrl", "pgup"), ("alt", "arrowleft"), ("CONTROL", "PgDn")):
+            with self.subTest(alias=keys):
+                self.assertEqual(decide(replace(action, keys=keys)), Verdict(RUN))
+        for keys in (("ctrl", "a", "a"), ("ctrl", "shift", "shift", "t"), ("ctrl", "control", "c"),
+                     ("del", "delete"), ("ſpace",), ("\u212a",), ("ctrl", "ſ")):
+            with self.subTest(refused=keys):
+                self.assertEqual(decide(replace(action, keys=keys)), Verdict(REFUSE, reasons=("invalid:keys",)))
+                self.assertIsNone(canonical_keys(keys))
+        self.assertEqual(canonical_keys((" Control ", "RETURN")), ("ctrl", "enter"))
+        self.assertEqual(canonical_keys(("cmd", "Del")), ("win", "delete"))
+        for bad in ((), ["ctrl"], ("ctrl", 1), None, "ctrl"):
+            self.assertIsNone(canonical_keys(bad))
+        for keys in (("ctrl", "g"), ("ctrl", "a", "c"),
                      ("ctrl", "alt", "left"), ("ctrl", "alt"), ("ctrl", "shift"),
-                     ("ctrl", "pgup"), ("alt", "end"), ("altgr", "left")):
+                     ("alt", "end"), ("alt", "f4"), ("altgr", "left")):
             with self.subTest(keys=keys):
                 self.assertEqual(decide(replace(action, keys=keys)), Verdict(ASK, reasons=("shortcut",)))
         for modifier in ("ctrl", "control", "alt", "altgr", "win", "windows",
@@ -358,8 +384,8 @@ class Statements(unittest.TestCase):
         self.assertEqual(card, f'Click "{"x" * 59}…" in {"A" * 60}')
         exact = replace(BASE, name="x" * 60)
         self.assertEqual(statement(exact, None), f'Click "{"x" * 60}" in Outlook')
-        chord = replace(action, kind="key", keys=("ctrl", "escape") * 100)
-        card = statement(chord, decide(chord))
+        chord = replace(action, kind="key", keys=("ctrl", "escape", *LONG_CHORD))
+        card = statement(chord, None)
         self.assertLessEqual(len(card), 200)
         self.assertEqual(len(card.splitlines()), 1)
         self.assertTrue(card.startswith("Press Ctrl+Escape+"))
@@ -368,7 +394,7 @@ class Statements(unittest.TestCase):
     def test_card_bound_across_long_name_app_and_chord_grid(self):
         for name_size in (0, 42, 58, 59, 60, 61, 90):
             for app_size in (0, 45, 57, 58, 59, 60, 94):
-                for keys in (("a",) * 100, ("escape",) * 40, ("ctrl", "pageup") * 35):
+                for keys in (LONG_CHORD, LONG_CHORD[:40], LONG_CHORD[::-1], ("ctrl", "pageup")):
                     for group in ("", "pay", "confirm"):
                         action = replace(BASE, kind="key", keys=keys,
                                          name="界" * name_size, app="A" * app_size)
@@ -388,15 +414,17 @@ class Statements(unittest.TestCase):
 
     def test_display_names_for_known_keys(self):
         expected = {
-            "esc": "Esc", "pageup": "Pageup", "f12": "F12", "backspace": "Backspace",
-            "ctrl": "Ctrl", "enter": "Enter", "del": "Del", "spacebar": "Spacebar",
+            "esc": "Escape", "pageup": "Pageup", "f12": "F12", "backspace": "Backspace",
+            "ctrl": "Ctrl", "enter": "Enter", "del": "Delete", "spacebar": "Space",
             "printscreen": "Printscreen", "minus": "Minus", "plus": "Plus",
+            "control": "Ctrl", "return": "Enter", "pgup": "Pageup", "arrowleft": "Left",
+            "cmd": "Win", "windows": "Win",
         }
         self.assertLessEqual(expected.keys(), KEYS)
         for key in sorted(KEYS):
             with self.subTest(key=key):
                 action = replace(BASE, kind="key", keys=(key,))
-                display = expected.get(key, key.capitalize())
+                display = expected.get(key, canonical_keys((key,))[0].capitalize())
                 self.assertEqual(statement(action, None), f'Press {display} in "Send" in Outlook')
 
     def test_malformed_instance_returns_the_invalid_card(self):
@@ -462,6 +490,58 @@ class LeadAdditions(unittest.TestCase):
         self.assertEqual(label_group("Cancel order"), "delete")
         self.assertEqual(label_group("Cancel membership"), "delete")
         self.assertEqual(label_group("Cancel"), "")
+
+
+class SecondReview(unittest.TestCase):
+    def test_shift_enter_is_a_new_line_only_in_a_text_field(self):
+        box = replace(BASE, kind="key", role="edit", name="Message", keys=("shift", "enter"))
+        self.assertEqual(decide(box), Verdict(RUN))
+        self.assertEqual(decide(replace(box, keys=("enter",))).decision, ASK)
+        self.assertEqual(decide(replace(box, keys=("ctrl", "shift", "enter"))).decision, ASK)
+        for role in ("", "button", "unrecognized"):
+            self.assertEqual(decide(replace(box, role=role, name="Send")).decision, ASK)
+
+    def test_stated_payment_blocks_voice_when_the_step_asks(self):
+        action = replace(BASE, name="", role="", purpose="Pay the $500 invoice", risky="yes")
+        verdict = decide(action)
+        self.assertEqual(verdict, Verdict(ASK, "pay", ("declared:yes",)))
+        self.assertFalse(voice_may_approve(verdict))
+        # The purpose alone never makes a step ask.
+        quiet = replace(action, name="Next", risky="no")
+        self.assertEqual(decide(quiet), Verdict(RUN))
+        other = replace(action, purpose="Open the payload viewer", risky="unsure")
+        self.assertEqual(decide(other), Verdict(ASK, "", ("declared:unsure",)))
+
+    def test_ampersand_is_read_both_ways(self):
+        self.assertEqual(label_group("Send&Close"), "send")
+        self.assertEqual(label_group("Review&Pay"), "pay")
+        self.assertEqual(label_group("&Send"), "send")
+        self.assertEqual(label_group("Se&nd"), "send")
+        self.assertEqual(label_group("E&xit"), "")
+
+    def test_role_names_with_spaces(self):
+        action = replace(BASE, kind="key", keys=("space",), name="Pay now")
+        for role in ("push button", "Push_Button", "menu item", "list-item", "page tab"):
+            self.assertEqual(decide(replace(action, role=role)), Verdict(ASK, "pay", ("press",)))
+        for role in ("editable text", "Editable_Text", "search box"):
+            self.assertEqual(decide(replace(action, role=role)), Verdict(RUN))
+
+    def test_added_words(self):
+        for name in ("Place your order", "Confirm order", "Send money", "Redeem", "Claim"):
+            self.assertEqual(label_group(name), "pay")
+
+    def test_only_three_first_words_mark_a_lookup_box(self):
+        for word in ("search", "find", "filter"):
+            self.assertFalse(enter_asks(word + " messages", "edit"))
+        for word in ("go", "open", "type", "enter", "query", "lookup", "browse", "jump", "ask", "message"):
+            with self.subTest(word=word):
+                self.assertTrue(enter_asks(word + " here", "edit"))
+
+    def test_private_use_and_unassigned_characters(self):
+        self.assertEqual(label_group("Se\ue000nd"), "send")
+        self.assertEqual(label_group("Se\U000e0001nd"), "send")
+        card = statement(replace(BASE, name="\ue000" * 80 + "Pay"), None)
+        self.assertEqual(card, 'Click "Pay" in Outlook')
 
 
 if __name__ == "__main__":
