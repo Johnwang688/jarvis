@@ -123,7 +123,8 @@ def match_window(target, windows):
     return None
 
 
-_APP_ID_PARTS = re.compile(r"[.!_]")
+# The image a Start entry names: "{folder}\\Vendor\\app.exe", "Microsoft.Office.WINWORD.EXE.15".
+_APP_ID_IMAGE = re.compile(r"([^\\/.!_]+)\.exe(?=$|[.!_])", re.IGNORECASE)
 
 
 def _app_images(target, apps):
@@ -135,12 +136,9 @@ def _app_images(target, apps):
         name, ident = app.get("name"), app.get("id")
         if not isinstance(name, str) or not isinstance(ident, str) or _normal(name) not in (target, canonical):
             continue
-        if ident.casefold().endswith(".exe"):
-            # A classic Start entry: "{known folder}\\Vendor\\app.exe".
-            images.add(_normal(ntpath.splitext(ntpath.basename(ident))[0]))
-        else:
-            # An application ID such as "Microsoft.Office.WINWORD.EXE.15".
-            images.update(part for part in map(_normal, _APP_ID_PARTS.split(ident)) if len(part) >= 4)
+        # Only an image the entry spells out. A vendor or suite word in an
+        # application ID ("Microsoft", "Office") names no process.
+        images.update(_normal(image) for image in _APP_ID_IMAGE.findall(ident))
     images.discard("")
     return images
 
@@ -150,10 +148,11 @@ def grounded_window(target, windows, apps=()):
 
     For a routed Laya switch, whose target is an offered Start catalog name.
     Only the owning process identifies a window: its image must be the app's
-    name, a fixed alias of it, or the image the app's Start entry names.
+    name, a fixed alias of it, or the image the app's Start entry spells out.
     Titles are never read. A document, page or console title is content, and
     content can say anything ("Review draft - Google Chrome" in Notepad).
-    A window hosted by a shared frame process is therefore not switchable.
+    A window hosted by a shared frame process, or a packaged app whose image
+    is neither its name nor in its Start entry, is therefore not switchable.
     """
     target = _normal(target) if isinstance(target, str) else ""
     if not target:

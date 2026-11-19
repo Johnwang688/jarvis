@@ -677,7 +677,8 @@ class Flow:
         Speech that names one without being a plain choice ("open noaa.gov,
         actually disregard that", or the same site again after it was chosen)
         may still be routed, but a routed navigation to an offered site is
-        refused in ``_laya_turn``: the offer answers it, never the router.
+        or app launch of an offered site is refused in ``_laya_turn`` and on
+        the unrouted path: the offer answers it, never the router.
         """
         self.expire_site_choice(self.client)
         pending = getattr(self.client, "_pending_site_choice", None)
@@ -807,8 +808,10 @@ class Flow:
         if not current():
             self._outcome(turn, "cancelled")
             return
-        if kind == "navigate" and offered and any(_same_site(target, site) for site in offered[0]):
-            # Not a plain choice, so the offer did not select it; never the router either.
+        if (kind in ("navigate", "open_app") and offered
+                and any(_same_site(target, site) for site in offered[0])):
+            # Not a plain choice, so the offer did not select it; never the
+            # router either, as a page or as an installed app of that name.
             self._outcome(turn, "cancelled")
             pending = getattr(self.client, "_pending_site_choice", None)
             if isinstance(pending, _SiteReplyContext) and pending.choices == offered[0]:
@@ -945,6 +948,13 @@ class Flow:
                           "text": text, "target": "" if addressed else "literal"}
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
+            # A reply context carried to a helper without Laya routing still
+            # keeps its sites: nothing here opens one the offer did not.
+            offered = self._offered_sites()
+            if offered and (kind in ("navigate", "open_app") or url) and any(
+                    _same_site(value, site) for value in (url, target) for site in offered[0]):
+                self.ui.set_state(*offered[1])
+                return
             if url or kind == "navigate":
                 if not current():
                     return

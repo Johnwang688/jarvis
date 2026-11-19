@@ -686,6 +686,9 @@ class Helper(unittest.TestCase):
         self.assertEqual(actions.route_names()[1], ())
         desktop.focus.assert_not_called()
         paint = (9, "Untitled - Paint", r"C:\Windows\System32\mspaint.exe")
+        # A vendor or suite word in Word's application ID names no process.
+        shown[:] = [(10, "Tool", r"C:\Synthetic\office.exe"), (11, "Tool", r"C:\Synthetic\microsoft.exe")]
+        self.assertFalse(actions.switch_app("Word", exact=True))
         shown[:] = [notepad, word, calc, chrome, paint]
         self.assertEqual(actions.route_names()[1], ("Google Chrome", "Word", "Paint", "chrome"))
         for name, hwnd in (("Chrome", 4), ("Word", 5), ("Paint", 9)):
