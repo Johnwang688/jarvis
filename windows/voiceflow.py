@@ -34,6 +34,10 @@ PROFILE_CANCELED = "Chrome profile selection canceled."
 SITE_CHOICE_SECONDS = 15.0
 SITE_CANCELED = "Website choice canceled."
 SITE_EXPIRED = "That website choice expired. Ask again."
+SITE_UNCLEAR = "No website was chosen. Ask again and say first, second or a site name."
+SITE_FAILED = "Could not send the website to the browser."
+SITE_UNVERIFIED = "The website handoff could not be verified. Check the browser."
+SITE_CHOSEN = "Website already chosen."
 ASSISTANT_UPDATE = ("Restart the Jarvis daemon to use Right Ctrl commands. "
                     "Ctrl+D still dictates.")
 ROUTE_UNAVAILABLE = "Voice command routing is unavailable. Ctrl+D still dictates."
@@ -157,17 +161,45 @@ def _looks_like_profile_reply(words, names):
                for part in map(candidate, parts))
 
 
-_SITE_LEAD = re.compile(r"^(?:(?:open|go to|visit|choose|pick|select|use|take me to|show me|"
-                        rf"i{_APOSTROPHE}d like|i would like|i want|let{_APOSTROPHE}s do|make it|"
-                        r"maybe|oh|um|uh|ok|okay)[, ]+)+")
+_SITE_LEAD = re.compile(rf"^(?:(?:open|go to|go with|let{_APOSTROPHE}s go with|visit|choose|pick|select|use|"
+                        rf"take me to|show me|i{_APOSTROPHE}d like|i would like|i want|let{_APOSTROPHE}s do|"
+                        r"make it|maybe|oh|um|uh|ok|okay)[, ]+)+")
 _SITE_TAIL = re.compile(r"(?:[, ]+(?:one|site|website|option|link|please|thanks|thank you))+$")
 _SITE_ORDINALS = {"first": 0, "1st": 0, "number one": 0, "the first": 0, "former": 0, "the former": 0,
                   "second": 1, "2nd": 1, "number two": 1, "the second": 1, "last": 1, "the last": 1,
                   "latter": 1, "the latter": 1, "other": 1, "the other": 1}
+# Words that make a reply about an offered site something other than a plain
+# yes to it ("don't open noaa.gov", "no, the second one", "not nasa"). Such a
+# reply never selects; it stays with the prompt instead of reaching the router.
+_SITE_NEGATION = re.compile(
+    rf"(?<![\w'])(?:don{_APOSTROPHE}?t|do not|dont|doesn{_APOSTROPHE}?t|not|no|never|neither|nor|"
+    rf"except|without|instead|rather|skip|avoid|won{_APOSTROPHE}?t|wouldn{_APOSTROPHE}?t|"
+    rf"shouldn{_APOSTROPHE}?t|can{_APOSTROPHE}?t|cannot|isn{_APOSTROPHE}?t|but|stop|cancel)(?![\w'])")
+_SITE_ORDINAL_WORDS = re.compile(r"(?<![\w])(?:first|second|1st|2nd|former|latter)(?![\w])")
+# A reply made only of offered sites, ordinals and joining words, but not one
+# whole affirmative choice ("noaa noaa", "first or second", "the second one
+# the second one"), is a repeated or listed reply: it stays local too.
+_SITE_FILLER = frozenset({"first", "second", "1st", "2nd", "former", "latter", "last", "other", "number",
+                          "one", "two", "the", "or", "and", "then", "site", "website", "option", "link",
+                          "dot", "\x00"})
+
+
+def _site_forms(choice):
+    """Whole spoken forms of one offered website: host, www host, URL or label."""
+    host = choice.split("://", 1)[-1].rstrip("/").casefold()
+    label = host.split(".", 1)[0]
+    return {host, "www." + host, choice.casefold(), choice.casefold().rstrip("/")}, label
 
 
 def _site_reply(text, choices):
-    """0 or 1 for a choice the owner picked, "cancel", or None (not a reply)."""
+    """0 or 1 for a choice the owner picked, "cancel", "unclear", or None.
+
+    Only a whole affirmative form selects: an ordinal, or one offered site's
+    host, URL or label with nothing but courtesy or a selection verb around
+    it. A negated or otherwise inexact reply that still names an offered site
+    or ordinal is "unclear": it never selects and never reaches the router.
+    None means the speech was not about this prompt.
+    """
     reading = _profile_name(JARVIS_ADDRESS.sub("", text, count=1))
     if not reading:
         return None
@@ -176,16 +208,35 @@ def _site_reply(text, choices):
     core = _TRAIL_COURTESY.sub("", POLITE_PREFIX.sub("", reading)).strip(" ,")
     core = _SITE_LEAD.sub("", core)
     stripped = _SITE_TAIL.sub("", core).strip(" ,")
+    whole = {core, stripped, stripped.removeprefix("the ")}
     for form in (core, stripped, stripped.removeprefix("the ")):
         if form in _SITE_ORDINALS:
             return _SITE_ORDINALS[form]
-    named = spoken_websites(text)
-    if len(named) == 1 and named[0] in choices and sanitize(stripped).count(" ") < 3:
-        return choices.index(named[0])
-    labels = [choice.split("://", 1)[-1].split(".", 1)[0] for choice in choices]
-    for form in (stripped, stripped.removeprefix("the ")):
-        if labels.count(form) == 1:
-            return labels.index(form)
+    forms = [_site_forms(choice) for choice in choices]
+    spelled = {re.sub(r"\s+dot\s+", ".", form) for form in whole}
+    hits = {index for index, (urls, label) in enumerate(forms)
+            if spelled & urls or (label in whole and [lab for _, lab in forms].count(label) == 1)}
+    if len(hits) == 1:
+        return hits.pop()
+    named = set(spoken_websites(text)) & set(choices)
+    labels = [label for _, label in forms]
+    mentions = (bool(named) or bool(_SITE_ORDINAL_WORDS.search(reading))
+                or any(re.search(rf"(?<![\w]){re.escape(label)}(?![\w])", reading) for label in labels if label))
+    if not mentions:
+        return None
+    if _SITE_NEGATION.search(reading):
+        return "unclear"
+    # Mark every offered host, URL, spoken host and label (longest first),
+    # then see whether anything else was said.
+    spoken_forms = set()
+    for urls, label in forms:
+        spoken_forms |= urls | {label} | {url.split("://", 1)[-1].replace(".", " dot ") for url in urls}
+    marked = stripped
+    for form in sorted(filter(None, spoken_forms), key=len, reverse=True):
+        marked = re.sub(rf"(?<![\w.]){re.escape(form)}(?![\w])", "\x00", marked)
+    words = re.sub(r"[,;]", " ", marked).replace("\x00", " \x00 ").split()
+    if words and all(word in _SITE_FILLER for word in words):
+        return "unclear"
     return None
 
 
@@ -326,6 +377,32 @@ class Flow:
             pending = _ProfileReplyContext(pending.labels, retired_at + PROFILE_REPLY_GRACE_SECONDS)
             client._pending_chrome_profile = pending
         return pending if isinstance(pending, _ProfileReplyContext) else ()
+
+    @staticmethod
+    def retire_choices(client):
+        """Retire both prompts on a lost link; return what a new client may keep.
+
+        The result holds only recognition contexts (no session, receipt or
+        turn), so a reconnecting worker carries reply recognition for the
+        Chrome profile and website prompts alike and never their authority.
+        """
+        profile = Flow.retire_profile_choice(client)
+        site = getattr(client, "_pending_site_choice", None)
+        return (profile if isinstance(profile, _ProfileReplyContext) else None,
+                site if isinstance(site, _SiteReplyContext) else None)
+
+    @staticmethod
+    def carry_choices(client, carried):
+        """Install contexts from ``retire_choices`` on a new client.
+
+        Anything that is not a recognition-only context is dropped, so no
+        click, navigation or receipt can cross a reconnect.
+        """
+        profile, site = carried if isinstance(carried, tuple) and len(carried) == 2 else (None, None)
+        if isinstance(profile, _ProfileReplyContext):
+            client._pending_chrome_profile = profile
+        if isinstance(site, _SiteReplyContext):
+            client._pending_site_choice = site
 
     @staticmethod
     def retire_site_choice(client):
@@ -599,16 +676,25 @@ class Flow:
             self.retire_site_choice(self.client)
             return False
         if isinstance(pending, _SiteReplyContext):
+            # Retired, expired or already answered: show the outcome again and
+            # never navigate, confirm or route, whatever the reply now says.
             self.ui.set_state(*pending.repeat)
             return True
-        # Consume before acting: a repeated reply can never navigate twice.
-        self.client._pending_site_choice = _SiteReplyContext(
-            pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("done", "Website already chosen."))
-        if choice == "cancel":
+
+        def settle(state, message):
+            # The prompt is answered. A repeat inside the grace re-shows what
+            # actually happened, never a success the handoff did not have.
             self.client._pending_site_choice = _SiteReplyContext(
-                pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("done", SITE_CANCELED))
+                pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, (state, message))
+            self.ui.set_state(state, message)
+
+        # Consume before acting: a repeated reply can never navigate twice, and
+        # an interrupted handoff is recalled as unverified, not as chosen.
+        self.client._pending_site_choice = _SiteReplyContext(
+            pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("error", SITE_UNVERIFIED))
+        if choice in ("cancel", "unclear"):
             self._outcome(pending.turn, "cancelled")
-            self.ui.set_state("done", SITE_CANCELED)
+            settle("done", SITE_CANCELED if choice == "cancel" else SITE_UNCLEAR)
             return True
 
         def authorized():
@@ -616,8 +702,12 @@ class Flow:
                     and time.monotonic() < pending.expires_at)
 
         navigate = getattr(self.actions, "navigate", None)
-        if not authorized() or not callable(navigate):
-            self.ui.set_state("done", SITE_EXPIRED)
+        if not callable(navigate):
+            self._outcome(pending.turn, "failed")
+            settle("error", "Website navigation is unavailable.")
+            return True
+        if not authorized():
+            settle("done", SITE_EXPIRED)
             return True
         handed_off = _run_native(authorized, navigate, pending.choices[choice])
         if not current():
@@ -625,10 +715,12 @@ class Flow:
             return True
         if handed_off is not True:
             self._outcome(pending.turn, "failed")
-            self.ui.set_state("error", "Could not send the website to the browser.")
+            settle("error", SITE_FAILED)
             return True
         self._confirm_action(pending.receipt, current)
         self._outcome(pending.turn, "confirmed")
+        self.client._pending_site_choice = _SiteReplyContext(
+            pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("done", SITE_CHOSEN))
         self.ui.set_state("done", "Sent the website to the browser.")
         return True
 
@@ -713,7 +805,10 @@ class Flow:
                 self.ui.set_state("error", f"Could not find {target}.")
         elif kind in ("switch_app", "search", "read_selection"):
             if kind == "switch_app":
-                done = _run_native(current, self.actions.switch_app, target) is True
+                # Exact window grounding of an offered catalog name: a title
+                # that merely mentions it (a Notepad note about Chrome) never
+                # takes focus.
+                done = _run_native(current, self.actions.switch_app, target, exact=True) is True
                 failure = f"Could not find {target}."
             elif kind == "search":
                 done = _run_native(current, self.actions.search, target) is True

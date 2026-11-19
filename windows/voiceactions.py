@@ -123,6 +123,45 @@ def match_window(target, windows):
     return None
 
 
+# Processes whose window titles are whatever the running program says (a shell
+# can retitle its console to anything). Their titles never stand for an app.
+_TITLE_INELIGIBLE = frozenset({
+    "cmd", "powershell", "pwsh", "windowsterminal", "wt", "conhost", "openconsole", "mintty",
+    "wsl", "wslhost", "bash", "explorer",
+})
+_TITLE_APP_SUFFIX = re.compile(r"\s+[-\u2013\u2014]\s+")
+
+
+def grounded_window(target, windows):
+    """The window of the app ``target`` names exactly, or None.
+
+    For a routed Laya switch, whose target is an offered Start catalog name.
+    A window belongs to the app when its process image is the app (or a fixed
+    alias of it), or when its whole title, or the app segment a window title
+    ends with ("Secret plan - Word"), is exactly that name. A name anywhere
+    else in a title ("Chrome setup instructions - Notepad") never matches,
+    and console titles are never read as an app.
+    """
+    target = _normal(target) if isinstance(target, str) else ""
+    if not target:
+        return None
+    canonical = ALIASES.get(target, target)
+    variants = {target, canonical}
+    variants.update(alias for alias, name in ALIASES.items() if name == canonical)
+    windows = list(windows)
+    for hwnd, title, exe in windows:
+        if _normal(ntpath.splitext(ntpath.basename(exe or ""))[0]) in variants:
+            return hwnd
+    for hwnd, title, exe in windows:
+        if _normal(ntpath.splitext(ntpath.basename(exe or ""))[0]) in _TITLE_INELIGIBLE:
+            continue
+        title = title if isinstance(title, str) else ""
+        segments = _TITLE_APP_SUFFIX.split(title.strip())
+        if _normal(title) in variants or _normal(segments[-1]) in variants:
+            return hwnd
+    return None
+
+
 def search_url(q):
     return "https://www.google.com/search?q=" + quote_plus(q)
 
@@ -744,8 +783,8 @@ class Actions:
 
         Only Start catalog display names and the fixed aliases above are
         offered; window titles and other window text never leave the helper.
-        An app counts as open when ``match_window`` (what ``switch_app`` uses)
-        finds a window for it.
+        An app counts as open when ``grounded_window`` (what a routed
+        ``switch_app(exact=True)`` uses) finds a window for it.
         """
         self.refresh_apps()
 
@@ -764,12 +803,24 @@ class Actions:
             windows = list(self.desktop.windows())
         except Exception:  # noqa: BLE001  (no enumeration: nothing to switch to)
             windows = []
-        open_names = tuple(name for name in apps if windows and match_window(name, windows) is not None)
+        open_names = tuple(name for name in apps if windows and grounded_window(name, windows) is not None)
         return tuple(apps), open_names
 
-    def switch_app(self, target):
-        hwnd = match_window(target, self.desktop.windows())
-        return bool(hwnd and self.desktop.focus(hwnd))
+    def switch_app(self, target, *, exact=False):
+        """Focus ``target``'s window. ``exact`` grounds a routed catalog name.
+
+        The clip's revocation check is read once and asked again after the
+        window enumeration, immediately before focus: a capture that was
+        superseded while windows were listed never moves the foreground.
+        """
+        guard = action_guard.get()
+        if not _allowed(guard):
+            return False
+        windows = self.desktop.windows()
+        hwnd = grounded_window(target, windows) if exact else match_window(target, windows)
+        if not hwnd or not _allowed(guard):
+            return False
+        return bool(self.desktop.focus(hwnd))
 
     def search(self, query):
         (self.opener or os.startfile)(search_url(query))

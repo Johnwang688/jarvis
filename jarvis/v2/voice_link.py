@@ -130,6 +130,10 @@ class VoiceLink:
         self._laya = None
         self._feedback = route_feedback
         self._laya_lock = threading.Lock()
+        # True only between a successful start() and the next stop(), changed
+        # under both locks. A router is never made outside it, so a handler
+        # still finishing after stop() cannot start a worker nobody will close.
+        self._laya_open = False
         self._laya_issue = ""
         self._laya_helper = None  # None until the active helper pings with features
         self._voice_chat = getattr(daemon, "voice_chat", None)
@@ -386,6 +390,8 @@ class VoiceLink:
 
     def _laya_router(self):
         with self._laya_lock:
+            if not self._laya_open:
+                raise RuntimeError("Voice link stopped")
             if self._laya is None:
                 if self._laya_factory is not None:
                     self._laya = self._laya_factory()
@@ -735,6 +741,8 @@ class VoiceLink:
             self.address = server.getsockname()
             self.port = self.address[1]
             self.status = "Listening."
+            with self._laya_lock:
+                self._laya_open = True
             self._thread = threading.Thread(target=self._accept, args=(server,),
                                             name="jarvis-voice-link", daemon=True)
             self._thread.start()
@@ -748,14 +756,18 @@ class VoiceLink:
             self._end_subscriptions_locked()
             self.address = None
             self.status = "Stopped."
+            # Detach the router atomically with the server: a route still in a
+            # handler gets no new router, and a start() racing this stop gets
+            # a fresh one rather than this one's closed state.
+            with self._laya_lock:
+                self._laya_open = False
+                router, self._laya = self._laya, None
         if server:
             _shutdown(server)
         for conn in sockets:
             _shutdown(conn)
         if self._thread:
             self._thread.join(1)
-        with self._laya_lock:
-            router, self._laya = self._laya, None
         if router is not None:
             try:
                 router.close()

@@ -455,8 +455,11 @@ class Agent:
                     block_right = False
                 if press:
                     ctrl_d = True
-                    if machine.state == "hold":
-                        desktop_capture = True  # Right Ctrl joined by D
+                    if machine.state in ("hold", "toggle"):
+                        # Right Ctrl joined by D, or Ctrl+D ending a Right Ctrl
+                        # toggle: either way the clip is one dictation capture,
+                        # never an assistant command.
+                        desktop_capture = True
                 if ctrl_d:
                     # A fast tap can already be up by the time WM_HOTKEY is
                     # dequeued. Give the machine one down edge in that case.
@@ -532,7 +535,7 @@ class Agent:
 
     def network(self):
         client = None
-        retired_profile_labels = ()
+        retired_choices = ()
         stop_requested = getattr(self, "stop_requested", None)
         profile_cancelled = getattr(self, "profile_cancelled", None)
         delay, last_ping, reported_wake = 1.0, 0.0, None
@@ -548,10 +551,11 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
-                        if retired_profile_labels:
-                            # Carry only reply recognition across a reconnect.
-                            client._pending_chrome_profile = retired_profile_labels
-                            retired_profile_labels = ()
+                        if retired_choices:
+                            # Carry only reply recognition (Chrome profile and
+                            # website prompts) across a reconnect.
+                            Flow.carry_choices(client, retired_choices)
+                            retired_choices = ()
                         delay, last_ping, reported_wake = 1.0, 0.0, None
                         if hasattr(self, "online"):
                             # Drop anything captured during the failed/offline interval.
@@ -588,7 +592,7 @@ class Agent:
                     except LinkError:
                         if hasattr(self, "online"):
                             self.online.clear()
-                        retired_profile_labels = Flow.retire_profile_choice(client)
+                        retired_choices = Flow.retire_choices(client)
                         client.close()
                         client = None
                         self.discard_clips("Jarvis isn't running")
@@ -665,7 +669,7 @@ class Agent:
                     self.show(generation, str(exc), True)
                     if hasattr(self, "online"):
                         self.online.clear()
-                    retired_profile_labels = Flow.retire_profile_choice(client)
+                    retired_choices = Flow.retire_choices(client)
                     client.close()
                     client = None
                     self.discard_clips("Jarvis isn't running")

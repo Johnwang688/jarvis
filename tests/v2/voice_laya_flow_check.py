@@ -20,10 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.v2 import voice_link_va245_impl_check as fixture
 from jarvis.v2 import laya_routing, voice_link
 from jarvis.v2.route_feedback import RouteFeedback
-from windows import voice_agent, voicetype, voicewire
+from windows import voice_agent, voiceactions, voiceflow, voicetype, voicewire
 from windows.voiceactions import Actions, LaunchStatus
-from windows.voiceflow import (ASSISTANT_UPDATE, CONVERSATION_ONLY, ROUTE_UNAVAILABLE, SITE_EXPIRED,
-                               Flow)
+from windows.voiceflow import (ASSISTANT_UPDATE, CONVERSATION_ONLY, ROUTE_UNAVAILABLE, SITE_CHOSEN,
+                               SITE_EXPIRED, SITE_FAILED, SITE_UNCLEAR, Flow)
 
 ROUTE = "jarvis.v2.laya_service.LayaRouter.route"
 EITHER = "Show me either nasa.gov or noaa.gov"
@@ -240,6 +240,164 @@ class Choices(Paired):
         self.assertEqual(self.actions.navigate.call_count, 1)  # the active offer survives a stale clip
 
 
+    def test_only_whole_affirmative_forms_select(self):
+        choices = ("https://nasa.gov", "https://noaa.gov")
+        for reply, want in (("the second one, please", 1), ("Jarvis, first", 0), ("noaa.gov", 1),
+                            ("noaa dot gov", 1), ("open noaa.gov please", 1), ("the noaa site", 1),
+                            ("go with the first one", 0), ("https://nasa.gov", 0), ("www.nasa.gov", 0),
+                            ("nasa", 0), ("cancel", "cancel"), ("neither", "cancel"),
+                            ("don't open noaa.gov", "unclear"), ("Don’t open noaa.gov", "unclear"),
+                            ("not the second one", "unclear"), ("no, the second one", "unclear"),
+                            ("not nasa", "unclear"), ("noaa.gov noaa.gov", "unclear"),
+                            ("the second one the second one", "unclear"), ("first or second", "unclear"),
+                            ("nasa or noaa", "unclear"), ("open noaa.gov instead of nasa.gov", "unclear"),
+                            ("I would rather you didn't open the noaa website at all today", "unclear"),
+                            ("what time is it", None),
+                            ("Talk me through the difference between nasa.gov and noaa.gov", None)):
+            with self.subTest(reply=reply):
+                self.assertEqual(voiceflow._site_reply(reply, choices), want)
+
+    @patch(ROUTE)
+    def test_negated_or_repeated_replies_never_navigate_or_route(self, route):
+        for reply in ("don't open noaa.gov", "Jarvis, not the second one", "no, the second one",
+                      "noaa.gov noaa.gov", "first or second"):
+            with self.subTest(reply=reply):
+                self.offer(route)
+                route.reset_mock()
+                # Were it routed, the daemon would ground this site from the words.
+                route.return_value = decision("navigate", "https://noaa.gov")
+                self.clip("assistant", reply)
+                self.ui.set_state.assert_called_with("done", SITE_UNCLEAR)
+                # The prompt is settled: a plain choice now changes nothing either.
+                self.clip("assistant", "the second one")
+                self.ui.set_state.assert_called_with("done", SITE_UNCLEAR)
+                route.assert_not_called()
+        self.actions.navigate.assert_not_called()
+        self.assertEqual(self.notices(), [])
+        self.assertTrue(all(t["outcomes"] == ["clarified", "cancelled"] for t in self.turns()))
+
+    @patch(ROUTE)
+    def test_negated_repeat_after_a_choice_stays_local(self, route):
+        self.offer(route)
+        self.clip("assistant", "the second one")
+        self.actions.navigate.assert_called_once_with("https://noaa.gov")
+        route.reset_mock()
+        route.return_value = decision("navigate", "https://noaa.gov")
+        for reply in ("don't open noaa.gov", "noaa.gov noaa.gov", "Jarvis, the second one"):
+            self.clip("assistant", reply)
+            self.ui.set_state.assert_called_with("done", SITE_CHOSEN)
+        route.assert_not_called()
+        self.actions.navigate.assert_called_once()
+        self.assertEqual(len(self.notices()), 1)
+
+    @patch(ROUTE)
+    def test_failed_or_expired_handoff_repeat_reports_what_happened(self, route):
+        self.offer(route)
+        self.actions.navigate.return_value = False
+        self.clip("assistant", "the second one")
+        self.ui.set_state.assert_called_with("error", SITE_FAILED)
+        self.actions.navigate.return_value = True
+        route.reset_mock()
+        self.clip("assistant", "the second one")
+        self.ui.set_state.assert_called_with("error", SITE_FAILED)  # never "already chosen"
+        self.assertNotIn(("done", SITE_CHOSEN), [c.args for c in self.ui.set_state.call_args_list])
+        route.assert_not_called()
+        self.actions.navigate.assert_called_once()
+        self.assertEqual(self.notices(), [])
+        turn, = self.turns()
+        self.assertEqual(turn["outcomes"], ["clarified", "failed"])
+
+        self.offer(route)  # an offer that lapses while its reply is checked
+        now = [time.monotonic()]
+
+        def lapse():
+            now[0] += 20
+            return True
+        self.flow.can_act = lapse
+        with patch.object(voiceflow, "time", SimpleNamespace(monotonic=lambda: now[0])):
+            self.clip("assistant", "the first one")
+            self.ui.set_state.assert_called_with("done", SITE_EXPIRED)
+            self.flow.can_act = lambda: self.allowed
+            self.clip("assistant", "the first one")
+        self.ui.set_state.assert_called_with("done", SITE_EXPIRED)
+        self.actions.navigate.assert_called_once()
+
+    def network_agent(self, clips):
+        agent = voice_agent.Agent.__new__(voice_agent.Agent)
+        agent.done, agent.online = threading.Event(), threading.Event()
+        agent.stop_requested, agent.profile_cancelled = threading.Event(), threading.Event()
+        agent.recording, agent.flow_running = threading.Event(), threading.Event()
+        agent.generation_lock, agent.generation, agent.wake = threading.Lock(), 1, None
+        agent.overlay, agent.player = self.ui, self.player
+        agent.host, agent.port, agent.key_path = "unused", 0, "unused"
+        agent.user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
+        agent.discard_clips = Mock()
+        agent.clips = Mock(spec=queue.Queue)
+        agent.clips.get.side_effect = clips(agent)
+        return agent
+
+    @patch(ROUTE)
+    def test_reconnect_carries_website_recognition_without_authority(self, route):
+        routed, made = [], []
+
+        def words(wav, **_):
+            if wav == b"drop":
+                raise voicewire.LinkError("The voice link disconnected.")
+            return {"text": wav.decode()}
+
+        def connect(*_, **__):
+            # Each reconnect is a new paired connection to the real daemon.
+            client = self.client()
+            self.enterContext(patch.object(client, "connect"))
+            self.enterContext(patch.object(client, "dictate", side_effect=words))
+            made.append(client)
+            return client
+
+        def clips(agent):
+            route.return_value = TWO_SITES
+            yield 1, EITHER.encode(), "assistant"
+            self.assertIsInstance(made[0]._pending_site_choice, voiceflow._SiteChoice)
+            route.reset_mock()
+            route.side_effect = lambda *a, **k: routed.append(a) or decision("navigate", "https://noaa.gov")
+            yield 1, b"drop", "assistant"  # the link fails with the offer active
+            # Reconnected and negotiated: the new connection could route and act.
+            self.assertEqual((len(made), made[-1].laya_routing), (2, True))
+            for words in (b"the second one", b"don't open noaa.gov", b"noaa.gov"):
+                yield 1, words, "assistant"
+            agent.done.set()
+            raise queue.Empty
+
+        agent = self.network_agent(clips)
+        with patch.object(voice_agent, "Client", side_effect=connect), \
+                patch.object(voice_agent, "load_key", return_value=b"key"), \
+                patch.object(voice_agent, "Typer", return_value=self.typer), \
+                patch.object(voice_agent, "Actions", return_value=self.actions):
+            agent.network()
+        first, second = made
+        self.assertIsNot(first, second)
+        self.assertIsInstance(second._pending_site_choice, voiceflow._SiteReplyContext)
+        self.assertEqual(second._pending_site_choice.choices, ("https://nasa.gov", "https://noaa.gov"))
+        self.assertEqual(routed, [])
+        route.assert_not_called()
+        self.actions.navigate.assert_not_called()
+        self.typer.run.assert_not_called()
+        self.ui.set_state.assert_called_with("done", SITE_EXPIRED)
+        self.assertEqual(self.notices(), [])
+
+    def test_carry_drops_anything_with_authority(self):
+        target = SimpleNamespace(_pending_site_choice=None, _pending_chrome_profile=None)
+        active = voiceflow._SiteChoice("s", ("https://nasa.gov", "https://noaa.gov"), "receipt", "turn",
+                                       time.monotonic() + 9)
+        profile = voiceflow._ProfileChoice("s", ("Work",), "receipt", time.monotonic() + 9)
+        Flow.carry_choices(target, (profile, active))
+        self.assertEqual((target._pending_site_choice, target._pending_chrome_profile), (None, None))
+        source = SimpleNamespace(_pending_site_choice=active, _pending_chrome_profile=profile, session="s")
+        carried = Flow.retire_choices(source)
+        Flow.carry_choices(target, carried)
+        self.assertIsInstance(target._pending_site_choice, voiceflow._SiteReplyContext)
+        self.assertIsInstance(target._pending_chrome_profile, voiceflow._ProfileReplyContext)
+
+
 class Dispatch(Paired):
     @patch(ROUTE, return_value=decision("ask"))
     def test_comparison_answers_in_the_selected_chat(self, route):
@@ -307,7 +465,7 @@ class Dispatch(Paired):
             with patch(ROUTE, return_value=made):
                 self.clip("assistant", text)
         self.actions.open_app.assert_called_once_with("Google Chrome", exact=True)
-        self.actions.switch_app.assert_called_once_with("Calendar")
+        self.actions.switch_app.assert_called_once_with("Calendar", exact=True)
         self.actions.search.assert_called_once_with("viola tuning")
         self.player.play.assert_called_once_with(b"test WAV")
         self.assertEqual(len(self.notices()), 4)
@@ -385,6 +543,13 @@ class Helper(unittest.TestCase):
         self.assertEqual(self.run_poll([(0, right, False), (20, right | {voice_agent.VK_D}, True),
                                         (1000, right | {voice_agent.VK_D}, False), (1600, right, False),
                                         (2100, set(), False)]), [("dictation", 3)])
+        # Ctrl+D pressed to end a Right Ctrl toggle recording: the clip dictates.
+        self.assertEqual(self.run_poll([(0, right, False), (100, set(), False),
+                                        (600, left | {voice_agent.VK_D}, True), (800, set(), False)]),
+                         [("dictation", 2)])
+        # A Right Ctrl toggle ended by Right Ctrl stays an assistant command.
+        self.assertEqual(self.run_poll([(0, right, False), (100, set(), False), (600, right, False),
+                                        (800, set(), False)]), [("assistant", 2)])
 
     def bare(self):
         a = voice_agent.Agent.__new__(voice_agent.Agent)
@@ -410,6 +575,107 @@ class Helper(unittest.TestCase):
         a.finish_capture()
         self.assertEqual(upload.mode, "assistant")
 
+    def poll_real_capture(self, frames, *, streamed):
+        """The production poller and finish_capture, with only Win32 and audio faked."""
+        a = self.bare()
+        a.capture_mode, a.client, a.upload, a.capture_online = "hotkey", None, None, False
+        a.desktop_key = Mock(hud=False)
+        step = 0
+        uploads = []
+
+        def start_capture():
+            a.recording.set()
+            with a.capture_lock:
+                a.capture_online, a.chunks, a.frames = True, [b"\1\0" * 100], 100
+                if streamed:
+                    a.upload = voicewire.Capture()
+                    uploads.append(a.upload)
+                    a.clips.put_nowait((a.generation, a.upload, "hotkey"))
+        a.start_capture = start_capture
+
+        def tick(_):
+            nonlocal step
+            step += 1
+            if step >= len(frames):
+                a.done.set()
+        a.done.wait = tick
+        a.desktop_key.poll.side_effect = lambda: frames[step][2]
+        a.user32 = SimpleNamespace(GetAsyncKeyState=lambda k: 0x8000 if k in frames[step][1] else 0)
+        with patch.object(voice_agent.time, "monotonic_ns", lambda: frames[step][0] * 1_000_000):
+            a.poll()
+        items = []
+        while not a.clips.empty():
+            items.append(a.clips.get_nowait())
+        return items, uploads
+
+    def test_hotkey_poller_dictates_across_chord_and_toggle_for_queued_and_streamed_captures(self):
+        right = {voice_agent.VK_RCONTROL, voice_agent.VK_CONTROL}
+        left = {voice_agent.VK_LCONTROL, voice_agent.VK_CONTROL}
+        d = voice_agent.VK_D
+        gestures = {
+            "toggle ended by Ctrl+D": ([(0, right, False), (100, set(), False), (600, left | {d}, True),
+                                       (800, set(), False)], "dictation"),
+            "Right Ctrl joined by D": ([(0, right, False), (20, right | {d}, True), (1000, right | {d}, False),
+                                       (1600, right, False), (2100, set(), False)], "dictation"),
+            "Ctrl+D hold": ([(0, left, False), (20, left | {d}, True), (1000, left | {d}, False),
+                             (1250, set(), False)], "dictation"),
+            "Right Ctrl hold": ([(0, right, False), (900, set(), False), (1000, set(), False)], "assistant"),
+        }
+        for name, (frames, mode) in gestures.items():
+            for streamed in (False, True):
+                with self.subTest(gesture=name, streamed=streamed):
+                    items, uploads = self.poll_real_capture(frames, streamed=streamed)
+                    if streamed:
+                        upload, = uploads
+                        self.assertEqual([item[1] for item in items], [upload])
+                        self.assertFalse(upload.cancelled)
+                        self.assertEqual(upload.mode, mode)
+                    else:
+                        clip, = items
+                        self.assertEqual(clip[2], mode)
+
+    def test_laya_switch_grounds_the_app_never_a_title_mention(self):
+        notepad = (1, "Chrome setup instructions - Notepad", r"C:\Windows\notepad.exe")
+        console = (2, "Google Chrome", r"C:\Windows\System32\cmd.exe")
+        folder = (3, "Chrome", r"C:\Windows\explorer.exe")
+        chrome = (4, "New Tab - Google Chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+        word = (5, "Chrome notes - Word", r"C:\Office\WINWORD.EXE")
+        calc = (6, "Calculator", r"C:\Windows\ApplicationFrameHost.exe")
+        shown = [notepad, console, folder]
+        desktop = SimpleNamespace(windows=lambda: list(shown), focus=Mock(return_value=True))
+        actions = Actions(desktop=desktop, runner=Mock(returncode=1))
+        actions.refreshed = time.monotonic()
+        actions.apps = [{"name": "Google Chrome", "id": "c"}, {"name": "Word", "id": "w"},
+                        {"name": "Calculator", "id": "k"}]
+        for name in ("Chrome", "Google Chrome", "chrome"):
+            self.assertFalse(actions.switch_app(name, exact=True), name)
+        self.assertEqual(actions.route_names()[1], ())
+        desktop.focus.assert_not_called()
+        self.assertTrue(actions.switch_app("Chrome"))  # the unrouted legacy matcher is unchanged
+        desktop.focus.reset_mock()
+        shown[:] = [notepad, word, calc, chrome]
+        self.assertEqual(actions.route_names()[1], ("Google Chrome", "Word", "Calculator", "chrome"))
+        for name, hwnd in (("Chrome", 4), ("Word", 5), ("Calculator", 6)):
+            desktop.focus.reset_mock()
+            self.assertTrue(actions.switch_app(name, exact=True))
+            desktop.focus.assert_called_once_with(hwnd)
+
+    def test_switch_rechecks_the_guard_after_enumeration_before_focus(self):
+        allowed = [True]
+
+        def enumerate_windows():
+            allowed[0] = False  # a newer capture arrives while windows are listed
+            return [(4, "New Tab - Google Chrome", r"C:\Chrome\chrome.exe")]
+        desktop = SimpleNamespace(windows=enumerate_windows, focus=Mock(return_value=True))
+        actions = Actions(desktop=desktop, runner=Mock(returncode=1))
+        for exact in (True, False):
+            allowed[0] = True
+            with voiceactions.action_scope(lambda: allowed[0]):
+                self.assertFalse(actions.switch_app("Chrome", exact=exact))
+        with voiceactions.action_scope(lambda: False):
+            self.assertFalse(actions.switch_app("Chrome", exact=True))
+        desktop.focus.assert_not_called()
+
     def test_route_names_offer_catalog_names_never_window_titles(self):
         desktop = SimpleNamespace(windows=lambda: [
             (1, "Secret plan - Word", r"C:\Office\WINWORD.EXE"),
@@ -423,6 +689,115 @@ class Helper(unittest.TestCase):
         self.assertEqual(open_names, ("Google Chrome", "Word", "chrome"))
         self.assertNotIn("Secret", repr((apps, open_names)))
         self.assertNotIn("private@", repr((apps, open_names)))
+
+
+class RouterLifecycle(Paired):
+    """The daemon's lazily made Laya router never outlives VoiceLink.stop()."""
+
+    def test_no_router_is_made_after_stop_returns(self):
+        with patch("jarvis.v2.laya_service.LayaRouter") as router_class:
+            self.link.stop()
+            self.assertIsNone(self.link._laya_decide("assistant", "open youtube.com", (), ()))
+            router_class.assert_not_called()
+        self.assertIsNone(self.link._laya)
+
+    def test_router_made_while_stop_runs_is_closed_and_not_replaced(self):
+        entered, release, made = threading.Event(), threading.Event(), []
+
+        def factory():
+            entered.set()
+            release.wait(5)
+            router = Mock()
+            router.route.return_value = decision("ask")
+            made.append(router)
+            return router
+        self.link._laya_factory = factory
+        routing = threading.Thread(target=self.link._laya_decide, args=("assistant", "hi", (), ()))
+        routing.start()
+        self.assertTrue(entered.wait(5))
+        stopping = threading.Thread(target=self.link.stop)
+        stopping.start()
+        release.set()
+        routing.join(5)
+        stopping.join(5)
+        self.assertFalse(routing.is_alive() or stopping.is_alive())
+        router, = made
+        router.close.assert_called_once_with()
+        self.assertIsNone(self.link._laya)
+        # A handler that reaches the router after stop gets none at all.
+        self.assertIsNone(self.link._laya_decide("assistant", "hi", (), ()))
+        self.assertEqual(len(made), 1)
+
+    def test_route_in_flight_across_stop_cannot_restart_a_worker(self):
+        started, release = threading.Event(), threading.Event()
+        workers = []
+
+        def classify(router, transcript):
+            started.set()
+            release.wait(5)
+            return LayaRouterReal._classify(router, transcript)
+
+        from jarvis.v2.laya_service import LayaRouter as LayaRouterReal
+        with patch("jarvis.v2.laya_service._launch_worker", side_effect=lambda: workers.append(1) or Mock()), \
+                patch.object(LayaRouterReal, "_classify", classify):
+            routing = threading.Thread(target=self.link._laya_decide, args=("assistant", "what now", (), ()))
+            routing.start()
+            self.assertTrue(started.wait(5))
+            self.link.stop()
+            release.set()
+            routing.join(5)
+            self.assertFalse(routing.is_alive())
+            self.assertIsNone(self.link._laya_decide("assistant", "what now", (), ()))
+        self.assertEqual(workers, [])
+
+    def test_restart_after_stop_routes_with_a_fresh_router(self):
+        made = []
+
+        def factory():
+            router = Mock()
+            router.route.return_value = decision("ask")
+            made.append(router)
+            return router
+        self.link._laya_factory = factory
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), ())["kind"], "ask")
+        self.link.stop()
+        made[0].close.assert_called_once_with()
+        self.link.port = 0
+        self.assertTrue(self.link.start())
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), ())["kind"], "ask")
+        self.assertEqual(len(made), 2)
+        made[1].close.assert_not_called()
+        # The restarted link serves Right Ctrl commands end to end.
+        wire = self.client()
+        wire.ping()
+        self.assertTrue(wire.laya_routing)
+        self.assertEqual(wire.laya_route("what is new", "assistant")["kind"], "ask")
+
+    def test_concurrent_restart_keeps_the_new_router_open(self):
+        # A start() that runs while stop() is still shutting sockets down must
+        # keep its open router state: stop() detached its own router already.
+        self.link._laya_factory = lambda: Mock(route=Mock(return_value=decision("ask")))
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), ())["kind"], "ask")
+        old_router = self.link._laya
+        shutdown, restarted = voice_link._shutdown, []
+
+        def restart_during_shutdown(sock):
+            if not restarted:
+                restarted.append(True)
+                self.link.port = 0
+                starting = threading.Thread(target=self.link.start)
+                starting.start()
+                starting.join(5)
+                self.assertIsNotNone(self.link.address)
+            shutdown(sock)
+        with patch.object(voice_link, "_shutdown", side_effect=restart_during_shutdown):
+            self.link.stop()
+        old_router.close.assert_called_once_with()
+        self.assertEqual(restarted, [True])
+        self.assertIsNotNone(self.link.address)
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), ())["kind"], "ask")
+        self.assertIsNot(self.link._laya, old_router)
+        self.link._laya.close.assert_not_called()
 
 
 if __name__ == "__main__":
