@@ -35,6 +35,7 @@ from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
 from jarvis.v2.browser import drive
 from jarvis.v2.browser.drive_state import DriveTurn
 from jarvis.v2.daemon import APIError, Daemon
+from jarvis.v2.hud_sensitive import Reports
 from jarvis.v2.model import ProviderName, Role
 from jarvis.v2.provider import Decision
 from jarvis.v2.providers import claude, codex, fastpath
@@ -90,6 +91,8 @@ class Review(unittest.TestCase):
         self.daemon = object.__new__(Daemon)
         self.daemon._lock = threading.RLock()
         self.daemon._stopping = False
+        self.daemon.hud_sensitive_reports = Reports()
+        self.addCleanup(self.daemon.hud_sensitive_reports.close)
         self.service = window.WindowDrive(self.daemon)
         self.service.install()
         self.addCleanup(self.service.stop)

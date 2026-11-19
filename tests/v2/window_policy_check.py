@@ -127,9 +127,11 @@ class Actions(unittest.TestCase):
 class Hud(unittest.TestCase):
     card = Rect(100, 100, 300, 200)
 
-    def test_nothing_sensitive_leaves_the_hud_open(self):
-        self.assertEqual(wp.hud_view(0, None, None), (DRIVABLE, ()))
-        self.assertEqual(wp.hud_view(0, [self.card, None], None), (DRIVABLE, ()))
+    def test_zero_requires_a_readable_empty_scan(self):
+        self.assertEqual(wp.hud_view(0, [], 0.0), (DRIVABLE, ()))
+        for scan in (None, [self.card], [self.card, None], "", b"", bytearray(), {}, 0):
+            with self.subTest(scan=scan):
+                self.assertEqual(wp.hud_view(0, scan, 0.0), (PROTECTED, ()))
 
     def test_fresh_masks_keep_the_rest_drivable(self):
         state, masks = wp.hud_view(1, [self.card], 0.2)

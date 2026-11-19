@@ -2015,6 +2015,22 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
+    if parts == ["hud", "sensitive"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if not config.own_host_header(handler.headers.get("Host", ""), daemon.face_port):
+            fail(403, "untrusted Host")
+        if method != "POST":
+            fail(405, "method not allowed")
+        _object(query, ())
+        fields = ("client_id", "cards", "editors")
+        body = _object(handler._body(), fields, fields)
+        client = body["client_id"]
+        if not isinstance(client, str) or not re.fullmatch("[0-9a-f]{32}", client):
+            fail(400, "invalid HUD client id")
+        if not daemon.hud_sensitive_reports.record(client, body["cards"], body["editors"]):
+            fail(400, "cards and editors must be whole numbers from 0 to 64")
+        return 200, {"ok": True}
     if parts == ["voice", "chat-target"]:
         from .projects import owner_only
         owner_only(handler, daemon)

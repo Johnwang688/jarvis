@@ -77,6 +77,7 @@ import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { driving } from "./state/driving";
 import { AGENT_BATCHES_MAX, AGENT_OPEN_MAX, agentBrowserUrl, agentPageMayReuse, agentRequestId, type AgentAsk, type AgentBatch } from "./lib/agentpanes";
 import { WINDOW_ID } from "./lib/windowId";
+import { startHudSensitiveReports } from "./lib/hudSensitive";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, GeneralSettings, RoutingSettings, VoicePicker } from "./components/Pickers";
@@ -275,6 +276,7 @@ function stripProject(at: State, spec: PaneSpec, pane: PaneNo): string | null {
 }
 
 export default function App() {
+  useEffect(startHudSensitiveReports, []);
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
   // centre's panes, their views and the bottom panel (2026-10-09):
