@@ -561,7 +561,7 @@ class Flow:
             if how == "literal":
                 self.typer.run([("text", words)])
             else:
-                self._type(words)
+                self.typer.run(plan(words))
         self.ui.set_state("done")
 
     def _speak_prompt(self, text, current):
