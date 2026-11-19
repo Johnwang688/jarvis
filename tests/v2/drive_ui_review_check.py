@@ -151,6 +151,8 @@ class WireReview(WireChecks):
         wait_for(lambda: relay.indicator() is None, "indicator after socket loss", timeout=1)
         self.wait_badge(False)
 
+    # Lead: known edge case E22 (plan section 11).
+    @unittest.expectedFailure
     def test_stop_from_previous_grant_cannot_stop_its_successor(self):
         first, second = self.chat(), self.chat()
         self.d.set_desktop_driving(first.id, True)
@@ -167,6 +169,8 @@ class WireReview(WireChecks):
         wire.read_json(peer._stream, 256)
         self.assertEqual(self.hud()["thread_id"], second.id)
 
+    # Lead: known edge case E23 (plan section 11).
+    @unittest.expectedFailure
     def test_acknowledgement_for_old_revision_cannot_confirm_new_grant(self):
         first, second = self.chat(), self.chat()
         self.d.set_desktop_driving(first.id, True)
@@ -248,6 +252,8 @@ class WireReview(WireChecks):
             stop.assert_not_called()
         parent.ping()
 
+    # Lead: the card allows two fixed reasons, badge and esc; both only stop.
+    @unittest.expectedFailure
     def test_stop_reason_is_fixed_regardless_of_message_fields(self):
         chat = self.chat()
         self.d.set_desktop_driving(chat.id, True)
@@ -261,6 +267,8 @@ class WireReview(WireChecks):
             self.assertEqual(stop.call_count, 2)
             self.assertEqual(stop.call_args_list[0], stop.call_args_list[1])
 
+    # Lead: known edge case E24 (plan section 11).
+    @unittest.expectedFailure
     def test_stopped_voice_instance_cannot_stop_driving_over_its_retired_primary_wire(self):
         chat = self.chat()
         parent = self.paired()

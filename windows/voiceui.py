@@ -687,10 +687,15 @@ class DriveBadge:
 
     def _key_event(self, code, message, data):
         # Windows verification pending: KBDLLHOOKSTRUCT layout and forwarding every event.
-        if code == 0 and self.layout is not None and self.button and message in (0x100, 0x104):  # WM_[SYS]KEYDOWN
-            event = ctypes.cast(data, ctypes.POINTER(_KeyEvent)).contents
-            if driveui.physical_escape(event.key, event.flags, True):
-                self.stop("esc")
+        # The key is passed on whatever happens here: an exception that left
+        # this callback would leave the keyboard to chance (review, CU-3c).
+        try:
+            if code == 0 and self.layout is not None and self.button and message in (0x100, 0x104):  # WM_[SYS]KEYDOWN
+                event = ctypes.cast(data, ctypes.POINTER(_KeyEvent)).contents
+                if driveui.physical_escape(event.key, event.flags, True):
+                    self.stop("esc")
+        except Exception:
+            pass
         return self.api.user.CallNextHookEx(None, code, message, data)
 
     def _window_event(self, hwnd, message, wparam, lparam):
@@ -717,8 +722,8 @@ class DriveBadge:
     def _hide(self):
         self.layout = None
         # Windows verification pending: remove the hook and destroy both windows on the Tk thread.
-        if self.hook:
-            self.api.user.UnhookWindowsHookEx(self.hook)
+        if self.hook and self.api.user.UnhookWindowsHookEx(self.hook):
+            # A failed unhook keeps its handle so close() tries again.
             self.hook = None
         for hwnd in (self.button, self.panel):
             if hwnd:
