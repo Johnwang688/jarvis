@@ -416,7 +416,9 @@ class Review(unittest.TestCase):
         def action(fields):
             self.assertEqual(stat.S_IMODE(self.logfile.stat().st_mode), 0o600)
             row, = self.audit()
-            self.assertEqual(row["outcome"], "run")
+            # Lead's change 2026-11-19: while the input is being sent the row
+            # says "pending"; it becomes "run" only once the bridge answered.
+            self.assertEqual(row["outcome"], "pending")
             self.assertNotIn(TYPED, self.logfile.read_text())
             self.assertEqual(fields["text"], TYPED)
             return {"typed": True}
@@ -434,7 +436,8 @@ class Review(unittest.TestCase):
         self.responses["window_probe"] = Mock(side_effect=RuntimeError(INTERNAL))
         result = self.act("type", ref=EDIT, text=TYPED)
         self.assertEqual(self.actions(), [])
-        self.assertEqual([r["outcome"] for r in self.audit()], ["bridge-refused"], result)
+        # Lead's change 2026-11-19: an unexpected error is "failed", not a bridge refusal.
+        self.assertEqual([r["outcome"] for r in self.audit()], ["failed"], result)
 
     def test_08_failed_bridge_and_failed_audit_update_cannot_claim_run(self):
         self.snapshot()

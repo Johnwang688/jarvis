@@ -388,6 +388,7 @@ class WindowDrive:
                 raise Refused("The chat turn or snapshot changed. Inspect the window again.")
             if answer is not Decision.ALLOW:
                 return "asked-declined", "The user declined to run this. Ask what they would like instead."
+            record["asked"] = True
 
         return "pending", lambda: self.request("window_" + kind, thread, current=current,
                                                acting=True, window=window, expect=expected, **fields)
@@ -460,7 +461,7 @@ def _act(kind, window, purpose, risky, *, fault=None, **fields):
             return result
         try:
             result()
-            outcome, result = "run", COMPLETED
+            outcome, result = "asked-approved" if record.get("asked") else "run", COMPLETED
         except Refused as exc:
             outcome, result = "refused", _refusal(exc)
         except Exception as exc:

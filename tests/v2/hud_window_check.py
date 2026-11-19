@@ -204,7 +204,7 @@ class Checks(unittest.TestCase):
         self.assertFalse(card.allowlistable or card.grantable)
         self.assertEqual(self.requests[-1], ("window_click", "first",
                                             {"window": WINDOW, "ref": RISKY, "expect": SEND}))
-        self.assertEqual(self.log()[-1]["outcome"], "run")
+        self.assertEqual(self.log()[-1]["outcome"], "asked-approved")
         self.assertEqual(self.log()[-1]["group"], "send")
 
     def test_refs_cannot_be_invented_moved_or_reused(self):
