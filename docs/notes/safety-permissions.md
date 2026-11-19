@@ -3935,9 +3935,16 @@ shell rule now leaves out a path at or below
 profile, and resolving to itself (a link on the way gets no exception). The
 one glob allowed is `Users/*` in the profile's place with every later piece
 fixed, and only when every profile it can match passes the same check.
-Other extensions' storage and all else under `AppData` ask as before. Reads
-and writes are not told apart, so a write into the folder (its `tools` hold
-the toolchain and the device tool) no longer asks under this rule; running
-the device tool is still refused by the vex rule. Only the shell rule
+Other extensions' storage and all else under `AppData` ask as before.
+The exception is for reading (Opus review, 2026-11-19): only a segment whose
+program is on `_VEX_READERS` (ls, cat, head, tail, grep without `-R`, find
+without `-L`/`-exec`/`-delete`, `sed -n` with a print script, and the like),
+written bare, with no `..` piece and no substitution among its words, gets
+it. Any other program that names the folder asks as before, so nothing can
+be written there unasked: a write could plant a link (`ln -s ../github.auth
+V/l; cat V/l/token`), `tar -C V`/`env -C V`/`git -C V` move a relative
+operand into it, and `find -exec` runs anything. Pieces are plain ASCII
+names (no `@(…)` extglob, no letter that only folds to ASCII), and a shared
+folder (`Public`, `All Users`) that holds the path voids the glob. Only the shell rule
 changed: v1's file tools, `run_readonly`, v2's read tools and Codex's closed
 paths still refuse `AppData` whole. `tests/v2/vex_sdk_path_check.py`.

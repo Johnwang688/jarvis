@@ -39,7 +39,6 @@ class VexSdkPath(unittest.TestCase):
                 f"ls {self.one}/sdk/cpp/V5/ 2>&1",
                 f"ls {self.one}/sdk",
                 f"strings -a {self.one}/sdk/cpp/V5/libv5rt.a | grep -i '^vexTask' | sort -u",
-                f"ar x {self.one}/sdk/cpp/V5/libv5rt.a 2>&1",
                 f"grep -rn pressed {self.one}/sdk/cpp/V5/include",
                 f"find {self.one}/sdk -name '*.h'",
                 f"ls -d {self.any}/sdk/cpp/V5 2>/dev/null | head -1",
@@ -55,6 +54,12 @@ class VexSdkPath(unittest.TestCase):
     def test_everything_around_the_sdk_still_asks(self):
         for command in (
                 f"cat {self.one}/sdk/../tools/x",                   # any `..` gets no exception
+                f"ar x {self.one}/sdk/cpp/V5/libv5rt.a 2>&1",       # not on the readers' list
+                f"cp {self.one}/sdk/a.h /tmp/a.h",
+                f"touch {self.one}/sdk/new",
+                f"ln -s ../github.auth {self.one}/l",
+                f"sed -i s/a/b/ {self.one}/sdk/a.h",
+                f"timeout 5 cat {self.one}/sdk/a.h",                # a wrapper in front: asked
                 f"cat {self.one}/../github.auth/x",                 # out of the folder through `..`
                 f"cat {self.one}/sdk:{self.users}/Fixture/AppData/Roaming/secret/token",  # a second path
                 f"cat {self.one}/sdk={self.users}/Fixture/AppData/Roaming/secret/token",
