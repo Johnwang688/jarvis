@@ -531,26 +531,28 @@ class Review(unittest.TestCase):
              patch.object(inbox, "rows", return_value=[{"id": row, "detail": req.to_json()}]):
             return remote_answer.answer(handler, self.daemon, object(), "/fixture/answer", row, body)
 
-    def test_05_verified_phone_cannot_supply_the_required_hud_yes(self):
+    def test_05_verified_phone_can_supply_the_required_owner_yes(self):
+        # The lead changed the expectation on 2026-11-19.
         self.snapshot()
-        attempts = []
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                attempts = []
 
-        def present(req):
-            with self.assertRaises(ValueError):
-                broker.resolve_code(req.code, "allow")
-            for verified in (False, True):
-                status, data, _ = self.phone_answer(req, verified=verified)
-                attempts.append((verified, status, data))
-                if status == 200:
-                    return
-            broker.resolve(req.req_id, "deny", owner_verified=True)
+                def present(req):
+                    with self.assertRaises(ValueError):
+                        broker.resolve_code(req.code, "allow")
+                    attempts.append(self.phone_answer(req, verified=verified))
 
-        broker = self.broker(present)
-        result = self.act("click", ref=QUEUE)
-        self.assertEqual(len(attempts), 2, attempts)
-        self.assertEqual([op for op, _ in self.actions()], [],
-                         f"phone statuses {[(verified, status) for verified, status, _ in attempts]}; "
-                         f"tool returned {result!r}")
+                broker = self.broker(present)
+                result = self.act("click", ref=QUEUE)
+                self.assertEqual(len(attempts), 1, attempts)
+                self.assertEqual(attempts[0][0] == 200, verified, attempts)
+                if verified:
+                    self.assertEqual(result, COMPLETED)
+                    self.assertEqual([op for op, _ in self.actions()], ["window_click"])
+                else:
+                    self.assertIn("declined", result)
+                    self.assertEqual(self.actions(), [])
 
     def test_10_ordinary_phone_answers_still_use_both_authorities_and_deny(self):
         for verified, decision in ((False, "allow"), (True, "allow"), (False, "deny")):

@@ -386,7 +386,7 @@ class ApprovalRequest:
     cwd: str | None = None
     grantable: bool = True
     owner_initiated: bool = False
-    # Standard card presentation with the same verified yes as a private card.
+    # Standard card presentation with the same owner-verified yes as a private card.
     require_hud_answer: bool = False
     # Approval summaries (AS, approval_summary.py), display only, public
     # cards only, set by daemon code only and read by nothing that decides:
@@ -658,11 +658,11 @@ class PendingApprovals:
         `entry_for`. If that raises `NotAllowlistable` the approval still
         stands and no entry is minted — v1's rule, kept.
 
-        `owner_verified=True` is HUD authority (phone design PH-7, O-3): it
-        alone lets a HUD-only card be allowed. Exactly two kinds of caller
-        pass True: the HUD's own answer routes (the HUD listener's owner test
-        and its Host) and the phone's answer route after a fresh per-answer
-        passkey assertion while every §4.1 check holds (`remote_answer`).
+        `owner_verified=True` is required to allow private cards or cards with
+        `require_hud_answer` (phone design PH-7, O-3). Only the HUD's answer
+        routes (the HUD listener's owner test and its Host) and the phone's
+        answer route after a fresh per-answer passkey assertion while every
+        §4.1 check holds (`remote_answer`) pass True.
         Discord, tools and everything else leave it False
         (`tests/v2/remote_answer_check.py` greps the callers).
         """

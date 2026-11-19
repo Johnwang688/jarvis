@@ -1,6 +1,7 @@
 """Drive paired Windows windows from a current owner HUD chat."""
 from __future__ import annotations
 
+from dataclasses import replace
 import fcntl
 import json
 import os
@@ -32,9 +33,15 @@ UNAVAILABLE = "Refused: Windows window tools require a current owner HUD chat tu
 FRESH_SNAPSHOT = "Take a fresh snapshot of this window in this chat."
 COMPLETED = "Action completed. Take a fresh snapshot to see the result."
 LOG_REFUSED = "Refused: the desktop action log could not be written."
+LOG_OUTCOME_FAILED = "Error: The action outcome could not be recorded because the desktop action log could not be written."
+BRIDGE_REFUSED = "Refused: The window refused that action. Take a fresh snapshot and try again."
+BRIDGE_DISCONNECTED = "Error: The Windows bridge is not connected."
+ACTION_FAILED = "Error: The action could not be completed."
 _WINDOW_ID = re.compile(r"[0-9a-f]{16}")
+_WINDOW_REF = re.compile(r"[0-9a-f]{16}-e[1-9][0-9]*")
 _HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
-_OUTCOME_WIDTH = len(json.dumps("bridge-refused"))
+_DETAIL_LIMIT = 200
+_TYPED_WITHHELD = "[typed text withheld]"
 _service = None
 
 WindowId = Annotated[str, "Window id from hud_window_list"]
@@ -94,8 +101,15 @@ def _check(window, kind, fields):
         fields["keys"] = list(keys)
 
 
-def _audit_outcome(outcome):
-    return json.dumps(outcome).ljust(_OUTCOME_WIDTH).encode()
+def _audit_outcome(outcome, detail=""):
+    suffix = json.dumps(outcome)
+    if detail:
+        suffix += ', "outcome_detail": ' + json.dumps(detail)
+    return suffix.encode()
+
+
+# Ensure enough room for 200 characters escaped as JSON surrogate pairs.
+_OUTCOME_WIDTH = len(_audit_outcome("bridge-refused", "\U00010000" * _DETAIL_LIMIT))
 
 
 def _append_audit(record, outcome):
@@ -107,10 +121,12 @@ def _append_audit(record, outcome):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
             raise OSError("unsafe desktop action log")
         os.fchmod(fd, 0o600)
-        # Reserve a complete line before sending input. Its fixed-width outcome
-        # can be corrected after a bridge refusal without moving other records.
+        # Reserve a complete line before sending input, with room for the result.
         prefix = (json.dumps(record)[:-1] + ', "outcome": ').encode()
-        line = prefix + _audit_outcome(outcome) + b"}\n"
+        suffix = _audit_outcome(outcome)
+        if outcome == "pending":
+            suffix = suffix.ljust(_OUTCOME_WIDTH)
+        line = prefix + suffix + b"}\n"
         fcntl.flock(fd, fcntl.LOCK_EX)
         offset = os.lseek(fd, 0, os.SEEK_END)
         try:
@@ -127,12 +143,66 @@ def _append_audit(record, outcome):
         raise
 
 
+def _update_audit(fd, offset, outcome, detail):
+    suffix = _audit_outcome(outcome, detail).ljust(_OUTCOME_WIDTH)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        if os.pwrite(fd, suffix, offset) != len(suffix):
+            raise OSError("short desktop action log update")
+        os.fsync(fd)
+    except OSError:
+        pending = _audit_outcome("pending").ljust(_OUTCOME_WIDTH)
+        os.lseek(fd, offset, os.SEEK_SET)
+        while pending:
+            written = os.write(fd, pending)
+            if not written:
+                raise OSError("short desktop action log rollback")
+            pending = pending[written:]
+        os.fsync(fd)
+        raise
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _withhold_text(value, text, placeholder):
+    if text and text.casefold() in value.casefold():
+        return placeholder
+    return value
+
+
+def _without_typed_text(value, text):
+    if type(text) is str and text:
+        value = value.replace(text, _TYPED_WITHHELD)
+        stripped = text.strip()
+        if len(stripped) >= 3:
+            value = _withhold_text(value, stripped, _TYPED_WITHHELD)
+    return value
+
+
 def _reason_text(purpose, text):
     if type(purpose) is not str or any(category(ch) in _HIDDEN for ch in purpose):
         return ""
-    if type(text) is str and text:
-        purpose = purpose.replace(text, "[typed text withheld]")
-    return purpose[:300]
+    return _without_typed_text(purpose, text)[:300]
+
+
+def _disconnected(detail):
+    return detail.startswith((
+        "the Windows desktop bridge is not running.",
+        "the desktop bridge disconnected.",
+        "the desktop bridge closed the connection.",
+        "lost the desktop bridge mid-request (",
+    ))
+
+
+def _action_failure(exc, text):
+    try:
+        detail = str(exc)
+    except Exception:
+        detail = type(exc).__name__
+    safe_detail = _without_typed_text(detail, text)[:_DETAIL_LIMIT]
+    if isinstance(exc, DesktopError):
+        return "bridge-refused", BRIDGE_DISCONNECTED if _disconnected(detail) else BRIDGE_REFUSED, safe_detail
+    return "failed", ACTION_FAILED, safe_detail
 
 
 def _refusal(exc):
@@ -203,10 +273,20 @@ class WindowDrive:
         return app
 
     def snapshot(self, thread, window):
-        self.app(thread, window)
         with self._snapshot_lock:
+            with self._lock:
+                self._refs.pop((thread, window), None)
+            self.app(thread, window)
             result = self.request("window_snapshot", thread, window=window)
-            refs = {ref: _control(info) for ref, info in result["refs"].items()}
+            if (not isinstance(result, dict) or type(result.get("snapshot")) is not str
+                    or not result["snapshot"].strip() or not isinstance(result.get("refs"), dict)):
+                raise Refused("The bridge did not provide a valid window snapshot.")
+            refs = {}
+            for ref, info in result["refs"].items():
+                if (type(ref) is not str or not _WINDOW_REF.fullmatch(ref)
+                        or not isinstance(info, dict) or info.keys() != {"name", "role"}):
+                    raise Refused("The bridge did not provide valid snapshot refs.")
+                refs[ref] = _control(info)
             with self._lock:
                 self._refs[thread, window] = refs
             return result["snapshot"]
@@ -228,6 +308,8 @@ class WindowDrive:
             return ToolResult("Windows window screenshot. Coordinates are in screenshot pixels.",
                               result["image_b64"], "image/png")
         except (Refused, DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            if op == "windows" and isinstance(exc, DesktopError) and _disconnected(str(exc)):
+                return BRIDGE_DISCONNECTED
             return _refusal(exc)
 
     def prepare(self, kind, window, thread, purpose, risky, fields, record):
@@ -260,7 +342,9 @@ class WindowDrive:
                 return self._refs.get((thread, window)) is refs
 
         app = self.app(thread, window)
-        record["app"] = app
+        text = fields.get("text", "").strip()
+        sensitive = text if len(text) >= 3 else ""
+        record["app"] = _withhold_text(app, sensitive, "an app showing the typed text")
         if kind == "key":
             expected = _control(self.request("window_probe", thread, window=window, focus=True))
         elif not ref:
@@ -275,7 +359,8 @@ class WindowDrive:
             expected = live
 
         action = risk.Action(kind, app, **expected, keys=keys, submit=submit, purpose=purpose, risky=risky)
-        record.update(name=action.name[:120], role=action.role)
+        safe_name = _withhold_text(action.name, sensitive, "a field showing the typed text")
+        record.update(name=safe_name[:120], role=action.role)
         verdict = risk.decide(action)
         _record_verdict(record, verdict)
         if verdict.decision == risk.REFUSE:
@@ -283,7 +368,6 @@ class WindowDrive:
         if not current():
             raise Refused("The chat turn or snapshot changed. Inspect the window again.")
 
-        outcome = "run"
         if verdict.decision == risk.ASK:
             approvals = self.daemon.approvals
             if getattr(approvals, "human_backed", False) is not True:
@@ -294,23 +378,19 @@ class WindowDrive:
             request = ApprovalRequest(
                 record["tool"], args=args,
                 reason="Approve this one desktop action? Jarvis says: " + json.dumps(record["purpose"], ensure_ascii=False),
-                headline=risk.statement(action, verdict), layer="desktop-gate",
+                headline=risk.statement(replace(action, app=record["app"], name=safe_name), verdict),
+                layer="desktop-gate",
                 thread_id=thread, provider=runtime.caller()["provider"], allowlistable=False,
                 max_wait_s=120, grantable=False, owner_initiated=True, require_hud_answer=True,
             )
-            try:
-                answer = approvals.ask(request, cancelled=lambda: not current())
-            except Exception:
-                raise Refused("This desktop action needs the owner at the HUD.") from None
+            answer = approvals.ask(request, cancelled=lambda: not current())
             if not current():
                 raise Refused("The chat turn or snapshot changed. Inspect the window again.")
             if answer is not Decision.ALLOW:
                 return "asked-declined", "The user declined to run this. Ask what they would like instead."
-            outcome = "asked-approved"
 
-        # The caller writes the outcome before making this request.
-        return outcome, lambda: self.request("window_" + kind, thread, current=current,
-                                             acting=True, window=window, expect=expected, **fields)
+        return "pending", lambda: self.request("window_" + kind, thread, current=current,
+                                               acting=True, window=window, expect=expected, **fields)
 
 
 def _record_verdict(record, verdict):
@@ -348,26 +428,30 @@ def _act(kind, window, purpose, risky, *, fault=None, **fields):
               "decision": risk.REFUSE, "group": "", "reasons": ()}
     service = _service
     outcome = "refused"
-    if not config.desktop_drive():
-        record["reasons"] = ("disabled",)
-        result = OFF
-    elif service is None or not service.current():
-        record["reasons"] = ("unavailable",)
-        result = UNAVAILABLE
-    elif fault is not None:
-        record["reasons"] = (fault,)
-        result = f"Refused: {fault}"
-    else:
-        try:
+    text = fields.get("text")
+    detail = ""
+    try:
+        if not config.desktop_drive():
+            record["reasons"] = ("disabled",)
+            result = OFF
+        elif service is None or not service.current():
+            record["reasons"] = ("unavailable",)
+            result = UNAVAILABLE
+        elif fault is not None:
+            record["reasons"] = (fault,)
+            result = f"Refused: {fault}"
+        else:
             outcome, result = service.prepare(kind, window, thread, purpose, risky, fields, record)
-        except Refused as exc:
-            if not record["reasons"]:
-                record["reasons"] = (str(exc),)
-            result = _refusal(exc)
-        except (DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            outcome, result = "bridge-refused", _refusal(exc)
+    except Refused as exc:
+        if not record["reasons"]:
+            record["reasons"] = (str(exc),)
+        result = _refusal(exc)
+    except Exception as exc:
+        outcome, result, detail = _action_failure(exc, text)
 
     try:
+        if detail:
+            record["outcome_detail"] = detail
         fd, offset = _append_audit(record, outcome)
     except OSError:
         return LOG_REFUSED
@@ -376,17 +460,16 @@ def _act(kind, window, purpose, risky, *, fault=None, **fields):
             return result
         try:
             result()
-        except (Refused, DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            outcome = "refused" if isinstance(exc, Refused) else "bridge-refused"
-            line = _audit_outcome(outcome)
-            try:
-                if os.pwrite(fd, line, offset) != len(line):
-                    raise OSError("short desktop action log update")
-                os.fsync(fd)
-            except OSError:
-                return LOG_REFUSED
-            return _refusal(exc)
-        return COMPLETED
+            outcome, result = "run", COMPLETED
+        except Refused as exc:
+            outcome, result = "refused", _refusal(exc)
+        except Exception as exc:
+            outcome, result, detail = _action_failure(exc, text)
+        try:
+            _update_audit(fd, offset, outcome, detail)
+        except OSError:
+            return LOG_OUTCOME_FAILED
+        return result
     finally:
         os.close(fd)
 

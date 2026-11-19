@@ -11,14 +11,15 @@ import unittest
 from unittest.mock import Mock, patch
 
 from jarvis import config, runtime, tools
-from jarvis.desktop import DesktopError
+from jarvis.desktop import DesktopError, DesktopSession
 from jarvis.v2 import bridge, desktop_risk as risk, session_tools
-from jarvis.v2.approvals import PendingApprovals
+from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
 from jarvis.v2.daemon import APIError
 from jarvis.v2.mcp_catalog import MCP_TOOLS
 from jarvis.v2.model import ProviderName, Role
 from jarvis.v2.permissions import denied_file
 from jarvis.v2.provider import Decision
+from jarvis.v2.providers import claude, codex
 from jarvis.v2.tools import hud_window as hud
 
 WINDOW = "0000000000000001"
@@ -94,7 +95,7 @@ class Checks(unittest.TestCase):
         if op == "window_probe":
             return self.focus if fields.get("focus") else self.field if "ref" in fields else self.point
         # Inspect the actual file before returning from the mutation.
-        assert self.log()[-1]["outcome"] in ("run", "asked-approved")
+        assert self.log()[-1]["outcome"] == "pending"
         if self.bridge_error is not None:
             raise DesktopError(self.bridge_error)
         return {"internal": "do not return bridge internals"}
@@ -203,7 +204,7 @@ class Checks(unittest.TestCase):
         self.assertFalse(card.allowlistable or card.grantable)
         self.assertEqual(self.requests[-1], ("window_click", "first",
                                             {"window": WINDOW, "ref": RISKY, "expect": SEND}))
-        self.assertEqual(self.log()[-1]["outcome"], "asked-approved")
+        self.assertEqual(self.log()[-1]["outcome"], "run")
         self.assertEqual(self.log()[-1]["group"], "send")
 
     def test_refs_cannot_be_invented_moved_or_reused(self):
@@ -236,6 +237,34 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(self.approvals.cards), 2)
         self.assertEqual(self.log()[-1]["reasons"], ["declared:unsure"])
 
+    def test_click_and_scroll_require_exactly_one_selector(self):
+        self.snap()
+        for kind, args in (("click", {}), ("scroll", {"amount": 1})):
+            for selector in ({}, {"ref": SAFE, "x": 0, "y": 0}):
+                with self.subTest(kind=kind, selector=selector):
+                    self.assertIn("either a snapshot ref or both screenshot coordinates",
+                                  self.action(kind, **args, **selector))
+        self.assertEqual([op for op, _, _ in self.requests], ["windows", "window_snapshot"])
+
+    def test_malformed_snapshots_clear_old_and_new_refs(self):
+        for reply in ({"refs": {FRESH: OPEN}}, {"snapshot": "", "refs": {FRESH: OPEN}},
+                      {"snapshot": 42, "refs": {FRESH: OPEN}}, {"snapshot": FRESH},
+                      {"snapshot": FRESH, "refs": [FRESH]},
+                      {"snapshot": FRESH, "refs": {FRESH: {"name": "Open"}}},
+                      {"snapshot": FRESH, "refs": {FRESH: {"name": 1, "role": "button"}}},
+                      {"snapshot": FRESH, "refs": {FRESH: {"name": "Open", "role": 1}}},
+                      {"snapshot": FRESH, "refs": {FRESH: OPEN, "e2": OPEN}}):
+            with self.subTest(reply=reply):
+                self.snap()
+                self.call("snapshot", window=OTHER)
+                with patch.object(self.service, "request", return_value=reply):
+                    self.assertTrue(self.snap().startswith(("Refused:", "Error:")))
+                before = len(self.requests)
+                for ref in (SAFE, FRESH):
+                    self.assertEqual(self.action(ref=ref), f"Refused: {hud.FRESH_SNAPSHOT}")
+                self.assertEqual(len(self.requests), before)
+                self.assertEqual(self.action(ref=FRESH, window=OTHER), hud.COMPLETED)
+
     def test_key_focus_enter_and_canonical_names(self):
         self.assertEqual(self.action("key", keys=[" Return "]), hud.COMPLETED)
         self.assertEqual(self.requests[-2:], [
@@ -254,7 +283,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.action("type", ref=FIELD, text=SECRET), hud.COMPLETED)
         self.assertFalse(self.approvals.cards)
         self.assertEqual(self.action("type", ref=FIELD, text=SECRET, submit=True,
-                                     risky="unsure", purpose=f"Enter {SECRET}."), hud.COMPLETED)
+                                     risky="unsure", purpose=f'Enter "{SECRET}".'), hud.COMPLETED)
         self.assertEqual(self.requests[-2:], [
             ("window_probe", "first", {"window": WINDOW, "ref": FIELD}),
             ("window_type", "first", {"window": WINDOW, "ref": FIELD, "text": SECRET,
@@ -262,11 +291,47 @@ class Checks(unittest.TestCase):
         ])
         card, = self.approvals.cards
         self.assertEqual(card.args["text"], len(SECRET))
+        self.assertEqual(card.args["purpose"], 'Enter "[typed text withheld]".')
         self.assertNotIn(SECRET, repr(card))
         self.assertNotIn(SECRET, self.path.read_text())
         self.field = CHAT
         self.assertIn("fresh snapshot", self.action("type", ref=FIELD, text=SECRET))
         self.assertEqual(self.requests[-1][0], "window_probe")
+
+    def test_type_withholds_reflected_names_but_classifies_the_real_control(self):
+        self.field = {"name": f"Pay {SECRET.upper()}", "role": "editable"}
+        self.refs[WINDOW][FIELD] = self.field
+        self.snap()
+        self.service._apps["first"][WINDOW] = f"{SECRET.upper()}.exe"
+        self.assertEqual(self.action("type", ref=FIELD, submit=True, text=f" {SECRET} "), hud.COMPLETED)
+        card, = self.approvals.cards
+        self.assertIn("a field showing the typed text", card.headline)
+        self.assertIn("an app showing the typed text", card.headline)
+        self.assertNotIn(SECRET, repr(card).casefold())
+        self.assertNotIn(SECRET, self.path.read_text().casefold())
+        self.assertEqual(self.log()[-1]["group"], "pay")
+        self.assertEqual(self.requests[-1][2]["expect"], self.field)
+
+        self.assertEqual(self.action("type", ref=FIELD, risky="yes", text="a"), hud.COMPLETED)
+        self.assertIn(self.field["name"], self.approvals.cards[-1].headline)
+        self.assertEqual(self.log()[-1]["name"], self.field["name"])
+
+    def test_claude_event_omits_window_type_arguments(self):
+        provider = object.__new__(claude.ClaudeProvider)
+        name = "mcp__jarvis__hud_window_type"
+        message = SimpleNamespace(content=[claude.ToolUseBlock("call", name, {"text": SECRET})])
+        event, = provider._blocks(SimpleNamespace(thread_id="first"), message, {})
+        self.assertEqual(event.data["name"], name)
+        self.assertEqual(event.data["args"], {})
+
+    def test_codex_event_omits_window_type_arguments(self):
+        provider = object.__new__(codex.CodexProvider)
+        native = SimpleNamespace(thread_id="first", turn_id="fixture", mcp_items={})
+        handle = SimpleNamespace(thread_id="first", native=native)
+        item = {"id": "call", "server": "jarvis", "tool": "hud_window_type", "arguments": {"text": SECRET}}
+        event, = provider._mcp_item(handle, "item/started", {"threadId": "first", "turnId": "fixture"}, item)
+        self.assertEqual(event.data["name"], "hud_window_type")
+        self.assertEqual(event.data["args"], {})
 
     def test_arguments_refused_before_any_bridge_request(self):
         invalid = [
@@ -339,11 +404,74 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.action(ref=SAFE), hud.LOG_REFUSED)
         self.assertEqual(len(self.requests), 2)
         self.path.rmdir()
-        self.bridge_error = "Refused: that window is see-only."
-        self.assertEqual(self.action(ref=SAFE), self.bridge_error)
-        self.assertEqual(self.action(ref=RISKY), self.bridge_error)
+        self.bridge_error = "Refused: that window is see-only. " + "x" * 200
+        self.assertEqual(self.action(ref=SAFE), hud.BRIDGE_REFUSED)
+        self.assertEqual(self.action(ref=RISKY), hud.BRIDGE_REFUSED)
         self.assertEqual([row["outcome"] for row in self.log()], ["bridge-refused"] * 2)
+        self.assertEqual([row["outcome_detail"] for row in self.log()], [self.bridge_error[:200]] * 2)
         self.assertEqual(len(self.requests), 4)
+
+    def test_disconnected_list_and_action_use_fixed_text(self):
+        disconnected = DesktopSession(0)
+        with patch.object(disconnected, "start"), patch.object(disconnected, "wait_for_bridge"), \
+             patch.object(hud, "SESSION", disconnected):
+            expected = "Error: The Windows bridge is not connected."
+            self.assertEqual(self.call("list").text, expected)
+            self.assertEqual(self.action("key", keys=["tab"]), expected)
+        self.assertEqual(self.log()[-1]["outcome"], "bridge-refused")
+
+    def test_audit_fsyncs_pending_before_dispatch_and_run_after(self):
+        self.snap()
+        synced = []
+        fsync = os.fsync
+
+        def sync(fd):
+            synced.append(self.log()[-1]["outcome"])
+            fsync(fd)
+
+        def observe(op, **kwargs):
+            self.assertEqual(synced, ["pending"])
+            return self.request(op, **kwargs)
+
+        with patch.object(hud.os, "fsync", side_effect=sync), patch.object(hud.SESSION, "request", observe):
+            self.assertEqual(self.action(ref=SAFE), hud.COMPLETED)
+        self.assertEqual(synced, ["pending", "run"])
+
+    def test_failed_audit_update_retains_pending(self):
+        self.snap()
+        fsync = os.fsync
+        pwrite = os.pwrite
+
+        def fail_update_sync(fd):
+            if self.log()[-1]["outcome"] != "pending":
+                raise OSError("fixture update sync failure")
+            fsync(fd)
+
+        for method, failure in (("fsync", fail_update_sync),
+                                ("pwrite", lambda fd, data, offset: pwrite(fd, data[:12], offset))):
+            with self.subTest(method=method), patch.object(hud.os, method, side_effect=failure):
+                self.assertIn("outcome could not be recorded", self.action(ref=SAFE))
+                self.assertEqual(self.log()[-1]["outcome"], "pending")
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(len(self.log()), 2)
+        self.assertEqual([op for op, _, _ in self.requests].count("window_click"), 2)
+
+    def test_unexpected_probe_and_dispatch_exceptions_are_audited(self):
+        self.snap()
+        for expected_rows, op in enumerate(("window_probe", "window_type"), start=1):
+            def exchange(request, **kwargs):
+                if request == op:
+                    raise RuntimeError(f"fixture failure with {SECRET}")
+                return self.request(request, **kwargs)
+
+            with self.subTest(op=op), patch.object(hud.SESSION, "request", exchange):
+                self.assertEqual(self.action("type", ref=FIELD, text=SECRET),
+                                 "Error: The action could not be completed.")
+                rows = self.log() if self.path.exists() else []
+                self.assertEqual(len(rows), expected_rows)
+                self.assertEqual(rows[-1]["outcome"], "failed")
+                self.assertIn("fixture failure with", rows[-1]["outcome_detail"])
+        self.assertNotIn(SECRET, self.path.read_text())
 
     def test_daemon_entry_delegates_only_from_live_owner_hud(self):
         self.snap()
@@ -411,6 +539,21 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.action(ref=RISKY), hud.COMPLETED)
         self.assertEqual(rejected, [True])
         quiet.settle.assert_not_called()
+
+    def test_private_browser_card_can_only_be_allowed_by_verified_owner(self):
+        attempts = []
+
+        def present(request):
+            for verified in (False, 1):
+                with self.assertRaises(ValueError):
+                    broker.resolve(request.req_id, Decision.ALLOW, owner_verified=verified)
+                attempts.append(verified)
+            broker.resolve(request.req_id, Decision.ALLOW, owner_verified=True)
+
+        broker = PendingApprovals(timeout_s=1, on_request=present)
+        card = ApprovalRequest("hud_browser_act", hud_only=True)
+        self.assertIs(broker.ask(card), Decision.ALLOW)
+        self.assertEqual(attempts, [False, 1])
 
 
 if __name__ == "__main__":
