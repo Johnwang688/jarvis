@@ -386,8 +386,6 @@ class ApprovalRequest:
     cwd: str | None = None
     grantable: bool = True
     owner_initiated: bool = False
-    # Standard card presentation with the same owner-verified yes as a private card.
-    require_hud_answer: bool = False
     # Approval summaries (AS, approval_summary.py), display only, public
     # cards only, set by daemon code only and read by nothing that decides:
     # the model's one line and its state ("pending", "ready", "failed",
@@ -398,6 +396,9 @@ class ApprovalRequest:
     summary: str = ""
     summary_state: str = ""
     where: dict = field(default_factory=dict)
+    # Standard card presentation with the same owner-verified yes as a private
+    # card. Last of the constructor fields, so positional callers keep binding.
+    require_hud_answer: bool = False
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
     # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker

@@ -164,15 +164,32 @@ def _update_audit(fd, offset, outcome, detail):
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _squash(value):
+    """Text as the card would show it: invisible characters gone, runs of
+    blank space one space, case folded. A label that only looks different
+    from the typed text ("my  secret", a zero-width character inside it)
+    compares equal."""
+    visible = "".join(ch for ch in value if category(ch) not in ("Cf", "Cc", "Cs", "Mn", "Me"))
+    return " ".join(visible.split()).casefold()
+
+
+# The bridge shows at most 150 elements; a table far past that is not its reply.
+_MAX_REFS = 1000
+
+
 def _withhold_text(value, text, placeholder):
-    if text and text.casefold() in value.casefold():
+    if text and _squash(text) and _squash(text) in _squash(value):
         return placeholder
     return value
 
 
 def _without_typed_text(value, text):
-    if type(text) is str and text:
-        value = value.replace(text, _TYPED_WITHHELD)
+    """Free text (the assistant's purpose, a bridge error) with the typed
+    text taken out, whatever its case. One character is not removed: that
+    would strike a letter from every sentence."""
+    if type(text) is str and len(text.strip()) >= 2:
+        for needle in {text, text.strip()}:
+            value = re.sub(re.escape(needle), _TYPED_WITHHELD, value, flags=re.IGNORECASE)
         stripped = text.strip()
         if len(stripped) >= 3:
             value = _withhold_text(value, stripped, _TYPED_WITHHELD)
@@ -281,6 +298,8 @@ class WindowDrive:
             if (not isinstance(result, dict) or type(result.get("snapshot")) is not str
                     or not result["snapshot"].strip() or not isinstance(result.get("refs"), dict)):
                 raise Refused("The bridge did not provide a valid window snapshot.")
+            if len(result["refs"]) > _MAX_REFS:
+                raise Refused("The bridge did not provide valid snapshot refs.")
             refs = {}
             for ref, info in result["refs"].items():
                 if (type(ref) is not str or not _WINDOW_REF.fullmatch(ref)

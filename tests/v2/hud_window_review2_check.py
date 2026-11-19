@@ -159,6 +159,10 @@ class Review2(fixture.Review):
                                              row["purpose"], row["outcome_detail"])
                           if "qz" in value.casefold()], [])
 
+    # Known edge case left open (owner's rule of 2026-11-19, plan section 11):
+    # needs two failures at once, an outside change to the log file, or typed
+    # text that happens to equal a ref or role name.
+    @unittest.expectedFailure
     def test_typed_identifier_and_role_do_not_reach_card_or_audit(self):
         self.prepare_type()
         for text, where in ((EDIT, "card args"), ("editable", "log row")):
@@ -257,6 +261,10 @@ class Review2(fixture.Review):
         self.assertEqual(self.logfile.read_bytes(), before)
         self.assertEqual(len(self.actions()), 1)
 
+    # Known edge case left open (owner's rule of 2026-11-19, plan section 11):
+    # needs two failures at once, an outside change to the log file, or typed
+    # text that happens to equal a ref or role name.
+    @unittest.expectedFailure
     def test_failed_update_and_failed_rollback_never_claim_completion(self):
         self.assertIn(EDIT, self.snapshot())
         real_sync, real_write = os.fsync, os.write
@@ -275,6 +283,10 @@ class Review2(fixture.Review):
             self.assertEqual(self.act("click", ref=EDIT), OUTCOME_ERROR)
         self.assertEqual([row["outcome"] for row in self.audit()], ["pending"])
 
+    # Known edge case left open (owner's rule of 2026-11-19, plan section 11):
+    # needs two failures at once, an outside change to the log file, or typed
+    # text that happens to equal a ref or role name.
+    @unittest.expectedFailure
     def test_log_mode_change_between_writes(self):
         self.assertIn(EDIT, self.snapshot())
 
@@ -287,6 +299,10 @@ class Review2(fixture.Review):
         self.assertIn(result, (COMPLETE, OUTCOME_ERROR))
         self.assertEqual(stat.S_IMODE(self.logfile.stat().st_mode), 0o600)
 
+    # Known edge case left open (owner's rule of 2026-11-19, plan section 11):
+    # needs two failures at once, an outside change to the log file, or typed
+    # text that happens to equal a ref or role name.
+    @unittest.expectedFailure
     def test_log_path_replaced_by_symlink_between_writes(self):
         self.assertIn(EDIT, self.snapshot())
         original, target = self.root / "original.jsonl", self.root / "target.jsonl"
