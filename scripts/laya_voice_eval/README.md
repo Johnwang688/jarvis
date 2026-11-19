@@ -29,7 +29,7 @@ Two synthesized recordings were decoded by the existing local Parakeet transcrib
 | Peak CUDA memory allocated / reserved | 2.26 / 2.44 GiB |
 | CPU fallbacks | 0 |
 
-Warm measurements include classification, synchronization and target resolution. The first model turn and zero-call bypasses are excluded. CUDA peak counters measure PyTorch allocator use. Loading the checkpoint used a populated disk cache. All runs used a 3 GiB host memory limit with zero swap.
+An independent replay reproduced all 112 route choices, targets and raw score distributions. Its warm p95 was 27.8 ms. Warm measurements include classification, synchronization and target resolution, including time spent on failed predictions. The first model turn and zero-call bypasses are excluded. CUDA peak counters measure PyTorch allocator use. Loading the checkpoint used a populated disk cache. All runs used a 3 GiB host memory limit with zero swap.
 
 ## Reproduce
 

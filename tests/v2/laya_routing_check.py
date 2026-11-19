@@ -110,11 +110,13 @@ class BenchTests(unittest.TestCase):
         self.assertNotIn("inference_ms", reports[1])
         self.assertEqual(reports[3]["kind"], "unavailable")
         self.assertEqual(reports[3]["raw_scores"], scores)
+        reports[3].update(latency_ms=500, inference_ms=497)
+        reports[4].update(latency_ms=20, inference_ms=19)
         summary = timing(reports)
         self.assertEqual(summary["first_routing_ms"], reports[2]["latency_ms"])
-        self.assertEqual(summary["warm_p95_ms"], reports[4]["latency_ms"])
-        self.assertEqual(summary["warm_inference_p95_ms"], reports[4]["inference_ms"])
-        self.assertEqual(summary["warm_samples"], 1)
+        self.assertEqual(summary["warm_p95_ms"], 500)
+        self.assertEqual(summary["warm_inference_p95_ms"], 497)
+        self.assertEqual(summary["warm_samples"], 2)
 
     def test_labelled_rows_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

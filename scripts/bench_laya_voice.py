@@ -149,8 +149,8 @@ def run_rows(rows, predict, synchronize):
 def timing(reports):
     attempted = [row for row in reports if row["model_calls"]]
     first = attempted[0] if attempted else {}
-    # Exclude the first attempt and report failed predictions separately.
-    warm = [row for row in attempted[1:] if row["kind"] != "unavailable"]
+    # Use the same population as the gate: every model turn after the first.
+    warm = attempted[1:]
     return {
         "model_calls": len(attempted),
         "unavailable_rows": sum(row["kind"] == "unavailable" for row in reports),
