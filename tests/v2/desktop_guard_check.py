@@ -338,14 +338,26 @@ class GuardTests(unittest.TestCase):
             self.guard.capture(self.window)
         for unknown in (None, True, -1, "1", 0.0):
             self.guard.set_hud(unknown)
-            with self.subTest(unknown=unknown), self.assertRaises(Refused):
-                self.guard.act(self.window, point=(2, 2))
+            with self.subTest(unknown=unknown), patch.object(self.desktop, "hud_regions") as scan:
+                with self.assertRaises(Refused):
+                    self.guard.act(self.window, point=(2, 2))
+                scan.assert_not_called()
         self.guard.set_hud(0)
-        self.desktop.regions[10] = None
-        with patch.object(self.desktop, "hud_regions", side_effect=AssertionError):
+        self.desktop.regions[10] = []
+        with patch.object(self.desktop, "hud_regions", wraps=self.desktop.hud_regions) as scan_regions:
             self.assertEqual(self.guard.windows()[0]["access"], DRIVABLE)
             self.assertEqual(self.guard.capture(self.window).masks, ())
             self.assertEqual(self.guard.act(self.window, point=(50, 50)).masks, ())
+            self.assertEqual(scan_regions.call_count, 3)
+        for scan in ([HUD_REGION], None, "", b"", {}, [None]):
+            with self.subTest(scan=scan):
+                self.desktop.regions[10] = scan
+                with self.assertRaises(Refused):
+                    self.guard.capture(self.window)
+                with self.assertRaises(Refused):
+                    self.guard.act(self.window, point=(2, 2))
+                self.assertEqual(self.guard.windows(), [])
+        self.desktop.regions[10] = None
         self.guard.set_hud(1)
         with self.assertRaises(Refused):
             self.guard.capture(self.window)
@@ -390,8 +402,12 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.guard.capture(self.window)
         self.guard.set_hud(0)
+        with self.assertRaises(Refused):
+            self.guard.capture(self.window)
+        self.desktop.regions[20] = []
         self.assertEqual(self.guard.capture(self.window).masks, ())
         self.guard.set_hud(2)
+        self.desktop.regions[20] = [Rect(95, 95, 105, 105), Rect(200, 200, 210, 210)]
         self.assertEqual(self.guard.capture(self.window).masks, (Rect(87, 87, 113, 113),))
         self.desktop.regions[20] = None
         with self.assertRaises(Refused):

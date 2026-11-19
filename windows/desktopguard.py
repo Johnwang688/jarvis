@@ -5,6 +5,7 @@ from __future__ import annotations
 import ntpath
 import re
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Iterable, Protocol
 
@@ -214,7 +215,11 @@ class Guard:
         try:
             read = getattr(self._desktop, method, fallback)
             result = read(*args)
-            return tuple(result) if materialize and result is not None else result
+            if materialize and result is not None:
+                if method == "hud_regions" and isinstance(result, (str, bytes, bytearray, Mapping)):
+                    return None
+                return tuple(result)
+            return result
         except Exception:
             raise Refused("Windows could not be inspected safely.") from None
 
@@ -231,7 +236,8 @@ class Guard:
             kind = policy.PROTECTED
         if kind == policy.PROTECTED or not self._read("is_hud", hwnd):
             return kind, ()
-        regions = self._read("hud_regions", hwnd, materialize=True) if self._sensitive else None
+        # Even zero is only the daemon's last report. A region may have appeared since.
+        regions = self._read("hud_regions", hwnd, materialize=True) if self._sensitive is not None else None
         hud_kind, masks = policy.hud_view(self._sensitive, regions, 0.0)
         return (kind if hud_kind == policy.DRIVABLE else hud_kind), masks
 

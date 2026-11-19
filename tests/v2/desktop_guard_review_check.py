@@ -118,6 +118,7 @@ class OneAreaCannotStandForTwo(unittest.TestCase):
         # Lead's rewrite after the fix: nested masks now protect the whole HUD,
         # so it is no longer listed. Take its id first, then nest the masks.
         guard.set_hud(0)
+        desk.regions[1] = []
         hud = listed(guard)["chrome.exe"]
         desk.regions[1] = [CARD, inner]
         guard.set_hud(2)

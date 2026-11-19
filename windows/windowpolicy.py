@@ -22,6 +22,7 @@ hold a secret or run a command.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import combinations
 import re
@@ -191,7 +192,7 @@ def _valid(rect) -> bool:
 
 def _mask_list(masks) -> Optional[tuple]:
     """The masks as a tuple, or None when any of them cannot be trusted."""
-    if masks is None or isinstance(masks, (str, bytes)):
+    if masks is None or isinstance(masks, (str, bytes, bytearray, Mapping)):
         return None
     try:
         masks = tuple(masks)
@@ -208,12 +209,12 @@ def hud_view(sensitive, masks: Optional[Sequence[Rect]], age_s) -> tuple:
     them and `age_s` how old that report is. The HUD stays drivable around
     its masks only when a fresh report has exactly that many distinct valid
     rectangles and their padded masks share no pixels. Equal rectangles
-    count once. With nothing sensitive, the report is ignored.
+    count once. A zero count still requires a readable, empty scan.
     """
     if not _whole(sensitive) or sensitive < 0:
         return PROTECTED, ()
     if sensitive == 0:
-        return DRIVABLE, ()
+        return (DRIVABLE if _mask_list(masks) == () else PROTECTED), ()
     if (isinstance(age_s, bool) or not isinstance(age_s, (int, float))
             or not 0 <= age_s <= MASK_MAX_AGE_S):
         return PROTECTED, ()
