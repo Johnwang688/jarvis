@@ -134,6 +134,7 @@ class VoiceLink:
         # under both locks. A router is never made outside it, so a handler
         # still finishing after stop() cannot start a worker nobody will close.
         self._laya_open = False
+        self._laya_owner = None  # the listening socket whose requests may route
         self._laya_issue = ""
         self._laya_helper = None  # None until the active helper pings with features
         self._voice_chat = getattr(daemon, "voice_chat", None)
@@ -388,9 +389,16 @@ class VoiceLink:
     def _route_model(self, text, source):
         return voice_intent.route(text, source)
 
-    def _laya_router(self):
+    def _laya_router(self, server=None):
+        """The router of the listener that accepted the request, or raise.
+
+        ``server`` is the listening socket the request arrived on. A request
+        from a listener that has since stopped never gets the router a later
+        start() made: its decision would belong to a connection that is gone.
+        None (no connection, as in a direct call) means the running listener.
+        """
         with self._laya_lock:
-            if not self._laya_open:
+            if not self._laya_open or (server is not None and server is not self._laya_owner):
                 raise RuntimeError("Voice link stopped")
             if self._laya is None:
                 if self._laya_factory is not None:
@@ -424,10 +432,10 @@ class VoiceLink:
         except Exception:
             LOG.warning("Could not record voice route outcome")
 
-    def _laya_decide(self, mode, text, apps, windows):
+    def _laya_decide(self, mode, text, apps, windows, server=None):
         """One full-utterance Laya decision, or None when the router failed."""
         try:
-            decision = self._laya_router().route(mode, text, apps=apps, windows=windows)
+            decision = self._laya_router(server).route(mode, text, apps=apps, windows=windows)
         except Exception:
             return None
         return decision if isinstance(decision, dict) else None
@@ -666,7 +674,7 @@ class VoiceLink:
         snapshot = self._voice_chat.selected() if request.get("receipt") is True and self._voice_chat else None
         if not self._current(conn, server):
             return None
-        decision = self._laya_decide(mode, text, tuple(apps), tuple(windows))
+        decision = self._laya_decide(mode, text, tuple(apps), tuple(windows), server)
         if not self._current(conn, server):
             return None
         intent, feedback_kind = self._laya_intent(decision, text, tuple(apps), tuple(windows))
@@ -742,7 +750,7 @@ class VoiceLink:
             self.port = self.address[1]
             self.status = "Listening."
             with self._laya_lock:
-                self._laya_open = True
+                self._laya_open, self._laya_owner = True, server
             self._thread = threading.Thread(target=self._accept, args=(server,),
                                             name="jarvis-voice-link", daemon=True)
             self._thread.start()
@@ -760,7 +768,7 @@ class VoiceLink:
             # handler gets no new router, and a start() racing this stop gets
             # a fresh one rather than this one's closed state.
             with self._laya_lock:
-                self._laya_open = False
+                self._laya_open, self._laya_owner = False, None
                 router, self._laya = self._laya, None
         if server:
             _shutdown(server)

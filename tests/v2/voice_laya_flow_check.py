@@ -277,6 +277,29 @@ class Choices(Paired):
         self.assertTrue(all(t["outcomes"] == ["clarified", "cancelled"] for t in self.turns()))
 
     @patch(ROUTE)
+    def test_routed_navigation_to_an_offered_site_is_refused(self, route):
+        # Speech the reply grammar does not hold still cannot open an offered site.
+        self.offer(route)
+        route.return_value = decision("navigate", "https://noaa.gov")
+        self.clip("assistant", "open noaa.gov actually disregard that")
+        self.ui.set_state.assert_called_with("done", SITE_UNCLEAR)
+        self.clip("assistant", "open noaa.gov actually disregard that")  # the retired offer still guards
+        self.ui.set_state.assert_called_with("done", SITE_UNCLEAR)
+        self.actions.navigate.assert_not_called()
+        self.assertEqual(self.notices(), [])
+
+        self.offer(route)
+        self.clip("assistant", "second")
+        route.return_value = decision("navigate", "https://noaa.gov")
+        self.clip("assistant", "open noaa.gov; open noaa.gov")
+        self.ui.set_state.assert_called_with("done", SITE_CHOSEN)
+        self.actions.navigate.assert_called_once_with("https://noaa.gov")
+        self.assertEqual(len(self.notices()), 1)
+        route.return_value = decision("navigate", "https://example.org")
+        self.clip("assistant", "open example.org")  # any other site is an ordinary command
+        self.assertEqual(self.actions.navigate.call_count, 2)
+
+    @patch(ROUTE)
     def test_negated_repeat_after_a_choice_stays_local(self, route):
         self.offer(route)
         self.clip("assistant", "the second one")
@@ -645,17 +668,27 @@ class Helper(unittest.TestCase):
         desktop = SimpleNamespace(windows=lambda: list(shown), focus=Mock(return_value=True))
         actions = Actions(desktop=desktop, runner=Mock(returncode=1))
         actions.refreshed = time.monotonic()
-        actions.apps = [{"name": "Google Chrome", "id": "c"}, {"name": "Word", "id": "w"},
-                        {"name": "Calculator", "id": "k"}]
+        actions.apps = [{"name": "Google Chrome", "id": "Chrome"},
+                        {"name": "Word", "id": "Microsoft.Office.WINWORD.EXE.15"},
+                        {"name": "Paint", "id": r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\mspaint.exe"},
+                        {"name": "Calculator", "id": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"}]
         for name in ("Chrome", "Google Chrome", "chrome"):
             self.assertFalse(actions.switch_app(name, exact=True), name)
         self.assertEqual(actions.route_names()[1], ())
         desktop.focus.assert_not_called()
         self.assertTrue(actions.switch_app("Chrome"))  # the unrouted legacy matcher is unchanged
         desktop.focus.reset_mock()
-        shown[:] = [notepad, word, calc, chrome]
-        self.assertEqual(actions.route_names()[1], ("Google Chrome", "Word", "Calculator", "chrome"))
-        for name, hwnd in (("Chrome", 4), ("Word", 5), ("Calculator", 6)):
+        # A title that ends with the app's name is still content, never identity.
+        shown[:] = [(7, "Review draft - Google Chrome", r"C:\Windows\notepad.exe"),
+                    (8, "Word", r"C:\Windows\notepad.exe"), calc]
+        for name in ("Chrome", "Word", "Calculator"):  # a shared frame host owns Calculator
+            self.assertFalse(actions.switch_app(name, exact=True), name)
+        self.assertEqual(actions.route_names()[1], ())
+        desktop.focus.assert_not_called()
+        paint = (9, "Untitled - Paint", r"C:\Windows\System32\mspaint.exe")
+        shown[:] = [notepad, word, calc, chrome, paint]
+        self.assertEqual(actions.route_names()[1], ("Google Chrome", "Word", "Paint", "chrome"))
+        for name, hwnd in (("Chrome", 4), ("Word", 5), ("Paint", 9)):
             desktop.focus.reset_mock()
             self.assertTrue(actions.switch_app(name, exact=True))
             desktop.focus.assert_called_once_with(hwnd)
@@ -682,7 +715,8 @@ class Helper(unittest.TestCase):
             (2, "Inbox (3) - private@example.com - Google Chrome", r"C:\Chrome\chrome.exe")])
         actions = Actions(desktop=desktop, runner=Mock(returncode=1))
         actions.refreshed = time.monotonic()
-        actions.apps = [{"name": "Google Chrome", "id": "c"}, {"name": "Word", "id": "w"},
+        actions.apps = [{"name": "Google Chrome", "id": "c"},
+                        {"name": "Word", "id": "Microsoft.Office.WINWORD.EXE.15"},
                         {"name": "Paint", "id": "p"}, {"name": "Bad\u200bName", "id": "b"}]
         apps, open_names = actions.route_names()
         self.assertEqual(apps, ("Google Chrome", "Word", "Paint", "chrome"))
@@ -700,6 +734,20 @@ class RouterLifecycle(Paired):
             self.assertIsNone(self.link._laya_decide("assistant", "open youtube.com", (), ()))
             router_class.assert_not_called()
         self.assertIsNone(self.link._laya)
+
+    def test_request_from_a_stopped_listener_never_uses_the_next_router(self):
+        router = Mock()
+        router.route.return_value = decision("ask")
+        self.link._laya_factory = lambda: router
+        old = self.link._server
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), (), old)["kind"], "ask")
+        router.reset_mock()
+        self.link.stop()
+        self.link.port = 0
+        self.assertTrue(self.link.start())
+        self.assertIsNone(self.link._laya_decide("assistant", "hi", (), (), old))
+        router.route.assert_not_called()
+        self.assertEqual(self.link._laya_decide("assistant", "hi", (), (), self.link._server)["kind"], "ask")
 
     def test_router_made_while_stop_runs_is_closed_and_not_replaced(self):
         entered, release, made = threading.Event(), threading.Event(), []

@@ -6,7 +6,7 @@ import re
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 if __package__:
     from .voiceactions import LaunchStatus, action_scope
@@ -238,6 +238,13 @@ def _site_reply(text, choices):
     if words and all(word in _SITE_FILLER for word in words):
         return "unclear"
     return None
+
+
+def _same_site(url, other):
+    def site(value):
+        value = value.split("://", 1)[-1].casefold().rstrip("/")
+        return value.removeprefix("www.")
+    return isinstance(url, str) and isinstance(other, str) and site(url) == site(other)
 
 
 def _run_native(current, action, *args, **kwargs):
@@ -663,6 +670,23 @@ class Flow:
             self.retire_site_choice(self.client)
             raise
 
+    def _offered_sites(self):
+        """(sites, what to show) while an offer or its reply grace stands.
+
+        An offered website is opened by the choice handler or not at all.
+        Speech that names one without being a plain choice ("open noaa.gov,
+        actually disregard that", or the same site again after it was chosen)
+        may still be routed, but a routed navigation to an offered site is
+        refused in ``_laya_turn``: the offer answers it, never the router.
+        """
+        self.expire_site_choice(self.client)
+        pending = getattr(self.client, "_pending_site_choice", None)
+        if isinstance(pending, _SiteChoice):
+            return pending.choices, ("done", SITE_UNCLEAR)
+        if isinstance(pending, _SiteReplyContext):
+            return pending.choices, pending.repeat
+        return None
+
     def _handle_site_reply(self, text, current):
         self.expire_site_choice(self.client)
         pending = getattr(self.client, "_pending_site_choice", None)
@@ -764,6 +788,7 @@ class Flow:
                 self.typer.run([("text", payload)])
                 self.ui.set_state("done")
             return
+        offered = self._offered_sites()
         if self._handle_site_reply(clean, current):
             return
         apps, windows = self._route_names()
@@ -781,6 +806,14 @@ class Flow:
         turn, kind, target = intent["turn"], intent["kind"], intent["target"]
         if not current():
             self._outcome(turn, "cancelled")
+            return
+        if kind == "navigate" and offered and any(_same_site(target, site) for site in offered[0]):
+            # Not a plain choice, so the offer did not select it; never the router either.
+            self._outcome(turn, "cancelled")
+            pending = getattr(self.client, "_pending_site_choice", None)
+            if isinstance(pending, _SiteReplyContext) and pending.choices == offered[0]:
+                self.client._pending_site_choice = replace(pending, repeat=offered[1])
+            self.ui.set_state(*offered[1])
             return
         if kind == "navigate":
             navigate = getattr(self.actions, "navigate", None)

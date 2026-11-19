@@ -123,41 +123,44 @@ def match_window(target, windows):
     return None
 
 
-# Processes whose window titles are whatever the running program says (a shell
-# can retitle its console to anything). Their titles never stand for an app.
-_TITLE_INELIGIBLE = frozenset({
-    "cmd", "powershell", "pwsh", "windowsterminal", "wt", "conhost", "openconsole", "mintty",
-    "wsl", "wslhost", "bash", "explorer",
-})
-_TITLE_APP_SUFFIX = re.compile(r"\s+[-\u2013\u2014]\s+")
+_APP_ID_PARTS = re.compile(r"[.!_]")
 
 
-def grounded_window(target, windows):
-    """The window of the app ``target`` names exactly, or None.
+def _app_images(target, apps):
+    """Process image names (no extension) that are the app ``target`` names."""
+    canonical = ALIASES.get(target, target)
+    images = {target, canonical}
+    images.update(alias for alias, name in ALIASES.items() if name == canonical)
+    for app in apps or ():
+        name, ident = app.get("name"), app.get("id")
+        if not isinstance(name, str) or not isinstance(ident, str) or _normal(name) not in (target, canonical):
+            continue
+        if ident.casefold().endswith(".exe"):
+            # A classic Start entry: "{known folder}\\Vendor\\app.exe".
+            images.add(_normal(ntpath.splitext(ntpath.basename(ident))[0]))
+        else:
+            # An application ID such as "Microsoft.Office.WINWORD.EXE.15".
+            images.update(part for part in map(_normal, _APP_ID_PARTS.split(ident)) if len(part) >= 4)
+    images.discard("")
+    return images
+
+
+def grounded_window(target, windows, apps=()):
+    """The window owned by the app ``target`` names exactly, or None.
 
     For a routed Laya switch, whose target is an offered Start catalog name.
-    A window belongs to the app when its process image is the app (or a fixed
-    alias of it), or when its whole title, or the app segment a window title
-    ends with ("Secret plan - Word"), is exactly that name. A name anywhere
-    else in a title ("Chrome setup instructions - Notepad") never matches,
-    and console titles are never read as an app.
+    Only the owning process identifies a window: its image must be the app's
+    name, a fixed alias of it, or the image the app's Start entry names.
+    Titles are never read. A document, page or console title is content, and
+    content can say anything ("Review draft - Google Chrome" in Notepad).
+    A window hosted by a shared frame process is therefore not switchable.
     """
     target = _normal(target) if isinstance(target, str) else ""
     if not target:
         return None
-    canonical = ALIASES.get(target, target)
-    variants = {target, canonical}
-    variants.update(alias for alias, name in ALIASES.items() if name == canonical)
-    windows = list(windows)
-    for hwnd, title, exe in windows:
-        if _normal(ntpath.splitext(ntpath.basename(exe or ""))[0]) in variants:
-            return hwnd
-    for hwnd, title, exe in windows:
-        if _normal(ntpath.splitext(ntpath.basename(exe or ""))[0]) in _TITLE_INELIGIBLE:
-            continue
-        title = title if isinstance(title, str) else ""
-        segments = _TITLE_APP_SUFFIX.split(title.strip())
-        if _normal(title) in variants or _normal(segments[-1]) in variants:
+    images = _app_images(target, apps)
+    for hwnd, _title, exe in windows:
+        if isinstance(exe, str) and _normal(ntpath.splitext(ntpath.basename(exe))[0]) in images:
             return hwnd
     return None
 
@@ -803,7 +806,7 @@ class Actions:
             windows = list(self.desktop.windows())
         except Exception:  # noqa: BLE001  (no enumeration: nothing to switch to)
             windows = []
-        open_names = tuple(name for name in apps if windows and grounded_window(name, windows) is not None)
+        open_names = tuple(name for name in apps if windows and grounded_window(name, windows, self.apps) is not None)
         return tuple(apps), open_names
 
     def switch_app(self, target, *, exact=False):
@@ -817,7 +820,7 @@ class Actions:
         if not _allowed(guard):
             return False
         windows = self.desktop.windows()
-        hwnd = grounded_window(target, windows) if exact else match_window(target, windows)
+        hwnd = grounded_window(target, windows, self.apps) if exact else match_window(target, windows)
         if not hwnd or not _allowed(guard):
             return False
         return bool(self.desktop.focus(hwnd))
