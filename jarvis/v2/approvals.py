@@ -396,6 +396,9 @@ class ApprovalRequest:
     summary: str = ""
     summary_state: str = ""
     where: dict = field(default_factory=dict)
+    # Standard card presentation with the same owner-verified yes as a private
+    # card. Last of the constructor fields, so positional callers keep binding.
+    require_hud_answer: bool = False
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
     # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker
@@ -462,6 +465,7 @@ class _Pending:
     resolution: str = ""
     announced: bool = False             # resolve() already told on_resolve
     hud_only: bool = False              # pinned when asked; never weakened later
+    require_hud_answer: bool = False
 
 
 class DenyAll:
@@ -566,9 +570,10 @@ class PendingApprovals:
             request.asked_at = utcnow()
             # QH: settled here, under the lock, before any card exists: a
             # grant is taken once however many identical asks race for it.
-            settled = self._settle_quietly(desk, request)
+            verified = request.require_hud_answer
+            settled = None if verified else self._settle_quietly(desk, request)
             if settled is None:
-                item = _Pending(request, hud_only=request.private)
+                item = _Pending(request, hud_only=request.private, require_hud_answer=verified)
                 self._pending[request.req_id] = item
         if settled is not None:
             # No card, no Discord post, no wait: the desk records and announces.
@@ -654,11 +659,11 @@ class PendingApprovals:
         `entry_for`. If that raises `NotAllowlistable` the approval still
         stands and no entry is minted — v1's rule, kept.
 
-        `owner_verified=True` is HUD authority (phone design PH-7, O-3): it
-        alone lets a HUD-only card be allowed. Exactly two kinds of caller
-        pass True: the HUD's own answer routes (the HUD listener's owner test
-        and its Host) and the phone's answer route after a fresh per-answer
-        passkey assertion while every §4.1 check holds (`remote_answer`).
+        `owner_verified=True` is required to allow private cards or cards with
+        `require_hud_answer` (phone design PH-7, O-3). Only the HUD's answer
+        routes (the HUD listener's owner test and its Host) and the phone's
+        answer route after a fresh per-answer passkey assertion while every
+        §4.1 check holds (`remote_answer`) pass True.
         Discord, tools and everything else leave it False
         (`tests/v2/remote_answer_check.py` greps the callers).
         """
@@ -667,13 +672,14 @@ class PendingApprovals:
             item = self._pending.get(req_id)
             if item is None or item.event.is_set():
                 raise ValueError(f"unknown or already-resolved approval {req_id!r}")
-            if item.hud_only and decision is Decision.ALLOW and owner_verified is not True:
+            if ((item.hud_only or item.require_hud_answer)
+                    and decision is Decision.ALLOW and owner_verified is not True):
                 raise ValueError("this approval requires an answer in the owner HUD")
             item.decision = decision
             item.resolution = decision.value
             entry = None
             if always and decision is Decision.ALLOW:
-                if (item.hud_only or not item.request.allowlistable
+                if (item.hud_only or item.require_hud_answer or not item.request.allowlistable
                         or is_unknown_command_tool(item.request.tool, item.request.args)):
                     item.resolution = "allow (no standing rule from this path)"
                 else:

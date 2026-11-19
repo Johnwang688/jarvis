@@ -719,6 +719,8 @@ class Daemon:
         self.browser_opens = BrowserOpens(self)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
+        from .tools.hud_window import WindowDrive
+        self.window_drive = WindowDrive(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         from .browser.panes import BrowserPanes
@@ -817,6 +819,7 @@ class Daemon:
             self.terminals.install()
             self.browser_look.install()
             self.browser_drive.install()
+            self.window_drive.install()
             self.chat_relay.install()
             self.owner_posts.install()
             self.subagent_panes.install()
@@ -2553,7 +2556,7 @@ class Daemon:
         LOW 3: a card listed before `on_request` ran showed no summary slot).
         Code only, display only."""
         from .approval_summary import PENDING, where_parts
-        if self.approval_summaries is not None and not request.private:
+        if self.approval_summaries is not None and not request.private and not request.require_hud_answer:
             request.summary_state = PENDING
         project = None
         try:
@@ -2590,7 +2593,8 @@ class Daemon:
     def _approval_requested(self, request: ApprovalRequest) -> None:
         # AS-4: the card is published first, marked pending; the summary is
         # started only after, outside the broker's lock, and never waited on.
-        summarize = self.approval_summaries is not None and not request.private
+        summarize = (self.approval_summaries is not None and not request.private
+                     and not request.require_hud_answer)
         if summarize:
             request.summary_state = "pending"
         self.bus.publish({"kind": "approval_requested",
@@ -3476,6 +3480,7 @@ class Daemon:
         # they still exist (a lost one is repaired from the journal later).
         self.speech_ducker.stop()
         self.browser_drive.stop()
+        self.window_drive.stop()
         self.browser_look.stop()
         self.browser_panes.stop()
         self.browser.stop()

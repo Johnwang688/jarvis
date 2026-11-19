@@ -1175,7 +1175,7 @@ class _TurnState:
         self.pending.append((call_id, name))
         self.emit(
             EventKind.TOOL_STARTED,
-            {"call_id": call_id, "name": name, "args": {} if name in DRIVE_TOOLS or name == "hud_desktop_type" else _args(raw)},
+            {"call_id": call_id, "name": name, "args": {} if name in DRIVE_TOOLS or name in ("hud_desktop_type", "hud_window_type") else _args(raw)},
         )
 
     def _on_tool_end(self, data: Any) -> None:

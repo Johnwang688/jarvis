@@ -102,12 +102,14 @@ def _annotations(entry) -> dict:
     return {"readOnlyHint": False}
 
 
-def listing(provider) -> list[dict]:
+def listing(provider, *, window_tools=True) -> list[dict]:
     """The tools a chat on `provider` is offered, as MCP describes a tool."""
     from jarvis import tools
     from . import session_tools
     out = []
     for entry in session_tools.for_provider(provider):
+        if not window_tools and entry.name in session_tools.HUD_WINDOW_TOOLS:
+            continue
         spec = tools.REGISTRY[entry.name].spec()["function"]
         out.append({"name": spec["name"], "description": spec["description"],
                     "inputSchema": spec["parameters"], "annotations": _annotations(entry)})
@@ -180,7 +182,9 @@ def route(handler, daemon, parts, query):
     _object(query, ())
     provider = session.thread.provider
     if parts[1] == "tools":
-        return 200, {"tools": listing(provider)}
+        with daemon._lock:
+            window_tools = session.worker is None or session.desk.slot.get("present") is True
+        return 200, {"tools": listing(provider, window_tools=window_tools)}
     body = _body(handler)
     return 200, call(daemon, session, caller, body["name"], body["arguments"],
                      codex_context=body["codex_context"],
@@ -285,7 +289,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         # and chat_wait (chat-to-chat C4, §5.3), whose wait reads `current()`
         # through `runtime.should_stop()` and ends when the CLI's relay goes.
         desktop_call = name in session_tools.HUD_DESKTOP_TOOLS
-        socket_bound = browser_call or desktop_call or name == "chat_wait"
+        window_call = name in session_tools.HUD_WINDOW_TOOLS
+        socket_bound = browser_call or desktop_call or window_call or name == "chat_wait"
         drive_turn = getattr(session, "drive_turn", None) if worker is not None else None
 
     native_current = None
@@ -302,7 +307,7 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
             return {"text": "Refused: this Jarvis tool is only available to the current foreground chat turn.",
                     "isError": True}
 
-    if entry.owner_gated:
+    if entry.owner_gated and not window_call:
         from .browser.drive import admission_for_tool, OFF
         if name != "hud_browser_act" or not admission_for_tool():
             return {"text": "Refused: " + OFF, "isError": True}
@@ -339,7 +344,10 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
             from .tools.hud_desktop import current as current_desktop, UNAVAILABLE
             if not current_desktop():
                 return tools.ToolResult(UNAVAILABLE)
-        if entry.owner_gated and drive_turn is None:
+        if window_call and (not runtime.at_desk() or not current()):
+            from .tools.hud_window import UNAVAILABLE
+            return tools.ToolResult(UNAVAILABLE)
+        if entry.owner_gated and not window_call and drive_turn is None:
             return tools.ToolResult("Refused: this Browser action needs the current owner chat turn.")
         # Codex native approval delegates transport for every offered tool.
         # Unlike Claude it has no PreToolUse hook, so nondangerous entries

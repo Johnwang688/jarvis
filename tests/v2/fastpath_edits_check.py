@@ -319,8 +319,10 @@ class Turns(Base):
         for message, eligible in ((SelectedVoiceMessage(text="hi"), True),
                                   (UserMessage(text="hi", via="voice", spoken=True), False)):
             script = Script()
-            with patch("jarvis.v2.voice_model.completion_for", return_value=script):
+            with patch("jarvis.v2.voice_model.completion_for", return_value=script), \
+                    patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": "1"}):
                 self.turn(provider, handle, script, message)
+            self.assertFalse(any(name.startswith("hud_window_") for name in script.tools[0]))
             self.assertEqual(fastpath.HUD_DESKTOP_TOOLS & script.tools[0],
                              fastpath.HUD_DESKTOP_TOOLS if eligible else set())
             self.assertFalse(EDIT & script.tools[0])
@@ -367,8 +369,9 @@ class Turns(Base):
 
         events = queue.Queue()
         tracker = fastpath._TurnState("t1", events)
-        tracker.on_event("tool_start", ("hud_desktop_type", '{"text":"private fixture"}'))
-        self.assertEqual(events.get_nowait().data["args"], {})
+        for name in ("hud_desktop_type", "hud_window_type"):
+            tracker.on_event("tool_start", (name, '{"text":"private fixture"}'))
+            self.assertEqual(events.get_nowait().data["args"], {})
 
     def test_the_owners_desk_turn_holds_them_with_thirty_steps(self):
         provider, handle = self.open()

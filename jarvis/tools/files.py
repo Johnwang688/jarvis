@@ -103,6 +103,7 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/browser/drive_downloads.py",
         "jarvis/v2/tools/hud_browser_act.py",
         "jarvis/v2/tools/hud_desktop.py",
+        "jarvis/v2/tools/hud_window.py",
         "jarvis/desktop.py",
         "windows/desktopwire.py",
         "windows/bridge.py",
@@ -462,7 +463,7 @@ RECORD_TREES = (
     "deleting",      # a permanent delete's staging folder and manifest
     "vex",           # VEX build locks and unfinished-build markers
 )
-RECORD_FILES = ("decisions.jsonl",)
+RECORD_FILES = ("decisions.jsonl", "desktop_actions.jsonl")
 
 
 def _resolve_all(paths) -> set[Path]:

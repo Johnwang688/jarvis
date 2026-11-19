@@ -755,10 +755,14 @@ class OwnerOnly(Base):
         import jarvis.v2.tools as v2tools
         import jarvis.v2.tools.propose as propose
         import jarvis.v2.tools.schedules as schedule_tools
+        from jarvis.v2.tools import hud_window
         v2_names = {name for name, entry in tools.REGISTRY.items()
                     if getattr(getattr(entry, "func", None), "__module__", "").startswith("jarvis.v2.tools")}
         reachable = set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | v2_names
-        self.assertTrue({"task_propose", "schedule_delete"} <= reachable, reachable)
+        self.assertTrue({"task_propose", "schedule_delete"} | hud_window.HUD_WINDOW_TOOLS <= reachable,
+                        reachable)
+        self.assertEqual({name for name in v2_names if name.startswith("hud_window_")},
+                         hud_window.HUD_WINDOW_TOOLS)
         for name in sorted(reachable):
             self.assertIsNone(self.FORBIDDEN_NAME.search(name), name)
         # And nothing a tool runs names the routes or the functions behind them.
