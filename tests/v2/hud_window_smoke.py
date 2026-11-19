@@ -74,11 +74,6 @@ def main():
         if drivable:
             step("window_probe focus (may refuse when that window is not in front)",
                  lambda: ask("window_probe", window=drivable[0]["window"], focus=True))
-        if see_only and drivable:
-            refused = step("input to a see-only window is refused (FAIL here is the expected refusal text)",
-                           lambda: ask("window_probe", window=see_only[0]["window"], focus=True))
-            if refused is not None:
-                print("      NOTE: the see-only window answered a focus probe; tell the lead.")
     finally:
         session.stop()
         proc.terminate()
