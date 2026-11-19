@@ -16,9 +16,9 @@ import time
 import wave
 
 if __package__:
-    from .voicetype import navigation_target
+    from .voicetype import LAYA_ROUTE_WAIT_S, laya_grounded, navigation_target
 else:
-    from voicetype import navigation_target
+    from voicetype import LAYA_ROUTE_WAIT_S, laya_grounded, navigation_target
 
 PROTOCOL = "jarvis-voice-link/1"
 MAX_CLIP_S = 120
@@ -32,8 +32,14 @@ ERRORS = frozenset(("The clip could not be transcribed.", "That didn't sound lik
                     "Open a chat in the HUD, then ask again.",
                     "The voice answer took too long. Check the selected chat in the HUD.",
                     "The voice answer took too long. Please check the Voice chat.",
-                    "The clip must be a 16 kHz mono 16-bit WAV of at most 120 seconds."))
+                    "The clip must be a 16 kHz mono 16-bit WAV of at most 120 seconds.",
+                    "Voice commands and answers are unavailable right now."))
 KINDS = frozenset(("dictate", "ask", "open_app", "switch_app", "search", "read_selection", "navigate"))
+# A negotiated Laya route never asks the helper to type: literal dictation and
+# Ctrl+D are decided on the helper and never reach the router.
+LAYA_KINDS = frozenset(("ask", "open_app", "switch_app", "search", "read_selection", "navigate", "clarify"))
+LAYA_OUTCOMES = frozenset(("confirmed", "failed", "cancelled"))
+LAYA_NAMES = 512  # offered app or open-window names per request
 
 
 class LinkError(Exception):
@@ -132,6 +138,9 @@ class Capture:
         self.pending = bytearray()
         self.closed = self.cancelled = False
         self.release_at = self.speech_end = None
+        # Which control the capture belonged to, fixed when it ends: "assistant"
+        # (Right Ctrl) or "dictation" (Ctrl+D, including Right Ctrl joined by D).
+        self.mode = None
 
     def append(self, pcm):
         with self.ready:
@@ -140,10 +149,11 @@ class Capture:
                 if len(self.pending) >= PACKET_BYTES:
                     self.ready.notify()
 
-    def finish(self, cancel=False, *, release_at=None):
+    def finish(self, cancel=False, *, release_at=None, mode=None):
         with self.ready:
             self.closed = True
             self.release_at = release_at
+            self.mode = mode
             if cancel:
                 self.cancelled = True
                 self.pending.clear()
@@ -173,6 +183,10 @@ class Client:
         self.shared_capable = False
         self.action_receipts = False
         self.web_navigation = False
+        # Requested on every ping; True only while this connection's daemon
+        # granted it. Right Ctrl and wake commands need it to act or answer.
+        self.request_laya = True
+        self.laya_routing = False
         self._request_lock = threading.Lock()
         self._speech_lock = threading.Lock()
         self._speaking_id = None
@@ -206,14 +220,17 @@ class Client:
                 raise
             raise LinkError("Jarvis isn't running") from None
 
-    def _request(self, payload, on_delta=None, on_status=None):
+    def _request(self, payload, on_delta=None, on_status=None, *, wait=None):
         with self._request_lock:
-            return self._exchange(payload, on_delta, on_status)
+            return self._exchange(payload, on_delta, on_status, wait=wait)
 
-    def _exchange(self, payload, on_delta, on_status, on_audio=None, cancelled=None):
+    def _exchange(self, payload, on_delta, on_status, on_audio=None, cancelled=None, *, wait=None):
         if self._stream is None:
             raise LinkError("Jarvis isn't running")
         try:
+            if wait is not None and self._socket is not None:
+                # A routing inference may need a cold model start (bounded by the daemon).
+                self._socket.settimeout(max(self.timeout, wait))
             self._id += 1
             with self._speech_lock:
                 if cancelled is not None and cancelled.is_set():
@@ -266,11 +283,15 @@ class Client:
 
     def ping(self, *, wake=None, instance=None):
         got = self._request({"op": "ping", "features": True, **({"wake": wake} if wake is not None else {}),
-                             **({"instance": instance} if instance is not None else {})})
+                             **({"instance": instance} if instance is not None else {}),
+                             **({"laya_routing": True} if self.request_laya else {})})
         self.streaming = got.get("streaming") is True
         self.shared_capable = got.get("shared_mic") is True
         self.action_receipts = got.get("action_receipts") is True
         self.web_navigation = got.get("web_navigation") is True
+        # Paired: granted only when requested, and only with web navigation.
+        self.laya_routing = (self.request_laya and self.web_navigation
+                             and got.get("laya_routing") is True)
 
     def dictate(self, wav, source="hotkey"):
         got = self._request({"op": "dictate", "wav_b64": base64.b64encode(wav).decode("ascii"),
@@ -336,6 +357,49 @@ class Client:
             return {**value, "receipt": receipt}
         return value
 
+    def laya_route(self, text, mode, *, apps=(), windows=(), with_receipt=False):
+        """One negotiated routing decision for a Right Ctrl or wake command.
+
+        The helper rechecks the decision against the transcript and the exact
+        names it offered; anything else closes the link before any action.
+        """
+        if not self.laya_routing or mode not in ("assistant", "wake"):
+            raise LinkError("The voice request failed.")
+        apps, windows = list(apps)[:LAYA_NAMES], list(windows)[:LAYA_NAMES]
+        request = {"op": "route", "laya": True, "text": text, "source": mode,
+                   "apps": apps, "windows": windows, "web_navigation": True}
+        if with_receipt and self.action_receipts:
+            request["receipt"] = True
+        got = self._request(request, wait=LAYA_ROUTE_WAIT_S)
+        value, turn = got.get("intent"), got.get("turn")
+        try:
+            if (not isinstance(value, dict) or not isinstance(turn, str) or not HEX64.fullmatch(turn)
+                    or not {"kind", "text", "target"} <= set(value) <= {"kind", "text", "target", "choices"}
+                    or value["kind"] not in LAYA_KINDS or not isinstance(value["text"], str)
+                    or len(value["text"]) > 2000 or not isinstance(value["target"], str)
+                    or len(value["target"]) > 500
+                    or ("choices" in value and (not isinstance(value["choices"], list)
+                                                or not all(isinstance(c, str) for c in value["choices"])))):
+                raise ValueError()
+            intent = {"kind": value["kind"], "text": value["text"], "target": value["target"],
+                      "turn": turn}
+            if "choices" in value:
+                intent["choices"] = tuple(value["choices"])
+            if not laya_grounded(intent, text, tuple(apps), tuple(windows)):
+                raise ValueError()
+        except (ValueError, TypeError):
+            self.close()
+            raise LinkError("The voice link sent an invalid reply.") from None
+        receipt = got.get("receipt")
+        if request.get("receipt") and isinstance(receipt, str) and HEX64.fullmatch(receipt):
+            intent["receipt"] = receipt
+        return intent
+
+    def route_outcome(self, turn, status):
+        """Observational feedback for a routed turn; never a label or a receipt."""
+        if self.laya_routing and isinstance(turn, str) and status in LAYA_OUTCOMES:
+            self._request({"op": "route_outcome", "turn": turn, "status": status})
+
     def confirm_action(self, receipt):
         return self._request({"op": "action_done", "receipt": receipt}).get("recorded") is True
 
@@ -350,8 +414,9 @@ class Client:
     def scratch(self, pass_):
         self._request({"op": "scratch", "pass": pass_})
 
-    def ask(self, text, on_delta=None, on_status=None):
-        got = self._request({"op": "ask", "text": text}, on_delta, on_status)
+    def ask(self, text, on_delta=None, on_status=None, *, turn=None):
+        got = self._request({"op": "ask", "text": text, **({"turn": turn} if turn else {})},
+                            on_delta, on_status)
         if got.get("done") is not True or not isinstance(got.get("text"), str):
             self.close()
             raise LinkError("The voice link sent an invalid reply.")
@@ -366,9 +431,11 @@ class Client:
                     pass
                 self._speaking_id = None
 
-    def ask_spoken(self, text, on_delta, on_audio, cancelled=None, *, defer_speech=False):
+    def ask_spoken(self, text, on_delta, on_audio, cancelled=None, *, defer_speech=False, turn=None):
         with self._request_lock:
             payload = {"op": "ask", "text": text, "speech": True, "defer_speech": defer_speech}
+            if turn:
+                payload["turn"] = turn
             got = self._exchange(payload, on_delta, None, on_audio, cancelled)
         if got.get("done") is not True or not isinstance(got.get("text"), str):
             raise LinkError("The voice link sent an invalid reply.")
@@ -387,6 +454,7 @@ class Client:
     def close(self):
         self.action_receipts = False
         self.web_navigation = False
+        self.laya_routing = False
         self.session = None
         sock, stream = self._socket, self._stream
         self._socket = self._stream = None

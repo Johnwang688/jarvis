@@ -10,13 +10,15 @@ from dataclasses import dataclass
 
 if __package__:
     from .voiceactions import LaunchStatus, action_scope
-    from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, navigation_target, plan,
-                            sanitize, shortcut_open_target)
+    from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
+                            mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
+                            spoken_websites)
     from .voicewire import LinkError, VoiceQuestionError
 else:
     from voiceactions import LaunchStatus, action_scope
-    from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, mentions_command, navigation_target, plan,
-                            sanitize, shortcut_open_target)
+    from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
+                           mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
+                           spoken_websites)
     from voicewire import LinkError, VoiceQuestionError
 
 
@@ -29,6 +31,16 @@ PROFILE_QUESTION = "Which Chrome profile would you like?"
 PROFILE_MANUAL = "Chrome needs a profile. Choose one in Chrome."
 PROFILE_UNVERIFIED = "Chrome profile selection could not be verified. Check Chrome."
 PROFILE_CANCELED = "Chrome profile selection canceled."
+SITE_CHOICE_SECONDS = 15.0
+SITE_CANCELED = "Website choice canceled."
+SITE_EXPIRED = "That website choice expired. Ask again."
+ASSISTANT_UPDATE = ("Restart the Jarvis daemon to use Right Ctrl commands. "
+                    "Ctrl+D still dictates.")
+ROUTE_UNAVAILABLE = "Voice command routing is unavailable. Ctrl+D still dictates."
+CONVERSATION_ONLY = "Desktop actions are unavailable; answering in conversation only."
+CLARIFY = "I wasn't sure what to do. Please say that again more specifically."
+TOO_LONG = "That is too long for a command. Hold Ctrl+D to dictate long text."
+VOICE_SOURCES = frozenset(("hotkey", "wake", "assistant", "dictation"))
 
 
 def _profile_name(text):
@@ -41,6 +53,25 @@ class _ProfileChoice:
     labels: tuple[str, ...]
     receipt: str | None
     expires_at: float
+    turn: str | None = None  # the routed turn awaiting an outcome, if any
+
+
+@dataclass(frozen=True)
+class _SiteChoice:
+    """Two websites the owner named for navigation. Only an active choice acts."""
+    session: str | None
+    choices: tuple[str, str]
+    receipt: str | None
+    turn: str | None
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class _SiteReplyContext:
+    """Recognition only (no session, receipt or turn): a late reply never acts."""
+    choices: tuple[str, ...]
+    until: float
+    repeat: tuple[str, str] = ("done", SITE_EXPIRED)
 
 
 @dataclass(frozen=True)
@@ -126,6 +157,38 @@ def _looks_like_profile_reply(words, names):
                for part in map(candidate, parts))
 
 
+_SITE_LEAD = re.compile(r"^(?:(?:open|go to|visit|choose|pick|select|use|take me to|show me|"
+                        rf"i{_APOSTROPHE}d like|i would like|i want|let{_APOSTROPHE}s do|make it|"
+                        r"maybe|oh|um|uh|ok|okay)[, ]+)+")
+_SITE_TAIL = re.compile(r"(?:[, ]+(?:one|site|website|option|link|please|thanks|thank you))+$")
+_SITE_ORDINALS = {"first": 0, "1st": 0, "number one": 0, "the first": 0, "former": 0, "the former": 0,
+                  "second": 1, "2nd": 1, "number two": 1, "the second": 1, "last": 1, "the last": 1,
+                  "latter": 1, "the latter": 1, "other": 1, "the other": 1}
+
+
+def _site_reply(text, choices):
+    """0 or 1 for a choice the owner picked, "cancel", or None (not a reply)."""
+    reading = _profile_name(JARVIS_ADDRESS.sub("", text, count=1))
+    if not reading:
+        return None
+    if _is_cancel_reply(reading) or _is_negative_reply(reading) or reading in ("stop", "never mind"):
+        return "cancel"
+    core = _TRAIL_COURTESY.sub("", POLITE_PREFIX.sub("", reading)).strip(" ,")
+    core = _SITE_LEAD.sub("", core)
+    stripped = _SITE_TAIL.sub("", core).strip(" ,")
+    for form in (core, stripped, stripped.removeprefix("the ")):
+        if form in _SITE_ORDINALS:
+            return _SITE_ORDINALS[form]
+    named = spoken_websites(text)
+    if len(named) == 1 and named[0] in choices and sanitize(stripped).count(" ") < 3:
+        return choices.index(named[0])
+    labels = [choice.split("://", 1)[-1].split(".", 1)[0] for choice in choices]
+    for form in (stripped, stripped.removeprefix("the ")):
+        if labels.count(form) == 1:
+            return labels.index(form)
+    return None
+
+
 def _run_native(current, action, *args, **kwargs):
     # A worker may retain the scope's callable after the native call returns.
     running = True
@@ -169,11 +232,11 @@ class SpokenAnswer:
             except queue.Full:
                 pass
 
-    def ask(self, client, words, delta, *, defer_speech=False):
+    def ask(self, client, words, delta, *, defer_speech=False, turn=None):
         self.worker.start()
         try:
             answer = client.ask_spoken(words, delta, self.offer, self.player.cancelled,
-                                       defer_speech=defer_speech)
+                                       defer_speech=defer_speech, **({"turn": turn} if turn else {}))
         except BaseException:
             self.player.stop()
             raise
@@ -256,6 +319,7 @@ class Flow:
         Returns the receipt-free context (or ``()``) so a reconnecting worker
         can carry reply recognition, never authority, to the next client.
         """
+        Flow.retire_site_choice(client)
         pending = getattr(client, "_pending_chrome_profile", None)
         if isinstance(pending, _ProfileChoice):
             retired_at = min(time.monotonic(), pending.expires_at)
@@ -263,8 +327,29 @@ class Flow:
             client._pending_chrome_profile = pending
         return pending if isinstance(pending, _ProfileReplyContext) else ()
 
+    @staticmethod
+    def retire_site_choice(client):
+        """Stop, cancel, a new capture's routing, or a lost session: never act again."""
+        pending = getattr(client, "_pending_site_choice", None)
+        if isinstance(pending, _SiteChoice):
+            retired_at = min(time.monotonic(), pending.expires_at)
+            client._pending_site_choice = _SiteReplyContext(
+                pending.choices, retired_at + PROFILE_REPLY_GRACE_SECONDS)
+
+    @staticmethod
+    def expire_site_choice(client):
+        pending = getattr(client, "_pending_site_choice", None)
+        if (isinstance(pending, _SiteChoice)
+                and (pending.session != getattr(client, "session", None)
+                     or time.monotonic() >= pending.expires_at)):
+            Flow.retire_site_choice(client)
+            pending = client._pending_site_choice
+        if isinstance(pending, _SiteReplyContext) and time.monotonic() >= pending.until:
+            client._pending_site_choice = None
+
     @classmethod
     def expire_profile_choice(cls, client):
+        cls.expire_site_choice(client)
         pending = getattr(client, "_pending_chrome_profile", None)
         if (isinstance(pending, _ProfileChoice)
                 and (pending.session != getattr(client, "session", None) or time.monotonic() >= pending.expires_at)):
@@ -288,7 +373,7 @@ class Flow:
         self.ui.set_state("profile_choice", f"{PROFILE_QUESTION}\n{', '.join(pending.labels)}\n{instruction}",
                           pending.expires_at)
 
-    def _offer_profile_choice(self, receipt, session, source, current):
+    def _offer_profile_choice(self, receipt, session, source, current, turn=None):
         options = getattr(self.actions, "chrome_profile_options", None)
         choose = getattr(self.actions, "choose_chrome_profile", None)
         labels = options() if callable(options) and callable(choose) else ()
@@ -298,7 +383,7 @@ class Flow:
                 or not all(isinstance(label, str) and _profile_name(label) for label in labels)):
             self.ui.set_state("error", PROFILE_MANUAL)
             return
-        pending = _ProfileChoice(session, labels, receipt, time.monotonic() + PROFILE_CHOICE_SECONDS)
+        pending = _ProfileChoice(session, labels, receipt, time.monotonic() + PROFILE_CHOICE_SECONDS, turn)
         self.client._pending_chrome_profile = pending
         self._show_profile_choice(pending, source)
         try:
@@ -384,6 +469,7 @@ class Flow:
                 result = _run_native(authorized, self.actions.choose_chrome_profile, matches[0])
                 if result is LaunchStatus.LAUNCHED and authorized():
                     self._confirm_action(pending.receipt, authorized)
+                    self._outcome(pending.turn, "confirmed")
                     self.client._pending_chrome_profile = _ProfileReplyContext(
                         labels, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS,
                         ("done", "Chrome profile already chosen."))
@@ -414,22 +500,256 @@ class Flow:
         return True
 
     def _open_app(self, target, intent, session, source, current, *, exact=False):
+        turn = intent.get("turn")
         if not current():
+            self._outcome(turn, "cancelled")
             return True
         kwargs = {"exact": True} if exact else {}
         result = _run_native(current, self.actions.open_app, target, **kwargs)
         if not current():
+            self._outcome(turn, "cancelled")
             return True
         if not result:
+            self._outcome(turn, "failed")
             return False
         if result == LaunchStatus.CHROME_PROFILE_REQUIRED:
-            self._offer_profile_choice(intent.get("receipt"), session, source, current)
+            self._offer_profile_choice(intent.get("receipt"), session, source, current, turn)
         elif result == LaunchStatus.CHROME_WINDOW_UNCONFIRMED:
+            self._outcome(turn, "failed")
             self.ui.set_state("error", "Chrome launch requested. Check the Chrome window.")
         else:
             self._confirm_action(intent.get("receipt"), current)
+            self._outcome(turn, "confirmed")
             self.ui.set_state("done", f"Opened {target}.")
         return True
+
+    def _outcome(self, turn, status):
+        """Observational route feedback after dispatch; it can change nothing."""
+        if not turn:
+            return
+        try:
+            self.client.route_outcome(turn, status)
+        except LinkError as exc:
+            self.link_error = exc  # reconnect before the next clip; the action stands
+        except Exception:
+            pass
+
+    def _route_names(self):
+        """Exact installed app names and open-window app names to ground against.
+
+        The helper offers names from the Start catalog only: no window titles
+        or other window text leave this process.
+        """
+        names = getattr(self.actions, "route_names", None)
+        try:
+            got = names() if callable(names) else None
+        except Exception:
+            got = None
+        if (isinstance(got, tuple) and len(got) == 2 and all(isinstance(part, tuple) for part in got)
+                and all(isinstance(name, str) for part in got for name in part)):
+            return got
+        return (), ()
+
+    def _dictate(self, text, current):
+        """Ctrl+D: type into the focused app. No routing, chat, receipt or action."""
+        if not current():
+            return
+        if len(text) > 2000:
+            self.typer.run([("text", text)])  # a long paragraph stays complete and literal
+        else:
+            how, words = dictation_choice(text)
+            if how == "literal":
+                self.typer.run([("text", words)])
+            else:
+                self._type(words)
+        self.ui.set_state("done")
+
+    def _speak_prompt(self, text, current):
+        wav = self.client.say(text)
+        if current():
+            self.player.play(wav)
+
+    def _offer_site_choice(self, intent, session, source, current):
+        choices = intent["choices"]
+        pending = _SiteChoice(session, choices, intent.get("receipt"), intent.get("turn"),
+                              time.monotonic() + SITE_CHOICE_SECONDS)
+        self.client._pending_site_choice = pending
+        names = " or ".join(choice.split("://", 1)[-1] for choice in choices)
+        instruction = ("Say Jarvis, then first, second or cancel." if source == "wake"
+                       else "Hold Right Ctrl and say first, second or cancel.")
+        self.ui.set_state("profile_choice", f"Which website: {names}?\n{instruction}", pending.expires_at)
+        try:
+            wav = self.client.say(f"Which website: {names}?")
+            if current() and time.monotonic() < pending.expires_at:
+                self.player.play(wav)
+        except (OSError, RuntimeError):
+            self.retire_site_choice(self.client)
+            raise
+
+    def _handle_site_reply(self, text, current):
+        self.expire_site_choice(self.client)
+        pending = getattr(self.client, "_pending_site_choice", None)
+        if not isinstance(pending, (_SiteChoice, _SiteReplyContext)):
+            return False
+        if not current():
+            return True
+        choice = _site_reply(text, pending.choices)
+        if choice is None:
+            # Unrelated speech: the offer loses its authority and routing goes on.
+            self.retire_site_choice(self.client)
+            return False
+        if isinstance(pending, _SiteReplyContext):
+            self.ui.set_state(*pending.repeat)
+            return True
+        # Consume before acting: a repeated reply can never navigate twice.
+        self.client._pending_site_choice = _SiteReplyContext(
+            pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("done", "Website already chosen."))
+        if choice == "cancel":
+            self.client._pending_site_choice = _SiteReplyContext(
+                pending.choices, time.monotonic() + PROFILE_REPLY_GRACE_SECONDS, ("done", SITE_CANCELED))
+            self._outcome(pending.turn, "cancelled")
+            self.ui.set_state("done", SITE_CANCELED)
+            return True
+
+        def authorized():
+            return (current() and pending.session == getattr(self.client, "session", None)
+                    and time.monotonic() < pending.expires_at)
+
+        navigate = getattr(self.actions, "navigate", None)
+        if not authorized() or not callable(navigate):
+            self.ui.set_state("done", SITE_EXPIRED)
+            return True
+        handed_off = _run_native(authorized, navigate, pending.choices[choice])
+        if not current():
+            self._outcome(pending.turn, "cancelled")
+            return True
+        if handed_off is not True:
+            self._outcome(pending.turn, "failed")
+            self.ui.set_state("error", "Could not send the website to the browser.")
+            return True
+        self._confirm_action(pending.receipt, current)
+        self._outcome(pending.turn, "confirmed")
+        self.ui.set_state("done", "Sent the website to the browser.")
+        return True
+
+    def _answer(self, words, *, defer_speech=False, turn=None):
+        partial = ""
+
+        def delta(piece):
+            nonlocal partial
+            partial += piece
+            self.ui.set_state("answering", partial)
+
+        extra = {"turn": turn} if turn else {}
+        if getattr(self.client, "streaming", False) is True:
+            if self.player.cancelled.is_set():
+                return False
+            answer = SpokenAnswer(self.player).ask(self.client, words, delta,
+                                                   defer_speech=defer_speech, **extra)
+            self.ui.set_state("answering", answer)
+        else:
+            answer = self.client.ask(words, on_delta=delta, **extra)
+            self.ui.set_state("answering", answer)
+            self.player.play(self.client.say(answer))
+        return True
+
+    def _laya_turn(self, text, clean, source, session, current):
+        """A negotiated Right Ctrl or wake command: one local or Laya decision.
+
+        Explicit literal dictation and an active clarification reply are
+        decided here without the router; anything else is routed once with
+        the full transcript. Every action rechecks generation and session just
+        before it runs and confirms its receipt only after native success.
+        """
+        if len(text) > 2000:
+            self.ui.set_state("error", TOO_LONG)
+            return
+        payload = literal_payload(text)
+        if payload:
+            self.retire_site_choice(self.client)
+            if current():
+                # The payload is text through the entire call: "send it" stays words.
+                self.typer.run([("text", payload)])
+                self.ui.set_state("done")
+            return
+        if self._handle_site_reply(clean, current):
+            return
+        apps, windows = self._route_names()
+        if not current():
+            return
+        self.ui.set_state("thinking")
+        try:
+            intent = self.client.laya_route(
+                text, source, apps=apps, windows=windows,
+                with_receipt=getattr(self.client, "action_receipts", False) is True)
+        except LinkError as exc:
+            self.link_error = exc
+            self.ui.set_state("error", ROUTE_UNAVAILABLE)
+            return
+        turn, kind, target = intent["turn"], intent["kind"], intent["target"]
+        if not current():
+            self._outcome(turn, "cancelled")
+            return
+        if kind == "navigate":
+            navigate = getattr(self.actions, "navigate", None)
+            if not callable(navigate):
+                self._outcome(turn, "failed")
+                self.ui.set_state("error", "Website navigation is unavailable.")
+                return
+            handed_off = _run_native(current, navigate, target)
+            if not current():
+                self._outcome(turn, "cancelled")
+                return
+            if handed_off is not True:
+                self._outcome(turn, "failed")
+                self.ui.set_state("error", "Could not send the website to the browser.")
+                return
+            self._confirm_action(intent.get("receipt"), current)
+            self._outcome(turn, "confirmed")
+            self.ui.set_state("done", "Sent the website to the browser.")
+        elif kind == "open_app":
+            # Exact catalog resolution of a name this helper offered.
+            if not self._open_app(target, intent, session, source, current, exact=True):
+                self.ui.set_state("error", f"Could not find {target}.")
+        elif kind in ("switch_app", "search", "read_selection"):
+            if kind == "switch_app":
+                done = _run_native(current, self.actions.switch_app, target) is True
+                failure = f"Could not find {target}."
+            elif kind == "search":
+                done = _run_native(current, self.actions.search, target) is True
+                failure = "Could not open the search."
+            else:
+                selection = _run_native(current, self.actions.read_selection)
+                done = isinstance(selection, str) and bool(selection)
+                failure = "No selected text to read."
+                if done and current():
+                    self.ui.set_state("answering", selection)
+                    self.player.play(self.client.say(selection))
+                    done = not self.player.cancelled.is_set()
+                selection = None
+            if not current():
+                self._outcome(turn, "cancelled")
+                return
+            if not done:
+                self._outcome(turn, "failed")
+                self.ui.set_state("error", failure)
+                return
+            self._confirm_action(intent.get("receipt"), current)
+            self._outcome(turn, "confirmed")
+            self.ui.set_state("done", f"Switched to {target}." if kind == "switch_app" else None)
+        elif kind == "clarify":
+            if target == "website":
+                self._offer_site_choice(intent, session, source, current)
+            else:
+                self.ui.set_state("done", CLARIFY)
+                self._speak_prompt(CLARIFY, current)
+        elif kind == "ask":
+            if target == "conversation":
+                self.ui.set_state("thinking", CONVERSATION_ONLY)
+            if self._answer(text, turn=turn):
+                self.ui.set_state("done")
+        else:
+            self.ui.set_state("error", "Unknown voice action.")
 
     def on_clip(self, wav, source, *, transcript=None):
         self.link_error = None
@@ -439,14 +759,29 @@ class Flow:
             return self._can_act() and session == getattr(self.client, "session", None)
 
         try:
-            if source not in {"hotkey", "wake"}:
+            if source not in VOICE_SOURCES:
                 raise ValueError("Unknown voice source")
             self.ui.set_state("transcribing")
-            text = transcript if transcript is not None else self.client.dictate(wav, source=source)["text"]
+            # Both physical shortcuts transcribe as before; only wake verifies the speaker.
+            text = transcript if transcript is not None else self.client.dictate(
+                wav, source="wake" if source == "wake" else "hotkey")["text"]
             if session != getattr(self.client, "session", None):
                 return
             clean = sanitize(text)
-            if not clean or (source == "wake" and clean.rstrip(".,!?").casefold() == "jarvis"):
+            if source == "dictation":
+                # Ctrl+D never routes, asks, acts, confirms or answers a prompt.
+                if not clean:
+                    self.ui.set_state("done", "No speech heard")
+                else:
+                    self._dictate(text, current)
+                return
+            laya = getattr(self.client, "laya_routing", False) is True
+            if source == "assistant" and not laya:
+                # A daemon without the negotiated mode cannot tell this from
+                # dictation. Never type or act on it.
+                self.ui.set_state("error", ASSISTANT_UPDATE)
+                return
+            if not clean or (source in ("wake", "assistant") and clean.rstrip(".,!?").casefold() == "jarvis"):
                 self.expire_profile_choice(self.client)
                 pending = getattr(self.client, "_pending_chrome_profile", None)
                 if isinstance(pending, _ProfileChoice) and current():
@@ -455,6 +790,9 @@ class Flow:
                     self.ui.set_state("done", "No speech heard")
                 return
             if self._handle_profile_reply(clean, current):
+                return
+            if laya and source in ("assistant", "wake"):
+                self._laya_turn(text, clean, source, session, current)
                 return
             if source == "hotkey" and len(text) > 2000:
                 # Route replies are capped. A long paragraph stays complete
@@ -512,23 +850,8 @@ class Flow:
                 self.ui.set_state("done", "Hold the dictation shortcut to type those words.")
                 return
             elif kind in {"ask", "dictate"}:
-                partial = ""
-
-                def delta(piece):
-                    nonlocal partial
-                    partial += piece
-                    self.ui.set_state("answering", partial)
-
-                if getattr(self.client, "streaming", False) is True:
-                    if self.player.cancelled.is_set():
-                        return
-                    answer = SpokenAnswer(self.player).ask(self.client, words, delta,
-                                                           defer_speech=target == "task")
-                    self.ui.set_state("answering", answer)
-                else:
-                    answer = self.client.ask(words, on_delta=delta)
-                    self.ui.set_state("answering", answer)
-                    self.player.play(self.client.say(answer))
+                if not self._answer(words, defer_speech=target == "task"):
+                    return
             elif kind == "open_app":
                 if not self._open_app(target, intent, session, source, current):
                     self.ui.set_state("error", f"Could not find {target}.")

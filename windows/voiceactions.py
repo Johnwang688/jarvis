@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from urllib.parse import quote_plus
 
 if __package__:
@@ -734,6 +735,37 @@ class Actions:
                 return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
             self.sleep(min(remaining, 0.1))
         return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
+
+    ROUTE_NAMES = 512
+    ROUTE_NAME_CHARS = 80
+
+    def route_names(self):
+        """(installed app names, names of apps with an open window) for routing.
+
+        Only Start catalog display names and the fixed aliases above are
+        offered; window titles and other window text never leave the helper.
+        An app counts as open when ``match_window`` (what ``switch_app`` uses)
+        finds a window for it.
+        """
+        self.refresh_apps()
+
+        def usable(name):
+            return (isinstance(name, str) and 0 < len(name) <= self.ROUTE_NAME_CHARS and name.strip() == name
+                    and not any(unicodedata.category(c).startswith("C") for c in name))
+
+        apps, seen = [], set()
+        for name in [app["name"] for app in self.apps] + [
+                alias for alias, canonical in ALIASES.items()
+                if any(_normal(app["name"]) == canonical for app in self.apps)]:
+            if usable(name) and name.casefold() not in seen and len(apps) < self.ROUTE_NAMES:
+                seen.add(name.casefold())
+                apps.append(name)
+        try:
+            windows = list(self.desktop.windows())
+        except Exception:  # noqa: BLE001  (no enumeration: nothing to switch to)
+            windows = []
+        open_names = tuple(name for name in apps if windows and match_window(name, windows) is not None)
+        return tuple(apps), open_names
 
     def switch_app(self, target):
         hwnd = match_window(target, self.desktop.windows())

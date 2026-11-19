@@ -106,6 +106,139 @@ def navigation_target(text: str, source: str) -> str:
     return web_destination(_SPOKEN_DOT.sub(".", target))
 
 
+# -- Laya routing: local literal/dictation decisions and grounding checks ------
+# The helper decides explicit literal dictation and Ctrl+D typing itself, and
+# rechecks every routed target against the owner's own words, so a stale or
+# faulty daemon can never make it act on a site, app or query never spoken.
+# These mirror jarvis/v2/laya_routing.py (the daemon's grounding adapter);
+# tests/v2/voice_laya_flow_check.py holds the two in parity.
+
+LAYA_ROUTE_WAIT_S = 40.0  # cold Laya start (20 s) plus one request, with margin
+_LAYA_LITERAL = re.compile(
+    r"^\s*(?:(?:please|kindly)\s+)?(?:type(?: out)?|dictate|insert)\s+"
+    r"(?:(?:the\s+)?(?:words|phrase|sentence|text)|literally|verbatim)(?=[: ,\s])"
+    r"(?:\s*[:,]\s*|\s+)(?=\S)", re.I)
+_LAYA_LITERAL_QUOTED = re.compile(
+    r"^\s*(?:(?:please|kindly)\s+)?(?:type(?: out)?|dictate|insert)"
+    r"(?:\s*[:,]\s*|\s+)(?=[\"“‘])", re.I)
+_LAYA_SPOKEN_DOT = re.compile(
+    r"(?<=[a-z0-9])\s+dot(?:\s+|-)(?=[a-z0-9])|(?<=[a-z0-9]) +\. +(?=[a-z0-9])", re.I | re.ASCII)
+_LAYA_HOST_TOKEN = re.compile(
+    rf"(?<![\w.@:/\\%#?&=+~-])((?:https?://)?(?:{_DNS_LABEL}\.)+[a-z]{{2,63}}/?)"
+    r"(?![\w@:/\\%#&=+~-]|\?(?=\S)|\.[a-z0-9])", re.I | re.ASCII)
+_LAYA_FUSED_GREETING = re.compile(r"(\.[a-z]{2,63})(?=(?:Yo|Hey|Hi|Hello|Okay|OK)[, ]+)", re.ASCII)
+_LAYA_REPEATED_HOST = re.compile(
+    rf"(?<![\w.@:/\\%#?&=+~-])((?:{_DNS_LABEL}\.)+[a-z]{{2,63}}?)(?:\1)+"
+    r"(?![\w@:/\\%#&=+~-]|\?(?=\S)|\.[a-z0-9])", re.I | re.ASCII)
+
+
+def literal_payload(text: str) -> str:
+    """The words after an explicit "type the words …" request, else ""."""
+    if not isinstance(text, str):
+        return ""
+    body = JARVIS_ADDRESS.sub("", text.lstrip(), count=1)
+    match = _LAYA_LITERAL.match(body) or _LAYA_LITERAL_QUOTED.match(body)
+    return body[match.end():] if match else ""
+
+
+def spoken_websites(text: str) -> tuple[str, ...]:
+    """Every distinct canonical website the transcript names, in spoken order."""
+    if not isinstance(text, str) or len(text) > 2000:
+        return ()
+    text = _LAYA_SPOKEN_DOT.sub(".", text)
+    text = _LAYA_FUSED_GREETING.sub(r"\1 ", text)
+    text = _LAYA_REPEATED_HOST.sub(r"\1", text)
+    found = []
+    for match in _LAYA_HOST_TOKEN.finditer(text):
+        url = web_destination(match[1])
+        if url and url not in found:
+            found.append(url)
+    return tuple(found)
+
+
+def spoken_span(text: str, value: str) -> bool:
+    """Whether ``value`` occurs in the transcript as whole words (any case)."""
+    if not isinstance(text, str) or not isinstance(value, str) or not value.strip():
+        return False
+    phrase = r"\s+".join(map(re.escape, value.split()))
+    return re.search(rf"(?<![\w+]){phrase}(?![\w+])", text, re.I) is not None
+
+
+def laya_grounded(intent, text, apps=(), windows=()):
+    """Recheck one routed Laya decision against the owner's own words.
+
+    ``apps`` and ``windows`` are exactly the names this helper offered for the
+    request. Only an exact offered name the transcript says may launch or
+    focus; only the one website it names may navigate; a search query must be
+    the owner's own contiguous words. A clarification may only offer
+    websites the owner named.
+    """
+    kind, target = intent.get("kind"), intent.get("target")
+    if not isinstance(target, str):
+        return False
+    if kind == "navigate":
+        return bool(target) and spoken_websites(text) == (target,)
+    if kind == "clarify":
+        choices = intent.get("choices", ())
+        if target == "":
+            return choices == ()
+        spoken = spoken_websites(text)
+        return (target == "website" and isinstance(choices, tuple) and len(choices) == 2
+                and len(set(choices)) == 2 and all(choice in spoken for choice in choices))
+    if kind in ("open_app", "switch_app"):
+        offered = apps if kind == "open_app" else windows
+        return bool(target) and target in offered and spoken_span(text, target)
+    if kind == "search":
+        return 0 < len(target) <= 500 and spoken_span(text, target)
+    if kind == "ask":
+        return target in ("", "conversation")
+    return kind == "read_selection" and target == ""
+
+
+_LITERAL_DICTATION = re.compile(
+    r"^(?:type(?: out)?|dictate|insert)(?:\s+(?:the )?(?:words?|phrase|sentence|text)"
+    r"(?=[:,\s]))?(?:\s+(?:literally|verbatim))?(?:\s*[:,]\s*|\s+)(.+)$", re.I)
+_DICTATION_QUOTES = {'"': '"', "'": "'", '“': '”', '‘': '’'}
+_REPORTED = re.compile(r"\b(?:said|says|say the words|phrase|literally|verbatim|"
+                       r"the words|quotation|quote|quoted|reads|wrote|write the words|heard|told)\b", re.I)
+_SEND_IN_SENTENCE = re.compile(
+    r"\b(?:I|you|we|she|he|they|to|not|never|cannot|can|could|would|will|"
+    r"should|may|might|must|shall|did|do|does|usually|already|always|"
+    r"\w+['’](?:t|ll|d))\s+send it[.!?]*$", re.I)
+_EDIT_WORDS = re.compile(r"\b(?:scratch that|new line|send it)\b", re.I)
+_TYPE_NOUN = re.compile(r"^type (?:[0-9]+|one|two|three|i|ii|iii|safety|checking|"
+                        r"system|inference|error|theory|of)\b", re.I)
+
+
+def _unquote(payload):
+    for candidate in (payload, payload.rstrip(".!?")):
+        if len(candidate) > 1 and _DICTATION_QUOTES.get(candidate[0]) == candidate[-1]:
+            return candidate[1:-1].strip()
+    return payload
+
+
+def dictation_choice(text: str) -> tuple[str, str]:
+    """How Ctrl+D types a transcript, decided locally with no intent model.
+
+    ``("literal", words)`` inserts exactly those words; ``("edit", words)``
+    goes through the editing grammar (scratch that, new line, send it). This
+    keeps the held shortcut's established escapes: "type the words …" and a
+    quoted or reported command phrase are typed, never pressed.
+    """
+    words = sanitize(text)
+    body = JARVIS_ADDRESS.sub("", words, count=1)
+    body = POLITE_PREFIX.sub("", body, count=1).strip()
+    literal = _LITERAL_DICTATION.fullmatch(body)
+    if literal and not _TYPE_NOUN.match(body):
+        return "literal", _unquote(literal[1].strip())
+    if _SEND_IN_SENTENCE.search(body) or (body.endswith("?") and _EDIT_WORDS.search(body)):
+        return "literal", words
+    if (_unquote(body) != body or (_EDIT_WORDS.search(body) and
+            (_REPORTED.search(body) or re.search(r"""["“”‘’]|(?:^|\s)'""", body)))):
+        return "literal", words
+    return "edit", words
+
+
 def app_name(target):
     """Extract one bounded spoken app name from a complete imperative."""
     target = re.sub(r"^the ", "", target.strip(), flags=re.I)
