@@ -19,7 +19,14 @@ _MODIFIERS = frozenset({
     "shift", "lshift", "rshift", "ctrl", "control", "lctrl", "rctrl",
     "alt", "lalt", "ralt", "altgr",
 })
-_WINDOWS_KEYS = frozenset({"win", "windows", "lwin", "rwin", "meta", "super", "cmd", "command"})
+# Every key name the guard passes; the bridge's key table must be exactly this
+# set (it checks at import). There is no Windows key in it, by decision.
+KEY_NAMES = _MODIFIERS | frozenset({
+    "backspace", "tab", "enter", "return", "esc", "escape", "space",
+    "pageup", "pagedown", "end", "home", "left", "up", "right", "down",
+    "insert", "delete", "del",
+    *"abcdefghijklmnopqrstuvwxyz0123456789", *(f"f{i}" for i in range(1, 25)),
+})
 
 
 class Desktop(Protocol):
@@ -64,6 +71,11 @@ class Desktop(Protocol):
         ...
 
 
+# The role of a container kept only as a step on the way to its unmasked
+# children. No real control has it, so a ref can never resolve to one.
+MASKED_STEP_ROLE = "masked-step"
+
+
 class Refused(Exception):
     """A refusal safe to show to the driving agent."""
 
@@ -90,7 +102,10 @@ class Grant:
         """Refuse unavailable, masked or mismatched control geometry."""
         if not usable_rect(bounds) or not policy.overlaps(bounds, (self.rect,)):
             raise Refused("The requested control has unreadable or off-window bounds.")
-        if policy.overlaps(bounds, self.masks):
+        # One pixel wider: a control that only shares an edge with a mask is
+        # refused too.
+        near = Rect(bounds.left - 1, bounds.top - 1, bounds.right + 1, bounds.bottom + 1)
+        if policy.overlaps(near, self.masks):
             raise Refused("The requested control is protected.")
         if point is not None and (not policy.masked(*point, (bounds,))
                                   or policy.masked(*point, self.masks)):
@@ -143,8 +158,12 @@ def own_image(image_path, *, executable, prefix, base_executable, base_prefix) -
 def _one_key_chord(keys) -> bool:
     if policy.refused_keys(keys):
         return False
-    names = [key.strip().casefold() for key in keys]
-    return (all(names) and _WINDOWS_KEYS.isdisjoint(names)
+    if not all(isinstance(key, str) and key.isascii() for key in keys):
+        return False
+    names = [key.strip().lower() for key in keys]
+    # A closed vocabulary: a name the bridge has no key for ("VK_LWIN",
+    # "win+r", "ctrl+a" as one string) is not one ordinary key, it is unknown.
+    return (all(name in KEY_NAMES for name in names) and len(set(names)) == len(names)
             and sum(name not in _MODIFIERS for name in names) == 1)
 
 
@@ -259,8 +278,10 @@ class Guard:
             raise Refused(policy.refusal(kind))
         rect = self._rect(hwnd)
         overlapping = []
-        if self._read("see_through", hwnd, fallback=lambda _: True) is False:
-            order = order[:order.index(hwnd)]
+        # Windows behind the target count as much as windows in front. The
+        # bridge copies screen pixels, and nothing it can read says a window is
+        # opaque: acrylic terminals, shaped windows and windows on another
+        # virtual desktop all show what lies behind them.
         for other in order:
             if other == hwnd:
                 continue
@@ -345,7 +366,7 @@ class MaskedTree:
             children = tuple(self._backend.children(node))
             if not children:
                 return False
-            info = {"role": "group", "name": "", "value": "", "interactive": False,
+            info = {"role": MASKED_STEP_ROLE, "name": "", "value": "", "interactive": False,
                     "offscreen": info["offscreen"], "enabled": False, "checked": None}
         self._visible[id(node)] = (node, info, children)
         return True

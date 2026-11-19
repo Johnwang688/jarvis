@@ -1026,7 +1026,8 @@ class WindowsDesktop:
             if hwnd in seen or len(seen) >= 10000:
                 raise Refused("The desktop window order is unavailable.")
             seen.add(hwnd)
-            if self.user.IsWindowVisible(hwnd) and not self.user.IsIconic(hwnd):
+            if (self.user.IsWindowVisible(hwnd) and not self.user.IsIconic(hwnd)
+                    and not self._cloaked(hwnd)):
                 handles.append(hwnd)
             ctypes.set_last_error(0)
             hwnd = self.user.GetWindow(hwnd, 2)  # GW_HWNDNEXT
@@ -1104,6 +1105,16 @@ class WindowsDesktop:
         bounds = info.rcMonitor
         return ScreenRect(max(frame.left, bounds.left), max(frame.top, bounds.top),
                           min(frame.right, bounds.right), min(frame.bottom, bounds.bottom))
+
+    def _cloaked(self, hwnd):
+        # Windows verification pending. A cloaked window (another virtual
+        # desktop, a hidden shell surface such as Search or Start) reports
+        # itself visible but has no pixels on screen: it is not listed, so it
+        # can neither be captured nor stand in front of what is really there.
+        # A failed query lists the window; the guard then judges it as usual.
+        cloaked = wt.DWORD()
+        result = self.dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        return result == 0 and cloaked.value != 0
 
     def see_through(self, hwnd):
         # Windows verification pending: zero style is valid unless last-error was set.
@@ -1394,6 +1405,8 @@ _WINDOW_KEY_CODES = {
     **{char.lower(): ord(char) for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
     **{f"f{i}": 0x6F + i for i in range(1, 25)},
 }
+if set(_WINDOW_KEY_CODES) != set(KEY_NAMES):  # the guard passes exactly what this table can send
+    raise RuntimeError("The bridge key table and the guard's key names differ.")
 
 
 def _window_keys(keys):

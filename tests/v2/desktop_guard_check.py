@@ -192,7 +192,7 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "protected"):
             guard.capture(window)
 
-    def test_capture_checks_intersection_and_only_windows_in_front(self):
+    def test_capture_checks_intersection_in_front_and_behind(self):
         self.desktop.add(20, Window("keepass.exe", False), Rect(99, 99, 200, 200), SECRET)
         with self.assertRaisesRegex(Refused, "protected window") as exc:
             self.guard.capture(self.window)
@@ -201,7 +201,8 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.guard.capture(self.window).masks, ())
         self.desktop.bounds[20] = TARGET
         self.desktop.order.reverse()
-        self.assertEqual(self.guard.capture(self.window).masks, ())
+        with self.assertRaisesRegex(Refused, "protected window"):
+            self.guard.capture(self.window)
         self.desktop.order.reverse()
         self.desktop.info[20] = Window("cmd.exe", False)
         self.assertEqual(self.guard.capture(self.window).masks, ())
@@ -211,6 +212,9 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "protected window"):
             self.guard.capture(self.window)
         self.desktop.order.reverse()
+        with self.assertRaisesRegex(Refused, "protected window"):
+            self.guard.capture(self.window)
+        self.desktop.bounds[20] = Rect(500, 500, 600, 600)
         self.assertEqual(self.guard.capture(self.window).rect, TARGET)
         for unreadable in (None, Rect(1, 1, 1, 30), Rect(False, 0, 100, 100)):
             self.desktop.bounds[10] = unreadable
@@ -225,9 +229,10 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "protected window"):
             self.guard.capture(self.window)
 
-    def test_see_through_target_checks_windows_behind_it(self):
+    def test_windows_behind_the_target_count_whatever_it_says_about_itself(self):
         self.desktop.add(20, Window("keepass.exe", False), TARGET, SECRET, front=False)
-        self.assertEqual(self.guard.capture(self.window).rect, TARGET)
+        with self.assertRaisesRegex(Refused, "protected window"):
+            self.guard.capture(self.window)
         self.desktop.transparent.add(10)
         for bounds in (TARGET, None):
             self.desktop.bounds[20] = bounds
@@ -251,6 +256,20 @@ class GuardTests(unittest.TestCase):
         self.desktop.hit = None
         with self.assertRaises(Refused):
             self.guard.act(self.window, point=(2, 2))
+
+    def test_key_names_are_a_closed_ascii_vocabulary(self):
+        self.desktop.front = 10 if hasattr(self.desktop, "front") else None
+        for keys in (["a"], ["Ctrl", "A"], [" SHIFT\t", "f5"], ["alt", "left"]):
+            with self.subTest(keys=keys):
+                try:
+                    self.guard.act(self.window, keys=keys)
+                except Refused as exc:
+                    self.assertNotIn("key combination", str(exc))
+        for keys in (["ctrl", "ctrl", "a"], ["shift", "Shift", "a"], ["\u212a"], ["ctrl", "\u212a"],
+                     ["VK_LWIN"], ["win"], ["lwin", "r"], ["win+r"], ["ctrl+a"], ["{Enter}"],
+                     ["menu"], ["apps"], ["option", "a"], [""], ["a", ""]):
+            with self.subTest(refused=keys), self.assertRaisesRegex(Refused, "key combination"):
+                self.guard.act(self.window, keys=keys)
 
     def test_act_needs_input_and_checks_foreground_and_key_chords(self):
         with self.assertRaises(Refused):
@@ -370,7 +389,6 @@ class GuardTests(unittest.TestCase):
             "top_windows": self.guard.windows,
             "facts": lambda: self.guard.capture(self.window),
             "rect": lambda: self.guard.capture(self.window),
-            "see_through": lambda: self.guard.capture(self.window),
             "title": self.guard.windows,
             "pid": lambda: self.guard.capture(self.window),
             "is_hud": lambda: self.guard.capture(self.window),

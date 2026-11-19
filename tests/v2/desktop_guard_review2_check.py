@@ -121,11 +121,13 @@ class RefResolvesBesideAMask(unittest.TestCase):
         beside = node("Account panel", (100, 100, 200, 200),
                       kids=[node("Label", (110, 110, 150, 130))])
         after = Tree([beside])
-        found = resolve(MaskedTree(after, (MASK,)), entry)
-        # The bridge's geometry check does not refuse it (no exception here):
-        Grant(1, WINDOW, (MASK,)).check_control(Rect(*found["rect"]))
-        self.assertFalse(touches(found["rect"], MASK),
-                         f"ref resolved to {found['name']!r} at {found['rect']}, touching {MASK}")
+        # Lead's rewrite after the fix: the placeholder now has a role no ref
+        # can carry, so the ref is stale instead of resolving beside the mask,
+        # and the geometry check refuses a control that shares an edge with it.
+        with self.assertRaises(StaleRef):
+            resolve(MaskedTree(after, (MASK,)), entry)
+        with self.assertRaises(Refused):
+            Grant(1, WINDOW, (MASK,)).check_control(Rect(100, 100, 200, 200))
 
 
 class CoverageForSurvivingMutants(unittest.TestCase):
