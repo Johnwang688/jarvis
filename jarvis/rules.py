@@ -49,6 +49,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -3835,16 +3836,24 @@ def _command_words(tokens: list[str]) -> list[str]:
 
 
 _LITERAL_BINDING = re.compile(
-    r"""(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=([^ \t'"<>]+|'[^']*'|"[^"]*")""")
+    r"""([A-Za-z_][A-Za-z0-9_]*)=([^ \t'"<>]+|'[^']*'|"[^"]*")""")
 _PROGRAM_VAR = re.compile(
     r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
+_ASSIGNMENT_PREFIX = re.compile(
+    r"""[A-Za-z_][A-Za-z0-9_]*\+?=(?:[^ \t\n'"]+|'[^']*'|"[^"]*")*""")
 _PROGRAM_VAR_START = re.compile(r'(?:"(\$[^" \t]+)"|(\$[^ \t<>]+))(?=$|[ \t<>])')
-_SIMPLE_FUNCTION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]+")
+_SIMPLE_FUNCTION = re.compile(
+    r"(?:(?:function[ \t]+)([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*\(\))?"
+    r"|([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\))[ \t]*\{(?=$|[ \t])")
+_FOR_HEADER = re.compile(r"(?:for|select)[ \t]+([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]+in(?:[ \t].*)?)?")
+_CASE_HEADER = re.compile(r"""case[ \t]+(?:[^ \t'"]+|'[^']*'|"[^"]*")[ \t]+in(?=$|[ \t])""")
+_CASE_PATTERN = re.compile(r"\(?[ \t]*[\w./*?+-]+[ \t]*\)")
+_CASE_ALTERNATIVE = re.compile(r"\(?[ \t]*[\w./*?+-]+")
+_BINDING_META = frozenset("$`*?[]{}\\")
 _SHELL_MUTATORS = frozenset({
     ".", "source", "eval", "read", "readarray", "mapfile", "unset", "declare", "local",
-    "typeset", "readonly", "printf", "getopts", "let", "set", "shopt", "trap", "alias",
-    "unalias", "builtin", "command", "enable", "wait", "time", "test", "compgen", "fc",
-    "export",
+    "typeset", "readonly", "getopts", "let", "set", "shopt", "trap", "alias", "unalias",
+    "builtin", "command", "enable", "wait", "time", "test", "compgen", "fc", "export",
 })
 _SPECIAL_BINDINGS = frozenset({
     "IFS", "LINENO", "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME",
@@ -3853,95 +3862,253 @@ _SPECIAL_BINDINGS = frozenset({
 })
 
 
-def _vex_literal_programs(outer: str) -> dict[int, str]:
-    """Prove literal bindings for direct program words in a flat shell list.
+@dataclass(frozen=True)
+class _LiteralProgram:
+    value: str
+    fall_through: bool = False  # an unset, unquoted variable can disappear
 
-    Substitutions have already been masked by the walk and are read separately.
-    Only a stand-alone assignment in a sequential list can establish a value.
-    The one compound shape accepted here is an inert, simple function definition
-    whose name is never invoked on the line. Other syntax keeps the old reading.
+
+def _literal_next_word(word: str) -> bool:
+    return not any(on and (c in _BINDING_META or c == "~" and i == 0)
+                   for i, (c, on) in enumerate(zip(word, word.active)))
+
+
+def _mutating_builtin(word: str, args: list[str]) -> bool:
+    return word in _SHELL_MUTATORS or (
+        word == "printf" and bool(args)
+        and (args[0].startswith("-v") or not _literal_next_word(args[0])))
+
+
+def _binding_syntax(text: str) -> str:
+    return (_PROGRAM_VAR.sub("VAR", text).replace("$(_)", "SUB")
+            .replace("<(_)", "SUB").replace(">(_)", "SUB"))
+
+
+def _vex_literal_programs(outer: str, substitutions: list[str]) -> dict[int, _LiteralProgram]:
+    """Prove bindings for direct program words while retaining separator and scope.
+
+    The existing walk reads the original segments and all substitution bodies.
+    This pass can only annotate a program the walk already found. Unsupported
+    shell syntax leaves the walk's original reading in place.
     """
-    parts = _segment_parts(outer)
-    if parts is None:
-        return {}
-    assigned: set[str] = set()
-    repeated: set[str] = set()
-    values: dict[str, str] = {}
-    uses: dict[int, tuple[str, str]] = {}
+    writes: dict[str, int] = {}
+    bindings: dict[str, tuple[int, str, bool, bool]] = {}
+    programs: list[tuple[int, str, list[str], tuple[tuple[str, int], ...]]] = []
     functions: set[str] = set()
     called: set[str] = set()
-    in_function = saw_dynamic = False
-    before = ""
-    for index, (segment, after) in enumerate(part for part in parts if part[0]):
-        header = _SIMPLE_FUNCTION.match(segment)
-        if header and not in_function and before in ("", ";"):
-            functions.add(header[1])
-            segment = segment[header.end():]
-            in_function = True
-        if segment == "}" and in_function and before == ";" and after in ("", ";"):
-            in_function = False
-            before = after
-            continue
+    dirty_subshells: set[int] = set()
+    substitution_writes = False
 
-        # Remove the two expansion shapes the proof understands before checking
-        # for other shell syntax. A masked command/process substitution has no
-        # effect on the parent shell's bindings.
-        syntax = _PROGRAM_VAR.sub("VAR", segment).replace("$(_)", "SUB")
-        syntax = syntax.replace("<(_)", "SUB").replace(">(_)", "SUB")
-        if first_unquoted(syntax, ("(", ")", "{", "}", "[", "#")):
-            return {}
-        # Other expansions, even in double quotes, can assign in the parent.
-        if any(syntax[i] == "$" for i in unquoted_indices(syntax, double_is_quote=False)):
-            return {}
+    def write(name: str, subshells: tuple[int, ...]) -> None:
+        writes[name] = writes.get(name, 0) + 1
+        dirty_subshells.update(subshells)
 
-        words = _shell_words(strip_redirections(segment))
-        if not words:
+    def scan(text: str, *, isolated: bool = False) -> bool:
+        parts = _segment_parts(text)
+        if parts is None:
+            return False
+        scopes: list[tuple[str, int]] = []
+        before = ""
+        root_or_list = False
+        index = -1
+        for raw, after in parts:
+            if not raw:
+                # Newlines can continue an AND/OR list or pipeline. The empty
+                # segment between two semicolons is a case-arm terminator.
+                if after == ";" and before == ";" and scopes and scopes[-1][0] == "arm":
+                    scopes[-1] = ("case", scopes[-1][1])
+                    continue
+                if before == "|" and after == "&":  # the second half of `|&`
+                    continue
+                if after not in ("", "\n"):
+                    return False
+                continue
+            index += 1
+            incoming, before = before, after
+
+            # A here-string's single-quoted data can contain any shell-looking
+            # text, including the escapes used to quote a heredoc's apostrophes.
+            syntax = raw
+            for redirect in reversed(redirections(raw)):
+                if redirect.op == "<<<" and re.fullmatch(r"'[^']*'(?:\\''[^']*')*", redirect.word):
+                    syntax = syntax[:redirect.start] + " " + syntax[redirect.end:]
+                elif redirect.op in ("<<", "<<-"):
+                    return False
+            # Retain the syntax of ordinary parameter references, but remove
+            # their braces and the masked substitution delimiters.
+            syntax = _binding_syntax(syntax)
+            if ("\\" in syntax or first_unquoted(syntax, ("#",))
+                    or any(syntax[i] in "$`" for i in
+                           unquoted_indices(syntax, double_is_quote=False))):
+                return False
+
+            segment = raw
+            while segment:
+                header = _SIMPLE_FUNCTION.match(segment)
+                lead = segment.split(None, 1)[0]
+                if len(scopes) >= 64:
+                    return False
+                if header:
+                    functions.add(header[1] or header[2])
+                    scopes.append(("function", index))
+                    segment = segment[header.end():].lstrip()
+                elif lead in ("for", "select"):
+                    loop = _FOR_HEADER.fullmatch(segment)
+                    if not loop:
+                        return False
+                    subshells = tuple(site for kind, site in scopes if kind == "subshell")
+                    write(loop[1], subshells)
+                    if lead == "select":
+                        write("REPLY", subshells)
+                    scopes.append(("loop", index))
+                    segment = ""
+                elif lead == "case":
+                    case = _CASE_HEADER.match(segment)
+                    if not case:
+                        return False
+                    scopes.append(("case", index))
+                    segment = segment[case.end():].lstrip()
+                elif scopes and scopes[-1][0] == "case" and segment != "esac":
+                    pattern = _CASE_PATTERN.match(segment)
+                    if pattern:
+                        scopes[-1] = ("arm", scopes[-1][1])
+                        segment = segment[pattern.end():].lstrip()
+                    elif after == "|" and _CASE_ALTERNATIVE.fullmatch(segment):
+                        segment = ""
+                    else:
+                        return False
+                elif lead in ("if", "while", "until", "{") or segment.startswith("("):
+                    if segment.startswith("(("):
+                        return False
+                    if segment.startswith("("):
+                        scopes.append(("subshell", index))
+                        segment = segment[1:].lstrip()
+                    else:
+                        scopes.append(({"if": "if", "{": "brace"}.get(lead, "loop"), index))
+                        segment = segment[len(lead):].lstrip()
+                elif lead == "!":
+                    segment = segment[1:].lstrip()
+                elif lead in ("then", "elif", "else", "do"):
+                    if not scopes or scopes[-1][0] != ("loop" if lead == "do" else "if"):
+                        return False
+                    segment = segment[len(lead):].lstrip()
+                else:
+                    break
+            if not segment:
+                continue
+
+            # A closing parenthesis can be glued to the last command word.
+            # Other parentheses, brace expansions and arithmetic are outside
+            # this proof. The original walk still runs on the unchanged text.
+            plain_syntax = _binding_syntax(segment)
+            position = unquoted_indices(plain_syntax)
+            trimmed = plain_syntax.rstrip()
+            closers = 0
+            while position and position[-1] == len(trimmed) - 1 and trimmed.endswith(")"):
+                closers += 1
+                position.pop()
+                trimmed = trimmed[:-1].rstrip()
+            if trimmed != "}" and any(plain_syntax[i] in "(){}[" for i in position):
+                return False
+            command = segment.rstrip()
+            for _ in range(closers):
+                command = command[:-1].rstrip()
+            closing = {"fi": ("if",), "done": ("loop",), "esac": ("case", "arm"),
+                       "}": ("brace", "function")}.get(command)
+            if closing:
+                if not scopes or scopes[-1][0] not in closing:
+                    return False
+                scopes.pop()
+                command = ""
+            subshells = tuple(site for kind, site in scopes if kind == "subshell")
+            simple = strip_redirections(command).lstrip()
+            words = _shell_words(simple)
+            start = strip_assignments(words)
+            prefixes = words[:len(words) - len(start)]
+            for word in prefixes:
+                write(assignment(word)[0], subshells)
+            if substitution_writes and any(mask in raw for mask in ("$(_)", "<(_)", ">(_)")):
+                dirty_subshells.update(subshells)
+            binding = _LITERAL_BINDING.fullmatch(command)
+            if binding and not isolated and raw == command and not scopes and (
+                    incoming in ("", ";", "\n", "&", "&&") and after in ("", ";", "\n")
+                    and not root_or_list):
+                name, spelling = binding.groups()
+                tilde = spelling.startswith("~/")
+                quoted = spelling.startswith(("'", '"'))
+                if (not _BINDING_META.intersection(spelling) and name not in _SPECIAL_BINDINGS
+                        and not name.startswith("BASH")
+                        and (quoted or "~" not in spelling[int(tilde):])):
+                    value = _shell_words(spelling)[0]
+                    if value:
+                        bindings[name] = (index, value, incoming == "&&", tilde)
+            elif start:
+                head, *args = start
+                if head in _LEAD_WORDS or head in {"case", "function", "[["} or _mutating_builtin(head, args):
+                    return False
+                called.add(head)
+                if not isolated:
+                    for _ in prefixes:
+                        prefix = _ASSIGNMENT_PREFIX.match(simple)
+                        simple = simple[prefix.end():].lstrip() if prefix else ""
+                    original = _command_words(_shell_words(strip_redirections(raw)))
+                    # Use the same segment index, but only if both readings
+                    # agree about the direct program and its arguments.
+                    programs.append((index, simple if original == start else "", start, tuple(scopes)))
+            for _ in range(closers):
+                if not scopes or scopes[-1][0] != "subshell":
+                    return False
+                scopes.pop()
+            if not scopes:
+                if after == "||":
+                    root_or_list = True
+                elif after in (";", "\n", "&", ""):
+                    root_or_list = False
+        return not scopes
+
+    # Substitutions cannot establish a parent binding. Their assignments still
+    # count against uniqueness, and their program words remain unresolved.
+    pending = list(substitutions)
+    for inner in pending:
+        nested, masked = _substitutions(inner)
+        pending.extend(nested)
+        if len(pending) > SUBSTITUTION_CAP or not scan(masked, isolated=True):
             return {}
-        # Count prefixes too. Bash expands the program using the old value
-        # before applying the temporary environment, so a prefix proves nothing.
-        for word in words:
-            parts_of_word = assignment(word)
-            if parts_of_word is not None:
-                name = parts_of_word[0]
-                if name in assigned:
-                    repeated.add(name)
-                assigned.add(name)
-        start = strip_assignments(words)
-        binding = _LITERAL_BINDING.fullmatch(segment)
-        if binding:
-            name, spelling = binding.groups()
-            if (not in_function and before in ("", ";") and after in ("", ";")
-                    and not any(c in spelling for c in "$`*?[")
-                    and not (spelling.startswith("~") or "=~" in spelling)
-                    and name not in _SPECIAL_BINDINGS and not name.startswith("BASH")):
-                value = _shell_words(spelling)[0]
-                if value:
-                    values[name] = value
-        elif start:
-            head = start[0]
-            if (head in _LEAD_WORDS or head in {"for", "select", "[["}
-                    or head in _SHELL_MUTATORS):
-                return {}
-            called.add(head)
-            dynamic = any(c in head for c in "$`*?[")
-            if in_function and dynamic:
-                return {}
-            use = _PROGRAM_VAR_START.match(segment)
-            if use and not in_function and not saw_dynamic:
-                var = _PROGRAM_VAR.fullmatch(use[1] or use[2])
-                if var and head == var[0]:
-                    name = var[1] or var[2]
-                    value = values.get(name)
-                    if (value and value not in _SHELL_MUTATORS
-                            and (use[1] or not any(c.isspace() for c in value))):
-                        uses[index] = (name, value)
-            saw_dynamic = saw_dynamic or dynamic
-        before = after
-    if (in_function or functions & called or "command_not_found_handle" in functions
-            or "IFS" in assigned):
+    substitution_writes = bool(writes)
+    if not scan(outer) or "command_not_found_handle" in functions or "IFS" in writes:
         return {}
-    return {site: value for site, (name, value) in uses.items()
-            if name not in repeated and value not in functions}
+
+    uses = {}
+    for index, simple, start, scopes in programs:
+        head, *args = start
+        if not any(c in head for c in "$`*?["):
+            continue
+        if any(kind == "function" for kind, _ in scopes):
+            continue
+        use = _PROGRAM_VAR_START.match(simple)
+        var = use and _PROGRAM_VAR.fullmatch(use[1] or use[2])
+        if var and head == var[0]:
+            name = var[1] or var[2]
+            site, value, conditional, tilde = bindings.get(name, (index, "", False, False))
+            if tilde:
+                value = "" if "HOME" in writes else os.path.expanduser(value)
+            fallback = conditional and not use[1]
+            if (site < index and value and writes[name] == 1 and value not in functions
+                    and not _mutating_builtin(value, args)
+                    and (use[1] or not any(c.isspace() or c in "*?[" for c in value))
+                    and not any(kind == "subshell" and site in dirty_subshells for kind, site in scopes)
+                    and (not fallback or args and _literal_next_word(args[0])
+                         and not _mutating_builtin(args[0], args[1:]))):
+                if fallback:
+                    called.add(args[0])
+                uses[index] = _LiteralProgram(value, fallback)
+                continue
+        # An unknown program can be a shell builtin or function that changes
+        # later bindings, or changes earlier uses on a subsequent iteration.
+        if any(kind == "loop" for kind, _ in scopes):
+            return {}
+        break
+    return {} if functions & called else uses
 
 
 @dataclass(frozen=True)
@@ -3951,7 +4118,8 @@ class _Prog:
     args: tuple
     via_input: bool = False
     replace: str | None = None
-    literal: str | None = None    # only set for a proven direct use in the VEX reading
+    literal: _LiteralProgram | None = None  # only for a proven direct VEX program use
+    here: tuple = ()
 
 
 class _Walk:
@@ -3973,15 +4141,14 @@ class _Walk:
 
     def line(self, text: str, certain: bool, depth: int, *, literal_programs=False) -> None:
         self._spend(depth)
-        # Prove bindings only against the original single line. In particular
-        # a decoded variant, heredoc or backslash can change shell syntax.
-        can_bind = (literal_programs and len(text) <= 16384 and ";" in text and "$" in text
-                    and not any(c in text for c in ("\\", "\x00", "`", "<<", "$'"))
-                    and not any(c.isspace() and c not in " \t" for c in text))
+        # Only an original command within the proof budget can supply bindings.
+        can_bind = (literal_programs and len(text) <= 16384 and "$" in text
+                    and (";" in text or "\n" in text) and "\x00" not in text
+                    and not any(c.isspace() and c not in " \t\n" for c in text))
         text = join_continuations(_inline_heredocs(text, bodies=self.bodies,
                                                    unsure=self.flagged))
         inners, outer = _substitutions(text)
-        literals = _vex_literal_programs(outer) if can_bind else {}
+        literals = _vex_literal_programs(outer, inners) if can_bind else {}
         for inner in inners:
             self.line(inner, certain, depth + 1)
         for index, segment in enumerate(segments(outer)):
@@ -4006,7 +4173,7 @@ class _Walk:
                 self.progs.append(_Prog("", certain, (), True, replace))
             return
         word, args = tokens[0], tokens[1:]
-        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace, literal))
+        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace, literal, tuple(here)))
         stem = _basename(word)
         if _PYTHON.fullmatch(stem) and _module_run(args):
             self.modules = True
@@ -4290,8 +4457,17 @@ def _vex_line_uncached(command: str, backstop: bool = True, *, resolve_literals=
                 resolved = _Walk()
                 try:
                     for prog in candidates:
-                        word = _Word(prog.literal, (False,) * len(prog.literal))
-                        resolved.segment([word, *prog.args], True, 0, program_already_known=True)
+                        value = prog.literal.value
+                        word = _Word(value, (False,) * len(value))
+                        resolved.segment([word, *prog.args], True, 0, here=prog.here,
+                                         program_already_known=True)
+                        if prog.literal.fall_through:
+                            # Rule 4 proved this word literal before annotating
+                            # the site. Read any program it starts as well.
+                            fallback, *args = prog.args
+                            word = _Word(fallback, (False,) * len(fallback))
+                            resolved.segment([word, *args], True, 0, here=prog.here,
+                                             program_already_known=True)
                 except _TooComplex:
                     unsure = unsure or TOO_COMPLEX
                 else:

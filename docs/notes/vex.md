@@ -1273,15 +1273,27 @@ try", and `vex_check` for the refusal's code. Removing the calls, the wait, its
 limit or the `holds()` stop each fails it. Not yet seen on the robot: a download after the brain terminal saying
 "(controller download channel)" in the journal and taking about 20 s.
 
-## Same-line program variables (GB-2)
+## Literal program variables (GB-2 and GB-2b)
 
-The command gate's VEX reading can use one earlier, unconditional literal
-assignment on the same line for a direct `$VAR` or `${VAR}` program word.
-Double quotes let a path contain spaces. Reassignment, temporary command
-environments, variable-mutating builtins and uncertain shell syntax keep
-the owner ask. A literal VEX device command still gets the existing refusal.
-The ordinary command rules still read the original line, and the allowlist
-continues to use the unresolved VEX reading.
+The command gate's VEX reading can use one earlier, standalone literal
+assignment at the top level of a shell command, including one at the end of
+an `&&` list. The binding can span physical lines and reach later direct
+`$VAR` or `${VAR}` program words in lists, pipelines, loops, branches, brace
+groups and subshells without writes. Double quotes let a path contain spaces,
+and an unquoted leading `~/` uses the home folder. A quoted here-document for
+another command can follow the use.
+
+An assignment in an `||` list, a second assignment, a temporary command
+environment, a variable-mutating builtin or uncertain shell syntax keeps the
+owner ask. Function and substitution bodies keep their original readings.
+For a conditional assignment, an unquoted use needs a literal next word,
+which Bash can run if the variable is unset. If the assignment was skipped,
+a quoted `"$VAR"` takes any value the variable already had in the environment.
+The gate does not see that inherited value.
+
+A literal VEX device command still gets the existing refusal. Owner
+operations, gate-state and other always-ask rules read the original command,
+and the allowlist continues to use the unresolved VEX reading.
 
 ## The Reach check and the `vex` record tree (2026-11-06)
 

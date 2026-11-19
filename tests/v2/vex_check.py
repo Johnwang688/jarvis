@@ -3280,6 +3280,67 @@ class LiteralVariablePrograms(Base):
                 self.assertEqual(rules._vex_line(variable), rules._vex_line(literal))
                 self.assertEqual(rules.decide(variable).decision, rules.ASK)
 
+    def test_logged_build_shapes_leave_no_vex_ask(self):
+        cases = {
+            "clang version and compile": (
+                'cd /repo && CXX="/mnt/c/Program Files/LLVM/bin/clang++.exe"; '
+                '"$CXX" --version | head -2; mkdir -p out && cp a.cpp out/ && cd out && '
+                '"$CXX" -std=c++17 -c a.cpp'),
+            "powershell rebuild": (
+                'cd /repo && PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+                '"$PS" -NoProfile -ExecutionPolicy Bypass -File build.ps1 rebuild 2>&1 | tail -12'),
+            "edit and unquoted powershell": (
+                "sed -i 's|a|b|' src/x.cpp && grep -n b src/x.cpp && "
+                'PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+                "$PS -NoProfile -ExecutionPolicy Bypass -File build.ps1 2>&1 | grep -E 'error|Built'"),
+            "node twice": (
+                'N="/mnt/c/Program Files/nodejs/node.exe"; "$N" simhost/build.mjs clean && '
+                '"$N" simhost/build.mjs 2>&1 | tail -5'),
+            "clang in for": (
+                'C="/mnt/c/Program Files/LLVM/bin/clang++.exe"; for t in path-check clamp-check; '
+                'do "$C" -std=c++17 -fsyntax-only tools/$t.cpp; done'),
+            "home-relative compiler in for": (
+                'cd /repo && SDK=/mnt/c/sdk/vexv5; GXX=~/opt/arm-gnu-toolchain/bin/arm-none-eabi-g++; '
+                'for f in src/a.cpp src/b.cpp; do $GXX -c "$f" -I"$SDK/include"; done'),
+        }
+        commit = "\ngit commit -q -F - <<'EOF'\nIt's build data: C=elsewhere; $(echo text)\nEOF\n"
+        for label, template in cases.items():
+            for separator in (";", "\n"):
+                for suffix in ("", commit):
+                    with self.subTest(label=label, separator=separator, heredoc=bool(suffix)):
+                        command = (template.replace("; ", "\n") if separator == "\n" else template) + suffix
+                        subprocess.run(["/bin/bash", "--noprofile", "--norc", "-n", "-c", command],
+                                       env={"HOME": str(self.root), "PATH": os.defpath},
+                                       capture_output=True, check=True, timeout=5)
+                        self.assertIsNone(rules.vex_uncoverable(command))
+                        self.assertIn("cannot be told from here",
+                                      rules.vex_uncoverable(command, resolve_literals=False) or "")
+
+    def test_uses_in_later_shell_scopes_and_lists(self):
+        cases = (
+            'V=/opt/build-cli; while false; do "$V" build; done',
+            'V=/opt/build-cli; until true; do "$V" build; done',
+            'V=/opt/build-cli; ( "$V" build )',
+            'V=/opt/build-cli; ("${V}")',
+            'V=/opt/build-cli; { "$V" build; }',
+            'V=/opt/build-cli; if true; then "$V" build; else "${V}" check; fi',
+            'V=/opt/build-cli; case x in x) "$V" build;; y) "$V" check;; esac',
+            'V=/opt/build-cli; false || "${V}" build | tail -1',
+            'V=/opt/build-cli; printf input |& "$V" build',
+            'V=/opt/build-cli; ! "$V" build',
+            ': & V=/opt/build-cli; "$V" build',
+            'V=/opt/build-cli; W="other value" "$V" build',
+            'true &&\nV=/opt/build-cli\n"$V" build',
+            'cd /repo && V=/opt/build-cli; "$V" build',
+            'cd /repo && V=/opt/build-cli; "$V" "$NEXT"',
+            'cd /repo && V=/opt/build-cli; ${V} "literal argument"',
+            'V=/opt/build-cli\n"$V" build',
+            'V=/opt/build-cli; printf "%s" ok; "$V" build',
+        )
+        for command in cases:
+            with self.subTest(command):
+                self.assertIsNone(rules.vex_uncoverable(command))
+
     def test_auto_leaves_a_proven_ordinary_program_to_the_provider(self):
         args = {"command": 'V=/opt/build-cli; "$V" build'}
         with patch.object(v2_permissions, "log_decision") as log:
@@ -3301,22 +3362,29 @@ class LiteralVariablePrograms(Base):
             "appended binding": 'V=/opt/build-cli; V+=-new; "$V" build',
             "before assignment": '"$V" build; V=/opt/build-cli; "$V" build',
             "loop assignment": 'while true; do V=/opt/build-cli; break; done; "$V" build',
-            "loop use": 'V=/opt/build-cli; while false; do "$V" build; done',
             "function assignment": 'f() { V=/opt/build-cli; }; "$V" build',
             "function use": 'V=/opt/build-cli; f() { "$V" build; }',
             "same use text in function and outside": 'V=/opt/build-cli; f(){ :; "$V"; }; "$V"',
             "subshell assignment": '(V=/opt/build-cli); "$V" build',
-            "subshell use": 'V=/opt/build-cli; ( "$V" build )',
             "brace assignment": '{ V=/opt/build-cli; }; "$V" build',
-            "brace use": 'V=/opt/build-cli; { "$V" build; }',
             "branch assignment": 'if true; then V=/opt/build-cli; fi; "$V" build',
-            "branch use": 'V=/opt/build-cli; if true; then "$V" build; fi',
-            "short-circuit and": 'cd /repo && V=/opt/build-cli; "$V" build',
             "short-circuit or": 'cd /repo || V=/opt/build-cli; "$V" build',
+            "mixed or and list": 'false || false && V=/opt/build-cli; "$V" build',
+            "or list with a compound operand": 'false || { false; } && V=/opt/build-cli; "$V" build',
+            "or list continued on a newline": 'false || false &&\nV=/opt/build-cli\n"$V" build',
+            "case assignment": 'case x in x) V=/opt/build-cli;; esac; "$V" build',
+            "assignment in substitution": 'echo "$(V=/opt/build-cli)"; "$V" build',
+            "duplicate in substitution": 'V=/opt/build-cli; echo "$(V=other)"; "$V" build',
+            "use in substitution": 'V=/opt/build-cli; echo "$("$V" build)"',
+            "use in a subshell with an assignment": 'V=/opt/build-cli; ( W=other; "$V" build )',
+            "use in a subshell with a mutator": 'V=/opt/build-cli; ( read W; "$V" build )',
+            "use in a subshell with a substitution assignment": (
+                'V=/opt/build-cli; ( echo "$(W=other)"; "$V" build )'),
             "assignment in and-list": 'V=/opt/build-cli && "$V" build',
             "pipe": 'V=/opt/build-cli | cat; "$V" build',
             "background": 'V=/opt/build-cli & "$V" build',
             "comment": 'echo ok # ; V=/opt/build-cli; "$V" build',
+            "non-shell whitespace before an assignment": '\vV=/opt/build-cli; "$V" build',
             "read": 'V=/opt/build-cli; read V; "$V" build',
             "timed read": 'V=/opt/build-cli; time -p read V; "$V" build',
             "variable-held read": 'V=read; "$V" V',
@@ -3329,19 +3397,37 @@ class LiteralVariablePrograms(Base):
             "local": 'V=/opt/build-cli; local -n V=OTHER; "$V" build',
             "export": 'V=/opt/build-cli; export -n V; "$V" build',
             "printf": 'V=/opt/build-cli; printf -v V %s /opt/other-cli; "$V" build',
+            "printf with expanded option": 'V=/opt/build-cli; printf * V %s /opt/other-cli; "$V" build',
             "mapfile": 'V=/opt/build-cli; mapfile V; "$V" build',
+            "readarray": 'V=/opt/build-cli; readarray V; "$V" build',
+            "typeset": 'V=/opt/build-cli; typeset -i V; "$V" build',
+            "readonly": 'V=/opt/build-cli; readonly V=other; "$V" build',
+            "getopts": 'V=/opt/build-cli; getopts a V; "$V" build',
+            "let": 'V=/opt/build-cli; let V=2; "$V" build',
+            "arithmetic": 'V=/opt/build-cli; ((V=2)); "$V" build',
+            "arithmetic expansion": 'V=/opt/build-cli; : "$((V=2))"; "$V" build',
             "for variable": 'V=/opt/build-cli; for V in /opt/other-cli; do :; done; "$V" build',
-            "parameter assignment": 'V=/opt/build-cli; : "${OTHER:=value}"; "$V" build',
+            "parameter assignment": 'V=/opt/build-cli; : "${V:=value}"; "$V" build',
             "computed assignment": 'V="$OTHER"; "$V" build',
             "substitution": 'V=$(cat tool.txt); "$V" build',
             "backticks": 'V=`cat tool.txt`; "$V" build',
             "glob": 'V=/opt/build-*; "$V" build',
+            "brace": 'V=/opt/{build,other}; "$V" build',
+            "quoted brace": 'V="/opt/{build,other}"; "$V" build',
+            "quoted dollar": "V='/opt/$tool'; \"$V\" build",
+            "user tilde": 'V=~other/bin/build; "$V" build',
+            "non-leading assignment tilde": 'V=/opt/build:~/other; "$V" build',
+            "export is not a stand-alone assignment": 'export V=/opt/build-cli; "$V" build',
+            "conditional unquoted with expanded next word": 'false && V=/opt/build-cli; $V "$NEXT"',
+            "conditional unquoted with unquoted expansion": 'false && V=/opt/build-cli; ${V} $NEXT',
+            "conditional unquoted with glob next word": 'false && V=/opt/build-cli; $V build-*',
+            "conditional unquoted with substitution next word": 'false && V=/opt/build-cli; $V "$(echo build)"',
+            "conditional unquoted with no next word": 'false && V=/opt/build-cli; $V 2>&1',
             "unquoted spaces": 'V="/opt/build cli"; $V build',
             "redirected assignment": 'V=/opt/build-cli >out; "$V" build',
             "only environment": 'V=/opt/build-cli true; "$V" build',
             "prefix on use": 'V=/opt/build-cli "$V" build',
             "env wrapper": 'env V=/opt/build-cli true; "$V" build',
-            "different physical lines": 'V=/opt/build-cli\n"$V" build',
             "alias chain": 'V=/opt/build-cli; W=$V; $W',
         }
         for label, command in cases.items():
@@ -3360,11 +3446,47 @@ class LiteralVariablePrograms(Base):
         line = 'V=/opt/build-cli; V=/opt/other-cli "$V" build'
         self.assertIn("cannot be told from here", rules.vex_uncoverable(line) or "")
 
+    def test_bash_runs_the_next_word_only_after_an_unquoted_empty_expansion(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'next() { echo next; }; prior() { echo prior; }; NEXT=next; '
+             'false && V=build; $V "$NEXT"; false && V=build; "$V" "$NEXT"; '
+             'V=prior; false && V=build; "$V" "$NEXT"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["next", "prior"])
+        self.assertIn("command not found", result.stderr)
+
+    def test_bash_or_list_can_skip_its_final_assignment(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'V=prior; true || V=build; printf "%s\\n" "$V"; '
+             'false || { false; } && V=build; printf "%s\\n" "$V"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["prior", "prior"])
+
+    def test_bash_expands_the_leading_unquoted_tilde_in_an_assignment(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             """V=~/bin/build; W='~/bin/build'; printf '%s\\n' "$V" "$W" """],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), [str(self.root / "bin/build"), "~/bin/build"])
+
+    def test_conditional_literal_fallback_still_reads_a_runner(self):
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable("false && V=/opt/build-cli; $V bash -c '$NEXT'") or "")
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable("V=/bin/bash; \"$V\" <<'EOF'\n$NEXT\nEOF\n") or "")
+
     def test_original_and_resolved_device_denials_win(self):
         cases = (
             'V=vexcom; $V --user',
             'V=/path/to/vexcom.exe; "$V" --user',
             'V=vexcom; W=$V; $W',
+            'cd a && V=vexcom; "$V"',
+            'V=vexcom; for i in 1; do $V; done',
             'V=/opt/build-cli; "$V" build; *.exe --user',
             'V=/bin/bash; "$V" -c "./v*.exe --user"',
         )
@@ -3380,14 +3502,20 @@ class LiteralVariablePrograms(Base):
             self.assertEqual(rules._vex_line_uncached(command).unsure, rules.TOO_COMPLEX)
 
     def test_literal_resolution_cannot_add_allowlist_coverage(self):
-        with patch.object(v1_permissions, "load_allowlist", return_value=[
-                {"tool": "run_command", "prefix": p} for p in ("export", "$V", "/opt/build-cli")]):
-            # An export has a command stem, so even explicit entries for all
-            # the original targets would cover it if the VEX check were relaxed.
-            command = 'export V=/opt/build-cli; "$V" build'
-            self.assertTrue(rules.command_targets(command))
-            self.assertIsNone(rules.vex_uncoverable(command))
-            self.assertFalse(v1_permissions.allows("run_command", {"command": command}))
+        command = 'V=/opt/build-cli; "$V" build'
+        args = {"command": command}
+        self.assertIsNone(rules.vex_uncoverable(command))
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable(command, resolve_literals=False) or "")
+        with (patch.object(v1_permissions, "load_allowlist", return_value=[
+                  {"tool": "run_command", "prefix": "$V"}]),
+              patch.object(rules, "command_targets", return_value=[("$V", "$V")]) as targets):
+            # Even if target enumeration could cover a bare assignment, VEX's
+            # unresolved reading must independently rule out standing coverage.
+            self.assertFalse(v1_permissions.allows("run_command", args))
+            targets.assert_not_called()
+            with patch.object(rules, "vex_uncoverable", return_value=None):
+                self.assertTrue(v1_permissions.allows("run_command", args))
 
     def test_existing_general_denials_and_always_ask_stems_still_win(self):
         for command in (
