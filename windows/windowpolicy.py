@@ -37,6 +37,14 @@ SYSTEM_PROMPT_IMAGES = frozenset({
     "credentialenrollmentmanager.exe", "microsoft.aad.brokerplugin.exe",
 })
 SYSTEM_PROMPT_CLASSES = frozenset({"credential dialog xaml host"})
+# Shell surfaces that draw a picture of every window, minimised and protected
+# ones included: Alt+Tab and Task View, and the taskbar's previews. They belong
+# to explorer.exe, so only the class tells them apart. (Class names taken from
+# Windows 10 and 11; to confirm on the owner's machine.)
+SWITCHER_CLASSES = frozenset({
+    "xamlexplorerhostislandwindow", "multitaskingviewframe", "tasklistthumbnailwnd",
+    "tasklistoverlaywnd", "taskswitcherwnd",
+})
 
 # Seed list; the owner adds to it through `extra_password_managers`.
 PASSWORD_MANAGER_IMAGES = frozenset({
@@ -137,6 +145,8 @@ def classify(window: Window, *, extra_password_managers: Iterable[str] = ()) -> 
     if image is None or window_class is None or extra is None:
         return PROTECTED
     if window.elevated is not False or window.own is not False:
+        return PROTECTED
+    if window_class in SWITCHER_CLASSES:
         return PROTECTED
     if image in SYSTEM_PROMPT_IMAGES or window_class in SYSTEM_PROMPT_CLASSES:
         return PROTECTED

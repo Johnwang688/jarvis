@@ -42,10 +42,6 @@ class Desktop(Protocol):
         """Read the visible window frame clipped to its monitor, or None."""
         ...
 
-    def see_through(self, hwnd: int) -> bool:
-        """Return True for layered, transparent or unreadable window styles."""
-        ...
-
     def title(self, hwnd: int) -> str:
         """Read the window's current title."""
         ...
@@ -163,8 +159,15 @@ def _one_key_chord(keys) -> bool:
     names = [key.strip().lower() for key in keys]
     # A closed vocabulary: a name the bridge has no key for ("VK_LWIN",
     # "win+r", "ctrl+a" as one string) is not one ordinary key, it is unknown.
-    return (all(name in KEY_NAMES for name in names) and len(set(names)) == len(names)
-            and sum(name not in _MODIFIERS for name in names) == 1)
+    if not (all(name in KEY_NAMES for name in names) and len(set(names)) == len(names)
+            and sum(name not in _MODIFIERS for name in names) == 1):
+        return False
+    # Chords that open the window switcher or Start, which show every window.
+    held = {"ctrl" if name in ("control", "lctrl", "rctrl") else
+            "alt" if name in ("lalt", "ralt", "altgr") else
+            "shift" if name in ("lshift", "rshift") else
+            "esc" if name == "escape" else name for name in names}
+    return not ("alt" in held and held & {"tab", "esc"}) and not {"ctrl", "esc"} <= held
 
 
 def require_expected_control(expect, info):

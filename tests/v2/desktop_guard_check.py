@@ -15,6 +15,7 @@ from windows.desktopguard import (
     Grant, Guard, MaskedTree, Rect, Refused, black_out, own_image, require_expected_control,
 )
 from windows.uiatree import resolve, snapshot
+from windows import windowpolicy as policy
 from windows.windowpolicy import DRIVABLE, SEE_ONLY, SEE_ONLY_MESSAGE, Window
 
 TARGET = Rect(0, 0, 100, 100)
@@ -43,9 +44,6 @@ class FakeDesktop:
 
     def rect(self, hwnd):
         return self.bounds[hwnd]
-
-    def see_through(self, hwnd):
-        return hwnd in self.transparent
 
     def title(self, hwnd):
         return self.titles[hwnd]
@@ -270,6 +268,28 @@ class GuardTests(unittest.TestCase):
                      ["menu"], ["apps"], ["option", "a"], [""], ["a", ""]):
             with self.subTest(refused=keys), self.assertRaisesRegex(Refused, "key combination"):
                 self.guard.act(self.window, keys=keys)
+
+    def test_switcher_and_start_chords_are_refused(self):
+        for keys in (["alt", "tab"], ["ctrl", "alt", "tab"], ["shift", "alt", "tab"], ["ralt", "tab"],
+                     ["altgr", "tab"], ["alt", "esc"], ["alt", "escape"], ["ctrl", "esc"],
+                     ["control", "escape"], ["rctrl", "shift", "esc"]):
+            with self.subTest(refused=keys), self.assertRaisesRegex(Refused, "key combination"):
+                self.guard.act(self.window, keys=keys)
+        for keys in (["tab"], ["ctrl", "tab"], ["shift", "tab"], ["esc"], ["alt", "left"], ["shift", "escape"]):
+            with self.subTest(allowed=keys):
+                try:
+                    self.guard.act(self.window, keys=keys)
+                except Refused as exc:
+                    self.assertNotIn("key combination", str(exc))
+
+    def test_window_switcher_surfaces_are_protected(self):
+        for window_class in ("XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "TaskListThumbnailWnd",
+                             "TaskSwitcherWnd", " tasklistoverlaywnd "):
+            with self.subTest(window_class=window_class):
+                self.assertEqual(policy.classify(Window(r"C:\Windows\explorer.exe", False, window_class)),
+                                 policy.PROTECTED)
+        self.assertEqual(policy.classify(Window(r"C:\Windows\explorer.exe", False, "CabinetWClass")),
+                         policy.DRIVABLE)
 
     def test_act_needs_input_and_checks_foreground_and_key_chords(self):
         with self.assertRaises(Refused):

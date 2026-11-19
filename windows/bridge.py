@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from desktopwire import APPS, NAV_KEYS, launch_name, private_key, prove_windows, wire
 from desktopguard import (
-    Guard, HUD_REGION_NAME, MaskedTree, Rect as ScreenRect, Refused, black_out,
+    Guard, HUD_REGION_NAME, KEY_NAMES, MaskedTree, Rect as ScreenRect, Refused, black_out,
     own_image, require_expected_control,
 )
 import windowpolicy as window_policy
@@ -990,8 +990,9 @@ class WindowsDesktop:
             (self.user.IsWindowVisible, [wt.HWND], wt.BOOL),
             (self.user.IsIconic, [wt.HWND], wt.BOOL),
             (self.user.GetWindowThreadProcessId, [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
+            # c_void_p: the attribute decides the type (a RECT for the frame, a DWORD for the cloak).
             (self.dwm.DwmGetWindowAttribute,
-             [wt.HWND, wt.DWORD, ctypes.POINTER(wt.RECT), wt.DWORD], ctypes.c_long),
+             [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD], ctypes.c_long),
             (self.user.MonitorFromWindow, [wt.HWND, wt.DWORD], wt.HMONITOR),
             (self.user.GetMonitorInfoW, [wt.HMONITOR, ctypes.POINTER(_MonitorInfo)], wt.BOOL),
             (self.user.GetWindowLongW, [wt.HWND, ctypes.c_int], wt.LONG),
@@ -1115,14 +1116,6 @@ class WindowsDesktop:
         cloaked = wt.DWORD()
         result = self.dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
         return result == 0 and cloaked.value != 0
-
-    def see_through(self, hwnd):
-        # Windows verification pending: zero style is valid unless last-error was set.
-        ctypes.set_last_error(0)
-        style = self.user.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-        if style == 0 and ctypes.get_last_error():
-            return True
-        return bool(style & (0x00080000 | 0x00000020))  # WS_EX_LAYERED | WS_EX_TRANSPARENT
 
     def title(self, hwnd):
         # Windows verification pending: zero length can also be a valid empty caption.
@@ -1469,7 +1462,8 @@ def op_window_type(req):
     verify_focus(["ctrl", "a"])
     _send_window_keys(backend, [0x11, 0x41])
     if text:
-        verify_focus(["unicode text"])
+        # Typed text is unmodified character keys: one such key stands for it in the guard.
+        verify_focus(["a"])
         # Windows verification pending: Unicode SendInput to the checked text field.
         backend.text(text)
     else:
