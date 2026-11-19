@@ -386,6 +386,8 @@ class ApprovalRequest:
     cwd: str | None = None
     grantable: bool = True
     owner_initiated: bool = False
+    # Standard card presentation with the same verified yes as a private card.
+    require_hud_answer: bool = False
     # Approval summaries (AS, approval_summary.py), display only, public
     # cards only, set by daemon code only and read by nothing that decides:
     # the model's one line and its state ("pending", "ready", "failed",
@@ -462,6 +464,7 @@ class _Pending:
     resolution: str = ""
     announced: bool = False             # resolve() already told on_resolve
     hud_only: bool = False              # pinned when asked; never weakened later
+    require_hud_answer: bool = False
 
 
 class DenyAll:
@@ -566,9 +569,10 @@ class PendingApprovals:
             request.asked_at = utcnow()
             # QH: settled here, under the lock, before any card exists: a
             # grant is taken once however many identical asks race for it.
-            settled = self._settle_quietly(desk, request)
+            verified = request.require_hud_answer
+            settled = None if verified else self._settle_quietly(desk, request)
             if settled is None:
-                item = _Pending(request, hud_only=request.private)
+                item = _Pending(request, hud_only=request.private, require_hud_answer=verified)
                 self._pending[request.req_id] = item
         if settled is not None:
             # No card, no Discord post, no wait: the desk records and announces.
@@ -667,13 +671,14 @@ class PendingApprovals:
             item = self._pending.get(req_id)
             if item is None or item.event.is_set():
                 raise ValueError(f"unknown or already-resolved approval {req_id!r}")
-            if item.hud_only and decision is Decision.ALLOW and owner_verified is not True:
+            if ((item.hud_only or item.require_hud_answer)
+                    and decision is Decision.ALLOW and owner_verified is not True):
                 raise ValueError("this approval requires an answer in the owner HUD")
             item.decision = decision
             item.resolution = decision.value
             entry = None
             if always and decision is Decision.ALLOW:
-                if (item.hud_only or not item.request.allowlistable
+                if (item.hud_only or item.require_hud_answer or not item.request.allowlistable
                         or is_unknown_command_tool(item.request.tool, item.request.args)):
                     item.resolution = "allow (no standing rule from this path)"
                 else:

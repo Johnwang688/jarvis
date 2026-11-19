@@ -1191,7 +1191,8 @@ class ClaudeProvider:
                         ),
                     }
                 }
-            if jarvis is not None and jarvis.owner_gated:
+            if (jarvis is not None and jarvis.owner_gated
+                    and jarvis.name not in session_tools.HUD_WINDOW_TOOLS):
                 from ..browser.drive import admission_for_tool, OFF
                 if jarvis.name != "hud_browser_act" or not admission_for_tool():
                     _note_denied(session, tool_use_id, agent_id)
@@ -1316,7 +1317,7 @@ class ClaudeProvider:
         pending = _Pending()
         with session.mutex:
             session.pending[req_id] = pending
-        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type")
+        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type", "hud_window_type")
         sid, label = self._asker(session, agent_id)
         session.emit(
             EventKind.APPROVAL_REQUESTED,
@@ -2497,7 +2498,7 @@ class ClaudeProvider:
                         EventKind.TOOL_STARTED,
                         session.thread_id,
                         {"call_id": block.id, "name": block.name,
-                         "args": {} if block.name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type") else args},
+                         "args": {} if block.name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type", "hud_window_type") else args},
                     )
                 )
         return out
@@ -2722,7 +2723,7 @@ class ClaudeProvider:
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
         private_read = _private_result(name.removeprefix("mcp__jarvis__"))
-        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type")
+        private_act = name.removeprefix("mcp__jarvis__") in ("hud_browser_act", "hud_desktop_type", "hud_window_type")
         summary = self._tool_summary(name, text)
         if private_read:
             if denied:

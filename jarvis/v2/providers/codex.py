@@ -1708,7 +1708,7 @@ class CodexProvider:
             s.mcp_items[call_id] = (*identity, False)
             args = item.get("arguments")
             yield self._event(h, EventKind.TOOL_STARTED, call_id=call_id, name=name,
-                              args=args if isinstance(args, dict) and not (server == "jarvis" and tool in ("hud_browser_act", "hud_desktop_type")) else {})
+                              args=args if isinstance(args, dict) and not (server == "jarvis" and tool in ("hud_browser_act", "hud_desktop_type", "hud_window_type")) else {})
         if method != "item/completed":
             return
         s.mcp_items[call_id] = (*identity, True)
@@ -1898,7 +1898,7 @@ class CodexProvider:
         tool = tool if isinstance(tool, str) else ""
         name = tool if server == "jarvis" else f"mcp__{server}__{tool}"
         args = item.get("arguments")
-        private = server == "jarvis" and tool in ("hud_browser_act", "hud_desktop_type")
+        private = server == "jarvis" and tool in ("hud_browser_act", "hud_desktop_type", "hud_window_type")
         return name[:256], (dict(args) if isinstance(args, dict) and not private else {})
 
     @staticmethod

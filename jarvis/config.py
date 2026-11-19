@@ -1007,6 +1007,11 @@ ONSHAPE_API = os.environ.get("JARVIS_ONSHAPE_API", "https://cad.onshape.com/api/
 # every boot).
 DESKTOP_PORT = int(os.environ.get("JARVIS_DESKTOP_PORT", "8404"))
 
+
+def desktop_drive() -> bool:
+    return os.environ.get("JARVIS_DESKTOP_DRIVE") == "1"
+
+
 # Where the Windows-side venv lives. Windows Python cannot be a repo venv —
 # it is a different OS's interpreter — so the bridge gets its own, created by
 # `jarvis desktop setup`.

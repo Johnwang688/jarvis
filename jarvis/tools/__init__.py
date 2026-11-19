@@ -519,6 +519,11 @@ def _dispatch(
         return ToolResult(f"Error: arguments must be a JSON object, got {type(arguments).__name__}")
 
     missing = [k for k in entry.schema["required"] if k not in arguments]
+    if name.startswith("hud_window_"):
+        from ..v2.tools.hud_window import invalid_call
+        invalid = invalid_call(name, arguments, missing, arguments.keys() - entry.schema["properties"].keys())
+        if invalid is not None:
+            return ToolResult(invalid)
     if missing:
         return ToolResult(f"Error: missing required argument(s): {', '.join(missing)}")
 

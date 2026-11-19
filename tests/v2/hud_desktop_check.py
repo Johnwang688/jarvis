@@ -3,12 +3,14 @@ Pass --windows on the owner machine to ping the real Windows bridge on a private
 """
 import contextvars
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import threading
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -73,6 +75,12 @@ def main():
         for name in NAMES:
             item = session_tools.offered(provider, name)
             assert item.foreground_only and item.read_only == (name == "hud_desktop_status")
+    for enabled in ("0", "1"):
+        with patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": enabled}):
+            for provider in ("claude", "codex"):
+                listed = {row["name"] for row in bridge.listing(provider)}
+                assert {name for name in listed if name.startswith("hud_desktop_")} == NAMES
+                assert bool(listed & session_tools.HUD_WINDOW_TOOLS) == (enabled == "1")
     assert NAMES <= tools.EXPLICIT_ONLY and not NAMES & MCP_TOOLS
     assert all(tools.REGISTRY[n].dangerous for n in NAMES - {"hud_desktop_status"})
     assert call("hud_desktop_status")[0].startswith("Refused:")

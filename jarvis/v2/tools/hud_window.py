@@ -1,0 +1,443 @@
+"""Drive paired Windows windows from a current owner HUD chat."""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import threading
+from typing import Annotated
+from unicodedata import category
+
+from jarvis import config, runtime, untrusted
+from jarvis.desktop import DesktopError, SESSION
+from jarvis.tools import EXPLICIT_ONLY, PRIVATE_RESULT, ToolResult, tool
+from windows.desktopguard import KEY_NAMES
+from windows.windowpolicy import DRIVABLE, SEE_ONLY
+
+from .. import desktop_risk as risk
+from ..approvals import ApprovalRequest
+from ..model import utcnow
+from ..provider import Decision
+from . import hud_desktop
+
+HUD_WINDOW_TOOLS = frozenset({
+    "hud_window_list", "hud_window_snapshot", "hud_window_screenshot",
+    "hud_window_click", "hud_window_type", "hud_window_key", "hud_window_scroll",
+})
+OFF = "Refused: Windows window driving is off."
+UNAVAILABLE = "Refused: Windows window tools require a current owner HUD chat turn."
+FRESH_SNAPSHOT = "Take a fresh snapshot of this window in this chat."
+COMPLETED = "Action completed. Take a fresh snapshot to see the result."
+LOG_REFUSED = "Refused: the desktop action log could not be written."
+_WINDOW_ID = re.compile(r"[0-9a-f]{16}")
+_HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+_OUTCOME_WIDTH = len(json.dumps("bridge-refused"))
+_service = None
+
+WindowId = Annotated[str, "Window id from hud_window_list"]
+Purpose = Annotated[str, "One sentence describing why you are taking this action, up to 300 characters"]
+Risky = Annotated[str, 'Your risk declaration: "yes", "no" or "unsure"']
+Ref = Annotated[str, "Control ref from this chat's latest snapshot of this window"]
+X = Annotated[int, "X in pixels from this chat's latest screenshot of this window"]
+Y = Annotated[int, "Y in pixels from this chat's latest screenshot of this window"]
+
+
+class Refused(Exception):
+    pass
+
+
+def _window_id(window):
+    return type(window) is str and _WINDOW_ID.fullmatch(window) is not None
+
+
+def _control(info):
+    if not isinstance(info, dict) or any(type(info.get(field)) is not str for field in ("name", "role")):
+        raise Refused("The bridge did not identify the control safely.")
+    return {"name": info["name"], "role": info["role"]}
+
+
+def _selector(ref, x, y):
+    if type(ref) is str and type(x) is int and type(y) is int:
+        if ref and (x, y) == (-1, -1):
+            return {"ref": ref}
+        if not ref and x >= 0 and y >= 0:
+            return {"x": x, "y": y}
+    raise Refused("Provide either a snapshot ref or both screenshot coordinates.")
+
+
+def _check(window, kind, fields):
+    if not _window_id(window):
+        raise Refused("Use a window id from hud_window_list.")
+    if kind in ("click", "scroll"):
+        selector = _selector(fields.pop("ref"), fields.pop("x"), fields.pop("y"))
+        fields.update(selector)
+    if kind == "scroll" and (type(fields["amount"]) is not int or not 1 <= abs(fields["amount"]) <= 100):
+        raise Refused("Use a signed scroll amount of 1 to 100 wheel detents.")
+    if kind == "type":
+        text = fields["text"]
+        if (type(text) is not str or len(text) > 2000
+                or any(category(ch) in _HIDDEN for ch in text)):
+            raise Refused("Use plain text up to 2000 characters without control characters. "
+                          "Use submit or hud_window_key to press Enter.")
+        if type(fields["submit"]) is not bool:
+            raise Refused("Use a boolean submit flag.")
+        if type(fields["ref"]) is not str or not fields["ref"]:
+            raise Refused(FRESH_SNAPSHOT)
+    if kind == "key":
+        raw = fields["keys"]
+        keys = risk.canonical_keys(tuple(raw)) if type(raw) is list else None
+        if keys is None or not set(keys) <= KEY_NAMES:
+            raise Refused("Use distinct key names supported by both the risk rules and Windows bridge.")
+        fields["keys"] = list(keys)
+
+
+def _audit_outcome(outcome):
+    return json.dumps(outcome).ljust(_OUTCOME_WIDTH).encode()
+
+
+def _append_audit(record, outcome):
+    path = Path(config.V2_DATA_DIR) / "desktop_actions.jsonl"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise OSError("unsafe desktop action log")
+        os.fchmod(fd, 0o600)
+        # Reserve a complete line before sending input. Its fixed-width outcome
+        # can be corrected after a bridge refusal without moving other records.
+        prefix = (json.dumps(record)[:-1] + ', "outcome": ').encode()
+        line = prefix + _audit_outcome(outcome) + b"}\n"
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        offset = os.lseek(fd, 0, os.SEEK_END)
+        try:
+            if os.write(fd, line) != len(line):
+                raise OSError("short desktop action log write")
+            os.fsync(fd)
+        except OSError:
+            os.ftruncate(fd, offset)
+            raise
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return fd, offset + len(prefix)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _reason_text(purpose, text):
+    if type(purpose) is not str or any(category(ch) in _HIDDEN for ch in purpose):
+        return ""
+    if type(text) is str and text:
+        purpose = purpose.replace(text, "[typed text withheld]")
+    return purpose[:300]
+
+
+def _refusal(exc):
+    if isinstance(exc, Refused):
+        return f"Refused: {exc}"
+    if isinstance(exc, DesktopError):
+        detail = str(exc)
+        return detail if detail.startswith("Refused:") else f"Error: {detail}"
+    return "Error: the Windows bridge did not complete the request safely."
+
+
+class WindowDrive:
+    def __init__(self, daemon):
+        self.daemon = daemon
+        self._lock = threading.Lock()
+        self._snapshot_lock = threading.Lock()
+        self._refs = {}
+        self._apps = {}
+
+    def install(self):
+        global _service
+        _service = self
+
+    def stop(self):
+        global _service
+        if _service is self:
+            _service = None
+
+    def current(self):
+        return (_service is self and config.desktop_drive() and runtime.at_desk()
+                and hud_desktop.current() and runtime.caller().get("provider") in ("claude", "codex"))
+
+    def request(self, op, thread, *, current=None, acting=False, **fields):
+        current = self.current if current is None else current
+        if not current():
+            raise Refused("The owner chat turn is no longer current. Inspect the window again.")
+        result = SESSION.request(op, require_pair=True, current=current, scope=thread,
+                                 hud_sensitive=None, **fields)
+        if not acting and not current():
+            raise Refused("The owner chat turn or snapshot is no longer current.")
+        return result
+
+    def windows(self, thread):
+        rows = self.request("windows", thread)["windows"]
+        apps = {}
+        lines = []
+        for row in rows:
+            window, app, title, access = (row[key] for key in ("window", "app", "title", "access"))
+            if not (_window_id(window) and type(app) is str and type(title) is str
+                    and access in (DRIVABLE, SEE_ONLY)):
+                raise Refused("The bridge did not identify the listed windows safely.")
+            apps[window] = app
+            lines.append(f"{window}\t{untrusted.one_line(app, 120)}\t"
+                         f"{untrusted.one_line(title, 300)}\t{access.replace('_', '-')}")
+        with self._lock:
+            self._apps[thread] = apps
+        return "\n".join(lines) or "No windows are available."
+
+    def app(self, thread, window):
+        with self._lock:
+            app = self._apps.get(thread, {}).get(window)
+        if app is None:
+            self.windows(thread)
+            with self._lock:
+                app = self._apps.get(thread, {}).get(window)
+        if app is None:
+            raise Refused("Unknown window. List windows first.")
+        return app
+
+    def snapshot(self, thread, window):
+        self.app(thread, window)
+        with self._snapshot_lock:
+            result = self.request("window_snapshot", thread, window=window)
+            refs = {ref: _control(info) for ref, info in result["refs"].items()}
+            with self._lock:
+                self._refs[thread, window] = refs
+            return result["snapshot"]
+
+    def read(self, op, window=None):
+        if not self.current():
+            return UNAVAILABLE
+        thread = runtime.caller()["thread_id"]
+        try:
+            if op == "windows":
+                return self.windows(thread)
+            if not _window_id(window):
+                raise Refused("Use a window id from hud_window_list.")
+            if op == "window_snapshot":
+                return self.snapshot(thread, window)
+            if not runtime.desk_images():
+                raise Refused("This chat's model does not support screenshots.")
+            result = self.request(op, thread, window=window)
+            return ToolResult("Windows window screenshot. Coordinates are in screenshot pixels.",
+                              result["image_b64"], "image/png")
+        except (Refused, DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            return _refusal(exc)
+
+    def prepare(self, kind, window, thread, purpose, risky, fields, record):
+        _check(window, kind, fields)
+        keys = tuple(fields.get("keys", ()))
+        submit = fields.get("submit", False)
+        record["keys"] = keys
+        # Validate the declaration through the same rules, before bridge reads.
+        declaration = risk.Action(kind, "", keys=keys, submit=submit, purpose=purpose, risky=risky)
+        verdict = risk.decide(declaration)
+        if verdict.decision == risk.REFUSE:
+            _record_verdict(record, verdict)
+            raise Refused(", ".join(verdict.reasons) + ".")
+
+        ref = fields.get("ref")
+        refs = None
+        if ref:
+            with self._lock:
+                refs = self._refs.get((thread, window))
+                expected = refs.get(ref) if refs is not None else None
+            if expected is None:
+                raise Refused(FRESH_SNAPSHOT)
+
+        def current():
+            if not self.current():
+                return False
+            if refs is None:
+                return True
+            with self._lock:
+                return self._refs.get((thread, window)) is refs
+
+        app = self.app(thread, window)
+        record["app"] = app
+        if kind == "key":
+            expected = _control(self.request("window_probe", thread, window=window, focus=True))
+        elif not ref:
+            expected = _control(self.request("window_probe", thread, window=window,
+                                             x=fields["x"], y=fields["y"]))
+        elif kind == "type":
+            live = _control(self.request("window_probe", thread, current=current, window=window, ref=ref))
+            if live != expected:
+                raise Refused(FRESH_SNAPSHOT)
+            if live["role"] not in ("editable", "combobox"):
+                raise Refused("Use a ref for an editable field.")
+            expected = live
+
+        action = risk.Action(kind, app, **expected, keys=keys, submit=submit, purpose=purpose, risky=risky)
+        record.update(name=action.name[:120], role=action.role)
+        verdict = risk.decide(action)
+        _record_verdict(record, verdict)
+        if verdict.decision == risk.REFUSE:
+            raise Refused(", ".join(verdict.reasons) + ".")
+        if not current():
+            raise Refused("The chat turn or snapshot changed. Inspect the window again.")
+
+        outcome = "run"
+        if verdict.decision == risk.ASK:
+            approvals = self.daemon.approvals
+            if getattr(approvals, "human_backed", False) is not True:
+                raise Refused("This desktop action needs the owner at the HUD.")
+            args = {"window": window, **fields, "purpose": record["purpose"], "risky": risky}
+            if "text" in args:
+                args["text"] = len(args["text"])
+            request = ApprovalRequest(
+                record["tool"], args=args,
+                reason="Approve this one desktop action? Jarvis says: " + json.dumps(record["purpose"], ensure_ascii=False),
+                headline=risk.statement(action, verdict), layer="desktop-gate",
+                thread_id=thread, provider=runtime.caller()["provider"], allowlistable=False,
+                max_wait_s=120, grantable=False, owner_initiated=True, require_hud_answer=True,
+            )
+            try:
+                answer = approvals.ask(request, cancelled=lambda: not current())
+            except Exception:
+                raise Refused("This desktop action needs the owner at the HUD.") from None
+            if not current():
+                raise Refused("The chat turn or snapshot changed. Inspect the window again.")
+            if answer is not Decision.ALLOW:
+                return "asked-declined", "The user declined to run this. Ask what they would like instead."
+            outcome = "asked-approved"
+
+        # The caller writes the outcome before making this request.
+        return outcome, lambda: self.request("window_" + kind, thread, current=current,
+                                             acting=True, window=window, expect=expected, **fields)
+
+
+def _record_verdict(record, verdict):
+    record.update(decision=verdict.decision, group=verdict.group, reasons=verdict.reasons)
+
+
+def _read(op, window=None):
+    if not config.desktop_drive():
+        return OFF
+    service = _service
+    return service.read(op, window) if service is not None else UNAVAILABLE
+
+
+def invalid_call(name, arguments, missing, unexpected):
+    if name not in HUD_WINDOW_TOOLS or name in {
+        "hud_window_list", "hud_window_snapshot", "hud_window_screenshot",
+    }:
+        return None
+    if missing:
+        fault = "Missing required argument(s): " + ", ".join(missing) + "."
+    elif unexpected:
+        fault = "Use only the tool's declared arguments."
+    else:
+        return None
+    return _act(name.removeprefix("hud_window_"), None, arguments.get("purpose"),
+                arguments.get("risky"), fault=fault, text=arguments.get("text"))
+
+
+def _act(kind, window, purpose, risky, *, fault=None, **fields):
+    who = runtime.caller() or {}
+    thread = who.get("thread_id")
+    record = {"at": utcnow(), "thread_id": thread, "tool": "hud_window_" + kind,
+              "app": "", "name": "", "role": "", "keys": [],
+              "purpose": _reason_text(purpose, fields.get("text")),
+              "decision": risk.REFUSE, "group": "", "reasons": ()}
+    service = _service
+    outcome = "refused"
+    if not config.desktop_drive():
+        record["reasons"] = ("disabled",)
+        result = OFF
+    elif service is None or not service.current():
+        record["reasons"] = ("unavailable",)
+        result = UNAVAILABLE
+    elif fault is not None:
+        record["reasons"] = (fault,)
+        result = f"Refused: {fault}"
+    else:
+        try:
+            outcome, result = service.prepare(kind, window, thread, purpose, risky, fields, record)
+        except Refused as exc:
+            if not record["reasons"]:
+                record["reasons"] = (str(exc),)
+            result = _refusal(exc)
+        except (DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            outcome, result = "bridge-refused", _refusal(exc)
+
+    try:
+        fd, offset = _append_audit(record, outcome)
+    except OSError:
+        return LOG_REFUSED
+    try:
+        if not callable(result):
+            return result
+        try:
+            result()
+        except (Refused, DesktopError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            outcome = "refused" if isinstance(exc, Refused) else "bridge-refused"
+            line = _audit_outcome(outcome)
+            try:
+                if os.pwrite(fd, line, offset) != len(line):
+                    raise OSError("short desktop action log update")
+                os.fsync(fd)
+            except OSError:
+                return LOG_REFUSED
+            return _refusal(exc)
+        return COMPLETED
+    finally:
+        os.close(fd)
+
+
+@tool
+def hud_window_list() -> str:
+    """List allowed Windows windows with their ids, apps, titles and access."""
+    return _read("windows")
+
+
+@tool
+def hud_window_snapshot(window: WindowId) -> str:
+    """Read a Windows window's accessible controls and refresh its refs for this chat."""
+    return _read("window_snapshot", window)
+
+
+@tool
+def hud_window_screenshot(window: WindowId) -> ToolResult | str:
+    """Look at a Windows window and get screenshot pixel coordinates."""
+    return _read("window_screenshot", window)
+
+
+@tool
+def hud_window_click(window: WindowId, purpose: Purpose, risky: Risky,
+                     ref: Ref = "", x: X = -1, y: Y = -1) -> str:
+    """Click a Windows control by ref or screenshot coordinates."""
+    return _act("click", window, purpose, risky, ref=ref, x=x, y=y)
+
+
+@tool
+def hud_window_type(window: WindowId, ref: Ref,
+                    text: Annotated[str, "Plain text to replace the field contents, up to 2000 characters"],
+                    purpose: Purpose, risky: Risky,
+                    submit: Annotated[bool, "Press Enter after typing"] = False) -> str:
+    """Replace text in a Windows field found in the current snapshot."""
+    return _act("type", window, purpose, risky, ref=ref, text=text, submit=submit)
+
+
+@tool
+def hud_window_key(window: WindowId, keys: Annotated[list[str], "Names of the keys to press together"],
+                   purpose: Purpose, risky: Risky) -> str:
+    """Press a chord in the focused control of a Windows window."""
+    return _act("key", window, purpose, risky, keys=keys)
+
+
+@tool
+def hud_window_scroll(window: WindowId, amount: Annotated[int, "Signed wheel detents from -100 to 100"],
+                      purpose: Purpose, risky: Risky, ref: Ref = "", x: X = -1, y: Y = -1) -> str:
+    """Scroll over a Windows control by ref or screenshot coordinates."""
+    return _act("scroll", window, purpose, risky, amount=amount, ref=ref, x=x, y=y)
+
+
+EXPLICIT_ONLY.update(HUD_WINDOW_TOOLS)
+PRIVATE_RESULT.update(HUD_WINDOW_TOOLS - {"hud_window_list"})
