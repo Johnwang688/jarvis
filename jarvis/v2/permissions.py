@@ -1204,7 +1204,7 @@ _VEX_SDK_PROFILES = 64
 
 def _vex_sdk_parts(path: str) -> list[str] | None:
     """The pieces of `path` below the Windows users folder when it is at or
-    below a profile's VEX SDK folder as written (`config.WINDOWS_VEX_SDK`),
+    below a profile's VEX extension folder as written (`config.WINDOWS_VEX_SDK`),
     else None. No `..` or `.` piece, no empty piece, and no piece Windows
     would read as another name (a trailing dot or space)."""
     root = os.path.abspath(config.windows_users_root()).rstrip("/")
@@ -1222,7 +1222,7 @@ def _vex_sdk_parts(path: str) -> list[str] | None:
 
 
 def _vex_sdk_path(path: str) -> bool:
-    """A fixed path at or below a profile's VEX SDK folder, which holds no
+    """A fixed path at or below a profile's VEX extension folder, which holds no
     credential (`config.WINDOWS_VEX_SDK`): the profile is one named folder
     (not a dot entry or a shared one), no piece is a glob, and the path
     resolves to itself, so no link on the way leads anywhere else. A path
@@ -1240,8 +1240,8 @@ def _vex_sdk_path(path: str) -> bool:
 
 
 def _vex_sdk_glob(pattern: str) -> bool:
-    """`<users>/*/<the SDK folder>/…` with every later piece fixed: the one
-    glob that finds the SDK whoever the profile is. True only when every
+    """`<users>/*/<the VEX folder>/…` with every later piece fixed: the one
+    glob that finds it whoever the profile is. True only when every
     profile it could match passes `_vex_sdk_path`; a users folder that cannot
     be listed, or holds too many entries, gets no exception."""
     parts = _vex_sdk_parts(pattern)
@@ -1355,7 +1355,7 @@ def _shell_walk_holds(tokens: list[str], bases) -> bool:
             if text is None:
                 return True
             if _vex_sdk_path(text) or _vex_sdk_glob(text):
-                continue        # a walk rooted in the VEX SDK reaches no credential
+                continue        # a walk rooted in the VEX folder reaches no credential
             parts = text.split("/")
             wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
             fixed = ("/".join(parts[:wild]) or "/") if wild is not None else text

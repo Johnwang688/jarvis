@@ -3923,18 +3923,21 @@ backstop) still read bodies as commands: the owner deferred them
 (layer 2 reads no `$(…)` or shell-fed here-string). Regression:
 `tests/v2/heredoc_credentials_read_check.py`.
 
-## The VEX SDK folder is not a credential path for v2's shell (GB-3, 2026-11-18)
+## The VEX extension folder is not a credential path for v2's shell (GB-3, 2026-11-19)
 
-Owner decision CU-D12. `credentials-path` asked for every read of the C++ SDK
-the VEX extension installs under a Windows profile's closed `AppData`. v2's
+Owner decision CU-D12, widened by the owner on 2026-11-19 from the `sdk`
+subfolder to the whole folder. `credentials-path` asked for every read of
+the VEX extension's storage under a Windows profile's closed `AppData`. v2's
 shell rule now leaves out a path at or below
-`<profile>/AppData/Roaming/{Code,Cursor}/User/globalStorage/vexrobotics.vexcode/sdk`
+`<profile>/AppData/Roaming/{Code,Cursor}/User/globalStorage/vexrobotics.vexcode`
 (`config.WINDOWS_VEX_SDK`, a constant, never a setting): as written with no
 `..`, no glob below the profile and no name Windows would trim, in a named
 profile, and resolving to itself (a link on the way gets no exception). The
 one glob allowed is `Users/*` in the profile's place with every later piece
-fixed, and only when every profile it can match passes the same check. The
-extension's other folders (`tools` holds the device tool), the folder itself
-and all else under `AppData` ask as before. Only the shell rule changed: v1's
-file tools, `run_readonly`, v2's read tools and Codex's closed paths still
-refuse `AppData` whole. `tests/v2/vex_sdk_path_check.py`.
+fixed, and only when every profile it can match passes the same check.
+Other extensions' storage and all else under `AppData` ask as before. Reads
+and writes are not told apart, so a write into the folder (its `tools` hold
+the toolchain and the device tool) no longer asks under this rule; running
+the device tool is still refused by the vex rule. Only the shell rule
+changed: v1's file tools, `run_readonly`, v2's read tools and Codex's closed
+paths still refuse `AppData` whole. `tests/v2/vex_sdk_path_check.py`.

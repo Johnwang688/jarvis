@@ -1,5 +1,5 @@
 """GB-3 (owner decision CU-D12, 2026-11-18): v2's shell rule `credentials-path`
-does not ask for a path at or below a Windows profile's VEX SDK folder
+does not ask for a path at or below a Windows profile's VEX extension folder
 (`config.WINDOWS_VEX_SDK`), and asks for everything else it asked before."""
 import os
 import tempfile
@@ -45,20 +45,22 @@ class VexSdkPath(unittest.TestCase):
                 f"ls -d {self.any}/sdk/cpp/V5 2>/dev/null | head -1",
                 f"grep -rn pressed {self.any}/sdk/cpp",
                 f"ls {self.one.replace('AppData', 'APPDATA').replace('sdk', 'SDK')}/sdk",
-                f"ls {self.one.replace('/Code/', '/Cursor/')}/sdk"):
+                f"ls {self.one.replace('/Code/', '/Cursor/')}/sdk",
+                f"ls -d {self.any} 2>&1 | head",                    # the folder itself (owner, 2026-11-19)
+                f"ls {self.one}",
+                f"ls {self.one}/tools"):
             with self.subTest(command=command):
                 self.assertIsNone(self.rule(command))
 
     def test_everything_around_the_sdk_still_asks(self):
         for command in (
-                f"ls {self.one}",                                   # the extension's folder
-                f"ls {self.one}/tools",                             # holds the device tool
-                f"cat {self.one}/sdk/../tools/x",
-                f"cat {self.one}/sdk/./../tools/x",
-                f"cat {self.one}/sdk./x",                           # Windows reads `sdk.` as `sdk`
-                f"cat '{self.one}/sdk /x'",
-                f"ls {self.any}",
-                f"ls {self.any}/tools",
+                f"cat {self.one}/sdk/../tools/x",                   # any `..` gets no exception
+                f"cat {self.one}/../github.auth/x",                 # out of the folder through `..`
+                f"cat {self.one}/sdk/../../github.auth/x",
+                f"cat {self.one}./x",                               # Windows trims the dot: another spelling
+                f"cat '{self.one} /x'",
+                f"ls {self.users}/*/AppData/Roaming/Code/User/globalStorage",
+                f"ls {self.users}/*/AppData/Roaming/Code/User/globalStorage/*",
                 f"ls {self.users}/*/AppData/*/Code/User/globalStorage/vexrobotics.vexcode/sdk",
                 f"ls {self.users}/*/{TAIL}/sdk/*/../../tools",
                 f"ls {self.users}/{{Fixture,Other}}/AppData",
@@ -76,6 +78,8 @@ class VexSdkPath(unittest.TestCase):
         secret = self.users / "Fixture" / "AppData" / "Roaming" / "secrets"
         secret.mkdir()
         (self.users / "Fixture" / TAIL / "sdk" / "linked").symlink_to(secret)
+        (self.users / "Fixture" / TAIL / "tools" / "linked").symlink_to(secret)
+        self.assertEqual(self.rule(f"cat {self.one}/tools/linked/token"), "credentials-path")
         self.assertEqual(self.rule(f"cat {self.one}/sdk/linked/token"), "credentials-path")
         # The SDK folder itself a link, in a profile the glob can match.
         other = self.users / "Other" / TAIL / "sdk"
@@ -93,12 +97,13 @@ class VexSdkPath(unittest.TestCase):
         with patch.object(permissions, "_VEX_SDK_PROFILES", 1):
             self.assertEqual(self.rule(f"ls {self.any}/sdk"), "credentials-path")
 
-    def test_the_exception_is_exactly_the_sdk_folder(self):
-        self.assertEqual({sdk[-2:] for sdk in config.WINDOWS_VEX_SDK}, {("vexrobotics.vexcode", "sdk")})
+    def test_the_exception_is_exactly_the_vex_folder(self):
+        self.assertEqual({sdk[-2:] for sdk in config.WINDOWS_VEX_SDK}, {("globalstorage", "vexrobotics.vexcode")})
+        sibling = f"ls {self.users}/Fixture/AppData/Roaming/Code/User/globalStorage/github.auth"
         widened = tuple(sdk[:-1] for sdk in config.WINDOWS_VEX_SDK)
         with patch.object(config, "WINDOWS_VEX_SDK", widened):  # the mutation this suite must catch
-            self.assertIsNone(self.rule(f"ls {self.one}/tools"))
-        self.assertEqual(self.rule(f"ls {self.one}/tools"), "credentials-path")
+            self.assertIsNone(self.rule(sibling))
+        self.assertEqual(self.rule(sibling), "credentials-path")
 
 
 if __name__ == "__main__":
