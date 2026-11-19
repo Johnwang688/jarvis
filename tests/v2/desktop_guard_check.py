@@ -242,6 +242,20 @@ class GuardTests(unittest.TestCase):
             with self.assertRaisesRegex(Refused, "protected window"):
                 self.guard.capture(self.window)
 
+    def test_a_window_with_no_area_covers_nothing(self):
+        # Found by the first real run (2026-11-19): the bridge's own hidden
+        # zero-size PseudoConsoleWindow refused every capture on the desktop.
+        self.desktop.add(20, Window("python.exe", False, "PseudoConsoleWindow", True), TARGET, SECRET, front=False)
+        for bounds in (Rect(0, 0, 0, 0), Rect(5, 5, 5, 40), Rect(5, 5, 40, 5)):
+            self.desktop.bounds[20] = bounds
+            with self.subTest(bounds=bounds):
+                self.assertEqual(self.guard.capture(self.window).rect, TARGET)
+        # Unreadable, reversed or out-of-range frames still protect.
+        for bounds in (None, Rect(40, 5, 5, 40), Rect(0, 0, 2 ** 31, 0), Rect(0, 0, True, 0), (0, 0, 0, 0)):
+            self.desktop.bounds[20] = bounds
+            with self.subTest(bounds=bounds), self.assertRaisesRegex(Refused, "protected window"):
+                self.guard.capture(self.window)
+
     def test_point_bounds_and_topmost_owner(self):
         for point in ((0, 0), (99, 99)):
             self.assertEqual(self.guard.act(self.window, point=point).hwnd, 10)

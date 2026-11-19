@@ -112,6 +112,20 @@ def usable_rect(rect: Rect | None) -> bool:
     return not policy.overlaps(rect, ())
 
 
+def empty_rect(rect) -> bool:
+    """True for a readable frame with no area: the window has no pixels on
+    screen (Windows gives every console program a hidden zero-size
+    PseudoConsoleWindow that still reports itself visible). An unreadable
+    frame or one with its edges reversed is not empty; it stays protected."""
+    if type(rect) is not Rect:
+        return False
+    edges = (rect.left, rect.top, rect.right, rect.bottom)
+    if not all(isinstance(v, int) and not isinstance(v, bool) and abs(v) < 2 ** 31 for v in edges):
+        return False
+    return (rect.left <= rect.right and rect.top <= rect.bottom
+            and (rect.left == rect.right or rect.top == rect.bottom))
+
+
 def _absolute_image_path(value):
     if not isinstance(value, str) or not value:
         return None
@@ -290,6 +304,8 @@ class Guard:
                 continue
             # An overlapping window can extend onto the target's monitor.
             bounds = self._read("occlusion_rect", other, fallback=lambda h: self._desktop.rect(h))
+            if empty_rect(bounds):
+                continue
             if not usable_rect(bounds):
                 overlapping.append(policy.PROTECTED)
             elif policy.overlaps(rect, (bounds,)):
