@@ -3189,3 +3189,23 @@ still verifies every clip (V12). The phone writes the desk's 16 kHz PCM WAV
 with Web Audio, not Safari's MediaRecorder `audio/mp4`, so the local engine
 takes it without a media decoder. Details: `control-plane.md`, "Push to talk
 from the phone".
+
+## Desktop voice with local Laya
+
+Start desktop voice beside the HUD orb. Hold Right Ctrl or say “Jarvis” for an assistant turn. Hold Ctrl+D for dictation. With the HUD focused, Ctrl+D puts the words into the selected chat draft. An explicit assistant request such as “Jarvis, type the words open Chrome” inserts the literal suffix. A website handoff reports that the browser accepted the URL.
+
+The daemon starts one offline Laya process on its first classified turn. The owner runtime manifest defaults to `~/.config/jarvis/laya-runtime.json`. Set `JARVIS_LAYA_RUNTIME` in the daemon environment to use a different manifest. It names the isolated Python interpreter, English checkpoint directory, repository, revision, and CUDA device. The measured installation uses Python 3.12.13, Laya 0.4.37, PyTorch 2.11.0+cu128, and revision `e333cb7c823cd1787276228260f56d02fbf5180b`. A cold turn includes model startup.
+
+### Reviewing routing examples
+
+Jarvis retains the most recent 500 eligible assistant and wake transcripts in the owner's local daemon data directory. Each turn can have a model proposal, scores, and observed outcomes. Confirming that Chrome accepted a URL records the handoff. Only an explicit label identifies the route the speaker wanted. Dictation and explicit typing bypass collection. To pause new collection, set `JARVIS_ROUTE_FEEDBACK=0` in the daemon environment.
+
+From the Jarvis checkout, use the first command to see turn IDs. The second labels the intended route. The third writes the currently retained reviewed examples to a JSONL file. Export before reviewed turns age out if you want a longer training history.
+
+```bash
+.venv/bin/python -m jarvis.v2.route_feedback recent --limit 10
+.venv/bin/python -m jarvis.v2.route_feedback correct TURN_ID navigate
+(umask 077 && .venv/bin/python -m jarvis.v2.route_feedback export > "reviewed-routes-$(date +%Y%m%d-%H%M%S).jsonl")
+```
+
+Labels are `ask`, `navigate`, `open_app`, `switch_app`, `search`, `read_selection`, and `clarify`.

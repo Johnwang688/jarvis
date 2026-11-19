@@ -62,6 +62,11 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/voice_chat.py",
         "jarvis/v2/voice_intent.py",
         "jarvis/v2/voice_model.py",
+        "jarvis/v2/laya_routing.py",
+        "jarvis/v2/laya_schema.py",
+        "jarvis/v2/laya_service.py",
+        "jarvis/v2/laya_worker.py",
+        "jarvis/v2/route_feedback.py",
         "windows/voicewire.py",
         "windows/voice_agent.py",
         "jarvis/voice_link_setup.py",
@@ -342,7 +347,8 @@ def _protected_state_paths() -> set[Path]:
     # lists: kept per key, so a suite that repoints one gets its own set,
     # and a gate call does not rebuild ~30 paths (review of PR #315). What
     # they resolve to on disk is never kept (`_resolve_all`).
-    key = (str(config.ALLOWLIST_PATH), str(config.MODELS_PATH), str(config.PROVIDER_DEFAULTS_PATH),
+    laya_manifest = os.environ.get("JARVIS_LAYA_RUNTIME")
+    key = (laya_manifest, str(config.ALLOWLIST_PATH), str(config.MODELS_PATH), str(config.PROVIDER_DEFAULTS_PATH),
            str(config.DISCORD_GUILD_PATH), str(config.ROUTING_PATH), str(config.CODEX_CATALOG_PATH),
            str(config.CLAUDE_CATALOG_PATH),
            str(config.VEX_PATH), str(config.BROWSER_SETTINGS_PATH), str(config.STT_SETTINGS_PATH),
@@ -360,6 +366,10 @@ def _protected_state_paths() -> set[Path]:
              config.VEX_PATH.expanduser(),
              config.BROWSER_SETTINGS_PATH.expanduser(), config.STT_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
+    # The voice router starts the Python interpreter named in this manifest.
+    paths.add(Path.home() / ".config" / "jarvis" / "laya-runtime.json")
+    if laya_manifest and Path(laya_manifest).is_absolute():
+        paths.add(Path(laya_manifest))
     # The owner selects which existing chat receives speech from the paired helper.
     paths.add(Path(config.V2_DATA_DIR).expanduser() / "voice-target.json")
     # The speaker store's two files that switch the voice check off (V12, V-12b,
@@ -437,6 +447,7 @@ _STATE_PATHS: dict[tuple, frozenset] = {}
 # them), `inbox/` (its own tree, `_inbox_tree`) and `remote/` (its two named
 # files above).
 RECORD_TREES = (
+    "route-feedback",  # observed voice outcomes and owner-reviewed route labels
     "threads",       # thread.json, brief.json (the brief a resume reopens), log.jsonl, activity.json, discord.json, subagents.jsonl
     "tasks",         # task.json, journal.jsonl, activity.json, discord.json
     "projects",      # <id>.json: name, root (the folder its chats work in), archive state

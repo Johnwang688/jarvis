@@ -776,6 +776,7 @@ export default function App() {
   // Continuation windows whose message was placed (REVIEW box or chat); one
   // that never was (upload failed, nothing heard, refused) is taken back.
   const placedWindows = useRef(new Set<number>());
+  const dictationKeyPress = useRef(false);
   const endListening = () => {
     const was = listenWas.current;
     listenWas.current = null;
@@ -815,7 +816,8 @@ export default function App() {
         onListening: (source, tag, utterance) => {
           const at = live.current;
           let n = at.selectedChat;
-          let boxOnly = false;
+          const dictationKey = source === "ptt" && dictationKeyPress.current;
+          let boxOnly = dictationKey;
           if (source === "follow_up" && typeof tag === "number" && tag !== n) {
             if (!chatsOnScreen().includes(tag as PaneNo)) {
               // The pane the window was opened for is gone or hidden: nobody
@@ -836,8 +838,13 @@ export default function App() {
           if (utterance !== undefined && !utterances.current.has(utterance)) {
             utterances.current.set(utterance, {
               gid: null, refused: false,
-              meta: { mode: at.dictation, chat: n !== null ? draftKey(at.chats[n], n) : null, boxOnly, continuation: null, utterance },
+              meta: { mode: at.dictation, dictationKey, chat: n !== null ? draftKey(at.chats[n], n) : null, boxOnly, continuation: null, utterance },
             });
+          }
+          if (dictationKey && utterance !== undefined) {
+            // A hold can adopt an already-recording utterance.
+            const claim = utterances.current.get(utterance);
+            if (claim) { claim.meta.boxOnly = true; claim.meta.dictationKey = true; }
           }
           // The wake word and the talk key are the owner addressing him: they pause what he is saying (Q7).
           if (utterance !== undefined && (source === "wake" || source === "ptt")) barge.begin(source === "ptt" ? "key" : "wake", utterance);
@@ -1091,6 +1098,7 @@ export default function App() {
       // obeyed (Q10: no command under a card without local recognition, which is V11).
       const batch: SttPlaced<SttCapture>[] = [];
       for (const i of placed) {
+        if (i.meta.dictationKey) { batch.push(i); continue; }
         const r = commands.fromTranscript(i.text, { card: live.current.approvals.length > 0, stale: i.late || i.retried });
         if (r.kind === "none") { batch.push(i); continue; }
         done(r.kind === "ran" ? "command" : r.why === "card" ? "suppressed:card" : "cancelled", [i]);
@@ -3590,7 +3598,7 @@ export default function App() {
 
   // ---- push to talk -------------------------------------------------------
 
-  const press = useCallback(() => {
+  const press = useCallback((dictationKey = false) => {
     if (crashedRef.current) return; // nothing on screen to talk to
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
@@ -3612,7 +3620,9 @@ export default function App() {
     // it is held lands in the box, unsent, and nothing else is heard.
     // Talking over him pauses him, and he resumes when the utterance is over
     // (decision V-7): `onListening` begins the barge-in, `onUtteranceEnd` ends it.
-    capture.press();
+    dictationKeyPress.current = dictationKey;
+    try { capture.press(); }
+    finally { dictationKeyPress.current = false; }
   }, [capture, chatPatch, dispatch, micSource]);
 
   const release = useCallback(() => capture.release(), [capture]);
@@ -3697,7 +3707,7 @@ export default function App() {
       e.preventDefault();
       if (verdict === "monaco") return;
       e.stopPropagation();
-      if (verdict === "press") press();
+      if (verdict === "press") press(micSource === "windows");
     };
     const up = (e: KeyboardEvent) => {
       if (talkHold.up(e)) release();
@@ -3713,7 +3723,7 @@ export default function App() {
       window.removeEventListener("keyup", up, true);
       window.removeEventListener("blur", lost);
     };
-  }, [press, release, sayTalkKeyOnce, talkHold]);
+  }, [micSource, press, release, sayTalkKeyOnce, talkHold]);
 
   // ---- microphone ---------------------------------------------------------
 

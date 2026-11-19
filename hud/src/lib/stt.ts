@@ -673,6 +673,8 @@ export interface SttCapture {
    * claimed, so where they belong is unclear.
    */
   boxOnly?: boolean;
+  /** The Ctrl+D hold goes to the composer and bypasses voice playback commands. */
+  dictationKey?: boolean;
   /** The continuation window this message armed (`Capture`'s token), settled when it is placed. */
   continuation?: number | null;
   /**
