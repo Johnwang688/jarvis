@@ -63,6 +63,7 @@ export function ApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
   onSubagent?: (ref: SubagentRef, reqId: string) => void;
+  stopDesktopDriving?: () => void;
 }) {
   return props.request.hud_only
     ? <BrowserApprovalCard request={props.request} onDecide={props.onDecide} onPresent={approvalChime} />
@@ -191,6 +192,7 @@ function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
   onSubagent?: (ref: SubagentRef, reqId: string) => void;
+  stopDesktopDriving?: () => void;
 }) {
   const r = props.request;
   const [left, setLeft] = useState(r.timeout_s || 120);
@@ -270,6 +272,7 @@ function OrdinaryApprovalCard(props: {
           AUTHORIZE
         </button>
       </div>
+      {props.stopDesktopDriving ? <button type="button" onClick={props.stopDesktopDriving}>Stop desktop driving</button> : null}
       {/* AS: the model's line, marked as the model's; then code's two lines. */}
       <SummarySlot view={view} />
       <CodeLines why={reasonText(r.reason, r.layer)} where={whereParts(r.where)} />
@@ -321,6 +324,8 @@ export function ApprovalVeil(props: {
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
   /** A card's "from sub-agent ‹name›" (SV-3), with that card's request id. */
   onSubagent?: (ref: SubagentRef, reqId: string) => void;
+  desktopDriver?: string | null;
+  onStopDesktopDriving?: (threadId: string) => void;
 }) {
   const top = props.requests[0];
   const up = !!top;
@@ -423,7 +428,9 @@ export function ApprovalVeil(props: {
       {/* Keyed by its request: the next queued card is a new card, with its
           own countdown and live buttons — not the answered card's busy state
           (re-review of PR #27; main had the same bug). */}
-      <ApprovalCard key={top.req_id} request={top} onDecide={props.onDecide} onSubagent={props.onSubagent} />
+      <ApprovalCard key={top.req_id} request={top} onDecide={props.onDecide} onSubagent={props.onSubagent}
+        stopDesktopDriving={top.layer === "desktop-gate" && top.thread_id && top.thread_id === props.desktopDriver
+          ? () => props.onStopDesktopDriving?.(top.thread_id!) : undefined} />
     </div>
   );
 }

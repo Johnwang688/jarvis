@@ -285,6 +285,12 @@ def session_mcp(brief: Brief) -> dict | None:
     return None
 
 
+def _watch_window_tools(brief: Brief) -> bool:
+    from ..mcp_session import WATCH_WINDOWS_VARIABLE
+    server = session_mcp(brief)
+    return server is not None and server.get("env", {}).get(WATCH_WINDOWS_VARIABLE) == "1"
+
+
 def validate_mcp(brief: Brief, effective: dict) -> None:
     """Compare measured 0.161 readback without putting token values in errors."""
     expected = session_mcp(brief)
@@ -915,6 +921,8 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
         values["model_reasoning_effort"] = brief.effort
     lines = [f"{k} = {_value(v)}" for k, v in values.items()]
     lines += ["[features]", f"{FEATURE} = true"]
+    if _watch_window_tools(brief):
+        lines.append("mcp_tool_list_changed = true")
     lines += ["[shell_environment_policy]", 'inherit = "all"']
     if home is not None:
         lines.append(f"set = {_value({'HOME': str(sandbox_home(home))})}")
@@ -946,6 +954,8 @@ def check_effective(brief: Brief, effective: dict, home: Path | None) -> None:
         _refuse(f"feature {FEATURE} is not on")
     if features.get(TURN_WIDE_FEATURE) not in (None, False):
         _refuse(f"feature {TURN_WIDE_FEATURE} is on")
+    if _watch_window_tools(brief) and features.get("mcp_tool_list_changed") is not True:
+        _refuse("feature mcp_tool_list_changed is off")
     profiles = effective.get("permissions")
     profile = profiles.get(PROFILE) if isinstance(profiles, dict) else None
     if not isinstance(profile, dict):

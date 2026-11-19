@@ -443,6 +443,10 @@ def archive_project(daemon, project_id: str, expect) -> dict:
                 paused.append(record)
         project.archived = utcnow()
         stores.projects.save(project)
+        driver = daemon.desktop_driver.thread_id()
+        driving_chat = stores.threads.get(driver) if driver is not None else None
+        if driving_chat is not None and driving_chat.project_id == project.id:
+            daemon._revoke_desktop_driver(driver)
     for record in paused:
         daemon.schedules._changed("schedule_updated", record)
     daemon.bus.publish({"kind": "project_archived", "project_id": project.id,
@@ -656,6 +660,7 @@ def archive_thread(daemon, thread_id: str) -> dict:
         thread = daemon.require(stores.threads, thread_id)
         thread.archived = utcnow()
         stores.threads.save(thread)
+        daemon._revoke_desktop_driver(thread.id)
     daemon.bus.publish({"kind": "thread_archived", "thread_id": thread.id,
                         "project_id": thread.project_id,
                         "data": {"thread_id": thread.id, "project_id": thread.project_id}})

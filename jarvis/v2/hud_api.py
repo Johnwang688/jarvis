@@ -2015,6 +2015,24 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
+    if parts == ["desktop-driving"] or (len(parts) >= 3 and parts[0] == "threads"
+                                       and parts[2] == "desktop-driving"):
+        from .browser.routes import owner_route
+        owner_route(handler, daemon)
+        _object(query, ())
+        if parts == ["desktop-driving"] and method == "GET":
+            return 200, daemon.desktop_driving_state()
+        if len(parts) == 3 and method == "PATCH":
+            body = _object(handler._body(), ("on",), ("on",))
+            if type(body["on"]) is not bool:
+                fail(400, "on must be true or false")
+            return 200, daemon.set_desktop_driving(parts[1], body["on"])
+        if len(parts) == 4 and parts[3] == "stop" and method == "POST":
+            _object(handler._body(), ())
+            daemon.require(stores.threads, parts[1])
+            daemon.stop_desktop_driving("HUD Stop", thread_id=parts[1])
+            return 200, daemon.desktop_driving_state()
+        fail(404, "route not found")
     if parts == ["hud", "sensitive"]:
         from .projects import owner_only
         owner_only(handler, daemon)

@@ -14,7 +14,7 @@ from jarvis import config, runtime, tools
 from jarvis.desktop import DesktopError, DesktopSession
 from jarvis.v2 import bridge, desktop_risk as risk, session_tools
 from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
-from jarvis.v2.daemon import APIError
+from jarvis.v2.desktop_driver import DesktopDriver
 from jarvis.v2.hud_sensitive import Reports
 from jarvis.v2.mcp_catalog import MCP_TOOLS
 from jarvis.v2.model import ProviderName, Role
@@ -74,7 +74,10 @@ class Checks(unittest.TestCase):
         self.approvals = Approvals()
         reports = Reports()
         self.addCleanup(reports.close)
-        self.daemon = SimpleNamespace(approvals=self.approvals, hud_sensitive_reports=reports)
+        driver = DesktopDriver()
+        driver.set("first", True)
+        self.daemon = SimpleNamespace(approvals=self.approvals, hud_sensitive_reports=reports,
+                                      desktop_driver=driver)
         self.service = hud.WindowDrive(self.daemon)
         self.service.install()
         self.addCleanup(self.service.stop)
@@ -145,7 +148,7 @@ class Checks(unittest.TestCase):
         os.environ["JARVIS_DESKTOP_DRIVE"] = "1"
         self.assertFalse(NAMES & {row["name"] for row in bridge.listing("fast")})
         for provider in ("claude", "codex"):
-            rows = {row["name"]: row for row in bridge.listing(provider)}
+            rows = {row["name"]: row for row in bridge.listing(provider, window_tools=True)}
             self.assertLessEqual(NAMES, rows.keys())
             self.assertFalse(NAMES & {row["name"] for row in bridge.listing(provider, window_tools=False)})
             for name in NAMES:
@@ -165,8 +168,8 @@ class Checks(unittest.TestCase):
                 self.assertEqual(self.call("list", **args).text, hud.UNAVAILABLE)
                 self.assertEqual(self.action(ref=SAFE, **args), hud.UNAVAILABLE)
         self.service.stop()
-        self.assertEqual(self.action(ref=SAFE), hud.UNAVAILABLE)
-        self.assertEqual([row["outcome"] for row in self.log()], ["refused"] * 5)
+        self.assertEqual(self.action(ref=SAFE), hud.OFF)
+        self.assertEqual([row["outcome"] for row in self.log()], ["refused"] * 4)
         self.assertFalse(self.requests)
 
     def test_look_and_safe_click(self):
@@ -215,7 +218,13 @@ class Checks(unittest.TestCase):
 
     def test_refs_cannot_be_invented_moved_or_reused(self):
         self.snap()
-        for kwargs in ({"ref": SAFE, "thread": "second"}, {"ref": SAFE, "window": OTHER},
+        driver = self.daemon.desktop_driver
+        driver.clear("first")
+        driver.set("second", True)
+        self.assertIn("fresh snapshot", self.action(ref=SAFE, thread="second"))
+        driver.clear("second")
+        driver.set("first", True)
+        for kwargs in ({"ref": SAFE, "window": OTHER},
                        {"ref": "0123456789abcdef-e99"}, {"ref": SAFE, "label": "Send"}):
             with self.subTest(kwargs=kwargs):
                 self.assertTrue(self.action(**kwargs).startswith("Refused:"))
@@ -509,8 +518,7 @@ class Checks(unittest.TestCase):
         session.provider.admit_foreground_mcp.return_value = None
         self.assertIn("foreground", call()["text"])
         with patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": "0"}):
-            with self.assertRaisesRegex(APIError, "not offered"):
-                call()
+            self.assertEqual(call(), {"text": hud.OFF, "isError": True})
         self.assertEqual([op for op, _, _ in self.requests], ["windows", "window_snapshot", "window_click"])
 
     def test_audit_cuts_label_without_changing_bridge_expect(self):

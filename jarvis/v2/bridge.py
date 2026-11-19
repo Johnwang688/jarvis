@@ -60,7 +60,7 @@ def _python() -> str:
     return str(Path(sys.executable).absolute())
 
 
-def server_entry(provider, port: int, token: str) -> dict:
+def server_entry(provider, port: int, token: str, *, watch_windows=False) -> dict:
     """The `mcp_servers["jarvis"]` entry for one chat session's run brief.
 
     `python -m jarvis.v2.mcp_session`: a stdlib-only relay that imports no
@@ -74,6 +74,9 @@ def server_entry(provider, port: int, token: str) -> dict:
     entry = {"command": _python(), "args": ["-m", RELAY_MODULE],
              "env": {TOKEN_VARIABLE: token, PORT_VARIABLE: str(int(port)),
                      "PYTHONPATH": str(config.REPO_ROOT.resolve())}}
+    if watch_windows:
+        from .mcp_session import WATCH_WINDOWS_VARIABLE
+        entry["env"][WATCH_WINDOWS_VARIABLE] = "1"
     name = provider.value if isinstance(provider, ProviderName) else str(provider)
     if name == ProviderName.CODEX.value:
         approve = {tool.name: {"approval_mode": "approve"}
@@ -102,7 +105,7 @@ def _annotations(entry) -> dict:
     return {"readOnlyHint": False}
 
 
-def listing(provider, *, window_tools=True) -> list[dict]:
+def listing(provider, *, window_tools=False) -> list[dict]:
     """The tools a chat on `provider` is offered, as MCP describes a tool."""
     from jarvis import tools
     from . import session_tools
@@ -174,17 +177,44 @@ def route(handler, daemon, parts, query):
     if not _api_listener(handler, daemon):
         raise APIError(404, "route not found")
     method = handler.command
-    if not ((parts == ["mcp", "tools"] and method == "GET")
+    if not ((parts in (["mcp", "tools"], ["mcp", "window-tools"]) and method == "GET")
             or (parts == ["mcp", "call"] and method == "POST")):
         raise APIError(404, "route not found")
     from .callers import authenticate
     caller, session = authenticate(handler, daemon)
-    _object(query, ())
     provider = session.thread.provider
+
+    def window_tools():
+        return (daemon.desktop_driver.grant(session.thread.id) is not None
+                and (session.worker is None or session.desk.slot.get("present") is True))
+
+    if parts[1] == "window-tools":
+        _object(query, ("listed",), ("listed",))
+        if query["listed"] not in ("0", "1") or not daemon.desktop_driver.enabled:
+            raise APIError(400, "invalid window tool watch")
+        listed = query["listed"] == "1"
+        alive = _request_alive(handler.connection)
+        # Wake immediately on a switch, and periodically check whether the
+        # relay disconnected or a steer changed desk authority.
+        changed = daemon.desktop_driver.changed
+        with changed:
+            if session.window_watch:
+                raise APIError(409, "window tool watch already open")
+            session.window_watch = True
+            try:
+                for _ in range(12):
+                    if (window_tools() != listed or daemon._stopping or session.closing
+                            or session.caller_key is None or not alive()):
+                        break
+                    changed.wait(1)
+                authenticate(handler, daemon)
+                return 200, {"listed": window_tools()}
+            finally:
+                session.window_watch = False
+    _object(query, ())
     if parts[1] == "tools":
         with daemon._lock:
-            window_tools = session.worker is None or session.desk.slot.get("present") is True
-        return 200, {"tools": listing(provider, window_tools=window_tools)}
+            return 200, {"tools": listing(provider, window_tools=window_tools())}
     body = _body(handler)
     return 200, call(daemon, session, caller, body["name"], body["arguments"],
                      codex_context=body["codex_context"],
@@ -260,10 +290,12 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
     from jarvis import runtime, tools
     from .daemon import APIError
     from . import session_tools
+    from .desktop_driver import REFUSED as WINDOW_OFF
     thread = session.thread
     offered = session_tools.for_provider(thread.provider)
     entry = next((entry for entry in offered if entry.name == name), None)
-    if entry is None:
+    window_call = name in session_tools.HUD_WINDOW_TOOLS
+    if entry is None and not window_call:
         raise APIError(404, "this chat is not offered that tool")
     from .callers import FORBIDDEN
     from .model import Role
@@ -279,6 +311,9 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
     with daemon._lock:
         if not live_session():
             raise APIError(403, FORBIDDEN)
+        grant = daemon.desktop_driver.grant(thread.id) if window_call else None
+        if window_call and (grant is None or entry is None):
+            return {"text": WINDOW_OFF, "isError": True}
         # A CLI may call between turns; it gets an off-desk slot. Capture
         # worker identity as well as turn id so a successor cannot inherit it.
         worker = session.worker
@@ -289,7 +324,6 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         # and chat_wait (chat-to-chat C4, §5.3), whose wait reads `current()`
         # through `runtime.should_stop()` and ends when the CLI's relay goes.
         desktop_call = name in session_tools.HUD_DESKTOP_TOOLS
-        window_call = name in session_tools.HUD_WINDOW_TOOLS
         socket_bound = browser_call or desktop_call or window_call or name == "chat_wait"
         drive_turn = getattr(session, "drive_turn", None) if worker is not None else None
 
@@ -312,6 +346,9 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         if name != "hud_browser_act" or not admission_for_tool():
             return {"text": "Refused: " + OFF, "isError": True}
 
+    def window_current():
+        return daemon.desktop_driver.grant(thread.id) is grant
+
     def current():
         with daemon._lock:
             live = (live_session() and session.worker is worker
@@ -319,7 +356,7 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
                     and not session.cancelled.is_set()
                     and (not browser_call or getattr(session, "drive_turn", None) is drive_turn)
                     and (drive_turn is None or not drive_turn.closed))
-        if not live:
+        if not live or (window_call and not window_current()):
             return False
         if socket_bound and request_alive is not None:
             try:
@@ -335,7 +372,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
            "provider": caller.provider, "turn_id": turn_id}
     names = frozenset(entry.name for entry in offered)
     approve = _approver(session, current)
-    LOG.debug("jarvis-mcp call %s for thread %s", name, thread.id)
+    if not window_call:
+        LOG.debug("jarvis-mcp call %s for thread %s", name, thread.id)
 
     def dispatch():
         runtime.bind(caller=who, depth=0, tool_names=names, approve=approve,
@@ -344,6 +382,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
             from .tools.hud_desktop import current as current_desktop, UNAVAILABLE
             if not current_desktop():
                 return tools.ToolResult(UNAVAILABLE)
+        if window_call and not window_current():
+            return tools.ToolResult(WINDOW_OFF)
         if window_call and (not runtime.at_desk() or not current()):
             from .tools.hud_window import UNAVAILABLE
             return tools.ToolResult(UNAVAILABLE)
@@ -355,6 +395,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         # Dangerous entries take dispatch's existing single owner gate.
         if caller.provider == "codex" and not tools.REGISTRY[name].dangerous:
             refused = _delegated(getattr(session, "permit", None), name, arguments, current)
+            if window_call and not window_current():
+                return tools.ToolResult(WINDOW_OFF)
             if refused is not None:
                 return refused
         if not current() and not entry.desk_only:
@@ -362,6 +404,10 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         return tools.dispatch(name, json.dumps(arguments), approve=approve)
 
     def run():
+        if window_call:
+            from .tools.hud_window import bind_grant
+            with bind_grant(grant):
+                return dispatch()
         from .browser.drive_state import bind_turn
         with bind_turn(drive_turn if browser_call else None):
             return dispatch()

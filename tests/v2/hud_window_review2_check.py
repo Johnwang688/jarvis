@@ -81,7 +81,9 @@ class Review2(fixture.Review):
             "case collision": {bridge_ref: EDITOR, bridge_ref.upper(): EDITOR},
         }
         self.assertIn(NEW, self.snapshot(SECONDARY))
+        self.drive_chat("other-chat")
         self.assertIn(EDIT, self.snapshot(thread="other-chat"))
+        self.drive_chat("review-chat")
         good_reply = {"snapshot": f"[{EDIT}]", "refs": {EDIT: EDITOR}}
         for kind, refs in bad_refs.items():
             with self.subTest(kind=kind):
@@ -94,7 +96,9 @@ class Review2(fixture.Review):
                     self.assertIn("fresh snapshot", self.act("click", ref=ref))
                 self.assertEqual(len(self.actions()), actions)
                 self.assertEqual(self.act("click", on=SECONDARY, ref=NEW), COMPLETE)
+                self.drive_chat("other-chat")
                 self.assertEqual(self.act("click", ref=EDIT, via={"thread": "other-chat"}), COMPLETE)
+                self.drive_chat("review-chat")
                 self.responses["window_snapshot"] = good_reply
                 self.assertIn(EDIT, self.snapshot())
                 self.assertEqual(self.act("click", ref=EDIT), COMPLETE)
@@ -203,7 +207,9 @@ class Review2(fixture.Review):
     def test_retry_and_two_interleaved_chats_keep_separate_rows(self):
         other = {"thread": "other-chat"}
         self.assertIn(EDIT, self.snapshot())
+        self.drive_chat("other-chat")
         self.assertIn(EDIT, self.snapshot(**other))
+        self.drive_chat("review-chat")
         entered, release = threading.Event(), threading.Event()
 
         def bridge(fields):
@@ -220,11 +226,13 @@ class Review2(fixture.Review):
             try:
                 self.assertTrue(entered.wait(5))
                 self.assertEqual([row["outcome"] for row in self.audit()], ["pending"])
+                self.drive_chat("other-chat")
                 self.assertEqual(self.act("click", ref=EDIT, via=other), COMPLETE)
                 self.assertEqual([row["outcome"] for row in self.audit()], ["pending", "run"])
             finally:
                 release.set()
             self.assertIn("window refused", first.result(timeout=5))
+        self.drive_chat("review-chat")
         self.assertEqual(self.act("click", ref=EDIT), COMPLETE)
         self.assertEqual([(row["thread_id"], row["outcome"]) for row in self.audit()], [
             ("review-chat", "bridge-refused"), ("other-chat", "run"), ("review-chat", "run"),

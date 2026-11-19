@@ -106,6 +106,12 @@ def _strict_host(handler, daemon) -> None:
         _fail(403, "untrusted Host")
 
 
+def owner_route(handler, daemon) -> None:
+    from ..projects import owner_only
+    owner_only(handler, daemon)
+    _strict_host(handler, daemon)
+
+
 def _disposition(name: str) -> str:
     """`attachment`, with an ASCII fallback and the UTF-8 name (RFC 6266);
     `name` is already cleaned (no control, quote or path character)."""
@@ -151,9 +157,7 @@ def route(handler, daemon, parts, query):
     if not parts or parts[0] != "browser":
         return None
     from ..daemon import _object
-    from ..projects import owner_only
-    owner_only(handler, daemon)
-    _strict_host(handler, daemon)
+    owner_route(handler, daemon)
     method = handler.command
     attach = len(parts) == 4 and parts[1] == "tabs" and parts[3] == "attach" and method == "GET"
     # Socket tickets and capture identity queries are never logged:

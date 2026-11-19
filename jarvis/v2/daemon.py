@@ -428,6 +428,7 @@ class _Session:
     cancelled: threading.Event = field(default_factory=threading.Event)
     closing: bool = False
     retired: bool = False
+    window_watch: bool = False
     turn_id: str | None = None
     token_baseline: int = 0
     cost_baseline: float = 0.0
@@ -721,6 +722,8 @@ class Daemon:
         self.browser_drive = BrowserDrive(self)
         from .hud_sensitive import Reports
         self.hud_sensitive_reports = Reports()
+        from .desktop_driver import DesktopDriver
+        self.desktop_driver = DesktopDriver(self._lock)
         from .tools.hud_window import WindowDrive
         self.window_drive = WindowDrive(self)
         from .devservers import DevServers
@@ -1276,7 +1279,8 @@ class Daemon:
         token = self._mint(session)
         if token is not None:
             from .bridge import server_entry
-            servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
+            servers["jarvis"] = server_entry(session.thread.provider, self.port, token,
+                                             watch_windows=self.desktop_driver.enabled)
         return replace(run_brief, model=choice[0], effort=choice[1], speed=session.applied_speed, mcp_servers=servers)
 
     def _mint(self, session) -> str | None:
@@ -1981,6 +1985,7 @@ class Daemon:
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
         self.voice_chat.assign(message, thread_id, session.turn_id)
         session.desk.begin(session.brief, message, session.turn_id)
+        self.desktop_driver.changed.notify_all()
         self._retire_drive(session)
         if (session.thread.provider in (ProviderName.CLAUDE, ProviderName.CODEX)
                 and session.brief.role == Role.CHAT and session.brief.task_id is None):
@@ -1989,7 +1994,9 @@ class Daemon:
                 thread_id, session.turn_id, session.brief.profile == PermissionProfile.STRICT,
                 session.brief.cwd or "", message.text if session.desk.slot.get("present") is True else "",
                 provider=session.thread.provider.value)
-        worker = threading.Thread(target=self._turn, args=(session, message),
+        grant = (self.desktop_driver.grant(thread_id)
+                 if session.desk.slot.get("present") is True else None)
+        worker = threading.Thread(target=self._turn, args=(session, message), kwargs={"desktop_grant": grant},
                                   name=f"jarvis-turn-{thread_id}", daemon=True)
         turn_id = session.turn_id
         if relay is not None:
@@ -2481,7 +2488,9 @@ class Daemon:
             project=project, task=task,
             delegation_cancelled=lambda: self._delegation_cancelled(thread_id),
             relayed_from=(lambda child=None: _relayed_from(session, child)) if session is not None else None)
-        return build_permit(ctx, self.approvals)
+        permit = build_permit(ctx, self.approvals)
+        permit.desktop_driver_grant = lambda: self.desktop_driver.grant(thread_id)
+        return permit
 
     def owner_seen(self) -> None:
         """The owner's own input just arrived (QH-3): a HUD message the window
@@ -2882,7 +2891,7 @@ class Daemon:
             if current() and session.applied == applied:
                 session.desk.images(slot, turn_id, capable)
 
-    def _turn(self, session, message, *, compact=False):
+    def _turn(self, session, message, *, compact=False, desktop_grant=None):
         """A turn's worker. `message` None is a turn the CLI started by
         itself (SV-6, `_begin_cli`): read through the provider's `adopt`,
         with no model switch and no desk; everything else is the same.
@@ -2912,7 +2921,11 @@ class Daemon:
                 self._apply_choice(session)
                 self._refuse_unasked_tier(session)
                 self._desk_images(session, worker, turn_id, desk_slot)
-                source = session.provider.send(session.handle, message)
+                driver_brief = (self.desktop_driver.take_brief(session.thread.id, desktop_grant)
+                                if desk_slot.get("present") is True and not session.cancelled.is_set()
+                                and desktop_grant is not None else None)
+                provider_message = replace(message, text=f"{driver_brief}\n\n{message.text}") if driver_brief else message
+                source = session.provider.send(session.handle, provider_message)
             elif compact:
                 self._refuse_unasked_tier(session)
                 source = session.provider.compact(session.handle)
@@ -2975,6 +2988,7 @@ class Daemon:
         finally:
             with self._lock:
                 session.desk.end()
+                self.desktop_driver.changed.notify_all()
                 if session.drive_turn is drive_turn:
                     self._retire_drive(session)
             # Steered messages the provider took but never delivered (the fast
@@ -3120,6 +3134,50 @@ class Daemon:
             if session is None or session.handle is None or session.closing:
                 raise DaemonError("thread session is not open")
             return session
+
+    def desktop_driving_state(self):
+        with self._lock:
+            enabled = self.desktop_driver.enabled and config.desktop_drive()
+            return {"enabled": enabled, "thread_id": self.desktop_driver.thread_id() if enabled else None}
+
+    def _desktop_driving_changed(self):
+        self.bus.publish({"kind": "desktop_driving"})
+
+    def _revoke_desktop_driver(self, thread_id):
+        """The owner's archive operations call this under the daemon lock."""
+        if self.desktop_driver.clear(thread_id) is not None:
+            self._desktop_driving_changed()
+
+    def set_desktop_driving(self, thread_id, on):
+        from .projects import is_archived
+        with self._lock:
+            self._active()
+            thread = self.require(self.stores.threads, thread_id)
+            if on and (thread.role != Role.CHAT or thread.task_id is not None
+                       or thread.provider not in (ProviderName.CLAUDE, ProviderName.CODEX)
+                       or thread.archived or is_archived(self.stores, thread.project_id)):
+                raise APIError(409, "Desktop driving requires an active Claude or Codex chat.")
+            try:
+                changed = self.desktop_driver.set(thread_id, on)
+            except ValueError as exc:
+                raise APIError(409, str(exc)) from exc
+            if changed:
+                self._desktop_driving_changed()
+            return self.desktop_driving_state()
+
+    def stop_desktop_driving(self, reason, *, thread_id=None):
+        """Revoke first and stop only the turn that was running at revocation."""
+        with self._lock:
+            thread_id = self.desktop_driver.clear(thread_id)
+            if thread_id is None:
+                return
+            session = self._sessions.get(thread_id)
+            turn_id = (session.turn_id if session is not None and session.worker is not None
+                       and session.handle is not None and not session.closing else None)
+            self._desktop_driving_changed()
+        LOG.info("Desktop driving stopped for %s (%s)", thread_id, reason)
+        if turn_id is not None:
+            self.interrupt(thread_id, expected_turn_id=turn_id)
 
     def interrupt(self, thread_id, *, expected_turn_id=None):
         """Stop the current turn, or a specific acknowledged send's turn.
@@ -3427,6 +3485,7 @@ class Daemon:
             if self._stopping:
                 return
             self._stopping = True
+            self.desktop_driver.clear()
             # Terminals end with the daemon (decision W-3): every window is
             # told and every session gets SIGHUP now; what outlives it is
             # SIGKILLed below, before the listeners close.
