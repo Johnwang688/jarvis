@@ -107,6 +107,8 @@ SELF_PROTECTED = frozenset(
         "windows/desktopwire.py",
         "windows/bridge.py",
         "windows/uiatree.py",
+        "windows/windowpolicy.py",
+        "windows/desktopguard.py",
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",

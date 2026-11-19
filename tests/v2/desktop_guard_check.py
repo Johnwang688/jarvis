@@ -203,7 +203,7 @@ class GuardTests(unittest.TestCase):
     def test_act_needs_input_and_checks_foreground_and_key_chords(self):
         with self.assertRaises(Refused):
             self.guard.act(self.window, focus=TARGET)
-        self.assertEqual(self.guard.act(self.window, keys=iter(["Ctrl", "A"])).hwnd, 10)
+        self.assertEqual(self.guard.act(self.window, keys=("Ctrl", "A")).hwnd, 10)
         self.assertEqual(self.guard.act(self.window, keys=["Delete"]).hwnd, 10)
         for keys in (["Shift", "Delete"], ["CTRL", " RShift ", "DEL"], [None], "Shift+Delete"):
             with self.subTest(keys=keys), self.assertRaisesRegex(Refused, "key combination"):
