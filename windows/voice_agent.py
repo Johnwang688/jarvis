@@ -245,6 +245,9 @@ class Agent:
         self.client = None
         self.capture = None
         self.tapped = False
+        # Set by the hotkey poller just before a capture ends. Direct callers
+        # (and the VA-1 recorder) keep the legacy "hotkey" source.
+        self.capture_mode = "hotkey"
         self.chunks = []
         self.frames = 0
         self.audio_bad = False
@@ -256,7 +259,7 @@ class Agent:
         self.overlay = voiceui.Overlay(self.root, recording=self.recording.is_set)
         self.aurora = voiceui.AuroraEdges(self.root)
         self.desktop_key = DesktopTalkKey(self.user32, lambda: self.overlay.set_state(
-            "error", "Ctrl+D is in use by another app. Use Right Ctrl to dictate."))
+            "error", "Ctrl+D is in use by another app. Close that app's Ctrl+D shortcut to dictate."))
         self.player = Player()
         self.wake = None
 
@@ -382,6 +385,7 @@ class Agent:
 
     def finish_capture(self, cancel=False):
         release_at = time.monotonic()
+        mode, self.capture_mode = getattr(self, "capture_mode", "hotkey"), "hotkey"
         if cancel and hasattr(self, "profile_cancelled"):
             self.profile_cancelled.set()
         if getattr(self, "tapped", False):
@@ -414,7 +418,8 @@ class Agent:
                 commit = valid and not cancel and not bad and self.frames > 0
                 if commit:
                     self.show(self.generation, "Transcribing…")
-                upload.finish(cancel=not commit, release_at=release_at)
+                upload.finish(cancel=not commit, release_at=release_at,
+                              mode=mode if mode in ("assistant", "dictation") else None)
                 if commit:
                     return
             if cancel:
@@ -426,7 +431,7 @@ class Agent:
             elif wav:
                 self.show(self.generation, "Transcribing…")
                 if hasattr(self, "overlay"):
-                    self.enqueue(wav, "hotkey", self.generation)
+                    self.enqueue(wav, mode if mode in ("assistant", "dictation") else "hotkey", self.generation)
                 else:
                     try:
                         self.clips.put_nowait((self.generation, wav))
@@ -450,8 +455,11 @@ class Agent:
                     block_right = False
                 if press:
                     ctrl_d = True
-                    if machine.state == "hold":
-                        desktop_capture = True  # Right Ctrl joined by D
+                    if machine.state in ("hold", "toggle"):
+                        # Right Ctrl joined by D, or Ctrl+D ending a Right Ctrl
+                        # toggle: either way the clip is one dictation capture,
+                        # never an assistant command.
+                        desktop_capture = True
                 if ctrl_d:
                     # A fast tap can already be up by the time WM_HOTKEY is
                     # dequeued. Give the machine one down edge in that case.
@@ -488,6 +496,10 @@ class Agent:
                             self.next_generation()
                             self.start_capture()
                         else:
+                            # The capture's identity survives transcription:
+                            # Ctrl+D (or Right Ctrl joined by D, one clip) dictates;
+                            # Right Ctrl alone is an assistant command.
+                            self.capture_mode = "dictation" if desktop_capture else "assistant"
                             desktop_capture = False
                             self.finish_capture(cancel=action == "cancel")
                             if action == "cancel" and not (desktop is not None and desktop.hud and down(VK_D)):
@@ -523,7 +535,7 @@ class Agent:
 
     def network(self):
         client = None
-        retired_profile_labels = ()
+        retired_choices = ()
         stop_requested = getattr(self, "stop_requested", None)
         profile_cancelled = getattr(self, "profile_cancelled", None)
         delay, last_ping, reported_wake = 1.0, 0.0, None
@@ -539,10 +551,11 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
-                        if retired_profile_labels:
-                            # Carry only reply recognition across a reconnect.
-                            client._pending_chrome_profile = retired_profile_labels
-                            retired_profile_labels = ()
+                        if retired_choices:
+                            # Carry only reply recognition (Chrome profile and
+                            # website prompts) across a reconnect.
+                            Flow.carry_choices(client, retired_choices)
+                            retired_choices = ()
                         delay, last_ping, reported_wake = 1.0, 0.0, None
                         if hasattr(self, "online"):
                             # Drop anything captured during the failed/offline interval.
@@ -579,7 +592,7 @@ class Agent:
                     except LinkError:
                         if hasattr(self, "online"):
                             self.online.clear()
-                        retired_profile_labels = Flow.retire_profile_choice(client)
+                        retired_choices = Flow.retire_choices(client)
                         client.close()
                         client = None
                         self.discard_clips("Jarvis isn't running")
@@ -623,6 +636,8 @@ class Agent:
                                     Flow.retire_profile_choice(client)
                                 continue
                             transcript = got["text"]
+                            if capture.mode in ("assistant", "dictation"):
+                                source = capture.mode
                         # Toggle-stop can enqueue while either Ctrl key is still down.
                         # Let the physical modifier up before any synthetic typing.
                         while self.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000:
@@ -654,7 +669,7 @@ class Agent:
                     self.show(generation, str(exc), True)
                     if hasattr(self, "online"):
                         self.online.clear()
-                    retired_profile_labels = Flow.retire_profile_choice(client)
+                    retired_choices = Flow.retire_choices(client)
                     client.close()
                     client = None
                     self.discard_clips("Jarvis isn't running")

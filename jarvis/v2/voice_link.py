@@ -28,7 +28,7 @@ import unicodedata
 
 from jarvis import config
 from windows import voicewire as wire
-from windows.voicetype import navigation_target
+from windows.voicetype import navigation_target, spoken_span, spoken_websites, web_destination
 from . import remote_stt, dictation_guard, dictation_rules
 from .stores import StoreError
 from .voice_chat import NoVoiceTarget
@@ -46,6 +46,12 @@ NOT_OWNER = "That didn't sound like you."
 ASK_FAILED = "The voice question could not be answered."
 ASK_NO_TARGET = "Open a chat in the HUD, then ask again."
 ASK_TIMEOUT = "The voice answer took too long. Check the selected chat in the HUD."
+VOICE_DOWN = "Voice commands and answers are unavailable right now."
+LAYA_DOWN = ("Local voice command routing (Laya) is unavailable; Right Ctrl and wake "
+             "commands answer in conversation only. Ctrl+D dictation still works.")
+LAYA_UPDATE = ("The Windows voice helper is out of date: Right Ctrl and Ctrl+D share one mode. "
+               "Stop and start voice to update it.")
+LAYA_NAME_CHARS = 80
 SAY_FAILED = "The text could not be spoken."
 SAY_CHARS = 2000
 CLEAN_CHARS = 2000
@@ -107,7 +113,8 @@ def _shutdown(sock):
 
 class VoiceLink:
     def __init__(self, daemon, *, port=None, key_path=None, transcribe=None,
-                 transcribe_wake=None, route_model=None, asker=None, speaker=None):
+                 transcribe_wake=None, route_model=None, asker=None, speaker=None,
+                 laya_router=None, converser=None, route_feedback=None):
         self.daemon = daemon
         self.port = config.VOICE_LINK_PORT if port is None else port
         self.key_path = Path(config.voice_link_key() if key_path is None else key_path)
@@ -116,6 +123,20 @@ class VoiceLink:
         self.route_model = self._route_model if route_model is None else route_model
         self.asker = self._ask if asker is None else asker
         self.speaker = self._speaker if speaker is None else speaker
+        # Conversation-only answers while Laya is unavailable: no tools, no tasks.
+        self.converser = self._converse if converser is None else converser
+        # Both made on first use. Neither may change what a route dispatches.
+        self._laya_factory = laya_router
+        self._laya = None
+        self._feedback = route_feedback
+        self._laya_lock = threading.Lock()
+        # True only between a successful start() and the next stop(), changed
+        # under both locks. A router is never made outside it, so a handler
+        # still finishing after stop() cannot start a worker nobody will close.
+        self._laya_open = False
+        self._laya_owner = None  # the listening socket whose requests may route
+        self._laya_issue = ""
+        self._laya_helper = None  # None until the active helper pings with features
         self._voice_chat = getattr(daemon, "voice_chat", None)
         self._context = threading.local()
         self.address = None
@@ -182,9 +203,12 @@ class VoiceLink:
                 return {"state": "launch_failed", "detail": self._launch_issue}
             return {"state": "off", "detail": "Start voice to use the wake word in other apps."}
         wake = self._agent_wake
+        # A stale helper or a Laya outage is shown, never hidden behind "ready".
+        note = (" " + LAYA_UPDATE if self._laya_helper is False
+                else " " + self._laya_issue if self._laya_issue else "")
         if wake is None:
-            return {"state": "connected", "detail": "Connected; waiting for wake listener status."}
-        return {"state": wake, "detail": WAKE_STATUS[wake]}
+            return {"state": "connected", "detail": "Connected; waiting for wake listener status." + note}
+        return {"state": wake, "detail": WAKE_STATUS[wake] + note}
 
     def _mic_ready_locked(self):
         return (self._active is not None and self._mic is not None
@@ -365,6 +389,100 @@ class VoiceLink:
     def _route_model(self, text, source):
         return voice_intent.route(text, source)
 
+    def _laya_router(self, server=None):
+        """The router of the listener that accepted the request, or raise.
+
+        ``server`` is the listening socket the request arrived on. A request
+        from a listener that has since stopped never gets the router a later
+        start() made: its decision would belong to a connection that is gone.
+        None (no connection, as in a direct call) means the running listener.
+        """
+        with self._laya_lock:
+            if not self._laya_open or (server is not None and server is not self._laya_owner):
+                raise RuntimeError("Voice link stopped")
+            if self._laya is None:
+                if self._laya_factory is not None:
+                    self._laya = self._laya_factory()
+                else:
+                    from .laya_service import LayaRouter
+                    self._laya = LayaRouter()  # starts no worker until the first route
+            return self._laya
+
+    def _route_feedback(self):
+        with self._laya_lock:
+            if self._feedback is None:
+                from .route_feedback import RouteFeedback
+                self._feedback = RouteFeedback(self.daemon.stores.root)
+            return self._feedback
+
+    def _feedback_record(self, mode, text, decision):
+        """Journal a new routed command for owner review. Never affects dispatch."""
+        try:
+            token = self._route_feedback().record(mode, text, decision)
+            return token if isinstance(token, str) else None
+        except Exception:
+            LOG.warning("Could not record voice route feedback")
+            return None
+
+    def _feedback_outcome(self, token, status):
+        if not token:
+            return
+        try:
+            self._route_feedback().outcome(token, status)
+        except Exception:
+            LOG.warning("Could not record voice route outcome")
+
+    def _laya_decide(self, mode, text, apps, windows, server=None):
+        """One full-utterance Laya decision, or None when the router failed."""
+        try:
+            decision = self._laya_router(server).route(mode, text, apps=apps, windows=windows)
+        except Exception:
+            return None
+        return decision if isinstance(decision, dict) else None
+
+    @staticmethod
+    def _laya_intent(decision, text, apps, windows):
+        """Map a router decision to a grounded wire intent; never a typing step.
+
+        Returns (intent, feedback kind). Targets are rechecked here against the
+        transcript and the exact names the helper offered, and again on the
+        helper before anything runs.
+        """
+        words = _clean(text, 2000)
+        clarify = {"kind": "clarify", "text": "", "target": ""}
+        kind = decision.get("kind") if decision else "unavailable"
+        target = decision.get("target", "") if decision else ""
+        if not isinstance(target, str) or kind == "unavailable" or not isinstance(kind, str):
+            return {"kind": "ask", "text": words, "target": "conversation"}, "unavailable"
+        if kind == "ask":
+            return {"kind": "ask", "text": words, "target": ""}, kind
+        if kind == "read_selection":
+            return {"kind": "read_selection", "text": words, "target": ""}, kind
+        sites = spoken_websites(text)
+        if kind == "navigate":
+            if target and web_destination(target) == target and sites == (target,):
+                return {"kind": "navigate", "text": words, "target": target}, kind
+        elif kind in ("open_app", "switch_app"):
+            offered = apps if kind == "open_app" else windows
+            if target in offered and spoken_span(text, target):
+                return {"kind": kind, "text": words, "target": target}, kind
+        elif kind == "search":
+            if 0 < len(target) <= 500 and spoken_span(text, target):
+                return {"kind": "search", "text": words, "target": target}, kind
+        elif kind == "clarify" and len(sites) == 2:
+            scores = decision.get("scores")
+            ranked = sorted(((v, k) for k, v in scores.items()
+                             if isinstance(k, str) and isinstance(v, (int, float))
+                             and not isinstance(v, bool)), reverse=True)[:2] if isinstance(scores, dict) else []
+            if any(k == "navigate" for _, k in ranked):
+                return {"kind": "clarify", "text": "", "target": "website", "choices": list(sites)}, "clarify"
+        return clarify, "clarify"
+
+    def _converse(self, text, on_delta):
+        from . import voice_model
+        return voice_model.converse(text, on_delta,
+                                    cancelled=getattr(self._context, "cancelled", lambda: False))
+
     def _ask(self, text, on_delta):
         return self._voice_chat.ask(text, on_delta, cancelled=getattr(self._context, "cancelled", lambda: False),
                                     timeout=ASK_TIMEOUT_S, on_reset=getattr(self._context, "reset", None))
@@ -378,7 +496,8 @@ class VoiceLink:
         with self._lock:
             return self._active is conn and self._server is server and not self._hud_mic_paused
 
-    def _stream_ask(self, conn, server, stream, ident, text, *, speak=False, defer_speech=False):
+    def _stream_ask(self, conn, server, stream, ident, text, *, speak=False, defer_speech=False,
+                    conversation_only=False):
         """Bound the wait independently of providers; replacement ends this stream.
 
         The queue is bounded. A stalled reader cannot retain an unbounded answer,
@@ -456,14 +575,15 @@ class VoiceLink:
             self._context.cancelled = cancelled
             self._context.reset = lambda: offer("reset", "")
             try:
-                answer = self.asker(text, lambda piece: offer("delta", piece))
+                answer = (self.converser if conversation_only else self.asker)(
+                    text, lambda piece: offer("delta", piece))
                 result = ("done", answer)
             except NoVoiceTarget:
                 result = ("error", ASK_NO_TARGET)
             except TimeoutError:
                 result = ("error", ASK_TIMEOUT)
             except Exception:
-                result = ("error", ASK_FAILED)
+                result = ("error", VOICE_DOWN if conversation_only else ASK_FAILED)
             try:
                 offer(*result)
             except ConnectionError:
@@ -533,6 +653,41 @@ class VoiceLink:
         finally:
             stopped.set()
 
+    def _laya_route(self, conn, server, request):
+        """Validate and route one negotiated command; None if superseded.
+
+        Returns (reply, mode, text, decision, feedback kind, receipt kind), or
+        False for a malformed request. The model sees the full utterance once.
+        """
+        mode, text = request.get("source"), request.get("text")
+        apps, windows = request.get("apps", []), request.get("windows", [])
+
+        def names(value):
+            return (isinstance(value, list) and len(value) <= wire.LAYA_NAMES
+                    and all(isinstance(name, str) and 0 < len(name) <= LAYA_NAME_CHARS
+                            and name == _clean(name, LAYA_NAME_CHARS) for name in value))
+
+        if (mode not in ("assistant", "wake") or not isinstance(text, str) or not text.strip()
+                or len(text) > 2000 or not names(apps) or not names(windows)
+                or request.get("web_navigation") is not True):
+            return False
+        snapshot = self._voice_chat.selected() if request.get("receipt") is True and self._voice_chat else None
+        if not self._current(conn, server):
+            return None
+        decision = self._laya_decide(mode, text, tuple(apps), tuple(windows), server)
+        if not self._current(conn, server):
+            return None
+        intent, feedback_kind = self._laya_intent(decision, text, tuple(apps), tuple(windows))
+        with self._lock:
+            self._laya_issue = LAYA_DOWN if feedback_kind == "unavailable" else ""
+        if feedback_kind == "unavailable":
+            LOG.warning("Laya voice routing unavailable; answering in conversation only")
+        kind = intent["kind"]
+        receipt_kind = (kind if kind in ("open_app", "switch_app", "search", "read_selection", "navigate")
+                        else "navigate" if kind == "clarify" and intent["target"] == "website" else None)
+        reply = {"ok": True, "intent": intent, "turn": wire.new_nonce(), "_snapshot": snapshot}
+        return reply, mode, text, decision, feedback_kind, receipt_kind
+
     @staticmethod
     def _receive_capture(conn, stream):
         # A partial or malformed upload never reaches STT. A fresh connection
@@ -594,6 +749,8 @@ class VoiceLink:
             self.address = server.getsockname()
             self.port = self.address[1]
             self.status = "Listening."
+            with self._laya_lock:
+                self._laya_open, self._laya_owner = True, server
             self._thread = threading.Thread(target=self._accept, args=(server,),
                                             name="jarvis-voice-link", daemon=True)
             self._thread.start()
@@ -607,12 +764,23 @@ class VoiceLink:
             self._end_subscriptions_locked()
             self.address = None
             self.status = "Stopped."
+            # Detach the router atomically with the server: a route still in a
+            # handler gets no new router, and a start() racing this stop gets
+            # a fresh one rather than this one's closed state.
+            with self._laya_lock:
+                self._laya_open, self._laya_owner = False, None
+                router, self._laya = self._laya, None
         if server:
             _shutdown(server)
         for conn in sockets:
             _shutdown(conn)
         if self._thread:
             self._thread.join(1)
+        if router is not None:
+            try:
+                router.close()
+            except Exception:
+                pass
 
     def _accept(self, server):
         while True:
@@ -673,6 +841,7 @@ class VoiceLink:
                     session_instance = self._instance
                 else:
                     old, self._active = self._active, conn
+                    self._laya_helper = None
                     self._control_session = d
                     self._instance = None
                     self._agent_wake = None
@@ -692,7 +861,12 @@ class VoiceLink:
             # One in-flight action per sequential helper, bound to this authenticated
             # connection. Only a non-sensitive action description survives routing.
             pending_action = None
+            # A negotiated helper's latest routed turn on this connection:
+            # {"handle", "kind", "token"}. Feedback only; never authority.
+            pending_turn = None
+            laya_conn = False
             while True:
+                after_reply = None
                 try:
                     request = wire.read_json(stream)
                 except (wire.LinkError, ValueError):
@@ -731,6 +905,13 @@ class VoiceLink:
                             reply["web_navigation"] = True
                             if self._instance is not None:
                                 reply["shared_mic"] = True
+                            # Paired negotiation: granted only to a helper that asks.
+                            laya_conn = request.get("laya_routing") is True
+                            if laya_conn:
+                                reply["laya_routing"] = True
+                            with self._lock:
+                                if self._active is conn:
+                                    self._laya_helper = laya_conn
                 elif (type(ident) is int and request.get("op") == "action_done"
                       and set(request) == {"id", "op", "receipt"}):
                     recorded = False
@@ -743,6 +924,14 @@ class VoiceLink:
                             except (OSError, StoreError):
                                 pass
                     reply = {"id": ident, "ok": True, "recorded": recorded}
+                elif (type(ident) is int and request.get("op") == "route_outcome" and laya_conn
+                      and set(request) == {"id", "op", "turn", "status"}
+                      and request["status"] in wire.LAYA_OUTCOMES):
+                    # Observational only: what the helper saw happen. Never a label.
+                    # Written before the reply; the action itself already ran.
+                    if pending_turn and pending_turn["handle"] == request["turn"]:
+                        self._feedback_outcome(pending_turn["token"], request["status"])
+                    reply = {"id": ident, "ok": True}
                 elif type(ident) is int and request.get("op") == "clean":
                     text = request.get("text")
                     if isinstance(text, str) and len(text) <= CLEAN_CHARS:
@@ -794,6 +983,37 @@ class VoiceLink:
                             reply["error"] = NOT_OWNER
                         except Exception:
                             reply["error"] = FAILED
+                elif (type(ident) is int and request.get("op") == "route" and request.get("laya") is True
+                      and laya_conn):
+                    pending_action = pending_turn = None
+                    routed = self._laya_route(conn, server, request)
+                    if routed is None:
+                        return  # superseded during inference: never deliver its decision
+                    if routed is False:
+                        wire.send_json(stream, reply)
+                        continue
+                    reply, mode, text, decision, feedback_kind, receipt_kind = routed
+                    reply["id"] = ident
+                    handle = reply["turn"]
+                    pending_turn = {"handle": handle, "kind": feedback_kind, "token": None}
+                    if receipt_kind and request.get("receipt") is True and self._voice_chat:
+                        snapshot = reply.pop("_snapshot", None)
+                        if snapshot:
+                            token = wire.new_nonce()
+                            target = reply["intent"]["target"] if receipt_kind in ("open_app", "switch_app") else ""
+                            pending_action = (token, time.monotonic() + ACTION_RECEIPT_S, snapshot,
+                                              receipt_kind, target)
+                            reply["receipt"] = token
+                    reply.pop("_snapshot", None)
+
+                    def after_reply(turn=pending_turn, mode=mode, text=text, decision=decision):
+                        # After the reply, so feedback adds no dispatch latency
+                        # and its failure cannot change the decision.
+                        turn["token"] = self._feedback_record(
+                            mode, text, decision if decision is not None else {"kind": "unavailable"})
+                        if turn["kind"] in ("clarify", "unavailable"):
+                            self._feedback_outcome(turn["token"], "clarified" if turn["kind"] == "clarify"
+                                                   else "unavailable")
                 elif type(ident) is int and request.get("op") in ("route", "ask", "say"):
                     op, text = request["op"], request.get("text")
                     source = request.get("source")
@@ -834,11 +1054,20 @@ class VoiceLink:
                                 pending_action = (token, time.monotonic() + ACTION_RECEIPT_S, snapshot, kind, target)
                                 reply["receipt"] = token
                         elif op == "ask":
+                            # After a Laya outage the answer is conversation only,
+                            # whatever the helper asks: no tools and no task.
+                            routed = (pending_turn if laya_conn and pending_turn
+                                      and request.get("turn") == pending_turn["handle"] else None)
+                            conversation_only = bool(laya_conn and pending_turn
+                                                     and pending_turn["kind"] == "unavailable")
                             reply = self._stream_ask(conn, server, stream, ident, text,
                                                      speak=request.get("speech") is True,
-                                                     defer_speech=request.get("defer_speech") is True)
+                                                     defer_speech=request.get("defer_speech") is True,
+                                                     conversation_only=conversation_only)
                             if reply is None:
                                 return
+                            if routed and reply.get("ok") is True and reply.get("text"):
+                                self._feedback_outcome(routed["token"], "answered")
                         else:
                             try:
                                 audio = self.speaker(text.strip()[:SAY_CHARS])
@@ -854,6 +1083,8 @@ class VoiceLink:
                     if self._active is not conn or self._server is not server:
                         return
                 wire.send_json(stream, reply)
+                if after_reply is not None:
+                    after_reply()
         except (OSError, ValueError, wire.LinkError):
             pass
         finally:
@@ -878,6 +1109,7 @@ class VoiceLink:
                         self._lost_pairing = True
                         self._lost_instance = self._instance
                     self._active = None
+                    self._laya_helper = None
                     self._control_session = self._instance = self._agent_wake = None
                     self._end_subscriptions_locked()
                     # On Stop the side channel outlives the main connection

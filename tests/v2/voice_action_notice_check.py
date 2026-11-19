@@ -27,6 +27,12 @@ class ConfirmedAction(fixture.Base):
         self.link.speaker = lambda _: b"test WAV"
         self.flow = Flow(self.wire, self.typer, self.actions, self.ui, self.player)
 
+    def legacy_helper(self):
+        # A helper that never requested Laya routing keeps the legacy wake path.
+        self.wire.request_laya = False
+        self.wire.ping()
+        self.assertFalse(self.wire.laya_routing)
+
     def ask_local(self, text, source="wake"):
         self.flow.on_clip(None, source, transcript=text)
 
@@ -37,6 +43,7 @@ class ConfirmedAction(fixture.Base):
         return [r for r in self.d.stores.threads.read_log((thread or self.chosen).id) if r["kind"] == "notice"]
 
     def test_success_after_open_switch_search_and_completed_read(self):
+        self.legacy_helper()
         self.actions.open_app.side_effect = lambda _: not self.notices()
         self.ask_local("open Chrome")
         self.ask_local("Hey Jarvis, switch to Calendar", "hotkey")
@@ -75,6 +82,7 @@ class ConfirmedAction(fixture.Base):
         self.assertEqual(self.notices(), [])
 
     def test_go_to_site_navigates_once_without_typing_the_command(self):
+        self.legacy_helper()
         self.actions.navigate.return_value = True
         for phrase, source in (("Go to youtube.com", "hotkey"), ("Go to YouTube dot com.", "hotkey"),
                                ("Jarvis, go to youtube.com.", "hotkey"), ("Go to youtube.com.", "wake")):
@@ -281,6 +289,7 @@ class ConfirmedAction(fixture.Base):
         self.assertEqual(self.notices(), [])
 
     def test_selection_is_pinned_before_routing_finishes(self):
+        self.legacy_helper()
         other = self.d.open_thread(self.chosen.project_id, "chat", "fast", {})
         route = self.link.route_model
         def switch_while_routing(text, source):
@@ -335,6 +344,7 @@ class ConfirmedAction(fixture.Base):
         # Older clients request the unextended route; newer clients only opt in
         # when the server advertised support during ping.
         self.assertEqual(set(self.wire.route("open Chrome", "wake")), {"kind", "text", "target"})
+        self.legacy_helper()
         self.wire.action_receipts = False
         self.ask_local("open Chrome")
         self.actions.open_app.assert_called_once_with("Chrome")

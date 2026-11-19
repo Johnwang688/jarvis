@@ -166,7 +166,7 @@ export function Orb(props: {
   const voiceTone = failed ? "error" : voiceReady && !stopping ? "ready" :
     starting || connected || stopping ? "working" : "idle";
   const shortLabel = { error: "Error", ready: "Ready", working: "Wait", idle: voiceLabel }[voiceTone];
-  const shortcutHint = "Hold Ctrl+D to talk in the HUD. In another app, hold Ctrl+D or Right Ctrl to dictate, or tap to toggle. Say “open Chrome” to launch it or “type open Chrome” to enter the words. Start with “Jarvis” to ask your selected chat.";
+  const shortcutHint = "With desktop voice on, hold Right Ctrl or say “Jarvis” to ask a question or request an action. Hold Ctrl+D to dictate. In the HUD, dictation goes into the selected chat’s draft.";
   const voiceControl = (
     <div className="voice-agent-control">
       <div className="voice-agent-header">

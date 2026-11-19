@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from urllib.parse import quote_plus
 
 if __package__:
@@ -118,6 +119,54 @@ def match_window(target, windows):
     for hwnd, title, exe in windows:
         title = f" {_normal(title)} "
         if any(f" {variant} " in title for variant in variants):
+            return hwnd
+    return None
+
+
+# The image an application ID spells out: "Microsoft.Office.WINWORD.EXE.15".
+_APP_ID_IMAGE = re.compile(r"(?:^|[.!_])([^.!_]+)\.exe(?=$|[.!_])", re.IGNORECASE)
+
+
+def _app_images(target, apps):
+    """Process image names (no extension) that are the app ``target`` names."""
+    canonical = ALIASES.get(target, target)
+    images = {target, canonical}
+    images.update(alias for alias, name in ALIASES.items() if name == canonical)
+    for app in apps or ():
+        name, ident = app.get("name"), app.get("id")
+        if not isinstance(name, str) or not isinstance(ident, str) or _normal(name) not in (target, canonical):
+            continue
+        # Only an image the entry spells out. A classic entry is a path and
+        # names its whole file ("...\\Acme\\acme.report.exe"), never a folder
+        # or a piece of the file name. A vendor or suite word in an
+        # application ID ("Microsoft", "Office") names no process.
+        if "\\" in ident or "/" in ident:
+            base = ntpath.basename(ident)
+            if base.casefold().endswith(".exe"):
+                images.add(_normal(base[:-4]))
+        else:
+            images.update(_normal(image) for image in _APP_ID_IMAGE.findall(ident))
+    images.discard("")
+    return images
+
+
+def grounded_window(target, windows, apps=()):
+    """The window owned by the app ``target`` names exactly, or None.
+
+    For a routed Laya switch, whose target is an offered Start catalog name.
+    Only the owning process identifies a window: its image must be the app's
+    name, a fixed alias of it, or the image the app's Start entry spells out.
+    Titles are never read. A document, page or console title is content, and
+    content can say anything ("Review draft - Google Chrome" in Notepad).
+    A window hosted by a shared frame process, or a packaged app whose image
+    is neither its name nor in its Start entry, is therefore not switchable.
+    """
+    target = _normal(target) if isinstance(target, str) else ""
+    if not target:
+        return None
+    images = _app_images(target, apps)
+    for hwnd, _title, exe in windows:
+        if isinstance(exe, str) and _normal(ntpath.splitext(ntpath.basename(exe))[0]) in images:
             return hwnd
     return None
 
@@ -735,9 +784,52 @@ class Actions:
             self.sleep(min(remaining, 0.1))
         return LaunchStatus.CHROME_WINDOW_UNCONFIRMED
 
-    def switch_app(self, target):
-        hwnd = match_window(target, self.desktop.windows())
-        return bool(hwnd and self.desktop.focus(hwnd))
+    ROUTE_NAMES = 512
+    ROUTE_NAME_CHARS = 80
+
+    def route_names(self):
+        """(installed app names, names of apps with an open window) for routing.
+
+        Only Start catalog display names and the fixed aliases above are
+        offered; window titles and other window text never leave the helper.
+        An app counts as open when ``grounded_window`` (what a routed
+        ``switch_app(exact=True)`` uses) finds a window for it.
+        """
+        self.refresh_apps()
+
+        def usable(name):
+            return (isinstance(name, str) and 0 < len(name) <= self.ROUTE_NAME_CHARS and name.strip() == name
+                    and not any(unicodedata.category(c).startswith("C") for c in name))
+
+        apps, seen = [], set()
+        for name in [app["name"] for app in self.apps] + [
+                alias for alias, canonical in ALIASES.items()
+                if any(_normal(app["name"]) == canonical for app in self.apps)]:
+            if usable(name) and name.casefold() not in seen and len(apps) < self.ROUTE_NAMES:
+                seen.add(name.casefold())
+                apps.append(name)
+        try:
+            windows = list(self.desktop.windows())
+        except Exception:  # noqa: BLE001  (no enumeration: nothing to switch to)
+            windows = []
+        open_names = tuple(name for name in apps if windows and grounded_window(name, windows, self.apps) is not None)
+        return tuple(apps), open_names
+
+    def switch_app(self, target, *, exact=False):
+        """Focus ``target``'s window. ``exact`` grounds a routed catalog name.
+
+        The clip's revocation check is read once and asked again after the
+        window enumeration, immediately before focus: a capture that was
+        superseded while windows were listed never moves the foreground.
+        """
+        guard = action_guard.get()
+        if not _allowed(guard):
+            return False
+        windows = self.desktop.windows()
+        hwnd = grounded_window(target, windows, self.apps) if exact else match_window(target, windows)
+        if not hwnd or not _allowed(guard):
+            return False
+        return bool(self.desktop.focus(hwnd))
 
     def search(self, query):
         (self.opener or os.startfile)(search_url(query))
