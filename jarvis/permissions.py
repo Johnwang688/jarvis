@@ -176,7 +176,9 @@ def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool
     # complex to judge, is never covered: an entry for `uv` was a yes to
     # running Python, not to whatever `uv run $X` turns out to start (VX-1,
     # `rules.vex_uncoverable`).
-    if rules.vex_uncoverable(command):
+    # Keep the unresolved reading so a variable-held program gains no
+    # allowlist coverage through VEX's literal proof.
+    if rules.vex_uncoverable(command, resolve_literals=False):
         return False
     # A kill whose pattern is too costly to judge against the v2 daemon: an
     # entry for `pkill` was a yes to killing what the owner meant, not to a
@@ -250,6 +252,16 @@ def static_verdict(command: str, cwd: str | None = None) -> rules.Verdict:
     if verdict.decision == rules.DENY:
         return verdict
     guard = protected_state_verdict(command, cwd)
+    for text in rules.literal_program_readings(command):
+        try:
+            extra = protected_state_verdict(text, cwd)
+        except Exception:
+            extra = rules.Verdict(rules.ASK, rules.vex_uncoverable(command, resolve_literals=False)
+                                  or rules.TOO_COMPLEX)
+        if extra is not None:
+            if extra.decision == rules.DENY:
+                return extra
+            guard = guard if guard is not None else extra
     return guard if guard is not None else verdict
 
 

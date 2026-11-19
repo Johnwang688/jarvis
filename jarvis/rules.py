@@ -49,10 +49,12 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import itertools
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable
 
 DENY, ASK, ALLOW = "deny", "ask", "allow"
 _ORDER = {DENY: 0, ASK: 1, ALLOW: 2}  # lower is stricter; the minimum wins
@@ -942,13 +944,14 @@ _SENSITIVE_PERM_PATH = re.compile(
 
 # Longest first: `||` must beat `|`, and `&&` must beat `&`.
 _SEPARATORS = ("||", "&&", ";", "|", "\n", "&")
+_SourceEdit = tuple[int, int, int]  # start, end, replacement width
 
 
 def urls(command: str) -> list[str]:
     return _URL.findall(command)
 
 
-def join_continuations(text: str) -> str:
+def join_continuations(text: str, *, edits: list[_SourceEdit] | None = None) -> str:
     """The line as bash reads it, with every backslash-newline pair removed.
 
     **bash deletes `\\<newline>` before it splits anything** (outside single
@@ -980,6 +983,8 @@ def join_continuations(text: str) -> str:
             continue
         if ch == "\\":
             if text[i + 1:i + 2] == "\n":
+                if edits is not None:
+                    edits.append((i, i + 2, 0))
                 i += 2
                 continue
             out.append(text[i:i + 2])
@@ -1039,11 +1044,27 @@ def segments(command: str) -> list[str]:
     as its arguments.
     """
     command = join_continuations(command)
-    parts: list[str] = []
+    parts = _segment_parts(command)
+    if parts is None:
+        return [p.strip() for p in re.split(r"\|\||&&|;|\||\n|&", command) if p.strip()]
+    return [part for part, _ in parts if part]
+
+
+def _segment_parts(command: str, *, starts: list[int] | None = None) -> list[tuple[str, str]] | None:
+    """The segments with their following separators, or None for open quoting."""
+    parts: list[tuple[str, str]] = []
     buf: list[str] = []
     quote = ""
     escaped = False
     after_gt = False      # the last character taken was an unquoted, unescaped `>`
+    start = 0
+
+    def emit(separator: str) -> None:
+        raw = "".join(buf)
+        parts.append((raw.strip(), separator))
+        if starts is not None:
+            starts.append(start + len(raw) - len(raw.lstrip()))
+
     i = 0
     while i < len(command):
         ch = command[i]
@@ -1070,18 +1091,17 @@ def segments(command: str) -> list[str]:
             elif hit == "|" and after_gt:
                 hit = ""  # `>|`, the noclobber redirect
             if hit:
-                parts.append("".join(buf))
+                emit(hit)
                 buf = []
                 i += len(hit)
+                start = i
                 after_gt = False
                 continue
             buf.append(ch)
             after_gt = ch == ">"
         i += 1
-    parts.append("".join(buf))
-    if quote:
-        parts = re.split(r"\|\||&&|;|\||\n|&", command)
-    return [p.strip() for p in parts if p.strip()]
+    emit("")
+    return None if quote else parts
 
 
 def unquoted_indices(text: str, *, double_is_quote: bool = True) -> list[int]:
@@ -1328,17 +1348,22 @@ def _word_starts(text: str, k: int) -> bool:
     return before in " \t\n;|("
 
 
-def strip_redirections(segment: str) -> str:
+def strip_redirections(segment: str, *, edits: list[_SourceEdit] | None = None,
+                       redirects: list[Redirect] | None = None) -> str:
     """The segment with every redirection cut out, so what is left is the
     command and its own arguments. Quote-aware, unlike stripping tokens after
     shlex, which cannot tell a quoted `'>name'` argument from a redirect."""
-    spans = [(r.start, r.end) for r in redirections(segment)]
-    if not spans:
+    if redirects is None:
+        redirects = redirections(segment)
+    if not redirects:
         return segment
     out, last = [], 0
-    for start, end in spans:
+    for redirect in redirects:
+        start, end = redirect.start, redirect.end
         if start < last:
             start = last
+        if edits is not None:
+            edits.append((start, max(start, end), 1))
         out.append(segment[last:start])
         out.append(" ")
         last = max(last, end)
@@ -3276,7 +3301,7 @@ def _substitution_texts(text: str) -> list[str]:
     return _substitutions(text)[0]
 
 
-def _substitutions(text: str) -> tuple[list[str], str]:
+def _substitutions(text: str, *, edits: list[_SourceEdit] | None = None) -> tuple[list[str], str]:
     """(`_substitution_texts`, the text with each of them emptied to `$(_)`,
     `` `_` `` or `<(_)`). The walk segments the emptied text: what is inside
     a substitution is its own command line — a `"` or a newline in a commit
@@ -3316,12 +3341,16 @@ def _substitutions(text: str) -> tuple[list[str], str]:
             j = _close_paren(text, i + 2)
             out.append(text[i + 2:j - 1 if text[j - 1:j] == ")" else n])
             masked.append(text[last:i + 2] + "_)")
+            if edits is not None:
+                edits.append((i + 2, j, 2))
             i = last = j
         elif ch == "`":
             end = text.find("`", i + 1)
             end = n if end == -1 else end
             out.append(text[i + 1:end])
             masked.append(text[last:i + 1] + "_`")
+            if edits is not None:
+                edits.append((i + 1, min(n, end + 1), 2))
             i = last = end + 1
         else:
             i += 1
@@ -3400,6 +3429,7 @@ def _close_paren(text: str, j: int) -> int:
 # arithmetic (`$((1<<2))`, `((x<<=1))`, `$[…]`) — because one recognised where
 # bash would not hides the lines after it.
 _HEREDOC_STOP = " \t\n;|&<>()`"
+_HEREDOC_COMMENT_DELIMITER = re.compile(r"<<-?[ \t]*#")
 HEREDOC_CAP = 64           # here-documents open on one line before it is too complex (round 3b)
 # The `$'…'` escapes whose decoding by `_ansi_c_decoded` is exactly bash's;
 # any other (`\x`, octal, `\u`, `\c`, `\e`, `\?`) makes the delimiter unsure.
@@ -3502,7 +3532,9 @@ def _joins(line: str) -> bool:
 
 
 def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
-                     unsure: list | None = None) -> str:
+                     unsure: list | None = None, *, edits: list[_SourceEdit] | None = None,
+                     reject_comments: bool = False,
+                     body_ranges: list[tuple[int, int]] | None = None) -> str:
     """The text with each here-document's body moved into its operator as a
     here-string (see above). Several on one line are read in order, `<<-`
     strips leading tabs, a body with no terminator runs to the end (as in
@@ -3534,14 +3566,16 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
     and more than `HEREDOC_CAP` open on one line. One shape is flagged in
     `unsure` instead (when given) and read on: a here-document opened in
     backticks that close before its body — its lines after are read as
-    commands, the stricter reading."""
+    commands, the stricter reading. The data proof also asks this lexer to
+    reject shell comments outside bodies and record the raw ranges it
+    removed, including the delimiters that terminate the bodies."""
     if "<<" not in text:
         return text
     if "\x00" in text and "\n" in text:
         raise _TooComplex
     out: list[str] = []
     stack: list = []            # '"', "$(", "`", "(", or [kind, depth] for ${…} and arithmetic
-    # (delimiter, strip tabs, quoted, slot in out, as written, depth, inside a substitution)
+    # (delimiter, strip tabs, quoted, slot in out, as written, depth, in a substitution, start)
     pending: list[tuple] = []
     i, n = 0, len(text)
     last_newline = text.rfind("\n")
@@ -3610,12 +3644,18 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
             out.append(ch)
             i += 1
             continue
-        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;|&()"):
-            end = text.find("\n", i)
-            end = n if end == -1 else end
-            out.append(text[i:end])
-            i = end
-            continue
+        if ch == "#":
+            # The proof rejects a possible comment even after a redirection
+            # operator or a physical continuation.
+            comment = i == 0 or text[i - 1] in " \t\n;|&()"
+            if reject_comments and (comment or out[-1] in ("<", ">", "<<<", "\\\n")):
+                raise _TooComplex
+            if comment:
+                end = text.find("\n", i)
+                end = n if end == -1 else end
+                out.append(text[i:end])
+                i = end
+                continue
         if text.startswith("${", i):
             stack.append(["${", 1])
             out.append("${")
@@ -3669,6 +3709,8 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
             i += 3
             continue
         elif text.startswith("<<", i):
+            if reject_comments and _HEREDOC_COMMENT_DELIMITER.match(text, i):
+                raise _TooComplex
             strip = text.startswith("<<-", i)
             try:
                 delimiter, quoted, j = _heredoc_word(text, i + (3 if strip else 2), top == "`")
@@ -3684,15 +3726,16 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
                 if "`" in stack and "\\" in text[i:j] and last_newline > i:
                     raise _TooComplex               # backtick text loses backslashes first
                 pending.append((delimiter, strip, quoted, len(out), text[i:j], len(stack),
-                                "$(" in stack or "`" in stack))
+                                "$(" in stack or "`" in stack, i))
                 out.append("")
                 i = j
                 continue
         elif ch == "\n" and pending:
             out.append(ch)
             i += 1
+            body_start = i
             in_tick = "`" in stack
-            for delimiter, strip, quoted, slot, _written, _depth, in_sub in pending:
+            for delimiter, strip, quoted, slot, written, _depth, in_sub, start in pending:
                 lines: list[str] = []
                 while i < n:
                     end = text.find("\n", i)
@@ -3733,13 +3776,171 @@ def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
                 if bodies is not None:
                     bodies.append(body)
                 out[slot] = "<<<" + _here_word(body, quoted, keep)
+                if edits is not None:
+                    edits.append((start, start + len(written), len(out[slot])))
+            if edits is not None:
+                edits.append((body_start, i, 0))
+            if body_ranges is not None:
+                body_ranges.append((body_start, min(i, n)))
             pending = []
             continue
         out.append(ch)
         i += 1
-    for _delimiter, _strip, _quoted, slot, written, _depth, _in_sub in pending:
+    for _delimiter, _strip, _quoted, slot, written, _depth, _in_sub, _start in pending:
         out[slot] = written                         # no line after it: no body
     return "".join(out)
+
+
+# The data reading (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md) is
+# taken only on a line where **every** program is on these lists, so nothing
+# on it can run a body: a list of what is safe, never of what is dangerous
+# (the review of #396 found executors no deny-list held: `make`, `awk
+# system()`, `at -f`, `taskset dash`, `$l` read from a file). A missing entry
+# costs a prompt, never a hole. None of these runs its input or arguments.
+HEREDOC_INERT_PROGRAMS = frozenset({"cat", "tee", "wc", "grep", "head", "tail", "ls", "echo",
+                                    "cd", "pwd", "mkdir", "true"})
+# Programs allowed only when the body *is* their source, like an inline
+# code argument for shell segmentation. Checks for actions in interpreter
+# source are separate. Without a body on their segment, or with `-c`/`-e`/a
+# script, they are not on the list.
+_HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
+_HEREDOC_NODE_ARGS = frozenset({"-"})
+# Shell syntax that can route a body's output into a program not judged
+# here, or change which program a name runs: a group, subshell, function
+# body or process substitution (`{ cat <<E; } | sh`, `cat() { sh; }`,
+# `> >(sh)`).
+_HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
+_HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
+_HEREDOC_SHELL_QUOTES = str.maketrans("", "", "'\"\\")
+# Redirections a segment may carry: plain reads and writes of a path
+# (`cat > notes.txt <<'EOF'`), never an fd duplication.
+_HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
+_HEREDOC_SPECIAL_PATHS = ("/dev/fd", "/proc", "/dev/tcp", "/dev/udp")
+# `grep` may be ugrep (Claude Code's shell wraps it), whose filter, pager,
+# viewer, opener and config options run commands; refused in any spelling,
+# with `-Q`/`--query` (its TUI can open an editor) and rg's `--pre`.
+_HEREDOC_GREP_RUNS = re.compile(
+    r"---|-@|--[a-z-]*(?:filter|pager|view|open|config|pre|query)|-[A-Za-z]*Q")
+
+
+def _heredoc_segment_ok(words: list[str], redirects: list[Redirect], here: bool) -> bool:
+    """The segment runs only an inert program (`HEREDOC_INERT_PROGRAMS`),
+    or, when it is fed a body (`here`), a `python3 -`/`node -` whose program
+    the body is; named as written (no wrapper, no path, no expansion), with
+    only plain path redirections and no `/dev/fd`/`/proc` argument."""
+    if not words:
+        return False                # a compound command's closing word (`fi | sh`)
+    program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
+    if program in HEREDOC_INERT_PROGRAMS:
+        if program == "grep" and any(_HEREDOC_GREP_RUNS.match(a) for a in args):
+            return False
+    elif here and _PYTHON.fullmatch(program):
+        if not set(args) <= _HEREDOC_PYTHON_ARGS:
+            return False
+    elif here and program == "node":
+        if not set(args) <= _HEREDOC_NODE_ARGS:
+            return False
+    else:
+        return False
+    for redirect in redirects:
+        if redirect.op not in _HEREDOC_REDIRECTS:
+            return False
+        if redirect.op != "<<<":
+            word = redirect.word.strip("'\"")
+            if not word or word[0] in "(&" or word.startswith(_HEREDOC_SPECIAL_PATHS):
+                return False
+    return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
+
+
+def _continuation_prefix(text: str, body_ranges: list[tuple[int, int]] | None = None) -> str:
+    """The spelling through the last outer backslash-newline and its next
+    physical line. Only pairs wholly within a body range are ignored."""
+    last = text.rfind("\\\n")
+    for start, end in reversed(body_ranges or ()):
+        if last >= end - 1:
+            break
+        if last >= start:
+            last = text.rfind("\\\n", 0, start + 1)
+    if last == -1:
+        return ""
+    end = text.find("\n", last + 2)
+    return text if end == -1 else text[:end + 1]
+
+
+def heredoc_data_reading(text: str, *, keep: bool = True) -> str | None:
+    """`text` with its here-document bodies moved into their operators as
+    here-strings (`_inline_heredocs`), when nothing on the line can
+    run a body: every segment passes `_heredoc_segment_ok` (only inert
+    programs, and a body fed only to one of them or to `python3 -`/`node -`),
+    with no group, subshell, function or process substitution, nothing live
+    (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
+    assignment. The rewrite must preserve continuations and the shell text
+    outside bodies must be free of comments. None otherwise, and the caller
+    keeps the raw line, every body line a command. With `keep=False`,
+    the proven data is omitted from the synthetic here-strings."""
+    if "<<" not in text:
+        return None
+    flagged: list = []
+    body_ranges: list[tuple[int, int]] | None = [] if "\\\n" in text else None
+    try:
+        inlined = _inline_heredocs(text, unsure=flagged, reject_comments=True,
+                                   body_ranges=body_ranges)
+    except Exception:       # noqa: BLE001 — too complex: the raw reading
+        return None
+    if flagged or inlined == text:
+        return None
+    joined = join_continuations(inlined)
+    if first_unquoted(joined, _HEREDOC_LINE_SYNTAX):
+        return None
+    # Anything live outside single quotes, a body's included (an unquoted
+    # delimiter leaves its `$(…)` and backticks running).
+    if first_unquoted(joined, ("$(", "`"), double_is_quote=False):
+        return None
+    found = 0
+    cursor = 0
+    interpreted = False
+    try:
+        for segment in segments(inlined):
+            at = joined.find(segment, cursor)
+            if at < 0:
+                return None
+            cursor = at + len(segment)
+            # Shlex can remove quoting, but cannot invent an assignment
+            # name. Screen for those spellings before tokenizing a large body.
+            unquoted = segment.translate(_HEREDOC_SHELL_QUOTES)
+            if (any(name in unquoted for name in ("PATH", "ENV", "BASH_FUNC_"))
+                    and any(_HEREDOC_NAME_ENV.match(word) for word in _tokens(segment))):
+                return None
+            redirects = redirections(segment)
+            heres = sum(r.op == "<<<" for r in redirects)
+            found += heres
+            words = command_start(_tokens(strip_redirections(segment, redirects=redirects)))
+            if not _heredoc_segment_ok(words, redirects, bool(heres)):
+                return None
+            interpreted = interpreted or bool(heres and words[0] not in HEREDOC_INERT_PROGRAMS)
+    except Exception:       # noqa: BLE001 — unreadable: the raw reading
+        return None
+    # Every here-string the inlined text holds was placed above (one inside a
+    # substitution or a quote was not): otherwise its program is unknown.
+    if found != joined.count("<<<"):
+        return None
+    # A Python or node body beside another body could run what that one wrote
+    # (`cat > x.sh <<A … ; python3 - <<P os.system('sh x.sh')`): only alone
+    # (review round 3 of #396).
+    if interpreted and found > 1:
+        return None
+    if keep and body_ranges is None and "\\\n" not in inlined:
+        return inlined
+    # Compare the raw and rewritten command text with the payload opaque.
+    # The retained payload is single-quoted or has its backslashes doubled
+    # inside double quotes, so its own pairs cannot join shell lines.
+    try:
+        omitted = _inline_heredocs(text, keep=False)
+    except Exception:       # noqa: BLE001 — unreadable: the raw reading
+        return None
+    if _continuation_prefix(omitted) != _continuation_prefix(text, body_ranges):
+        return None
+    return inlined if keep else omitted
 
 
 def _shell_words(segment: str) -> list[str]:
@@ -3828,6 +4029,355 @@ def _command_words(tokens: list[str]) -> list[str]:
     return tokens
 
 
+_LITERAL_BINDING = re.compile(
+    r"""([A-Za-z_][A-Za-z0-9_]*)=([^ \t'"<>]+|'[^']*'|"[^"]*")""")
+_PROGRAM_VAR = re.compile(
+    r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
+_ASSIGNMENT_PREFIX = re.compile(
+    r"""[A-Za-z_][A-Za-z0-9_]*\+?=(?:[^ \t\n'"]+|'[^']*'|"[^"]*")*""")
+_PROGRAM_VAR_START = re.compile(r'(?:"(\$[^" \t]+)"|(\$[^ \t<>]+))(?=$|[ \t<>])')
+_SIMPLE_FUNCTION = re.compile(
+    r"(?:(?:function[ \t]+)([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*\(\))?"
+    r"|([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\))[ \t]*\{(?=$|[ \t])")
+_FOR_HEADER = re.compile(r"(?:for|select)[ \t]+([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]+in(?:[ \t].*)?)?")
+_CASE_HEADER = re.compile(r"""case[ \t]+(?:[^ \t'"]+|'[^']*'|"[^"]*")[ \t]+in(?=$|[ \t])""")
+_CASE_PATTERN = re.compile(r"\(?[ \t]*[\w./*?+-]+[ \t]*\)")
+_CASE_ALTERNATIVE = re.compile(r"\(?[ \t]*[\w./*?+-]+")
+_BINDING_META = frozenset("$`*?[]{}\\")
+_PROGRAM_LITERAL_CAP = 16384
+_PROGRAM_KEYWORDS = _LEAD_WORDS | {"case", "esac", "fi", "done", "in", "function", "[[", "]]"}
+_SHELL_MUTATORS = frozenset({
+    ".", "source", "eval", "read", "readarray", "mapfile", "unset", "declare", "local",
+    "typeset", "readonly", "getopts", "let", "set", "shopt", "trap", "alias", "unalias",
+    "builtin", "command", "enable", "wait", "time", "test", "compgen", "fc", "export", "hash",
+})
+_SPECIAL_BINDINGS = frozenset({
+    "IFS", "LINENO", "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME",
+    "OPTIND", "OPTARG", "PIPESTATUS", "DIRSTACK", "FUNCNAME", "GROUPS", "PPID", "UID",
+    "EUID", "SHLVL", "PWD", "OLDPWD", "HISTCMD", "SHELLOPTS", "_",
+})
+
+
+@dataclass(frozen=True)
+class _LiteralProgram:
+    value: str
+    start: int
+    end: int
+    fall_through: str | None  # an unset, unquoted variable can disappear
+
+
+def _source_positions(positions: list[int], edits: list[_SourceEdit]) -> list[int]:
+    """Map the kept characters through a rewrite; inserted text has no source."""
+    out = []
+    last = 0
+    for start, end, width in edits:
+        if not last <= start <= end <= len(positions):
+            raise _TooComplex
+        out.extend(positions[last:start])
+        out.extend([-1] * width)
+        last = end
+    out.extend(positions[last:])
+    return out
+
+
+def _literal_readings(raw: str, masked: str, programs: Iterable[_LiteralProgram],
+                      positions: list[int]) -> tuple[str, ...]:
+    """Rewrite only proven program words, preserving the rest of the source."""
+    sites = []
+    conditional = set()
+    for program in programs:
+        source = positions[program.start:program.end]
+        if not source or -1 in source:
+            raise _TooComplex
+        start, end = source[0], source[-1] + 1
+        if join_continuations(raw[start:end]) != masked[program.start:program.end]:
+            raise _TooComplex
+        # Quoting also keeps reserved words and assignment-shaped names in
+        # command position, just as an expansion does.
+        value = program.value
+        quoted = shlex.quote(value)
+        if quoted == value and (assignment(value) or value in _PROGRAM_KEYWORDS):
+            quoted = f"'{value}'"
+        sites.append((start, end, quoted, program.fall_through))
+        if program.fall_through:
+            conditional.add(program.fall_through)
+    if len(conditional) > 5:
+        raise _TooComplex
+    conditional = sorted(conditional)
+    readings = []
+    remaining = _PROGRAM_LITERAL_CAP
+    for choices in itertools.product((False, True), repeat=len(conditional)):
+        unset = {name for name, drop in zip(conditional, choices) if drop}
+        out = []
+        last = 0
+        for start, end, quoted, fallback in sites:
+            out.extend((raw[last:start], "" if fallback in unset else quoted))
+            last = end
+        out.append(raw[last:])
+        reading = "".join(out)
+        remaining -= len(reading)
+        if remaining < 0:
+            raise _TooComplex
+        readings.append(reading)
+    return tuple(readings)
+
+
+def _literal_next_word(word: str) -> bool:
+    return not any(on and (c in _BINDING_META or c == "~" and i == 0)
+                   for i, (c, on) in enumerate(zip(word, word.active)))
+
+
+def _mutating_builtin(word: str, args: list[str]) -> bool:
+    return word in _SHELL_MUTATORS or (
+        word == "printf" and bool(args)
+        and (args[0].startswith("-v") or not _literal_next_word(args[0])))
+
+
+def _binding_syntax(text: str) -> str:
+    return (_PROGRAM_VAR.sub("VAR", text).replace("$(_)", "SUB")
+            .replace("<(_)", "SUB").replace(">(_)", "SUB"))
+
+
+def _vex_literal_programs(outer: str, substitutions: list[str]) -> dict[int, _LiteralProgram]:
+    """Prove bindings for direct program words while retaining separator and scope.
+
+    The existing walk reads the original segments and all substitution bodies.
+    This pass can only annotate a program the walk already found. Unsupported
+    shell syntax leaves the walk's original reading in place.
+    """
+    writes: dict[str, int] = {}
+    bindings: dict[str, tuple[int, str, bool, bool]] = {}
+    programs = []
+    functions: set[str] = set()
+    called: set[str] = set()
+    dirty_subshells: set[int] = set()
+    substitution_writes = False
+
+    def write(name: str, subshells: tuple[int, ...]) -> None:
+        writes[name] = writes.get(name, 0) + 1
+        dirty_subshells.update(subshells)
+
+    def scan(text: str, *, isolated: bool = False) -> bool:
+        starts: list[int] = []
+        parts = _segment_parts(text, starts=starts)
+        if parts is None:
+            return False
+        scopes: list[tuple[str, int]] = []
+        before = ""
+        root_or_list = False
+        index = -1
+        for (raw, after), raw_start in zip(parts, starts):
+            if not raw:
+                # Newlines can continue an AND/OR list or pipeline. The empty
+                # segment between two semicolons is a case-arm terminator.
+                if after == ";" and before == ";" and scopes and scopes[-1][0] == "arm":
+                    scopes[-1] = ("case", scopes[-1][1])
+                    continue
+                if before == "|" and after == "&":  # the second half of `|&`
+                    continue
+                if after not in ("", "\n"):
+                    return False
+                continue
+            index += 1
+            incoming, before = before, after
+
+            # A here-string's single-quoted data can contain any shell-looking
+            # text, including the escapes used to quote a heredoc's apostrophes.
+            syntax = raw
+            for redirect in reversed(redirections(raw)):
+                if redirect.op == "<<<" and re.fullmatch(r"'[^']*'(?:\\''[^']*')*", redirect.word):
+                    syntax = syntax[:redirect.start] + " " + syntax[redirect.end:]
+                elif redirect.op in ("<<", "<<-"):
+                    return False
+            # Retain the syntax of ordinary parameter references, but remove
+            # their braces and the masked substitution delimiters.
+            syntax = _binding_syntax(syntax)
+            if ("\\" in syntax or first_unquoted(syntax, ("#",))
+                    or any(syntax[i] in "$`" for i in
+                           unquoted_indices(syntax, double_is_quote=False))):
+                return False
+
+            segment = raw
+            while segment:
+                header = _SIMPLE_FUNCTION.match(segment)
+                lead = segment.split(None, 1)[0]
+                if len(scopes) >= 64:
+                    return False
+                if header:
+                    functions.add(header[1] or header[2])
+                    scopes.append(("function", index))
+                    segment = segment[header.end():].lstrip()
+                elif lead in ("for", "select"):
+                    loop = _FOR_HEADER.fullmatch(segment)
+                    if not loop:
+                        return False
+                    subshells = tuple(site for kind, site in scopes if kind == "subshell")
+                    write(loop[1], subshells)
+                    if lead == "select":
+                        write("REPLY", subshells)
+                    scopes.append(("loop", index))
+                    segment = ""
+                elif lead == "case":
+                    case = _CASE_HEADER.match(segment)
+                    if not case:
+                        return False
+                    scopes.append(("case", index))
+                    segment = segment[case.end():].lstrip()
+                elif scopes and scopes[-1][0] == "case" and segment != "esac":
+                    pattern = _CASE_PATTERN.match(segment)
+                    if pattern:
+                        scopes[-1] = ("arm", scopes[-1][1])
+                        segment = segment[pattern.end():].lstrip()
+                    elif after == "|" and _CASE_ALTERNATIVE.fullmatch(segment):
+                        segment = ""
+                    else:
+                        return False
+                elif lead in ("if", "while", "until", "{") or segment.startswith("("):
+                    if segment.startswith("(("):
+                        return False
+                    if segment.startswith("("):
+                        scopes.append(("subshell", index))
+                        segment = segment[1:].lstrip()
+                    else:
+                        scopes.append(({"if": "if", "{": "brace"}.get(lead, "loop"), index))
+                        segment = segment[len(lead):].lstrip()
+                elif lead == "!":
+                    segment = segment[1:].lstrip()
+                elif lead in ("then", "elif", "else", "do"):
+                    if not scopes or scopes[-1][0] != ("loop" if lead == "do" else "if"):
+                        return False
+                    segment = segment[len(lead):].lstrip()
+                else:
+                    break
+            if not segment:
+                continue
+
+            # A closing parenthesis can be glued to the last command word.
+            # Other parentheses, brace expansions and arithmetic are outside
+            # this proof. The original walk still runs on the unchanged text.
+            plain_syntax = _binding_syntax(segment)
+            position = unquoted_indices(plain_syntax)
+            trimmed = plain_syntax.rstrip()
+            closers = 0
+            while position and position[-1] == len(trimmed) - 1 and trimmed.endswith(")"):
+                closers += 1
+                position.pop()
+                trimmed = trimmed[:-1].rstrip()
+            if trimmed != "}" and any(plain_syntax[i] in "(){}[" for i in position):
+                return False
+            command = segment.rstrip()
+            for _ in range(closers):
+                command = command[:-1].rstrip()
+            closing = {"fi": ("if",), "done": ("loop",), "esac": ("case", "arm"),
+                       "}": ("brace", "function")}.get(command)
+            if closing:
+                if not scopes or scopes[-1][0] not in closing:
+                    return False
+                scopes.pop()
+                command = ""
+            subshells = tuple(site for kind, site in scopes if kind == "subshell")
+            redirects = []
+            stripped = strip_redirections(command, edits=redirects)
+            simple = stripped.lstrip()
+            words = _shell_words(simple)
+            start = strip_assignments(words)
+            prefixes = words[:len(words) - len(start)]
+            for word in prefixes:
+                write(assignment(word)[0], subshells)
+            if substitution_writes and any(mask in raw for mask in ("$(_)", "<(_)", ">(_)")):
+                dirty_subshells.update(subshells)
+            binding = _LITERAL_BINDING.fullmatch(command)
+            if binding and not isolated and raw == command and not scopes and (
+                    incoming in ("", ";", "\n", "&", "&&") and after in ("", ";", "\n")
+                    and not root_or_list):
+                name, spelling = binding.groups()
+                tilde = spelling.startswith("~/")
+                quoted = spelling.startswith(("'", '"'))
+                if (not _BINDING_META.intersection(spelling) and name not in _SPECIAL_BINDINGS
+                        and not name.startswith("BASH")
+                        and (quoted or "~" not in spelling[int(tilde):])):
+                    value = _shell_words(spelling)[0]
+                    if value:
+                        bindings[name] = (index, value, incoming == "&&", tilde)
+            elif start:
+                head, *args = start
+                if head in _LEAD_WORDS or head in {"case", "function", "[["} or _mutating_builtin(head, args):
+                    return False
+                called.add(head)
+                if not isolated:
+                    for _ in prefixes:
+                        prefix = _ASSIGNMENT_PREFIX.match(simple)
+                        simple = simple[prefix.end():].lstrip() if prefix else ""
+                    original = _command_words(_shell_words(strip_redirections(raw)))
+                    # Use the same segment index, but only if both readings
+                    # agree about the direct program and its arguments.
+                    use = _PROGRAM_VAR_START.match(simple) if original == start else None
+                    source = []
+                    if use:
+                        offset = raw_start + len(raw) - len(segment)
+                        first = len(stripped) - len(simple)
+                        positions = _source_positions(list(range(offset, offset + len(command))), redirects)
+                        source = positions[first:first + use.end()]
+                    programs.append((index, start, tuple(scopes), use, source))
+            for _ in range(closers):
+                if not scopes or scopes[-1][0] != "subshell":
+                    return False
+                scopes.pop()
+            if not scopes:
+                if after == "||":
+                    root_or_list = True
+                elif after in (";", "\n", "&", ""):
+                    root_or_list = False
+        return not scopes
+
+    # Substitutions cannot establish a parent binding. Their assignments still
+    # count against uniqueness, and their program words remain unresolved.
+    pending = list(substitutions)
+    for inner in pending:
+        nested, masked = _substitutions(inner)
+        pending.extend(nested)
+        if len(pending) > SUBSTITUTION_CAP or not scan(masked, isolated=True):
+            return {}
+    substitution_writes = bool(writes)
+    if not scan(outer) or "command_not_found_handle" in functions or "IFS" in writes:
+        return {}
+
+    uses = {}
+    for index, start, scopes, use, source in programs:
+        head, *args = start
+        if not any(c in head for c in "$`*?["):
+            continue
+        if any(kind == "function" for kind, _ in scopes):
+            continue
+        var = use and _PROGRAM_VAR.fullmatch(use[1] or use[2])
+        if var and head == var[0]:
+            name = var[1] or var[2]
+            site, value, conditional, tilde = bindings.get(name, (index, "", False, False))
+            if tilde:
+                value = "" if "HOME" in writes else os.path.expanduser(value)
+            fallback = conditional and not use[1]
+            if (site < index and value and writes[name] == 1 and value not in functions
+                    and not _mutating_builtin(value, args)
+                    and (use[1] or not any(c.isspace() or c in "*?[" for c in value))
+                    and not any(kind == "subshell" and site in dirty_subshells for kind, site in scopes)
+                    and (not fallback or args and _literal_next_word(args[0])
+                         and not assignment(args[0]) and args[0] not in _PROGRAM_KEYWORDS
+                         and not _mutating_builtin(args[0], args[1:]))):
+                if fallback:
+                    called.add(args[0])
+                if (len(source) != use.end() or source[0] < 0
+                        or source != list(range(source[0], source[0] + len(source)))):
+                    return {}
+                uses[index] = _LiteralProgram(value, source[0], source[-1] + 1, name if fallback else None)
+                continue
+        # An unknown program can be a shell builtin or function that changes
+        # later bindings, or changes earlier uses on a subsequent iteration.
+        if any(kind == "loop" for kind, _ in scopes):
+            return {}
+        break
+    return {} if functions & called else uses
+
+
 @dataclass(frozen=True)
 class _Prog:
     word: str               # as the line spells it ("" when it comes from input)
@@ -3835,6 +4385,8 @@ class _Prog:
     args: tuple
     via_input: bool = False
     replace: str | None = None
+    literal: _LiteralProgram | None = None  # only for a proven direct VEX program use
+    here: tuple = ()
 
 
 class _Walk:
@@ -3848,39 +4400,64 @@ class _Walk:
         self.flagged: list[str] = []    # a here-document reading flagged unsure
         self.seen: set = set()          # readings already walked
         self.words = 0                  # words of readings walked (`WORK_CAP`)
+        self.literal_readings: tuple[str, ...] = ()
 
     def _spend(self, depth: int) -> None:
         self.spent += 1
         if self.spent > PROGRAM_CAP or depth > PROGRAM_DEPTH:
             raise _TooComplex
 
-    def line(self, text: str, certain: bool, depth: int) -> None:
+    def line(self, text: str, certain: bool, depth: int, *, literal_programs=False) -> None:
         self._spend(depth)
+        # Only an original command within the proof budget can supply bindings.
+        can_bind = (literal_programs and len(text) <= _PROGRAM_LITERAL_CAP and "$" in text
+                    and (";" in text or "\n" in text) and "\x00" not in text
+                    and not any(c.isspace() and c not in " \t\n" for c in text))
+        raw = text
+        heredocs, continuations, substitutions = ([] for _ in range(3)) if can_bind else (None,) * 3
         text = join_continuations(_inline_heredocs(text, bodies=self.bodies,
-                                                   unsure=self.flagged))
-        inners, outer = _substitutions(text)
+                                                   unsure=self.flagged, edits=heredocs),
+                                  edits=continuations)
+        inners, outer = _substitutions(text, edits=substitutions)
+        literals = {}
+        if can_bind:
+            try:
+                literals = _vex_literal_programs(outer, inners)
+                if literals:
+                    positions = list(range(len(raw)))
+                    for edits in (heredocs, continuations, substitutions):
+                        positions = _source_positions(positions, edits)
+                    if len(positions) != len(outer):
+                        raise _TooComplex
+                    self.literal_readings = _literal_readings(raw, outer, literals.values(), positions)
+            except Exception:
+                # The original walk can still refuse or keep the VEX ask.
+                literals = {}
         for inner in inners:
             self.line(inner, certain, depth + 1)
-        for segment in segments(outer):
+        for index, segment in enumerate(segments(outer)):
             here = [r.word for r in redirections(segment) if r.op == "<<<"]
-            self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here)
+            self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here,
+                         literal=literals.get(index))
 
-    def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None) -> None:
+    def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None,
+                literal=None, program_already_known=False) -> None:
         # A reading reached again (an option the table does not know offers
         # the same tail more than once) is not walked again.
         key = (tuple((str(t), getattr(t, "active", None)) for t in tokens), certain, depth,
-               via_input, tuple(here), replace)
+               via_input, tuple(here), replace, literal, program_already_known)
         if key in self.seen:
             return
         self.seen.add(key)
         self._spend(depth)
-        tokens = _command_words(tokens)
+        if not program_already_known:
+            tokens = _command_words(tokens)
         if not tokens:
             if via_input:
                 self.progs.append(_Prog("", certain, (), True, replace))
             return
         word, args = tokens[0], tokens[1:]
-        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace))
+        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace, literal, tuple(here)))
         stem = _basename(word)
         if _PYTHON.fullmatch(stem) and _module_run(args):
             self.modules = True
@@ -4132,9 +4709,10 @@ class VexLine:
     deny: str | None = None
     unsure: str | None = None
     vexbuild: bool = False
+    literal_readings: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
 
-def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
+def _vex_line_uncached(command: str, backstop: bool = True, *, resolve_literals=True) -> VexLine:
     if not command.strip():
         return VexLine()
     named = vexcom_reading(command)
@@ -4142,19 +4720,55 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
         return VexLine(deny=VEXCOM_DENIED)
     unsure = TOO_COMPLEX if named == COMPLEX else None
     vexbuild = False
+    literal_readings: tuple[str, ...] = ()
     bodies: list[str] = []
-    for text in _program_variants(command):
+    variants = _program_variants(command)
+    for text in variants:
         walk = _Walk()
+        complete = True
         try:
-            walk.line(text, True, 0)
+            walk.line(text, True, 0, literal_programs=resolve_literals and text == command)
         except _TooComplex:
+            complete = False
             unsure = unsure or TOO_COMPLEX
         if walk.flagged:
             unsure = unsure or TOO_COMPLEX
+        readings = ((prog, _program_kind(prog)) for prog in walk.progs)
+        candidates = [prog for prog in walk.progs if prog.literal]
+        if candidates and complete and not walk.flagged and named != COMPLEX:
+            # Keep the original walk and its DENYs. Only a proven direct use's
+            # UNKNOWN may be replaced. Read what a resolved runner or shell
+            # starts with the existing walker, in a separate work budget.
+            original = list(readings)
+            if all(kind != COMPLEX for _, kind in original):
+                resolved = _Walk()
+                try:
+                    for prog in candidates:
+                        value = prog.literal.value
+                        word = _Word(value, (False,) * len(value))
+                        resolved.segment([word, *prog.args], True, 0, here=prog.here,
+                                         program_already_known=True)
+                        if prog.literal.fall_through:
+                            # Rule 4 proved this word literal before annotating
+                            # the site. Read any program it starts as well.
+                            fallback, *args = prog.args
+                            word = _Word(fallback, (False,) * len(fallback))
+                            resolved.segment([word, *args], True, 0, here=prog.here,
+                                             program_already_known=True)
+                except Exception:
+                    unsure = unsure or TOO_COMPLEX
+                else:
+                    if not resolved.flagged:
+                        original = [(prog, kind) for prog, kind in original
+                                    if kind != UNKNOWN or not prog.literal]
+                        literal_readings = walk.literal_readings
+                original.extend((prog, _program_kind(prog)) for prog in resolved.progs)
+                bodies.extend(resolved.bodies)
+                vexbuild = vexbuild or resolved.modules
+            readings = iter(original)
         bodies.extend(walk.bodies)
         vexbuild = vexbuild or walk.modules
-        for prog in walk.progs:
-            kind = _program_kind(prog)
+        for prog, kind in readings:
             if kind == RUNS:
                 return VexLine(deny=(
                     f"it runs {_quoted_word(prog.word)} as a program, which could be vexcom, "
@@ -4169,11 +4783,15 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
                 unsure = unsure or TOO_COMPLEX
             vexbuild = vexbuild or kind == VEXBUILD
     if unsure is None and backstop and bodies:
-        unsure = _body_marker(bodies)
-    return VexLine(unsure=unsure, vexbuild=vexbuild)
+        # Keep the backstop if any variant lacks the HD-0 proof.
+        if not all(heredoc_data_reading(text) is not None for text in variants):
+            unsure = _body_marker(bodies)
+    return VexLine(unsure=unsure, vexbuild=vexbuild, literal_readings=literal_readings)
 
 
-# **The body backstop** (round 4). Three review rounds each found a shape
+# **The body backstop** (round 4). GB-1 keeps it when HD-0 cannot prove
+# that every here-document on the line can be read as data.
+# Three review rounds each found a shape
 # whose here-document body the lexer kept open past bash's own end (a
 # delimiter formed differently, a terminator joined from a continuation), so
 # the lines after it — commands to bash — were read as data. Whatever the
@@ -4222,7 +4840,7 @@ def _body_marker(bodies: list[str]) -> str | None:
                 if line in seen or not line.strip():
                     continue
                 seen.add(line)
-                alone = _vex_line_uncached(line, backstop=False)
+                alone = _vex_line_uncached(line, backstop=False, resolve_literals=False)
                 if alone.deny:
                     return BODY_MARKER
                 # Unsure alone, and nothing but the vex reading would ask it:
@@ -4240,21 +4858,21 @@ def _quoted_word(word: str) -> str:
 
 
 @functools.lru_cache(maxsize=256)
-def _vex_line_cached(command: str) -> VexLine:
-    return _vex_line_uncached(command)
+def _vex_line_cached(command: str, resolve_literals: bool) -> VexLine:
+    return _vex_line_uncached(command, resolve_literals=resolve_literals)
 
 
 _LAST_LONG: tuple = ("", VexLine())
 
 
-def _vex_line(command: str) -> VexLine:
+def _vex_line(command: str, *, resolve_literals=True) -> VexLine:
     """The vex reading of a line (`decide`, the allowlist and v2's layer 2
     each ask; short lines are cached, the last long one is kept, the
     reading is pure)."""
     global _LAST_LONG
     command = command or ""
     if len(command) <= 16384:
-        return _vex_line_cached(command)
+        return _vex_line_cached(command, resolve_literals)
     last = _LAST_LONG
     if last[0] == command:
         return last[1]
@@ -4263,13 +4881,24 @@ def _vex_line(command: str) -> VexLine:
     return line
 
 
-def vex_uncoverable(command: str) -> str | None:
+def vex_uncoverable(command: str, *, resolve_literals=True) -> str | None:
     """Why no allowlist entry, and no v2 profile, may answer for this line
     without asking: it names or runs vexcom (DENY before this is reached),
     or it may run vexcom and cannot be told, or it is too complex to judge.
-    `permissions.allows` and v2's layer 2 read it."""
-    line = _vex_line(command)
+    V2's layer 2 uses the literal proof. `permissions.allows` keeps the
+    unresolved reading so that proof cannot grant standing coverage."""
+    line = _vex_line(command, resolve_literals=resolve_literals)
     return line.deny or line.unsure
+
+
+def literal_program_readings(command: str) -> tuple[str, ...]:
+    """The original text with proven programs substituted, for stricter checks.
+
+    The first reading substitutes every proven use. Further readings cover
+    conditional assignments whose unquoted uses may disappear when unset.
+    An empty tuple leaves the unresolved VEX reading in force.
+    """
+    return _vex_line(command).literal_readings
 
 
 # What `_judge_plain` answers for a stem on no list at all: asked, but only for
@@ -4626,11 +5255,30 @@ def decide(command: str) -> Verdict:
     with work_scope() as work:
         verdict = _decide(command)
     if work.exhausted and verdict.decision != DENY:
-        return Verdict(ASK, work.exhausted)
+        verdict = Verdict(ASK, work.exhausted)
+    if verdict.decision == DENY:
+        return verdict
+    unresolved = False
+    for text in literal_program_readings(command):
+        try:
+            with work_scope(fresh=True) as extra:
+                reading = _decide(text, resolve_literals=False)
+        except Exception:
+            unresolved = True
+            continue
+        if reading.decision == DENY:
+            return reading
+        if extra.exhausted or reading.reason == TOO_COMPLEX:
+            unresolved = True
+        if _ORDER[reading.decision] < _ORDER[verdict.decision] or (
+                reading.decision == ASK and reading.reason and not verdict.reason):
+            verdict = reading
+    if unresolved:
+        return Verdict(ASK, vex_uncoverable(command, resolve_literals=False) or TOO_COMPLEX)
     return verdict
 
 
-def _decide(command: str) -> Verdict:
+def _decide(command: str, *, resolve_literals=True) -> Verdict:
     raw = command or ""
     command = join_continuations(raw)
     if not command.strip():
@@ -4642,7 +5290,7 @@ def _decide(command: str) -> Verdict:
     # an ALLOW-stem runner cannot carry it past (`_vex_line`).
     # Read from the raw line: a quoted here-document's body is not joined at
     # a backslash-newline, so joining first could swallow its terminator.
-    vex = _vex_line(raw)
+    vex = _vex_line(raw) if resolve_literals else _vex_line(raw, resolve_literals=False)
     if vex.deny:
         return Verdict(DENY, vex.deny)
     # The Secret Service (the owner's keyring) likewise, on the raw line:

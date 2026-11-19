@@ -3260,6 +3260,275 @@ class ProgramPosition(Base):
                 self.assertIsNone(rules.vex_uncoverable(command))
 
 
+class LiteralVariablePrograms(Base):
+    def test_proven_bindings_use_the_literal_vex_reading(self):
+        cases = (
+            ('PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+             '$PS -NoProfile -ExecutionPolicy Bypass -File build.ps1 build 2>&1 | tail -3',
+             '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe '
+             '-NoProfile -ExecutionPolicy Bypass -File build.ps1 build 2>&1 | tail -3'),
+            ('cd /repo; CXX="/mnt/c/Program Files/LLVM/bin/clang++.exe"; '
+             'objs=$(ls build/obj/*.o); "${CXX}" -c x.cpp',
+             '"/mnt/c/Program Files/LLVM/bin/clang++.exe" -c x.cpp'),
+            ('N="/mnt/c/Program Files/nodejs/node.exe"; get(){ grep -h foo run.log; }; "$N" tool.mjs',
+             '"/mnt/c/Program Files/nodejs/node.exe" tool.mjs'),
+            ("V='/opt/build-cli'; ${V} build", "/opt/build-cli build"),
+            ('V=vexbuild; "$V" build', 'vexbuild build'),
+        )
+        for variable, literal in cases:
+            with self.subTest(variable):
+                self.assertEqual(rules._vex_line(variable), rules._vex_line(literal))
+                self.assertEqual(rules.decide(variable).decision, rules.ASK)
+
+    def test_logged_build_shapes_leave_no_vex_ask(self):
+        cases = {
+            "clang version and compile": (
+                'cd /repo && CXX="/mnt/c/Program Files/LLVM/bin/clang++.exe"; '
+                '"$CXX" --version | head -2; mkdir -p out && cp a.cpp out/ && cd out && '
+                '"$CXX" -std=c++17 -c a.cpp'),
+            "powershell rebuild": (
+                'cd /repo && PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+                '"$PS" -NoProfile -ExecutionPolicy Bypass -File build.ps1 rebuild 2>&1 | tail -12'),
+            "edit and unquoted powershell": (
+                "sed -i 's|a|b|' src/x.cpp && grep -n b src/x.cpp && "
+                'PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; '
+                "$PS -NoProfile -ExecutionPolicy Bypass -File build.ps1 2>&1 | grep -E 'error|Built'"),
+            "node twice": (
+                'N="/mnt/c/Program Files/nodejs/node.exe"; "$N" simhost/build.mjs clean && '
+                '"$N" simhost/build.mjs 2>&1 | tail -5'),
+            "clang in for": (
+                'C="/mnt/c/Program Files/LLVM/bin/clang++.exe"; for t in path-check clamp-check; '
+                'do "$C" -std=c++17 -fsyntax-only tools/$t.cpp; done'),
+            "home-relative compiler in for": (
+                'cd /repo && SDK=/mnt/c/sdk/vexv5; GXX=~/opt/arm-gnu-toolchain/bin/arm-none-eabi-g++; '
+                'for f in src/a.cpp src/b.cpp; do $GXX -c "$f" -I"$SDK/include"; done'),
+        }
+        commit = "\ngit commit -q -F - <<'EOF'\nIt's build data: C=elsewhere; $(echo text)\nEOF\n"
+        for label, template in cases.items():
+            for separator in (";", "\n"):
+                for suffix in ("", commit):
+                    with self.subTest(label=label, separator=separator, heredoc=bool(suffix)):
+                        command = (template.replace("; ", "\n") if separator == "\n" else template) + suffix
+                        subprocess.run(["/bin/bash", "--noprofile", "--norc", "-n", "-c", command],
+                                       env={"HOME": str(self.root), "PATH": os.defpath},
+                                       capture_output=True, check=True, timeout=5)
+                        self.assertIsNone(rules.vex_uncoverable(command))
+                        self.assertIn("cannot be told from here",
+                                      rules.vex_uncoverable(command, resolve_literals=False) or "")
+
+    def test_uses_in_later_shell_scopes_and_lists(self):
+        cases = (
+            'V=/opt/build-cli; while false; do "$V" build; done',
+            'V=/opt/build-cli; until true; do "$V" build; done',
+            'V=/opt/build-cli; ( "$V" build )',
+            'V=/opt/build-cli; ("${V}")',
+            'V=/opt/build-cli; { "$V" build; }',
+            'V=/opt/build-cli; if true; then "$V" build; else "${V}" check; fi',
+            'V=/opt/build-cli; case x in x) "$V" build;; y) "$V" check;; esac',
+            'V=/opt/build-cli; false || "${V}" build | tail -1',
+            'V=/opt/build-cli; printf input |& "$V" build',
+            'V=/opt/build-cli; ! "$V" build',
+            ': & V=/opt/build-cli; "$V" build',
+            'V=/opt/build-cli; W="other value" "$V" build',
+            'true &&\nV=/opt/build-cli\n"$V" build',
+            'cd /repo && V=/opt/build-cli; "$V" build',
+            'cd /repo && V=/opt/build-cli; "$V" "$NEXT"',
+            'cd /repo && V=/opt/build-cli; ${V} "literal argument"',
+            'V=/opt/build-cli\n"$V" build',
+            'V=/opt/build-cli; printf "%s" ok; "$V" build',
+        )
+        for command in cases:
+            with self.subTest(command):
+                self.assertIsNone(rules.vex_uncoverable(command))
+
+    def test_auto_leaves_a_proven_ordinary_program_to_the_provider(self):
+        args = {"command": 'V=/opt/build-cli; "$V" build'}
+        with patch.object(v2_permissions, "log_decision") as log:
+            for profile, decision, layer, cards in (
+                    (PP.AUTO, Decision.ALLOW, v2_permissions.L_REVIEWER, 0),
+                    (PP.ASK, Decision.DENY, v2_permissions.L_HUMAN, 1),
+                    (PP.STRICT, Decision.DENY, v2_permissions.L_HUMAN, 0)):
+                with self.subTest(profile):
+                    asker = Asker(Decision.DENY)
+                    permit = v2_permissions.build_permit(context(self.root, profile), asker)
+                    self.assertEqual(permit("Bash", args), decision)
+                    self.assertEqual(log.call_args.args[0].layer, layer)
+                    self.assertEqual(len(asker.seen), cards)
+
+    def test_unproven_bindings_keep_the_unknown_program_ask(self):
+        cases = {
+            "second binding": 'V=/opt/build-cli; V=/opt/other-cli; "$V" build',
+            "later second binding": 'V=/opt/build-cli; "$V" build; V=/opt/other-cli',
+            "appended binding": 'V=/opt/build-cli; V+=-new; "$V" build',
+            "before assignment": '"$V" build; V=/opt/build-cli; "$V" build',
+            "loop assignment": 'while true; do V=/opt/build-cli; break; done; "$V" build',
+            "function assignment": 'f() { V=/opt/build-cli; }; "$V" build',
+            "function use": 'V=/opt/build-cli; f() { "$V" build; }',
+            "same use text in function and outside": 'V=/opt/build-cli; f(){ :; "$V"; }; "$V"',
+            "subshell assignment": '(V=/opt/build-cli); "$V" build',
+            "brace assignment": '{ V=/opt/build-cli; }; "$V" build',
+            "branch assignment": 'if true; then V=/opt/build-cli; fi; "$V" build',
+            "short-circuit or": 'cd /repo || V=/opt/build-cli; "$V" build',
+            "mixed or and list": 'false || false && V=/opt/build-cli; "$V" build',
+            "or list with a compound operand": 'false || { false; } && V=/opt/build-cli; "$V" build',
+            "or list continued on a newline": 'false || false &&\nV=/opt/build-cli\n"$V" build',
+            "case assignment": 'case x in x) V=/opt/build-cli;; esac; "$V" build',
+            "assignment in substitution": 'echo "$(V=/opt/build-cli)"; "$V" build',
+            "duplicate in substitution": 'V=/opt/build-cli; echo "$(V=other)"; "$V" build',
+            "use in substitution": 'V=/opt/build-cli; echo "$("$V" build)"',
+            "use in a subshell with an assignment": 'V=/opt/build-cli; ( W=other; "$V" build )',
+            "use in a subshell with a mutator": 'V=/opt/build-cli; ( read W; "$V" build )',
+            "use in a subshell with a substitution assignment": (
+                'V=/opt/build-cli; ( echo "$(W=other)"; "$V" build )'),
+            "assignment in and-list": 'V=/opt/build-cli && "$V" build',
+            "pipe": 'V=/opt/build-cli | cat; "$V" build',
+            "background": 'V=/opt/build-cli & "$V" build',
+            "comment": 'echo ok # ; V=/opt/build-cli; "$V" build',
+            "non-shell whitespace before an assignment": '\vV=/opt/build-cli; "$V" build',
+            "read": 'V=/opt/build-cli; read V; "$V" build',
+            "timed read": 'V=/opt/build-cli; time -p read V; "$V" build',
+            "variable-held read": 'V=read; "$V" V',
+            "default read target": 'REPLY=/opt/build-cli; read; "$REPLY" build',
+            "eval": 'V=/opt/build-cli; eval "$CODE"; "$V" build',
+            "source": 'V=/opt/build-cli; source vars.sh; "$V" build',
+            "dot": 'V=/opt/build-cli; . vars.sh; "$V" build',
+            "unset": 'V=/opt/build-cli; unset V; "$V" build',
+            "declare": 'V=/opt/build-cli; declare -n V=OTHER; "$V" build',
+            "local": 'V=/opt/build-cli; local -n V=OTHER; "$V" build',
+            "export": 'V=/opt/build-cli; export -n V; "$V" build',
+            "printf": 'V=/opt/build-cli; printf -v V %s /opt/other-cli; "$V" build',
+            "printf with expanded option": 'V=/opt/build-cli; printf * V %s /opt/other-cli; "$V" build',
+            "mapfile": 'V=/opt/build-cli; mapfile V; "$V" build',
+            "readarray": 'V=/opt/build-cli; readarray V; "$V" build',
+            "typeset": 'V=/opt/build-cli; typeset -i V; "$V" build',
+            "readonly": 'V=/opt/build-cli; readonly V=other; "$V" build',
+            "getopts": 'V=/opt/build-cli; getopts a V; "$V" build',
+            "let": 'V=/opt/build-cli; let V=2; "$V" build',
+            "arithmetic": 'V=/opt/build-cli; ((V=2)); "$V" build',
+            "arithmetic expansion": 'V=/opt/build-cli; : "$((V=2))"; "$V" build',
+            "for variable": 'V=/opt/build-cli; for V in /opt/other-cli; do :; done; "$V" build',
+            "parameter assignment": 'V=/opt/build-cli; : "${V:=value}"; "$V" build',
+            "computed assignment": 'V="$OTHER"; "$V" build',
+            "substitution": 'V=$(cat tool.txt); "$V" build',
+            "backticks": 'V=`cat tool.txt`; "$V" build',
+            "glob": 'V=/opt/build-*; "$V" build',
+            "brace": 'V=/opt/{build,other}; "$V" build',
+            "quoted brace": 'V="/opt/{build,other}"; "$V" build',
+            "quoted dollar": "V='/opt/$tool'; \"$V\" build",
+            "user tilde": 'V=~other/bin/build; "$V" build',
+            "non-leading assignment tilde": 'V=/opt/build:~/other; "$V" build',
+            "export is not a stand-alone assignment": 'export V=/opt/build-cli; "$V" build',
+            "conditional unquoted with expanded next word": 'false && V=/opt/build-cli; $V "$NEXT"',
+            "conditional unquoted with unquoted expansion": 'false && V=/opt/build-cli; ${V} $NEXT',
+            "conditional unquoted with glob next word": 'false && V=/opt/build-cli; $V build-*',
+            "conditional unquoted with substitution next word": 'false && V=/opt/build-cli; $V "$(echo build)"',
+            "conditional unquoted with no next word": 'false && V=/opt/build-cli; $V 2>&1',
+            "unquoted spaces": 'V="/opt/build cli"; $V build',
+            "redirected assignment": 'V=/opt/build-cli >out; "$V" build',
+            "only environment": 'V=/opt/build-cli true; "$V" build',
+            "prefix on use": 'V=/opt/build-cli "$V" build',
+            "env wrapper": 'env V=/opt/build-cli true; "$V" build',
+            "alias chain": 'V=/opt/build-cli; W=$V; $W',
+        }
+        for label, command in cases.items():
+            with self.subTest(label):
+                self.assertIn("cannot be told from here", rules.vex_uncoverable(command) or "")
+                self.assertEqual(rules.decide(command).decision, rules.ASK)
+
+    def test_bash_expands_the_old_value_before_applying_the_prefix(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'first() { echo "first:$V"; }; second() { echo second; }; '
+             'V=first; V=second "$V"; "$V"; V=second true; "$V"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["first:second", "first:first", "first:first"])
+        line = 'V=/opt/build-cli; V=/opt/other-cli "$V" build'
+        self.assertIn("cannot be told from here", rules.vex_uncoverable(line) or "")
+
+    def test_bash_runs_the_next_word_only_after_an_unquoted_empty_expansion(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'next() { echo next; }; prior() { echo prior; }; NEXT=next; '
+             'false && V=build; $V "$NEXT"; false && V=build; "$V" "$NEXT"; '
+             'V=prior; false && V=build; "$V" "$NEXT"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["next", "prior"])
+        self.assertIn("command not found", result.stderr)
+
+    def test_bash_or_list_can_skip_its_final_assignment(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             'V=prior; true || V=build; printf "%s\\n" "$V"; '
+             'false || { false; } && V=build; printf "%s\\n" "$V"'],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), ["prior", "prior"])
+
+    def test_bash_expands_the_leading_unquoted_tilde_in_an_assignment(self):
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c",
+             """V=~/bin/build; W='~/bin/build'; printf '%s\\n' "$V" "$W" """],
+            env={"HOME": str(self.root), "PATH": os.defpath}, text=True,
+            capture_output=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.splitlines(), [str(self.root / "bin/build"), "~/bin/build"])
+
+    def test_conditional_literal_fallback_still_reads_a_runner(self):
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable("false && V=/opt/build-cli; $V bash -c '$NEXT'") or "")
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable("V=/bin/bash; \"$V\" <<'EOF'\n$NEXT\nEOF\n") or "")
+
+    def test_original_and_resolved_device_denials_win(self):
+        cases = (
+            'V=vexcom; $V --user',
+            'V=/path/to/vexcom.exe; "$V" --user',
+            'V=vexcom; W=$V; $W',
+            'cd a && V=vexcom; "$V"',
+            'V=vexcom; for i in 1; do $V; done',
+            'V=/opt/build-cli; "$V" build; *.exe --user',
+            'V=/bin/bash; "$V" -c "./v*.exe --user"',
+        )
+        for command in cases:
+            with self.subTest(command):
+                self.assertEqual(rules.decide(command).decision, rules.DENY)
+                self.assertIn("vexcom", v2_permissions.denied_command(command) or "")
+        self.assertIn("`$OTHER`", rules.vex_uncoverable('V=/bin/bash; "$V" -c \'$OTHER\'') or "")
+
+    def test_walk_past_its_budget_keeps_the_ask(self):
+        command = 'V=/opt/build-cli; "$V" build; echo done'
+        with patch.object(rules, "PROGRAM_CAP", 3):
+            self.assertEqual(rules._vex_line_uncached(command).unsure, rules.TOO_COMPLEX)
+
+    def test_literal_resolution_cannot_add_allowlist_coverage(self):
+        command = 'V=/opt/build-cli; "$V" build'
+        args = {"command": command}
+        self.assertIsNone(rules.vex_uncoverable(command))
+        self.assertIn("cannot be told from here",
+                      rules.vex_uncoverable(command, resolve_literals=False) or "")
+        with (patch.object(v1_permissions, "load_allowlist", return_value=[
+                  {"tool": "run_command", "prefix": "$V"}]),
+              patch.object(rules, "command_targets", return_value=[("$V", "$V")]) as targets):
+            # Even if target enumeration could cover a bare assignment, VEX's
+            # unresolved reading must independently rule out standing coverage.
+            self.assertFalse(v1_permissions.allows("run_command", args))
+            targets.assert_not_called()
+            with patch.object(rules, "vex_uncoverable", return_value=None):
+                self.assertTrue(v1_permissions.allows("run_command", args))
+
+    def test_existing_general_denials_and_always_ask_stems_still_win(self):
+        for command in (
+                'V=/opt/build-cli; "$V" build; sudo true',
+                'V=/opt/build-cli; "$V" build; jarvis restart',
+                'V=/opt/build-cli; "$V" build; cp /tmp/x ~/.config/jarvis/allowlist.json'):
+            with self.subTest(command):
+                self.assertIsNone(rules.vex_uncoverable(command))
+                self.assertIsNotNone(v2_permissions.denied_command(command, str(self.root)))
+        args = {"command": 'V=/opt/build-cli; "$V" build; git push --force origin topic'}
+        self.assertEqual(v2_permissions.always_ask_match("Bash", args)[0], "git-push-force")
+
+
 class TooComplex(Base):
     """MED 2: a glob past the caps is too complex to judge — asked, never slow."""
 
@@ -3430,8 +3699,8 @@ class Polish(Base):
 
 R3 = "./v*.exe --user"
 # Ordinary commands that hold a here-document: never DENY, as on main (each was DENY at c12959c).
-# Each body holds a `*` or `/*` line, which read alone as a command would run a glob that could be
-# vexcom, so since round 4 the body backstop asks about each (approvable, never covered).
+# Each body holds a `*` or `/*` line that would run a glob if read as a command. GB-1 skips
+# the backstop for the HD-0 data shapes below and keeps it for the remaining shapes.
 HEREDOC_ORDINARY = {
     "a commit message": "git commit -m \"$(cat <<'EOF'\nFix the drivetrain PID\n\n* raise kP\n* clamp output\nEOF\n)\"",
     "gh pr create": "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\n* one\nEOF\n)\"",
@@ -3452,6 +3721,11 @@ HEREDOC_ORDINARY = {
     "a quote in a message": "git commit -m \"$(cat <<'EOF'\nMount the 5\" wheel\n* one\nEOF\n)\"",
     "a paren in an unquoted substitution": "notes=$(cat <<'EOF'\n1) first\n* second\nEOF\n)",
     "a backtick body with no terminator": "echo `cat <<X\n* a\n* b`",
+}
+HEREDOC_ORDINARY_DATA = {
+    "a C doc comment", "a C comment, unquoted", "a markdown file", "tee", "tab-stripped",
+    "python on stdin", "two on one line", "a spaced operator", "a double-quoted delimiter",
+    "a command after it",
 }
 # Still read: a body fed to a shell, a substitution an unquoted body runs, and
 # every line the lexer must not mistake for a body (each would hide a command).
@@ -3529,8 +3803,7 @@ HEREDOC_TICK_CLOSES = {
     "nested in $(…)": "x=$(echo `cat <<X`\nbody\nX\n)",
     "in a sh -c string": "sh -c 'echo `cat <<X`\nbody\nX'",
 }
-# A body bash does not end there: its lines are data — asked by the body backstop (round 4) when
-# one would be DENY read as a command, never DENY.
+# Bash keeps these lines in the body. Each top-level line passes the HD-0 data guard.
 HEREDOC_DATA = {
     "a terminator with trailing whitespace": f"cat <<'EOF'\nx\nEOF \n{M}",
     "an empty delimiter's body": f"cat <<''\n{M}\n\nls",
@@ -3561,7 +3834,7 @@ HEREDOC_JOINED = {
     '<<-: a tab-led "…" delimiter, unstripped': f'cat <<-"\tE"\nx\n\tE\n{M}',
 }
 # Bash does not join these (a quoted delimiter, an even run, a tab after the join point, a join
-# that makes another word): the marker is body, asked by the backstop, never DENY.
+# that makes another word). Their markers stay inside proven data bodies.
 HEREDOC_UNJOINED = {
     "a quoted delimiter": f"cat <<'EOF'\nx\nEO{BS}\nF\n{M}",
     "a double-quoted delimiter": f'cat <<"EOF"\nx\nEO{BS}\nF\n{M}',
@@ -3575,9 +3848,7 @@ HEREDOC_UNJOINED = {
     "a CR after the backslash": f"cat <<EOF\nx\nEO{BS}\r\nF\n{M}",
 }
 
-# Round 4 (the body backstop): a marker anywhere in a body — any here-document, any quoting —
-# is asked, never DENY, never allowlist-covered, always asked in v2. At 243b0cf each was ASK
-# and coverable.
+# Round 4 body markers, with the GB-1 data cases checked both with and without the guard.
 HEREDOC_BACKSTOP = {
     "a quoted body": f"cat > notes.txt <<'EOF'\n{M} --user\nEOF",
     "an unquoted body": f"cat > notes.txt <<EOF\nrun {M} later\n{M}\nEOF",
@@ -3649,11 +3920,19 @@ class HereDocuments(Base):
         self.assertIsNone(v2_permissions.denied_command(command))
         self.assertIn("here-document's body", rules.vex_uncoverable(command) or "", command)
 
+    def assert_data_body(self, command):
+        self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
+        self.assertIsNone(rules.vex_uncoverable(command), command)
+        self.assertIsNone(v2_permissions.denied_command(command), command)
+
     def test_ordinary_here_documents_are_never_refused(self):
         approve = v1_permissions.gate(lambda tool, args: True)
         for label, command in HEREDOC_ORDINARY.items():
             with self.subTest(label):
-                self.assert_backstop(command)
+                if label in HEREDOC_ORDINARY_DATA:
+                    self.assert_data_body(command)
+                else:
+                    self.assert_backstop(command)
                 tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
                                approve)
         self.assertEqual(sorted(self.ran), sorted(HEREDOC_ORDINARY.values()), "a yes runs each")
@@ -3734,7 +4013,7 @@ class HereDocuments(Base):
     def test_a_body_bash_does_not_end_stays_data(self):
         for label, command in HEREDOC_DATA.items():
             with self.subTest(label):
-                self.assert_backstop(command)       # data, so never DENY; asked (round 4)
+                self.assert_data_body(command)
         for label, command in HEREDOC_NO_BODY.items():
             with self.subTest(label):
                 self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
@@ -3750,14 +4029,21 @@ class HereDocuments(Base):
                 self.assertIsNotNone(v2_permissions.denied_command(command))
         for label, command in HEREDOC_UNJOINED.items():
             with self.subTest(label):
-                self.assert_backstop(command)
+                self.assert_data_body(command)
 
-    def test_a_marker_in_any_body_is_asked_never_denied_never_covered(self):
+    def test_a_marker_without_the_data_proof_is_asked_never_denied_never_covered(self):
         asked = []
         gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        commands = {}
         for label, command in HEREDOC_BACKSTOP.items():
             with self.subTest(label):
+                if label not in ("a body in $(…)", "a body in a sh -c string"):
+                    self.assert_data_body(command)
+                    # An unlisted program before the heredoc invalidates the
+                    # whole-line proof even if it has nothing to do with the body.
+                    command = "sort notes.txt; " + command
                 self.assert_backstop(command)
+                commands[label] = command
                 stems = {w for pair in rules.command_targets(command) for w in pair}
                 stems |= {"cat", "git", "sh", "ls", "bin/*", "*"}
                 Path(config.ALLOWLIST_PATH).write_text(json.dumps(
@@ -3766,15 +4052,15 @@ class HereDocuments(Base):
                                  "an allowlist entry covered it")
                 tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
                                gate)
-        self.assertEqual(sorted(asked), sorted(HEREDOC_BACKSTOP.values()), "v1 asked about each")
+        self.assertEqual(sorted(asked), sorted(commands.values()), "v1 asked about each")
         self.assertEqual(self.ran, [], "a no ran nothing")
         for profile in (PP.AUTO, PP.ASK):
             asker = Asker(Decision.DENY)
             permit = v2_permissions.build_permit(context(self.root, profile), asker)
-            for label, command in HEREDOC_BACKSTOP.items():
+            for label, command in commands.items():
                 with self.subTest(profile=profile.value, shape=label):
                     self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
-            self.assertEqual(len(asker.seen), len(HEREDOC_BACKSTOP), f"v2 asked ({profile})")
+            self.assertEqual(len(asker.seen), len(commands), f"v2 asked ({profile})")
 
     @staticmethod
     def alone(line):
@@ -3793,7 +4079,8 @@ class HereDocuments(Base):
                 self.assertIsNone(reading.deny, line)
                 self.assertIsNotNone(reading.unsure, line)
                 self.assertEqual(general, rules.ALLOW, line)
-                command = in_a_body(line)
+                self.assert_data_body(in_a_body(line))
+                command = "sort notes.txt; " + in_a_body(line)
                 commands.append(command)
                 self.assert_backstop(command)
                 Path(config.ALLOWLIST_PATH).write_text(json.dumps(
@@ -3827,7 +4114,8 @@ class HereDocuments(Base):
             with self.subTest(label):
                 reading, _ = self.alone(line)
                 self.assertIsNotNone(reading.deny, line)
-                self.assert_backstop(in_a_body(line))
+                self.assert_data_body(in_a_body(line))
+                self.assert_backstop("sort notes.txt; " + in_a_body(line))
 
     def test_a_marker_on_a_command_line_after_the_body_is_still_deny(self):
         for label, command in {"after a quoted body": f"cat <<'EOF'\n{M}\nEOF\n{M}",

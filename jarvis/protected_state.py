@@ -2975,6 +2975,20 @@ def _ansi_c(text: str) -> str:
     return _ANSI_C.sub(decode, text)
 
 
+def _ansi_c_shell_segment(segment: str) -> str:
+    """Decode the shell around inlined bodies, leaving their payloads quoted."""
+    if "$'" not in segment:
+        return segment
+    pieces = []
+    start = 0
+    for redirect in rules.redirections(segment):
+        if redirect.op == "<<<":
+            word_start = redirect.end - len(redirect.word)
+            pieces.extend((_ansi_c(segment[start:word_start]), redirect.word))
+            start = redirect.end
+    return "".join(pieces) + _ansi_c(segment[start:])
+
+
 def _substitutions(text: str, limit: int) -> tuple[list[str], bool]:
     """The command lines inside `$(…)`, `<(…)`, `>(…)` and backticks, at this
     level only, and whether there were more than `limit` of them.
@@ -3021,6 +3035,7 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
     total = _Seen()
     # As bash reads it: `\<newline>` removed first, so a continuation in the
     # middle of a path or an operator hides nothing (2026-10-09).
+    reading = rules.heredoc_data_reading(command)
     command = _ansi_c(rules.join_continuations(command))
     budget = state.budget
     inner, overflow = _substitutions(command, max(_MAX_SPANS - budget.spans, 0))
@@ -3036,7 +3051,12 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
             named |= nested.read
     if overflow:
         total.touches.append(_opaque(f"more than {_MAX_SPANS} substitutions, too many to judge"))
-    parts = [_segment(s, state, protected, ids, depth) for s in rules.segments(command)]
+    # Keep the operator's redirects and the source fed to an interpreter.
+    # The separate substitution check above still reads the original text.
+    segments = rules.segments(command if reading is None else reading)
+    if reading is not None:
+        segments = [_ansi_c_shell_segment(segment) for segment in segments]
+    parts = [_segment(s, state, protected, ids, depth) for s in segments]
     for k, part in enumerate(parts):
         total.touches += part.touches
         total.writes = total.writes or part.writes
