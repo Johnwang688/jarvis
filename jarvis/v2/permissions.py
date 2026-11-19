@@ -1107,9 +1107,12 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str],
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
         judge = v1_files.credential_folder_judge()
-        return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge)
+        # The VEX folder exception: only for a segment that reads, as written
+        # (the wrapper-peeled `tokens` and the raw words must both say so).
+        vex = _vex_reader(tokens, segment) and _vex_reader(rules._tokens(rules.strip_redirections(segment)))
+        return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge, vex)
                     for token in tokens + _path_words(segment))
-                or _shell_walk_holds(tokens, bases)
+                or _shell_walk_holds(tokens, bases, vex)
                 or _xargs_unseen(segment, tokens))
     if kind == "credential_read":
         return _reads_credential(tokens, bases) or _git_env_risky(segment)
@@ -1199,7 +1202,146 @@ def _glob_reaches(pattern: str) -> bool:
     return covers(users, tail=True)
 
 
-def _word_reaches_credential(word: str, bases, judge) -> bool:
+_VEX_SDK_PROFILES = 64
+# What a piece of an excepted path may be made of: plain ASCII name
+# characters. Anything else gets no exception: `:` and `=` join a second path
+# onto the word, `\\` is a separator to Windows, a stream name follows `:`,
+# `@(…)` and `+(…)` are patterns under extglob, and a letter that only folds
+# to ASCII (`ſ`) is another folder on a case-sensitive drive.
+_VEX_SDK_PIECE = re.compile(r"[A-Za-z0-9_ .\-]+")
+
+# The exception is for reading. Only a segment whose program is one of these,
+# written bare, with none of the listed options, gets it; every other program
+# that names the folder asks as before (a writer could plant a link there, a
+# `-C`/`--chdir` option moves a relative operand into it, `find -exec` runs
+# anything). The list says what is safe, never what is dangerous.
+_VEX_READERS: dict[str, tuple[str, ...]] = {
+    "ls": ("-L", "--dereference"), "cat": (), "head": (), "tail": (),
+    "wc": ("--files0-from",), "stat": (), "strings": (), "cd": (), "pushd": (),
+    "echo": (), "test": (), "basename": (), "dirname": (), "cmp": (),
+    "md5sum": ("-c", "--check"), "sha256sum": ("-c", "--check"),
+    "grep": ("-R", "--dereference-recursive", "-f", "--file"),
+    "rg": ("-L", "--follow", "-f", "--file", "--pre", "--hostname-bin"),
+    "find": ("-L", "-H", "-follow", "-exec", "-execdir", "-ok", "-okdir", "-delete",
+             "-fprint", "-fprint0", "-fprintf", "-fls", "-files0-from"),
+}
+_VEX_SED_PRINT = re.compile(r"[0-9$,]*p")
+_VEX_ASSIGNED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$\(")
+
+
+def _vex_reader(tokens: list[str], segment: str | None = None) -> bool:
+    """Whether the segment only reads: its program is on `_VEX_READERS`
+    (written bare; a `NAME=$(` in front is the usual `SDK=$(ls -d …)`) and
+    carries none of that program's excluded options, or it is `sed -n` with
+    one print script. No word may have a `..` piece or hold an expansion,
+    and the segment (when given) redirects nothing but its errors, to
+    `/dev/null` or onto its output: a redirection writes."""
+    if not tokens:
+        return False
+    if segment is not None:
+        try:
+            redirects = rules.redirections(segment)
+        except Exception:      # noqa: BLE001 — unreadable: no exception
+            return False
+        for redirect in redirects:
+            if segment[redirect.start:redirect.end].replace(" ", "") not in ("2>&1", "2>/dev/null"):
+                return False
+    words = list(tokens)
+    words[0] = _VEX_ASSIGNED.sub("", words[0], count=1)
+    program = words[0]
+    if any(".." in word.split("/") or "$" in word or "`" in word for word in words):
+        return False        # an expansion could be an option (`o=-R; grep $o`) or a sed command
+    if program == "sed":
+        return (len(words) >= 4 and words[1] == "-n"
+                and bool(_VEX_SED_PRINT.fullmatch(words[2].strip("'\"")))
+                and not any(word.startswith("-") for word in words[3:]))
+    excluded = _VEX_READERS.get(program)
+    if excluded is None:
+        return False
+    for word in words[1:]:
+        if not word.startswith("-"):
+            continue
+        name = word.split("=", 1)[0]
+        if name in excluded:
+            return False
+        if word.startswith("--") and len(name) > 2 and any(
+                option.startswith(name) for option in excluded if option.startswith("--")):
+            return False        # GNU reads an unambiguous prefix (`--deref`) as the option
+        if not word.startswith("--") and any(
+                len(option) == 2 and option[1] in word[1:] for option in excluded):
+            return False        # a short option inside a cluster (`-rnR`)
+    return True
+
+
+def _vex_sdk_parts(path: str) -> list[str] | None:
+    """The pieces of `path` below the Windows users folder when it is at or
+    below a profile's VEX extension folder as written (`config.WINDOWS_VEX_SDK`),
+    else None. No `..` or `.` piece, no empty piece, no piece Windows would
+    read as another name (a trailing dot or space), and only plain ASCII
+    name characters (`_VEX_SDK_PIECE`; `*` alone may stand for the profile)."""
+    root = os.path.abspath(config.windows_users_root()).rstrip("/")
+    if not path.startswith("/") or len(path) > 4096 or "\0" in path:
+        return None
+    if not path.casefold().startswith(root.casefold() + "/"):
+        return None
+    parts = path[len(root) + 1:].rstrip("/").split("/")
+    if any(part in ("", ".", "..") or part != part.rstrip(". ")
+           or not (_VEX_SDK_PIECE.fullmatch(part) or (index == 0 and part == "*"))
+           for index, part in enumerate(parts)):
+        return None
+    below = tuple(part.lower() for part in parts[1:])
+    if not any(below[:len(sdk)] == sdk for sdk in config.WINDOWS_VEX_SDK):
+        return None
+    return parts
+
+
+def _vex_sdk_path(path: str) -> bool:
+    """A fixed path at or below a profile's VEX extension folder, which holds no
+    credential (`config.WINDOWS_VEX_SDK`): the profile is one named folder
+    (not a dot entry or a shared one), no piece is a glob, and the path
+    resolves to itself, so no link on the way leads anywhere else. A path
+    that cannot be resolved gets no exception."""
+    parts = _vex_sdk_parts(path)
+    if parts is None or any(_GLOB_MAGIC & set(part) for part in parts):
+        return False
+    profile = parts[0]
+    if (config.windows_closed_name(profile) or profile.casefold() in config.WINDOWS_NOT_PROFILES):
+        return False
+    try:
+        return os.path.realpath(path).casefold() == os.path.abspath(path).casefold()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _vex_sdk_glob(pattern: str) -> bool:
+    """`<users>/*/<the VEX folder>/…` with every later piece fixed: the one
+    glob that finds it whoever the profile is. True only when every
+    profile it could match passes `_vex_sdk_path`; a users folder that cannot
+    be listed, or holds too many entries, gets no exception."""
+    parts = _vex_sdk_parts(pattern)
+    if parts is None or parts[0] != "*" or any(_GLOB_MAGIC & set(part) for part in parts[1:]):
+        return False
+    root = pattern[:len(pattern) - len("/".join(parts)) - 1]
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    if len(names) > _VEX_SDK_PROFILES:
+        return False
+    tail = "/".join(parts[1:])
+    for name in names:
+        if name.startswith("."):
+            continue      # the shell's `*` skips dot entries
+        # A shared folder (`Public`, `All Users`) is matched by `*` too, and
+        # is no profile: if the path exists there, the glob gets no exception.
+        candidate = f"{root}/{name}/{tail}"
+        folder = "/".join([root, name, *parts[1:1 + len(config.WINDOWS_VEX_SDK[0])]])
+        if os.path.lexists(folder) and not _vex_sdk_path(candidate):
+            return False
+    return True
+
+
+def _word_reaches_credential(word: str, bases, judge, vex: bool = False) -> bool:
     """A shell word that names a path in a credential folder or store, a
     Windows profile's closed entry, or through `/proc/<pid>/{cwd,root,…}`:
     each brace variant placed where the shell finds it (`_place_word`), a
@@ -1219,9 +1361,9 @@ def _word_reaches_credential(word: str, bases, judge) -> bool:
             if _proc_reach(placed) == 2:
                 return True
             if _GLOB_MAGIC & set(placed):
-                if _glob_reaches(placed):
+                if _glob_reaches(placed) and not (vex and _vex_sdk_glob(placed)):
                     return True
-            elif judge(placed):
+            elif judge(placed) and not (vex and _vex_sdk_path(placed)):
                 return True
     return False
 
@@ -1267,7 +1409,7 @@ def _walk_recursive(tokens: list[str]) -> bool:
     return program in _WALKERS
 
 
-def _shell_walk_holds(tokens: list[str], bases) -> bool:
+def _shell_walk_holds(tokens: list[str], bases, vex: bool = False) -> bool:
     """A recursive search or walk whose root holds a credential folder or
     store (`files.credential_folder_holds`, the read tools' reading), or lies
     in one: its operands as the shell finds them (`~`, `$HOME`, a relative
@@ -1289,6 +1431,8 @@ def _shell_walk_holds(tokens: list[str], bases) -> bool:
             text = _place_word(word, base)
             if text is None:
                 return True
+            if vex and (_vex_sdk_path(text) or _vex_sdk_glob(text)):
+                continue        # a walk rooted in the VEX folder reaches no credential
             parts = text.split("/")
             wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
             fixed = ("/".join(parts[:wild]) or "/") if wild is not None else text
