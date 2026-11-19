@@ -49,6 +49,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from desktopwire import APPS, NAV_KEYS, launch_name, private_key, prove_windows, wire
+from desktopguard import (
+    Guard, HUD_REGION_NAME, KEY_NAMES, MaskedTree, Rect as ScreenRect, Refused, black_out,
+    own_image, require_expected_control,
+)
+import windowpolicy as window_policy
 from voiceactions import Actions, exact_start_app
 from voicetype import WindowsInput
 
@@ -956,6 +961,564 @@ def op_screenshot(req):
             "size": [image.width, image.height]}
 
 
+# ---------------------------------------------------------------------------
+# Window-scoped desktop adapter and operations
+# ---------------------------------------------------------------------------
+
+_BROWSER_IMAGES = frozenset({
+    "chrome.exe", "chromium.exe", "msedge.exe", "firefox.exe", "brave.exe",
+    "vivaldi.exe", "opera.exe", "opera_gx.exe", "waterfox.exe", "librewolf.exe",
+    "iexplore.exe", "tor.exe", "arc.exe", "zen.exe", "browser.exe",
+})
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+class WindowsDesktop:
+    def __init__(self):
+        # CU1 Win32 signatures and last-error handling require Windows verification.
+        self.user = ctypes.WinDLL("user32", use_last_error=True)
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+        signatures = (
+            (self.user.GetTopWindow, [wt.HWND], wt.HWND),
+            (self.user.GetWindow, [wt.HWND, wt.UINT], wt.HWND),
+            (self.user.IsWindowVisible, [wt.HWND], wt.BOOL),
+            (self.user.IsIconic, [wt.HWND], wt.BOOL),
+            (self.user.GetWindowThreadProcessId, [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
+            # c_void_p: the attribute decides the type (a RECT for the frame, a DWORD for the cloak).
+            (self.dwm.DwmGetWindowAttribute,
+             [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD], ctypes.c_long),
+            (self.user.MonitorFromWindow, [wt.HWND, wt.DWORD], wt.HMONITOR),
+            (self.user.GetMonitorInfoW, [wt.HMONITOR, ctypes.POINTER(_MonitorInfo)], wt.BOOL),
+            (self.user.GetWindowLongW, [wt.HWND, ctypes.c_int], wt.LONG),
+            (self.user.GetWindowTextW, [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
+            (self.user.GetClassNameW, [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
+            (self.user.GetForegroundWindow, [], wt.HWND),
+            (self.user.WindowFromPoint, [wt.POINT], wt.HWND),
+            (self.user.GetAncestor, [wt.HWND, wt.UINT], wt.HWND),
+            (self.user.SetCursorPos, [ctypes.c_int, ctypes.c_int], wt.BOOL),
+            (self.user.GetCursorPos, [ctypes.POINTER(wt.POINT)], wt.BOOL),
+            (self.user.GetAsyncKeyState, [ctypes.c_int], wt.SHORT),
+            (self.user.SetThreadDpiAwarenessContext, [wt.HANDLE], wt.HANDLE),
+            (self.kernel.OpenProcess, [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE),
+            (self.kernel.QueryFullProcessImageNameW,
+             [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)], wt.BOOL),
+            (self.kernel.CloseHandle, [wt.HANDLE], wt.BOOL),
+            (self.advapi.OpenProcessToken,
+             [wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE)], wt.BOOL),
+            (self.advapi.GetTokenInformation,
+             [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL),
+        )
+        for function, args, result in signatures:
+            function.argtypes, function.restype = args, result
+
+    def top_windows(self):
+        # Windows verification pending: walk the actual z-order and refuse on failure or a cycle.
+        handles = []
+        seen = set()
+        ctypes.set_last_error(0)
+        hwnd = self.user.GetTopWindow(None)
+        while hwnd:
+            if hwnd in seen or len(seen) >= 10000:
+                raise Refused("The desktop window order is unavailable.")
+            seen.add(hwnd)
+            if (self.user.IsWindowVisible(hwnd) and not self.user.IsIconic(hwnd)
+                    and not self._cloaked(hwnd)):
+                handles.append(hwnd)
+            ctypes.set_last_error(0)
+            hwnd = self.user.GetWindow(hwnd, 2)  # GW_HWNDNEXT
+        if ctypes.get_last_error():
+            raise Refused("The desktop window order is unavailable.")
+        return handles
+
+    def pid(self, hwnd):
+        # Windows verification pending: owner PID lookup on a live HWND.
+        pid = wt.DWORD()
+        thread = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value if thread and pid.value else None
+
+    def _elevated(self, process):
+        # Windows verification pending: TokenElevation is a single DWORD.
+        token = wt.HANDLE()
+        if not self.advapi.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return None
+        try:
+            elevated = wt.DWORD()
+            size = wt.DWORD()
+            if self.advapi.GetTokenInformation(
+                    token, 20, ctypes.byref(elevated), ctypes.sizeof(elevated), ctypes.byref(size)):
+                if size.value == ctypes.sizeof(elevated):
+                    return bool(elevated.value)
+            return None
+        finally:
+            self.kernel.CloseHandle(token)
+
+    def _process_info(self, pid):
+        # Windows verification pending: limited process access and full image query.
+        if pid is None:
+            return None, None
+        process = self.kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return None, None
+        try:
+            size = wt.DWORD(32768)
+            path = ctypes.create_unicode_buffer(size.value)
+            image = path.value if self.kernel.QueryFullProcessImageNameW(
+                process, 0, path, ctypes.byref(size)) else None
+            return image, self._elevated(process)
+        finally:
+            self.kernel.CloseHandle(process)
+
+    def facts(self, hwnd):
+        pid = self.pid(hwnd)
+        image, elevated = self._process_info(pid)
+        # Windows verification pending: class lookup and PID stability across the queries.
+        name = ctypes.create_unicode_buffer(256)
+        size = self.user.GetClassNameW(hwnd, name, len(name))
+        if pid is None or pid != self.pid(hwnd):
+            return window_policy.Window(None, None, None, None)
+        # This also protects any other program run by the base Python, as intended.
+        own = pid == os.getpid() or own_image(
+            image, executable=sys.executable, prefix=sys.prefix,
+            base_executable=getattr(sys, "_base_executable", None), base_prefix=sys.base_prefix)
+        return window_policy.Window(image, elevated, name.value if size else None, own)
+
+    def occlusion_rect(self, hwnd):
+        # Windows verification pending: use the DWM visible frame in physical screen pixels.
+        rect = wt.RECT()
+        # DWMWA_EXTENDED_FRAME_BOUNDS
+        if self.dwm.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+            return None
+        return ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
+
+    def rect(self, hwnd):
+        # Windows verification pending: clip to the monitor Windows assigns to the window.
+        frame = self.occlusion_rect(hwnd)
+        monitor = self.user.MonitorFromWindow(hwnd, 0)  # MONITOR_DEFAULTTONULL
+        info = _MonitorInfo(cbSize=ctypes.sizeof(_MonitorInfo))
+        if frame is None or not monitor or not self.user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        bounds = info.rcMonitor
+        return ScreenRect(max(frame.left, bounds.left), max(frame.top, bounds.top),
+                          min(frame.right, bounds.right), min(frame.bottom, bounds.bottom))
+
+    def _cloaked(self, hwnd):
+        # Windows verification pending. A cloaked window (another virtual
+        # desktop, a hidden shell surface such as Search or Start) reports
+        # itself visible but has no pixels on screen: it is not listed, so it
+        # can neither be captured nor stand in front of what is really there.
+        # A failed query lists the window; the guard then judges it as usual.
+        cloaked = wt.DWORD()
+        result = self.dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        return result == 0 and cloaked.value != 0
+
+    def title(self, hwnd):
+        # Windows verification pending: zero length can also be a valid empty caption.
+        buf = ctypes.create_unicode_buffer(32768)
+        ctypes.set_last_error(0)
+        size = self.user.GetWindowTextW(hwnd, buf, len(buf))
+        if (not size and ctypes.get_last_error()) or size == len(buf) - 1:
+            raise Refused("The window title is unavailable.")
+        return buf.value
+
+    def is_hud(self, hwnd):
+        # Resolve the image even when the title matches to distinguish browsers from apps.
+        if not forbidden_title(self.title(hwnd)):
+            return False
+        image, _ = self._process_info(self.pid(hwnd))
+        basename = window_policy.image_name(image)
+        if basename is None:
+            raise Refused("The window image is unavailable.")
+        return basename in _BROWSER_IMAGES
+
+    def hud_regions(self, hwnd):
+        # Windows verification pending: browser providers must expose the exact UIA
+        # name and screen geometry of the labeled containers. Partial reads fail closed.
+        try:
+            root = auto.ControlFromHandle(hwnd)
+            if root is None:
+                return None
+            pending = [root]
+            regions = []
+            visited = 0
+            while pending:
+                node = pending.pop()
+                visited += 1
+                if visited > 10000:
+                    return None
+                if node.Name == HUD_REGION_NAME and not node.IsOffscreen:
+                    bounds = node.BoundingRectangle
+                    regions.append(ScreenRect(bounds.left, bounds.top, bounds.right, bounds.bottom))
+                pending.extend(node.GetChildren())
+            return list(dict.fromkeys(regions))
+        except Exception:
+            return None
+
+    def foreground(self):
+        # Windows verification pending: exact foreground HWND lookup.
+        return self.user.GetForegroundWindow() or None
+
+    def window_at(self, x, y):
+        # Windows verification pending: GA_ROOT maps a child hit to its top-level window.
+        hit = self.user.WindowFromPoint(wt.POINT(x, y))
+        return (self.user.GetAncestor(hit, 2) or None) if hit else None
+
+    def move_pointer(self, point):
+        # Windows verification pending: SetCursorPos and GetCursorPos use guard coordinates.
+        if not self.user.SetCursorPos(*point):
+            raise Refused("The pointer could not be positioned.")
+
+    def pointer_at(self, point):
+        pos = wt.POINT()
+        return self.user.GetCursorPos(ctypes.byref(pos)) and (pos.x, pos.y) == point
+
+    def require_idle_input(self):
+        # Windows verification pending: GetAsyncKeyState high bit reports currently held input.
+        held = (0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12, 0x5B, 0x5C)
+        if any(self.user.GetAsyncKeyState(vk) & 0x8000 for vk in held):
+            raise Refused("Release held mouse buttons or modifiers and try again.")
+
+    def set_dpi_context(self, context):
+        # Windows verification pending: per-monitor awareness aligns Win32 with UIA screen pixels.
+        previous = self.user.SetThreadDpiAwarenessContext(context)
+        if not previous:
+            raise Refused("Windows could not establish screen pixel coordinates.")
+        return previous
+
+
+_WINDOW_DESKTOP = None
+_WINDOW_GUARD = None
+_WINDOW_REFS = {}
+_WINDOW_SCREENSHOTS = {}
+
+
+def _reset_window_ops():
+    global _WINDOW_DESKTOP, _WINDOW_GUARD
+    _WINDOW_DESKTOP = None
+    _WINDOW_GUARD = None
+    _WINDOW_REFS.clear()
+    _WINDOW_SCREENSHOTS.clear()
+
+
+def _window_grant(req):
+    return _WINDOW_GUARD.capture(req.get("window"))
+
+
+def _window_context(req):
+    return req["scope"], req.get("window")
+
+
+def _same_window(before, after):
+    if (before.hwnd, before.rect) != (after.hwnd, after.rect):
+        raise Refused("The window moved. Inspect it again.")
+
+
+def _window_backend(hwnd):
+    # Windows verification pending: UIA must expose this HWND's live tree without activation.
+    return UIABackend(hwnd)
+
+
+def op_windows(_req):
+    return {"windows": _WINDOW_GUARD.windows()}
+
+
+def op_window_snapshot(req):
+    grant = _window_grant(req)
+    tree = MaskedTree(_window_backend(grant.hwnd), grant.masks)
+    text, refs = snapshot(tree, ref_prefix=secrets.token_hex(8) + "-e")
+    if grant != _window_grant(req):
+        raise Refused("The window changed during the snapshot. Inspect it again.")
+    _WINDOW_REFS[_window_context(req)] = refs
+    return {"snapshot": text, "refs": {
+        ref: {"name": info["name"], "role": info["role"]} for ref, info in refs.items()
+    }}
+
+
+def _window_selector(req, *, focus=False, ref_only=False):
+    selectors = []
+    if "ref" in req:
+        if not isinstance(req["ref"], str):
+            raise Refused("Use a ref from the current snapshot.")
+        selectors.append("ref")
+    if "x" in req or "y" in req:
+        if any(type(req.get(axis)) is not int for axis in ("x", "y")):
+            raise Refused("Use integer screenshot coordinates.")
+        selectors.append("point")
+    if "focus" in req:
+        if req["focus"] is not True or not focus:
+            raise Refused("Focus is unavailable for this operation.")
+        selectors.append("focus")
+    if len(selectors) != 1 or (ref_only and selectors[0] != "ref"):
+        raise Refused("Specify one supported control selector.")
+    return selectors[0]
+
+
+def _window_point(req, grant):
+    if _WINDOW_SCREENSHOTS.get(_window_context(req)) != grant.rect:
+        raise Refused("Take a fresh screenshot of this window before using coordinates.")
+    return grant.screenshot_point(req["x"], req["y"])
+
+
+def _owned_window_control(node, hwnd):
+    # Windows verification pending: UIA parent links associate point and focus
+    # results with the target, including providers with no child NativeWindowHandle.
+    for _ in range(128):
+        if node is None:
+            break
+        if node.NativeWindowHandle == hwnd:
+            return True
+        node = node.GetParentControl()
+    return False
+
+
+def _window_control(req, grant, selector, point=None):
+    backend = _window_backend(grant.hwnd)
+    if selector == "ref":
+        meta = _WINDOW_REFS.get(_window_context(req), {}).get(req["ref"])
+        if meta is None:
+            raise Refused("Take a fresh snapshot for this scope and window.")
+        try:
+            node = resolve(MaskedTree(backend, grant.masks), meta)
+        except StaleRef:
+            raise Refused("The control changed. Take a fresh snapshot.") from None
+    elif selector == "point":
+        grant.check_point(point)
+        if _WINDOW_DESKTOP.window_at(*point) != grant.hwnd:
+            raise Refused("The requested point is covered.")
+        # Windows verification pending: UIA hit testing must follow screen coordinates.
+        node = auto.ControlFromPoint(*point)
+    else:
+        if _WINDOW_DESKTOP.foreground() != grant.hwnd:
+            raise Refused("The target window must be in the foreground.")
+        # Windows verification pending: UIA focused-control lookup and keyboard focus flag.
+        node = auto.GetFocusedControl()
+        if node is None or not node.HasKeyboardFocus:
+            raise Refused("The focused control is unavailable.")
+    if not _owned_window_control(node, grant.hwnd):
+        raise Refused("The control does not belong to this window.")
+    info = backend.describe(node)
+    bounds = ScreenRect(*info["rect"])
+    if info["offscreen"]:
+        raise Refused("The requested control is offscreen.")
+    grant.check_control(bounds, point)
+    return node, info, bounds
+
+
+def op_window_probe(req):
+    selector = _window_selector(req, focus=True)
+    grant = _window_grant(req)
+    point = _window_point(req, grant) if selector == "point" else None
+    _, info, _ = _window_control(req, grant, selector, point)
+    if grant != _window_grant(req):
+        raise Refused("The window changed during the probe. Inspect it again.")
+    return {"name": info["name"], "role": info["role"], "rect": info["rect"]}
+
+
+def _window_input_control(req, grant, selector, point, *, keys=None):
+    live = _window_grant(req)
+    _same_window(grant, live)
+    node, info, bounds = _window_control(req, live, selector, point)
+    require_expected_control(req.get("expect"), info)
+    if not info["enabled"]:
+        raise Refused("The control is disabled.")
+    if selector == "ref":
+        point = ((bounds.left + bounds.right) // 2, (bounds.top + bounds.bottom) // 2)
+    acted = _WINDOW_GUARD.act(req["window"], point=point, element=bounds, keys=keys,
+                              focus=bounds if keys is not None else None)
+    _same_window(live, acted)
+    if any(mask not in live.masks for mask in acted.masks):
+        raise Refused("The protected areas changed. Inspect the window again.")
+    return node, info, point
+
+
+def _window_mouse(req, *, amount=None):
+    selector = _window_selector(req)
+    grant = _window_grant(req)
+    point = _window_point(req, grant) if selector == "point" else None
+    _, _, destination = _window_input_control(req, grant, selector, point)
+    _WINDOW_DESKTOP.require_idle_input()
+    _WINDOW_DESKTOP.move_pointer(destination)
+    # Re-read after moving the pointer: hover can open or replace a control.
+    node, _, current = _window_input_control(req, grant, selector, point)
+    if destination != current or not _WINDOW_DESKTOP.pointer_at(current):
+        raise Refused("The pointer or control moved. Inspect the window again.")
+    if selector == "ref":
+        # Windows verification pending: a physical click or wheel hit must still be the ref.
+        hit = auto.ControlFromPoint(*current)
+        if hit is None or not auto.CompareControls(node, hit):
+            raise Refused("The pointer is over a different control.")
+    if amount is not None and _WINDOW_DESKTOP.foreground() != grant.hwnd:
+        raise Refused("The target window must be in the foreground to scroll.")
+    _WINDOW_DESKTOP.require_idle_input()
+    # Windows verification pending: SendInput mouse flags and wheel direction.
+    backend = WindowsInput()
+    events = (backend.INPUT * (2 if amount is None else 1))()
+    if amount is None:
+        events[0].mi.dwFlags, events[1].mi.dwFlags = 0x0002, 0x0004
+    else:
+        events[0].mi.dwFlags = 0x0800
+        events[0].mi.mouseData = (amount * 120) & 0xFFFFFFFF
+    sent = backend.user32.SendInput(len(events), events, ctypes.sizeof(backend.INPUT))
+    if sent != len(events):
+        if amount is None and sent == 1:
+            backend.user32.SendInput(1, ctypes.byref(events[1]), ctypes.sizeof(backend.INPUT))
+        raise Refused("Windows could not send the complete mouse input.")
+
+
+def op_window_click(req):
+    _window_mouse(req)
+    return {"clicked": True}
+
+
+def op_window_scroll(req):
+    amount = req.get("amount")
+    if type(amount) is not int or not 0 < abs(amount) <= 100:
+        raise Refused("Use a signed scroll amount of 1 to 100 wheel detents.")
+    _window_mouse(req, amount=amount)
+    return {"scrolled": amount}
+
+
+_WINDOW_MODIFIER_CODES = {
+    "shift": 0xA0, "lshift": 0xA0, "rshift": 0xA1,
+    "ctrl": 0xA2, "control": 0xA2, "lctrl": 0xA2, "rctrl": 0xA3,
+    "alt": 0xA4, "lalt": 0xA4, "ralt": 0xA5, "altgr": 0xA5,
+}
+_WINDOW_KEY_CODES = {
+    **_WINDOW_MODIFIER_CODES,
+    "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "return": 0x0D,
+    "esc": 0x1B, "escape": 0x1B, "space": 0x20,
+    "pageup": 0x21, "pagedown": 0x22, "end": 0x23, "home": 0x24,
+    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    "insert": 0x2D, "delete": 0x2E, "del": 0x2E,
+    **{char.lower(): ord(char) for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+    **{f"f{i}": 0x6F + i for i in range(1, 25)},
+}
+if set(_WINDOW_KEY_CODES) != set(KEY_NAMES):  # the guard passes exactly what this table can send
+    raise RuntimeError("The bridge key table and the guard's key names differ.")
+
+
+def _window_keys(keys):
+    if not isinstance(keys, list) or not 1 <= len(keys) <= len(_WINDOW_MODIFIER_CODES) + 1:
+        raise Refused("Supply one key name and any modifiers as a list.")
+    codes = [_WINDOW_KEY_CODES.get(key.strip().casefold()) if isinstance(key, str) else None
+             for key in keys]
+    if None in codes or len(set(codes)) != len(codes):
+        raise Refused("Use distinct supported key names.")
+    return sorted(codes, key=lambda vk: vk not in _WINDOW_MODIFIER_CODES.values())
+
+
+def _send_window_keys(backend, codes):
+    # Windows verification pending: virtual-key chord down/up order and extended flags.
+    extended = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0xA3, 0xA5}
+    down = [(vk, 0, int(vk in extended)) for vk in codes]
+    up = [(vk, scan, flags | 2) for vk, scan, flags in reversed(down)]
+    try:
+        backend._send(down + up)
+    except OSError:
+        backend._send(up)
+        raise
+
+
+def op_window_key(req):
+    keys = req.get("keys")
+    codes = _window_keys(keys)
+    grant = _window_grant(req)
+    backend = WindowsInput()
+    _window_input_control(req, grant, "focus", None, keys=keys)
+    _WINDOW_DESKTOP.require_idle_input()
+    _send_window_keys(backend, codes)
+    return {"sent": keys}
+
+
+def op_window_type(req):
+    selector = _window_selector(req, ref_only=True)
+    text = req.get("text")
+    submit = req.get("submit", False)
+    if (not isinstance(text, str) or any(ord(char) < 32 or ord(char) == 127 for char in text)
+            or type(submit) is not bool):
+        raise Refused("Provide plain text and a boolean submit flag.")
+    grant = _window_grant(req)
+    node, info, point = _window_input_control(req, grant, selector, None)
+    if info["role"] not in ("editable", "combobox"):
+        raise Refused("The ref must identify a text field.")
+    if _WINDOW_DESKTOP.foreground() != grant.hwnd:
+        raise Refused("The target window must be in the foreground.")
+    # Windows verification pending: UIA SetFocus must focus this exact field.
+    node.SetFocus()
+
+    def verify_focus(keys):
+        focused, _, _ = _window_input_control(req, grant, "focus", None, keys=keys)
+        # Windows verification pending: UIA element identity survives a fresh focus lookup.
+        if not auto.CompareControls(node, focused) or _WINDOW_DESKTOP.window_at(*point) != grant.hwnd:
+            raise Refused("The requested text field lost focus.")
+        _WINDOW_DESKTOP.require_idle_input()
+
+    backend = WindowsInput()
+    verify_focus(["ctrl", "a"])
+    _send_window_keys(backend, [0x11, 0x41])
+    if text:
+        # Typed text is unmodified character keys: one such key stands for it in the guard.
+        verify_focus(["a"])
+        # Windows verification pending: Unicode SendInput to the checked text field.
+        backend.text(text)
+    else:
+        verify_focus(["backspace"])
+        _send_window_keys(backend, [0x08])
+    if submit:
+        verify_focus(["enter"])
+        _send_window_keys(backend, [0x0D])
+    return {"typed": True}
+
+
+def op_window_screenshot(req):
+    from PIL import ImageGrab
+
+    grant = _window_grant(req)
+    rect = grant.rect
+    # Windows verification pending: multi-monitor screen pixels, including negative origins.
+    image = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom), all_screens=True)
+    after = _window_grant(req)
+    _same_window(grant, after)
+    if image.size != (rect.right - rect.left, rect.bottom - rect.top):
+        raise Refused("The screenshot does not match the window bounds.")
+    black_out(image, (rect.left, rect.top), grant.masks + after.masks)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    data = base64.b64encode(buf.getvalue()).decode()
+    _WINDOW_SCREENSHOTS[_window_context(req)] = rect
+    return {"image_b64": data, "bytes": len(data), "marks": 0, "size": list(image.size)}
+
+
+_WINDOW_OPS = {
+    "windows": op_windows, "window_snapshot": op_window_snapshot,
+    "window_probe": op_window_probe, "window_click": op_window_click,
+    "window_type": op_window_type, "window_key": op_window_key,
+    "window_scroll": op_window_scroll, "window_screenshot": op_window_screenshot,
+}
+
+
+def _scoped_window_op(op, req, paired):
+    global _WINDOW_DESKTOP, _WINDOW_GUARD
+    if _WINDOW_GUARD is None:
+        _WINDOW_DESKTOP = WindowsDesktop()
+        _WINDOW_GUARD = Guard(_WINDOW_DESKTOP)
+    _WINDOW_GUARD.set_hud(req.get("hud_sensitive"))
+    if not paired or _WINDOW_DESKTOP._process_info(os.getpid())[1] is not False:
+        raise Refused("Window operations need the paired, non-elevated Windows bridge.")
+    if not isinstance(req.get("scope"), str) or not req["scope"].strip():
+        raise Refused("Window operations need a scope.")
+    previous = _WINDOW_DESKTOP.set_dpi_context(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    try:
+        return _WINDOW_OPS[op](req)
+    finally:
+        _WINDOW_DESKTOP.set_dpi_context(previous)
+
+
 OPS = {
     "ping": op_ping, "open": op_open, "snapshot": op_snapshot,
     "click": op_click, "type": op_type, "key": op_key,
@@ -979,6 +1542,7 @@ def serve_once(host: str, port: int) -> None:
         wire.send_json(stream, {"hello": "jarvis-desktop-bridge", "version": "1"})
     conn.settimeout(None)
     STATE.clear()  # a new daemon connection cannot reuse a previous chat snapshot
+    _reset_window_ops()
 
     while True:
         line = stream.readline()
@@ -990,6 +1554,19 @@ def serve_once(host: str, port: int) -> None:
         except json.JSONDecodeError:
             continue
         op = req.get("op")
+        if isinstance(op, str) and op in _WINDOW_OPS:
+            try:
+                result = _scoped_window_op(op, req, paired)
+                payload = {"id": req.get("id"), "ok": True, "result": result}
+            except Refused as exc:
+                payload = {"id": req.get("id"), "ok": False, "error": f"Refused: {exc}"}
+            except Exception:
+                payload = {"id": req.get("id"), "ok": False,
+                           "error": "Refused: Windows could not complete the operation safely."}
+            stream.write((json.dumps(payload) + "\n").encode())
+            stream.flush()
+            print(f"[bridge] {op} -> {'ok' if payload['ok'] else payload['error']}", flush=True)
+            continue
         try:
             if (req.get("scope") or op == "launch_app") and (not paired or ctypes.windll.shell32.IsUserAnAdmin()):
                 raise RuntimeError("HUD desktop actions need the paired, non-elevated Windows bridge.")
