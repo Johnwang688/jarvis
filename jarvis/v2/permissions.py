@@ -1199,6 +1199,71 @@ def _glob_reaches(pattern: str) -> bool:
     return covers(users, tail=True)
 
 
+_VEX_SDK_PROFILES = 64
+
+
+def _vex_sdk_parts(path: str) -> list[str] | None:
+    """The pieces of `path` below the Windows users folder when it is at or
+    below a profile's VEX SDK folder as written (`config.WINDOWS_VEX_SDK`),
+    else None. No `..` or `.` piece, no empty piece, and no piece Windows
+    would read as another name (a trailing dot or space)."""
+    root = os.path.abspath(config.windows_users_root()).rstrip("/")
+    if not path.startswith("/") or len(path) > 4096 or "\0" in path:
+        return None
+    if not path.casefold().startswith(root.casefold() + "/"):
+        return None
+    parts = path[len(root) + 1:].rstrip("/").split("/")
+    if any(part in ("", ".", "..") or part != part.rstrip(". ") for part in parts):
+        return None
+    below = tuple(part.casefold() for part in parts[1:])
+    if not any(below[:len(sdk)] == sdk for sdk in config.WINDOWS_VEX_SDK):
+        return None
+    return parts
+
+
+def _vex_sdk_path(path: str) -> bool:
+    """A fixed path at or below a profile's VEX SDK folder, which holds no
+    credential (`config.WINDOWS_VEX_SDK`): the profile is one named folder
+    (not a dot entry or a shared one), no piece is a glob, and the path
+    resolves to itself, so no link on the way leads anywhere else. A path
+    that cannot be resolved gets no exception."""
+    parts = _vex_sdk_parts(path)
+    if parts is None or any(_GLOB_MAGIC & set(part) for part in parts):
+        return False
+    profile = parts[0]
+    if (config.windows_closed_name(profile) or profile.casefold() in config.WINDOWS_NOT_PROFILES):
+        return False
+    try:
+        return os.path.realpath(path).casefold() == os.path.abspath(path).casefold()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _vex_sdk_glob(pattern: str) -> bool:
+    """`<users>/*/<the SDK folder>/…` with every later piece fixed: the one
+    glob that finds the SDK whoever the profile is. True only when every
+    profile it could match passes `_vex_sdk_path`; a users folder that cannot
+    be listed, or holds too many entries, gets no exception."""
+    parts = _vex_sdk_parts(pattern)
+    if parts is None or parts[0] != "*" or any(_GLOB_MAGIC & set(part) for part in parts[1:]):
+        return False
+    root = pattern[:len(pattern) - len("/".join(parts)) - 1]
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    if len(names) > _VEX_SDK_PROFILES:
+        return False
+    tail = "/".join(parts[1:])
+    for name in names:
+        if name.startswith(".") or name.casefold() in config.WINDOWS_NOT_PROFILES:
+            continue      # the shell's `*` skips dot entries; the rest are not profiles
+        candidate = f"{root}/{name}/{tail}"
+        if os.path.lexists(candidate) and not _vex_sdk_path(candidate):
+            return False
+    return True
+
+
 def _word_reaches_credential(word: str, bases, judge) -> bool:
     """A shell word that names a path in a credential folder or store, a
     Windows profile's closed entry, or through `/proc/<pid>/{cwd,root,…}`:
@@ -1219,9 +1284,9 @@ def _word_reaches_credential(word: str, bases, judge) -> bool:
             if _proc_reach(placed) == 2:
                 return True
             if _GLOB_MAGIC & set(placed):
-                if _glob_reaches(placed):
+                if _glob_reaches(placed) and not _vex_sdk_glob(placed):
                     return True
-            elif judge(placed):
+            elif judge(placed) and not _vex_sdk_path(placed):
                 return True
     return False
 
@@ -1289,6 +1354,8 @@ def _shell_walk_holds(tokens: list[str], bases) -> bool:
             text = _place_word(word, base)
             if text is None:
                 return True
+            if _vex_sdk_path(text) or _vex_sdk_glob(text):
+                continue        # a walk rooted in the VEX SDK reaches no credential
             parts = text.split("/")
             wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
             fixed = ("/".join(parts[:wild]) or "/") if wild is not None else text

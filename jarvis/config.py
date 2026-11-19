@@ -778,6 +778,17 @@ def windows_extra(name: str) -> bool:
     return folded == "appdata" or folded.startswith("ntuser")
 
 
+# Inside a profile's closed `AppData`, the one folder v2's shell may name
+# without asking (owner decision CU-D12, 2026-11-18): the C++ SDK that VS
+# Code's or Cursor's VEX extension installs (headers and libraries). Each
+# tuple is the path below the profile, case-folded. Only this subtree: its
+# siblings (`tools`, which holds the device tool; other extensions' storage)
+# stay closed. A constant, never a setting, so no agent can widen it.
+WINDOWS_VEX_SDK: tuple[tuple[str, ...], ...] = tuple(
+    ("appdata", "roaming", editor, "user", "globalstorage", "vexrobotics.vexcode", "sdk")
+    for editor in ("code", "cursor"))
+
+
 def windows_closed_name(name: str) -> bool:
     """A profile entry closed to agents: a dot entry or `windows_extra`."""
     return name.startswith(".") or windows_extra(name)
