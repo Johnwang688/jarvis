@@ -1484,13 +1484,10 @@ _CREDENTIAL_KINDS = frozenset({"credential_command", "credential_path", "credent
 
 def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str]]],
                   targets: list[str], *, inner: list | None = None,
-                  bases: tuple = (None,),
-                  read_segments: list | None = None) -> tuple[bool, str, str]:
+                  bases: tuple = (None,)) -> tuple[bool, str, str]:
     """(matched, rule id, reason) for one rule against one tool call. A
     credential rule also reads `inner`: the commands the line hands another
-    shell (`sh -c STR`, `eval`, `ssh host STR` …). `credential_read` reads
-    `read_segments` in place of `segments` when given: the line with its data
-    here-document bodies set aside (`_heredoc_data_reading`, HD-0)."""
+    shell (`sh -c STR`, `eval`, `ssh host STR` …)."""
     if isinstance(rule, str):
         phrase = tuple(part for part in rule.split() if part)
         if not phrase:
@@ -1520,8 +1517,7 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     require_any = list(rule.get("any") or [])
     forbid = list(rule.get("none") or [])
 
-    own = read_segments if kind == "credential_read" and read_segments is not None else segments
-    judged = own + (inner or []) if kind in _CREDENTIAL_KINDS else own
+    judged = segments + (inner or []) if kind in _CREDENTIAL_KINDS else segments
     for segment, tokens, stems in judged:
         if kind is not None:
             if _kind_matches(str(kind), segment, tokens, stems, bases):
@@ -1543,129 +1539,20 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     return False, "", ""
 
 
-# The data reading (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md) is
-# taken only on a line where **every** program is on these lists, so nothing
-# on it can run a body: a list of what is safe, never of what is dangerous
-# (the review of #396 found executors no deny-list held: `make`, `awk
-# system()`, `at -f`, `taskset dash`, `$l` read from a file). A missing entry
-# costs a prompt, never a hole. None of these runs its input or arguments.
-HEREDOC_INERT_PROGRAMS = frozenset({"cat", "tee", "wc", "grep", "head", "tail", "ls", "echo",
-                                    "cd", "pwd", "mkdir", "true"})
-# Programs a body may be fed to only when the body *is* the program: inline
-# source is not read by layer 2 in any spelling (`python3 -c` included), so a
-# Python body is no less read than before. Without a body on their segment,
-# or with `-c`/`-e`/a script, they are not on the list.
-_HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
-_HEREDOC_NODE_ARGS = frozenset({"-"})
-# Shell syntax that can route a body's output into a program not judged
-# here, or change which program a name runs: a group, subshell, function
-# body or process substitution (`{ cat <<E; } | sh`, `cat() { sh; }`,
-# `> >(sh)`).
-_HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
-_HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
-# Redirections a segment may carry: plain reads and writes of a path
-# (`cat > notes.txt <<'EOF'`), never an fd duplication.
-_HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
-_HEREDOC_SPECIAL_PATHS = ("/dev/fd", "/proc", "/dev/tcp", "/dev/udp")
-# `grep` may be ugrep (Claude Code's shell wraps it), whose filter, pager,
-# viewer, opener and config options run commands; refused in any spelling,
-# with `-Q`/`--query` (its TUI can open an editor) and rg's `--pre`.
-_HEREDOC_GREP_RUNS = re.compile(
-    r"---|-@|--[a-z-]*(?:filter|pager|view|open|config|pre|query)|-[A-Za-z]*Q")
-
-
-def _heredoc_segment_ok(segment: str, here: bool) -> bool:
-    """The segment runs only an inert program (`HEREDOC_INERT_PROGRAMS`),
-    or, when it is fed a body (`here`), a `python3 -`/`node -` whose program
-    the body is; named as written (no wrapper, no path, no expansion), with
-    only plain path redirections and no `/dev/fd`/`/proc` argument."""
-    words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
-    if not words:
-        return False                # a compound command's closing word (`fi | sh`)
-    program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
-    if program in HEREDOC_INERT_PROGRAMS:
-        if program == "grep" and any(_HEREDOC_GREP_RUNS.match(a) for a in args):
-            return False
-    elif here and rules._PYTHON.fullmatch(program):
-        if not set(args) <= _HEREDOC_PYTHON_ARGS:
-            return False
-    elif here and program == "node":
-        if not set(args) <= _HEREDOC_NODE_ARGS:
-            return False
-    else:
-        return False
-    for redirect in rules.redirections(segment):
-        if redirect.op not in _HEREDOC_REDIRECTS:
-            return False
-        if redirect.op != "<<<":
-            word = redirect.word.strip("'\"")
-            if not word or word[0] in "(&" or word.startswith(_HEREDOC_SPECIAL_PATHS):
-                return False
-    return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
-
-
-def _heredoc_data_reading(text: str) -> str | None:
-    """`text` with its here-document bodies moved into their operators as
-    here-strings (`rules._inline_heredocs`), when nothing on the line can
-    run a body: every segment passes `_heredoc_segment_ok` (only inert
-    programs, and a body fed only to one of them or to `python3 -`/`node -`),
-    with no group, subshell, function or process substitution, nothing live
-    (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
-    assignment. None otherwise (the inlining raised or flagged itself
-    unsure, a segment or here-string could not be placed), and the caller
-    keeps the raw line, every body line a command, as before HD-0. Only
-    `credentials-read` reads it: a sub-agent's line had a Python body whose
-    `pass` was judged as the password store."""
-    if "<<" not in text:
-        return None
-    flagged: list = []
-    try:
-        inlined = rules._inline_heredocs(text, unsure=flagged)
-    except Exception:       # noqa: BLE001 — too complex: the raw reading
-        return None
-    if flagged or inlined == text:
-        return None
-    joined = rules.join_continuations(inlined)
-    if rules.first_unquoted(joined, _HEREDOC_LINE_SYNTAX):
-        return None
-    # Anything live outside single quotes, a body's included (an unquoted
-    # delimiter leaves its `$(…)` and backticks running).
-    if rules.first_unquoted(joined, ("$(", "`"), double_is_quote=False):
-        return None
-    found = 0
-    cursor = 0
-    interpreted = False
-    try:
-        for segment in rules.segments(inlined):
-            at = joined.find(segment, cursor)
-            if at < 0:
-                return None
-            cursor = at + len(segment)
-            if any(_HEREDOC_NAME_ENV.match(word) for word in rules._tokens(segment)):
-                return None
-            heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
-            found += len(heres)
-            if not _heredoc_segment_ok(segment, bool(heres)):
-                return None
-            words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
-            interpreted = interpreted or bool(heres and words[0] not in HEREDOC_INERT_PROGRAMS)
-    except Exception:       # noqa: BLE001 — unreadable: the raw reading
-        return None
-    # Every here-string the inlined text holds was placed above (one inside a
-    # substitution or a quote was not): otherwise its program is unknown.
-    if found != joined.count("<<<"):
-        return None
-    # A Python or node body beside another body could run what that one wrote
-    # (`cat > x.sh <<A … ; python3 - <<P os.system('sh x.sh')`): only alone
-    # (review round 3 of #396).
-    if interpreted and found > 1:
-        return None
-    return inlined
-
-
 def _segments_of(text: str) -> list[tuple[str, list[str], list[str]]]:
     """Each segment of `text` (tokens, stems), and what its wrappers and
-    runners start. Raises `rules.TooComplex`."""
+    runners start. Try the data reading first and fall back to raw text
+    if it cannot be walked. Raises `rules.TooComplex`."""
+    reading = rules.heredoc_data_reading(text, keep=False)
+    if reading is not None:
+        try:
+            return _walk_segments(reading)
+        except rules.TooComplex:
+            pass
+    return _walk_segments(text)
+
+
+def _walk_segments(text: str) -> list[tuple[str, list[str], list[str]]]:
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(text):
         tokens = _tokens_of(segment)
@@ -1696,7 +1583,7 @@ def _inner_segments(lines: list[str]) -> list | None:
     while queue:
         text, depth = queue.pop()
         try:
-            found = v1_secrets._inner_commands(text)
+            found = v1_secrets._inner_commands(rules.heredoc_data_reading(text, keep=False) or text)
         except Exception:       # noqa: BLE001 — unreadable is asked
             return None
         for inner in found:
@@ -1742,46 +1629,15 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     """(rule id, reason) if this call is on the always-ask list, else None.
     `cwd` and `shell_cwd` place a walk's relative root (`credentials-path`)."""
     bases = tuple(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or (None,)
-    segments: list[tuple[str, list[str], list[str]]] = []
-    # Each reading's segments: a call with two command fields is matched
-    # field by field as well as joined (#211 bench, MED).
+    # A call with two command fields is matched field by field as well
+    # as joined (#211 bench, MED). A caller may hand in other readings of
+    # the command (GB-2c: the line with proven program variables written out).
     lines = [text for text in (_judged_of(tool, args) if command_readings is None else command_readings)
              if text.strip()]
-    for segment in [part for text in lines for part in rules.segments(text)]:
-        tokens = _tokens_of(segment)
-        stems = [s for s, _ in rules.command_targets(segment)]
-        if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
-            # The program past a reserved word (`then vercel --prod`), which
-            # the allowlist's stems do not peel.
-            stems.append(tokens[0].rsplit("/", 1)[-1].lower())
-        segments.append((segment, tokens, stems))
-        # What a wrapper or runner in front starts is judged too, from rules'
-        # one table: `npx vercel --prod` is a production deploy, and `uv run
-        # git push --force origin main` a force push (2026-10-12).
-        # Past the line's work budget or a nesting cap, what it starts cannot
-        # be told: asked, whatever the rules say (review of PR #75).
-        try:
-            started = rules.started_commands(segment)
-        except rules.TooComplex:
-            return "too-complex", rules.RUNNERS_TOO_COMPLEX
-        for inner in started:
-            segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
-    # `credentials-read` reads each line with its data here-document bodies
-    # set aside (HD-0): a Python body's `pass` is not the password store. A
-    # line without such a reading, or one whose reading cannot be walked,
-    # keeps its raw segments.
-    read_segments: list | None = None
-    readings = [_heredoc_data_reading(text) for text in lines]
-    if any(readings):
-        read_segments = []
-        for text, reading in zip(lines, readings):
-            try:
-                read_segments.extend(_segments_of(reading or text))
-            except rules.TooComplex:
-                try:
-                    read_segments.extend(_segments_of(text))
-                except rules.TooComplex:
-                    return "too-complex", rules.RUNNERS_TOO_COMPLEX
+    try:
+        segments = [part for text in lines for part in _segments_of(text)]
+    except rules.TooComplex:
+        return "too-complex", rules.RUNNERS_TOO_COMPLEX
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     inner = _inner_segments(lines) if lines else []
     # Where a `cd`/`pushd` on the line (or in a string it hands a shell)
@@ -1789,8 +1645,7 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     bases = bases + tuple(b for b in _cd_bases(segments + (inner or []), bases) if b not in bases)
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets,
-                                                 inner=inner, bases=bases,
-                                                 read_segments=read_segments)
+                                                 inner=inner, bases=bases)
         if matched:
             return rule_id, reason
     if inner is None:

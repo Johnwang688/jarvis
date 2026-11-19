@@ -1,7 +1,7 @@
 # Heredoc bodies in v2's layer 2: plan (2026-11-16)
 
-Status: **narrowed by the owner, 2026-11-16** (answers in §10). Only the
-reported `credentials-read` case is patched now (HD-0); the rest is deferred.
+Status: **HD-0 and GB-1 implemented.** See §10 for the original scope and
+§11 for the 2026-11-18 extension.
 Lead: Claude (Opus).
 
 ## 1. The report
@@ -233,3 +233,24 @@ a case in the regression test.
 
 So HD-0 only ever removes asks whose cause was a data body; it never reads
 less than main.
+
+## 11. GB-1 (2026-11-18)
+
+GB-1 uses §10's whole-line proof for the wiring described in §5.3. The
+always-ask and nested command readings set proven data bodies aside.
+The shared protected-state detector segments the inlined line so that it
+still sees the operator's redirects and protected names in interpreter
+source. Both versions retain the allowlist-write refusal. When the proof
+holds for every VEX reading, the body backstop is skipped, as in answer 3.
+
+The separate merge-gate interpreter check and the protected-state
+heuristics for single-quoted `sed -i` and inline interpreter arguments
+remain in effect. The HD-0 program list is unchanged, including the raw
+fallback for `git commit -F -`. Gap G stays deferred. The GB-1 regression
+matrix covers 14 execution routes across protected state, force pushes,
+protected-branch pushes, credential paths and unreadable inner commands.
+
+The whole-line proof falls back to the raw reading on any shell comment
+outside the bodies. With the payloads set aside, the rewrite must preserve
+the text through the last backslash-newline in the shell text and the
+line it precedes.
