@@ -1817,8 +1817,10 @@ class Daemon:
             # A native question owns its exact answer. Do not fasten it to a
             # turn that closed while deliver was deciding whether to steer,
             # or one that meanwhile asked the owner for a decision.
+            # Driving questions need their own brief and reply stream.
             voice_waits = self.voice_chat.owns(message) and (
-                not session.desk.active or self._waiting_on_owner(session)
+                self.desktop_driver.grant(thread_id) is not None
+                or not session.desk.active or self._waiting_on_owner(session)
                 or self._queues.get(thread_id))
             if not callable(steer) or voice_waits:
                 waiting = self._queues.setdefault(thread_id, deque())

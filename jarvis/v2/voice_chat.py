@@ -88,6 +88,9 @@ class VoiceChat:
         else:
             return False
         with self.daemon._lock:
+            # The grant can start after the link receives the receipt.
+            if self.daemon.desktop_driver.thread_id() is not None:
+                return False
             thread = self._eligible_thread(thread_id)
             if not thread:
                 return False

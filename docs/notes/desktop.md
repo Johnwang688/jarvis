@@ -79,4 +79,5 @@ shortcuts. Ctrl+D still dictates. On a paired voice turn the granted chat can
 use the window tools, including screenshots when its model supports images.
 Approvals still appear in the HUD. If the voice wait times out, the helper
 says “Still working. Check the driver chat.” The turn continues until it
-finishes or the owner stops it with the badge or physical Esc.
+finishes or the owner stops it with the badge or physical Esc. When the
+driver chat is busy, a spoken request waits for its own turn and reply.

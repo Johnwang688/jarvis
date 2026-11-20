@@ -976,6 +976,12 @@ class Flow:
                     self.link_error = exc
                 intent = {"kind": "ask" if addressed else "dictate",
                           "text": text, "target": "" if addressed else "literal"}
+            else:
+                if (url and not addressed and intent["kind"] == "dictate"
+                        and intent.get("target") == "literal" and intent.get("text")):
+                    if not current():
+                        return
+                    url = None  # The daemon explicitly chose to insert the words.
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
             # The daemon can see a new grant before the badge relay does.
