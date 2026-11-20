@@ -10,13 +10,13 @@ from dataclasses import dataclass, replace
 
 if __package__:
     from .voiceactions import LaunchStatus, action_scope, match_app
-    from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
+    from .voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, driver_handoff, literal_payload,
                             mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
                             spoken_websites)
     from .voicewire import LinkError, VoiceQuestionError
 else:
     from voiceactions import LaunchStatus, action_scope, match_app
-    from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, literal_payload,
+    from voicetype import (JARVIS_ADDRESS, POLITE_PREFIX, dictation_choice, driver_handoff, literal_payload,
                            mentions_command, navigation_target, plan, sanitize, shortcut_open_target,
                            spoken_websites)
     from voicewire import LinkError, VoiceQuestionError
@@ -318,10 +318,12 @@ class SpokenAnswer:
 
 
 class Flow:
-    def __init__(self, client, typer, actions, ui, player, *, can_act=lambda: True, revoked_at=lambda: None):
+    def __init__(self, client, typer, actions, ui, player, *, can_act=lambda: True,
+                 revoked_at=lambda: None, driving=lambda: False):
         self.client, self.typer, self.actions = client, typer, actions
         self.ui, self.player = ui, player
         self.can_act = can_act
+        self.driving = driving
         # When this clip's authority was first taken by a newer generation
         # (monotonic seconds), or None when the caller cannot say.
         self.revoked_at = revoked_at
@@ -781,7 +783,7 @@ class Flow:
             self.player.play(self.client.say(answer))
         return True
 
-    def _laya_turn(self, text, clean, source, session, current):
+    def _laya_turn(self, text, clean, source, session, current, handoff, shortcut_current):
         """A negotiated Right Ctrl or wake command: one local or Laya decision.
 
         Explicit literal dictation and an active clarification reply are
@@ -792,18 +794,18 @@ class Flow:
         if len(text) > 2000:
             self.ui.set_state("error", TOO_LONG)
             return
-        payload = literal_payload(text)
+        payload = "" if handoff() else literal_payload(text)
         if payload:
             self.retire_site_choice(self.client)
-            if current():
+            if shortcut_current():
                 # The payload is text through the entire call: "send it" stays words.
                 self.typer.run([("text", payload)])
                 self.ui.set_state("done")
             return
-        offered = self._offered_sites()
-        if self._handle_site_reply(clean, current):
+        offered = None if handoff() else self._offered_sites()
+        if not handoff() and self._handle_site_reply(clean, shortcut_current):
             return
-        apps, windows = self._route_names()
+        apps, windows = ((), ()) if handoff() else self._route_names()
         if not current():
             return
         self.ui.set_state("thinking")
@@ -819,6 +821,13 @@ class Flow:
         if not current():
             self._outcome(turn, "cancelled")
             return
+        if handoff() and kind != "ask":
+            self._outcome(turn, "cancelled")
+            if self._answer(text):
+                self.ui.set_state("done")
+            return
+        if kind != "ask":
+            current = shortcut_current
         if (kind in ("navigate", "open_app") and offered
                 and any(_names_site(target, site) for site in offered[0])):
             # Not a plain choice, so the offer did not select it; never the
@@ -910,6 +919,14 @@ class Flow:
             if session != getattr(self.client, "session", None):
                 return
             clean = sanitize(text)
+            driving = self.driving()
+
+            def handoff():
+                return driver_handoff(driving or self.driving(), source, text)
+
+            def shortcut_current():
+                return current() and not (driving or self.driving())
+
             if source == "dictation":
                 # Ctrl+D never routes, asks, acts, confirms or answers a prompt.
                 if not clean:
@@ -931,12 +948,14 @@ class Flow:
                 else:
                     self.ui.set_state("done", "No speech heard")
                 return
-            if self._handle_profile_reply(clean, current):
+            if driving:
+                self.retire_choices(self.client)
+            elif self._handle_profile_reply(clean, shortcut_current):
                 return
             if laya and source in ("assistant", "wake"):
-                self._laya_turn(text, clean, source, session, current)
+                self._laya_turn(text, clean, source, session, current, handoff, shortcut_current)
                 return
-            if source == "hotkey" and len(text) > 2000:
+            if source == "hotkey" and len(text) > 2000 and not handoff():
                 # Route replies are capped. A long paragraph stays complete
                 # and literal; a quoted suffix must never become an Enter key.
                 self.typer.run([("text", text)])
@@ -959,6 +978,13 @@ class Flow:
                           "text": text, "target": "" if addressed else "literal"}
             kind = intent["kind"]
             words, target = intent.get("text", text), intent.get("target", "")
+            # The daemon can see a new grant before the badge relay does.
+            if handoff() or (kind == "ask" and target == "driver"):
+                if current() and self._answer(words if kind == "ask" else text):
+                    self.ui.set_state("done")
+                return
+            if (driving or self.driving()) and kind != "dictate":
+                kind, words, target, url = "dictate", text, "literal", None
             # A reply context carried to a helper without Laya routing still
             # keeps its sites: nothing here opens one the offer did not.
             offered = self._offered_sites()
@@ -973,13 +999,13 @@ class Flow:
                 self.ui.set_state(*offered[1])
                 return
             if url or kind == "navigate":
-                if not current():
+                if not shortcut_current():
                     return
                 navigate = getattr(self.actions, "navigate", None)
                 if not url or kind != "navigate" or target != url or not callable(navigate):
                     self.ui.set_state("error", "Website navigation is unavailable.")
                     return
-                handed_off = _run_native(current, navigate, url)
+                handed_off = _run_native(shortcut_current, navigate, url)
                 if not current():
                     return
                 if handed_off is not True:
@@ -993,7 +1019,7 @@ class Flow:
                 # target from prose. Only a unique exact Windows app may launch.
                 candidate = shortcut_open_target(text) if kind == "open_app" else ""
                 if (candidate and candidate.casefold() == target.casefold()
-                        and self._open_app(candidate, intent, session, source, current, exact=True)):
+                        and self._open_app(candidate, intent, session, source, shortcut_current, exact=True)):
                     return
                 kind, words, target = "dictate", text, "literal"
             if kind == "dictate" and source == "hotkey":
@@ -1008,11 +1034,11 @@ class Flow:
                 if not self._answer(words, defer_speech=target == "task"):
                     return
             elif kind == "open_app":
-                if not self._open_app(target, intent, session, source, current):
+                if not self._open_app(target, intent, session, source, shortcut_current):
                     self.ui.set_state("error", f"Could not find {target}.")
                 return
             elif kind == "switch_app":
-                if not current():
+                if not shortcut_current():
                     return
                 if not self.actions.switch_app(target):
                     self.ui.set_state("error", f"Could not find {target}.")
@@ -1021,14 +1047,14 @@ class Flow:
                 self.ui.set_state("done", f"Switched to {target}.")
                 return
             elif kind == "search":
-                if not current():
+                if not shortcut_current():
                     return
                 if not self.actions.search(target or words):
                     self.ui.set_state("error", "Could not open the search.")
                     return
                 self._confirm_action(intent.get("receipt"), current)
             elif kind == "read_selection":
-                if not current():
+                if not shortcut_current():
                     return
                 selection = self.actions.read_selection()
                 if not selection:

@@ -70,3 +70,13 @@ Five findings from getting there, each of which cost a debugging round:
   is now a separate word from checkedness, and only printed when true.
 
 <!-- claude-source:008632-008688:end -->
+
+## 2026-11-19 — Voice hand-off during desktop driving (CU-3d)
+
+While a chat holds the desktop-driving grant, addressed speech goes to that
+chat with its driving instructions and skips fast routing and local Windows
+shortcuts. Ctrl+D still dictates. On a paired voice turn the granted chat can
+use the window tools, including screenshots when its model supports images.
+Approvals still appear in the HUD. If the voice wait times out, the helper
+says “Still working. Check the driver chat.” The turn continues until it
+finishes or the owner stops it with the badge or physical Esc.

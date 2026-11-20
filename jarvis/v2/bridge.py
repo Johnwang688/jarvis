@@ -185,8 +185,11 @@ def route(handler, daemon, parts, query):
     provider = session.thread.provider
 
     def window_tools():
+        slot = session.desk.slot
         return (daemon.desktop_driver.grant(session.thread.id) is not None
-                and (session.worker is None or session.desk.slot.get("present") is True))
+                and (session.worker is None
+                     or (not session.cancelled.is_set()
+                         and (slot.get("present") is True or slot.get("hud_desktop") is True))))
 
     if parts[1] == "window-tools":
         _object(query, ("listed",), ("listed",))
@@ -384,7 +387,7 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
                 return tools.ToolResult(UNAVAILABLE)
         if window_call and not window_current():
             return tools.ToolResult(WINDOW_OFF)
-        if window_call and (not runtime.at_desk() or not current()):
+        if window_call and not runtime.hud_desktop_access():
             from .tools.hud_window import UNAVAILABLE
             return tools.ToolResult(UNAVAILABLE)
         if entry.owner_gated and not window_call and drive_turn is None:

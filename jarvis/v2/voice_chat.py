@@ -1,4 +1,4 @@
-"""Deliver a paired Windows voice question to the owner's selected HUD chat."""
+"""Deliver a paired Windows voice question to the driver or selected HUD chat."""
 from __future__ import annotations
 
 import json
@@ -16,6 +16,9 @@ from .thread_model import is_chat
 
 class NoVoiceTarget(Exception):
     pass
+
+
+DRIVER_STILL_WORKING = "Still working. Check the driver chat."
 
 
 class VoiceChat:
@@ -112,7 +115,6 @@ class VoiceChat:
 
     def ask(self, text, on_delta, *, cancelled=lambda: False, timeout=180.0, on_reset=None):
         deadline = time.monotonic() + timeout
-        thread_id = self._selected()
 
         def check():
             if cancelled():
@@ -125,6 +127,11 @@ class VoiceChat:
         q = None
         try:
             check()
+            driver = self.daemon.desktop_driver
+            thread_id = driver.thread_id()
+            grant = driver.grant(thread_id)
+            if grant is None:
+                thread_id = self._selected()
             if not self._eligible_thread(thread_id):
                 raise NoVoiceTarget()
             q = self.daemon.bus.subscribe({"thread_id": thread_id})
@@ -137,7 +144,6 @@ class VoiceChat:
                 if not self._eligible_thread(thread_id):
                     raise NoVoiceTarget() from None
                 raise
-            check()
             if result["status"] == "dropped":
                 raise RuntimeError("voice message was stopped")
             turn = result.get("queued_turn_id") or result["turn_id"]
@@ -147,7 +153,16 @@ class VoiceChat:
             proposing = False
             receipt_deadline = None
             while True:
-                check()
+                try:
+                    check()
+                except TimeoutError:
+                    if grant is None or driver.grant(thread_id) is not grant:
+                        raise
+                    # Playback is a subscriber. Ending it leaves the delivered
+                    # turn (or queued message) under the chat's own controls.
+                    if on_reset:
+                        on_reset()
+                    return DRIVER_STILL_WORKING
                 if receipt_deadline is not None and time.monotonic() >= receipt_deadline:
                     return "I couldn't confirm that task was opened."
                 try:
