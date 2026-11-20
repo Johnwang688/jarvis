@@ -71,6 +71,12 @@ def sanitize(text):
     return re.sub(" +", " ", text).strip()
 
 
+def driver_handoff(driving: bool, source: str, text: str) -> bool:
+    """Decide which clips the helper must send to the desktop driver."""
+    return driving and (source in ("assistant", "wake")
+                        or (source == "hotkey" and bool(JARVIS_ADDRESS.match(sanitize(text)))))
+
+
 def web_destination(value: str) -> str:
     """Canonicalize a bare public-style hostname or an HTTP(S) origin."""
     if not isinstance(value, str) or len(value) > 262:

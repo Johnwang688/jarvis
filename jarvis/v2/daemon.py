@@ -1817,8 +1817,10 @@ class Daemon:
             # A native question owns its exact answer. Do not fasten it to a
             # turn that closed while deliver was deciding whether to steer,
             # or one that meanwhile asked the owner for a decision.
+            # Driving questions need their own brief and reply stream.
             voice_waits = self.voice_chat.owns(message) and (
-                not session.desk.active or self._waiting_on_owner(session)
+                self.desktop_driver.grant(thread_id) is not None
+                or not session.desk.active or self._waiting_on_owner(session)
                 or self._queues.get(thread_id))
             if not callable(steer) or voice_waits:
                 waiting = self._queues.setdefault(thread_id, deque())
@@ -1995,7 +1997,7 @@ class Daemon:
                 session.brief.cwd or "", message.text if session.desk.slot.get("present") is True else "",
                 provider=session.thread.provider.value)
         grant = (self.desktop_driver.grant(thread_id)
-                 if session.desk.slot.get("present") is True else None)
+                 if session.desk.slot.get("hud_desktop") is True else None)
         worker = threading.Thread(target=self._turn, args=(session, message), kwargs={"desktop_grant": grant},
                                   name=f"jarvis-turn-{thread_id}", daemon=True)
         turn_id = session.turn_id
@@ -2922,7 +2924,7 @@ class Daemon:
                 self._refuse_unasked_tier(session)
                 self._desk_images(session, worker, turn_id, desk_slot)
                 driver_brief = (self.desktop_driver.take_brief(session.thread.id, desktop_grant)
-                                if desk_slot.get("present") is True and not session.cancelled.is_set()
+                                if desk_slot.get("hud_desktop") is True and not session.cancelled.is_set()
                                 and desktop_grant is not None else None)
                 provider_message = replace(message, text=f"{driver_brief}\n\n{message.text}") if driver_brief else message
                 source = session.provider.send(session.handle, provider_message)

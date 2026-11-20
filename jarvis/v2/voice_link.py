@@ -3,7 +3,7 @@
 A physical dictation shortcut authorizes transcription with
 verify=False, as on the paired phone. The owner may change that decision.
 The existing desk STT switches still decide whether audio may reach cloud.
-Wake clips use the desk's speaker check. Questions go to the selected HUD chat.
+Wake clips use the desk's speaker check. Questions go to the driver or selected HUD chat.
 Approvals remain on the owner's existing surfaces.
 Audio and dictation stay in memory. Questions use the normal chat history;
 this transport keeps no transcript or audio log of its own.
@@ -31,7 +31,7 @@ from windows import voicewire as wire
 from windows.voicetype import navigation_target, spoken_span, spoken_websites, web_destination
 from . import remote_stt, dictation_guard, dictation_rules
 from .stores import StoreError
-from .voice_chat import NoVoiceTarget
+from .voice_chat import DRIVER_STILL_WORKING, NoVoiceTarget
 from . import voice_intent
 
 LOG = logging.getLogger(__name__)
@@ -519,8 +519,10 @@ class VoiceLink:
                                     cancelled=getattr(self._context, "cancelled", lambda: False))
 
     def _ask(self, text, on_delta):
+        deadline = getattr(self._context, "deadline", None)
+        timeout = ASK_TIMEOUT_S if deadline is None else deadline - time.monotonic()
         return self._voice_chat.ask(text, on_delta, cancelled=getattr(self._context, "cancelled", lambda: False),
-                                    timeout=ASK_TIMEOUT_S, on_reset=getattr(self._context, "reset", None))
+                                    timeout=timeout, on_reset=getattr(self._context, "reset", None))
 
     @staticmethod
     def _speaker(text):
@@ -541,6 +543,11 @@ class VoiceLink:
         events = queue.Queue(maxsize=256)
         stopped = threading.Event()
         deadline = time.monotonic() + ASK_TIMEOUT_S
+        # Leave time within the helper's 185 s wait for the chat's deadline
+        # response and its local speech synthesis.
+        driving = self._driver_active()
+        conversation_only = conversation_only and not driving
+        wire_deadline = deadline + 4 if driving else deadline
 
         def cancelled():
             return stopped.is_set() or not self._current(conn, server)
@@ -608,6 +615,7 @@ class VoiceLink:
 
         def work():
             self._context.cancelled = cancelled
+            self._context.deadline = deadline
             self._context.reset = lambda: offer("reset", "")
             try:
                 answer = (self.converser if conversation_only else self.asker)(
@@ -627,13 +635,15 @@ class VoiceLink:
         threading.Thread(target=work, name="jarvis-voice-answer", daemon=True).start()
         try:
             while self._current(conn, server):
-                if interruptible and select.select([conn], [], [], 0)[0]:
+                if select.select([conn], [], [], 0)[0]:
                     # During an ask the agent may only withdraw this exact reply.
-                    if wire.read_json(stream, 256) != {"op": "interrupt", "id": ident}:
+                    if not interruptible or wire.read_json(stream, 256) != {"op": "interrupt", "id": ident}:
                         return None
                     return {"id": ident, "ok": True, "done": True, "text": ""}
-                remaining = deadline - time.monotonic()
+                remaining = wire_deadline - time.monotonic()
                 if remaining <= 0:
+                    if final is not None and final["text"] == DRIVER_STILL_WORKING:
+                        return final
                     return {"id": ident, "ok": False, "error": ASK_TIMEOUT}
                 try:
                     kind, value = events.get(timeout=min(0.1, remaining))
@@ -675,7 +685,10 @@ class VoiceLink:
                     final = reply
                     # Final-only providers still speak. A revised final must
                     # never append an unrelated suffix to already-spoken text.
-                    if not spoken_until or value.startswith(partial[:spoken_until]):
+                    if value == DRIVER_STILL_WORKING:
+                        sentences.put(value)
+                        sentences.put(None)
+                    elif not spoken_until or value.startswith(partial[:spoken_until]):
                         queue_sentences(value, finish=True)
                     else:
                         sentences.put(None)
@@ -706,12 +719,19 @@ class VoiceLink:
                 or len(text) > 2000 or not names(apps) or not names(windows)
                 or request.get("web_navigation") is not True):
             return False
-        snapshot = self._voice_chat.selected() if request.get("receipt") is True and self._voice_chat else None
         if not self._current(conn, server):
             return None
-        decision = self._laya_decide(mode, text, tuple(apps), tuple(windows), server)
-        if not self._current(conn, server):
-            return None
+        driving = self._driver_active()
+        if not driving:
+            snapshot = self._voice_chat.selected() if request.get("receipt") is True and self._voice_chat else None
+            decision = self._laya_decide(mode, text, tuple(apps), tuple(windows), server)
+            if not self._current(conn, server):
+                return None
+            driving = self._driver_active()
+        if driving:
+            intent = {"kind": "ask", "text": _clean(text, 2000), "target": ""}
+            return ({"ok": True, "intent": intent, "turn": wire.new_nonce()},
+                    mode, text, None, "driver", None)
         intent, feedback_kind = self._laya_intent(decision, text, tuple(apps), tuple(windows))
         with self._lock:
             self._laya_issue = LAYA_DOWN if feedback_kind == "unavailable" else ""
@@ -722,6 +742,45 @@ class VoiceLink:
                         else "navigate" if kind == "clarify" and intent["target"] == "website" else None)
         reply = {"ok": True, "intent": intent, "turn": wire.new_nonce(), "_snapshot": snapshot}
         return reply, mode, text, decision, feedback_kind, receipt_kind
+
+    def _legacy_route(self, text, source, request):
+        addressed = source == "wake" or voice_intent.addressed(text)
+        handoff = {"kind": "ask", "text": _clean(text, 2000), "target": "driver"}
+        if addressed and self._driver_active():
+            return handoff, None
+        shortcut_target = (voice_intent.shortcut_open_target(text)
+                           if not addressed and request.get("exact_open") is True else "")
+        navigation = navigation_target(text, source)
+        navigation_capable = request.get("web_navigation") is True
+        snapshot = None
+        if (request.get("receipt") is True and self._voice_chat
+                and (addressed or shortcut_target or (navigation and navigation_capable))):
+            snapshot = self._voice_chat.selected()
+        try:
+            raw = self.route_model(text[:2000], source)
+        except Exception:
+            raw = None
+        driving = self._driver_active()
+        if addressed and driving:
+            return handoff, None
+        intent = parse_intent(raw, source, text)
+        if navigation and (not navigation_capable or intent["kind"] != "navigate"):
+            # An empty literal is a no-op for legacy hotkey and wake helpers.
+            return {"kind": "dictate", "text": "", "target": "literal"}, None
+        kind = intent["kind"]
+        if kind == "ask" and intent["target"] == "driver":
+            intent["target"] = ""  # The hand-off marker is reserved for the grant check.
+        exact_open = (kind == "open_app" and shortcut_target
+                      and shortcut_target.casefold() == intent["target"].casefold())
+        if not addressed and kind != "dictate" and (driving or (kind != "navigate" and not exact_open)):
+            # Unaddressed shortcuts require an idle desktop and app launches
+            # require exact local catalog resolution.
+            return {"kind": "dictate", "text": _clean(text, 2000), "target": "literal"}, None
+        return intent, snapshot
+
+    def _driver_active(self):
+        driver = getattr(self.daemon, "desktop_driver", None)
+        return driver is not None and driver.thread_id() is not None
 
     @staticmethod
     def _receive_capture(conn, stream):
@@ -971,7 +1030,7 @@ class VoiceLink:
                     if pending_action and pending_action[0] == request["receipt"]:
                         _, expiry, thread_id, kind, target = pending_action
                         pending_action = None  # a retry can never append twice
-                        if time.monotonic() < expiry:
+                        if time.monotonic() < expiry and not self._driver_active():
                             try:
                                 recorded = self._voice_chat.note_action(thread_id, kind, target)
                             except (OSError, StoreError):
@@ -1062,6 +1121,8 @@ class VoiceLink:
                     def after_reply(turn=pending_turn, mode=mode, text=text, decision=decision):
                         # After the reply, so feedback adds no dispatch latency
                         # and its failure cannot change the decision.
+                        if turn["kind"] == "driver":
+                            return  # The router feedback schema only admits its own decisions.
                         turn["token"] = self._feedback_record(
                             mode, text, decision if decision is not None else {"kind": "unavailable"})
                         if turn["kind"] in ("clarify", "unavailable"):
@@ -1074,32 +1135,12 @@ class VoiceLink:
                             and (op != "route" or source in ("hotkey", "wake"))):
                         if op == "route":
                             pending_action = None
-                            snapshot = None
-                            addressed = source == "wake" or voice_intent.addressed(text)
-                            shortcut_target = (voice_intent.shortcut_open_target(text)
-                                               if not addressed and request.get("exact_open") is True else "")
-                            navigation = navigation_target(text, source)
-                            navigation_capable = request.get("web_navigation") is True
-                            if (request.get("receipt") is True and self._voice_chat
-                                    and (addressed or shortcut_target or (navigation and navigation_capable))):
-                                snapshot = self._voice_chat.selected()
-                            try:
-                                raw = self.route_model(text[:2000], source)
-                            except Exception:
-                                raw = None
-                            intent = parse_intent(raw, source, text)
-                            if navigation and (not navigation_capable or intent["kind"] != "navigate"):
-                                # Empty literal dictation is safe on legacy helpers too:
-                                # it neither inserts text on a hotkey nor asks on wake.
-                                intent = {"kind": "dictate", "text": "", "target": "literal"}
+                            intent, snapshot = self._legacy_route(text, source, request)
                             kind = intent["kind"]
-                            exact_open = (kind == "open_app" and shortcut_target
-                                          and shortcut_target.casefold() == intent["target"].casefold())
-                            if not addressed and kind not in ("dictate", "navigate") and not exact_open:
-                                # Unaddressed launches require a helper that promises
-                                # exact catalog resolution.
-                                kind = "dictate"
-                                intent = {"kind": kind, "text": _clean(text, 2000), "target": "literal"}
+                            if kind == "ask" and intent["target"] == "driver":
+                                if not self._current(conn, server):
+                                    return
+                                pending_turn = None  # A previous Laya outage cannot downgrade this ask.
                             reply = {"id": ident, "ok": True, "intent": intent}
                             if snapshot and kind in ("open_app", "switch_app", "search", "read_selection", "navigate"):
                                 token = wire.new_nonce()
@@ -1107,8 +1148,8 @@ class VoiceLink:
                                 pending_action = (token, time.monotonic() + ACTION_RECEIPT_S, snapshot, kind, target)
                                 reply["receipt"] = token
                         elif op == "ask":
-                            # After a Laya outage the answer is conversation only,
-                            # whatever the helper asks: no tools and no task.
+                            # A Laya outage defaults to conversation only.
+                            # Ask admission checks for a current driver.
                             routed = (pending_turn if laya_conn and pending_turn
                                       and request.get("turn") == pending_turn["handle"] else None)
                             conversation_only = bool(laya_conn and pending_turn

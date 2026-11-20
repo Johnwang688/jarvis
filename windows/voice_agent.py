@@ -271,6 +271,10 @@ class Agent:
         if relay is not None:
             relay.request_stop(reason)
 
+    def driving(self):
+        relay = getattr(self, "desktop_relay", None)
+        return relay is not None and relay.indicator() is not None
+
     def share_frame(self, pcm):
         relay = self.relay
         if relay is not None:
@@ -664,7 +668,8 @@ class Agent:
                         if generation == self.generation:
                             self.player.begin()
                         flow = Flow(client, typer, actions, _FlowUI(self, generation), self.player,
-                                    can_act=can_act, revoked_at=lambda authority=authority: authority.revoked_at)
+                                    can_act=can_act, driving=self.driving,
+                                    revoked_at=lambda authority=authority: authority.revoked_at)
                         speech_end = capture.speech_end if capture else item[3] if len(item) > 3 else None
                         def metric(label, start, end):
                             if start is not None and generation == self.generation:

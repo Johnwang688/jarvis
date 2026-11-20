@@ -333,6 +333,12 @@ def desk_images() -> bool:
     return bool(at_desk() and slot is not None and slot.get("images") is True)
 
 
+def hud_desktop_images() -> bool:
+    """The active Windows tool turn has a pinned image-capable model."""
+    slot = _DESK.get()
+    return bool(slot is not None and slot.get("images") is True and hud_desktop_access())
+
+
 def working_dir() -> str | None:
     """The absolute folder this run works in, or None: the process's own
     directory (every v1 surface). See `_WORKDIR`."""

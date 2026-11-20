@@ -109,11 +109,11 @@ class Checks(unittest.TestCase):
             raise DesktopError(self.bridge_error)
         return {"internal": "do not return bridge internals"}
 
-    def call(self, name, *, thread="first", desk=True, stopped=False, depth=0,
+    def call(self, name, *, thread="first", desk=True, paired=False, stopped=False, depth=0,
              provider="claude", images=True, **args):
         def run():
             runtime.bind(caller={"thread_id": thread, "turn_id": "fixture", "provider": provider},
-                         desk={"present": desk, "hud_desktop": True, "images": images},
+                         desk={"present": desk, "hud_desktop": paired, "images": images},
                          depth=depth, should_stop=lambda: stopped or self.stopped, tool_names=NAMES)
             return tools.dispatch("hud_window_" + name, json.dumps(args))
         return contextvars.Context().run(run)

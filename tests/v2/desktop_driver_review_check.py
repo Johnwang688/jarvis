@@ -488,7 +488,7 @@ class Review(fixture.DaemonHarness):
                 self.assertTrue(observed)
                 self.assertEqual(set(observed), {None})
 
-    def test_f_brief_is_fixed_once_and_never_goes_to_other_or_voice_turns(self):
+    def test_f_brief_goes_only_to_the_driver_chats_hud_and_paired_voice_turns(self):
         owner, other = self.chat(), self.chat()
         self.driving(owner)
         sent = []
@@ -501,6 +501,8 @@ class Review(fixture.DaemonHarness):
 
         send(owner, SelectedVoiceMessage("voice fixture"))
         send(owner, UserMessage("phone fixture", via="phone"))
+        send(owner, UserMessage("unpaired voice fixture", via="voice", spoken=True))
+        send(other, SelectedVoiceMessage("other voice fixture"))
         send(other, UserMessage("other fixture", desk=True))
         send(owner, UserMessage("owner fixture", desk=True))
         self.driving(owner)
@@ -509,7 +511,9 @@ class Review(fixture.DaemonHarness):
         self.driving(owner)
         send(owner, UserMessage("second grant fixture", desk=True))
         self.assertEqual(sent, [
-            (owner.id, "voice fixture"), (owner.id, "phone fixture"), (other.id, "other fixture"),
+            (owner.id, BRIEF + "\n\nvoice fixture"), (owner.id, "phone fixture"),
+            (owner.id, "unpaired voice fixture"), (other.id, "other voice fixture"),
+            (other.id, "other fixture"),
             (owner.id, BRIEF + "\n\nowner fixture"), (owner.id, BRIEF + "\n\nnext fixture"),  # lead: every owner desk turn while driving
             (owner.id, BRIEF + "\n\nsecond grant fixture"),
         ])

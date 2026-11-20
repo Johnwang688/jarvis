@@ -31,7 +31,7 @@ HUD_WINDOW_TOOLS = frozenset({
     "hud_window_list", "hud_window_snapshot", "hud_window_screenshot",
     "hud_window_click", "hud_window_type", "hud_window_key", "hud_window_scroll",
 })
-UNAVAILABLE = "Refused: Windows window tools require a current owner HUD chat turn."
+UNAVAILABLE = "Refused: Windows window tools require a current owner HUD or paired voice chat turn."
 FRESH_SNAPSHOT = "Take a fresh snapshot of this window in this chat."
 COMPLETED = "Action completed. Take a fresh snapshot to see the result."
 LOG_REFUSED = "Refused: the desktop action log could not be written."
@@ -261,7 +261,7 @@ class WindowDrive:
             _service = None
 
     def current(self):
-        return (_service is self and runtime.at_desk() and hud_desktop.current()
+        return (_service is self and hud_desktop.current()
                 and runtime.caller().get("provider") in ("claude", "codex"))
 
     def grant(self):
@@ -345,7 +345,7 @@ class WindowDrive:
                 raise Refused("Use a window id from hud_window_list.")
             if op == "window_snapshot":
                 return self.snapshot(thread, window, current)
-            if not runtime.desk_images():
+            if not runtime.hud_desktop_images():
                 raise Refused("This chat's model does not support screenshots.")
             result = self.request(op, thread, current=current, window=window)
             return ToolResult("Windows window screenshot. Coordinates are in screenshot pixels.",

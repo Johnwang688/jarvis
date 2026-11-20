@@ -179,7 +179,7 @@ class Review(unittest.TestCase):
         self.assertEqual(self.actions(), [])
 
     def test_02_context_and_session_gates(self):
-        for via in ({"depth": 2}, {"turn": None}, {"desk": False, "paired": True},
+        for via in ({"depth": 2}, {"turn": None}, {"desk": False},
                     {"provider": "fast", "paired": True}, {"provider": "voice"}):
             with self.subTest(via=via):
                 self.assertIn("Refused:", self.invoke("list", **via).text)
@@ -660,7 +660,7 @@ class Review(unittest.TestCase):
             status, reply = bridge.route(NS(command="GET"), self.daemon, ["mcp", "tools"], {})
         self.assertEqual(status, 200)
         names = {row["name"] for row in reply["tools"]}
-        self.assertFalse(NAMES & names)
+        self.assertLessEqual(NAMES, names)
         self.assertIn("hud_browser_act", names)
         self.assertLessEqual(hud_desktop.HUD_DESKTOP_TOOLS, names)
         self.assertEqual(bridge.call(self.daemon, session, caller, "hud_desktop_type", args)["text"], COMPLETED)
