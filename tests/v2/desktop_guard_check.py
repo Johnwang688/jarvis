@@ -256,6 +256,23 @@ class GuardTests(unittest.TestCase):
             with self.subTest(bounds=bounds), self.assertRaisesRegex(Refused, "protected window"):
                 self.guard.capture(self.window)
 
+    def test_jarvis_own_helper_windows_are_masked_not_refused(self):
+        # Found by live trial 2 (2026-11-19): the driving badge and frame lie
+        # over every maximised window, and refusing stopped all driving.
+        badge = Rect(10, 10, 40, 20)
+        self.desktop.add(20, Window("python.exe", False, "JarvisDrivingBadge", True), badge, SECRET)
+        grant = self.guard.capture(self.window)
+        self.assertEqual(grant.rect, TARGET)
+        self.assertIn(badge, grant.masks)
+        # Any other protected window, and an elevated or unreadable "own" one, still refuses.
+        for facts in (Window("python.exe", True, "JarvisDrivingBadge", True),
+                      Window("python.exe", None, "JarvisDrivingBadge", True),
+                      Window("python.exe", True, "JarvisDrivingBadge", False),
+                      Window("1password.exe", False, "X", False)):
+            self.desktop.info[20] = facts
+            with self.subTest(facts=facts), self.assertRaisesRegex(Refused, "protected window"):
+                self.guard.capture(self.window)
+
     def test_point_bounds_and_topmost_owner(self):
         for point in ((0, 0), (99, 99)):
             self.assertEqual(self.guard.act(self.window, point=point).hwnd, 10)

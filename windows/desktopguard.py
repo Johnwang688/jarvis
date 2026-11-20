@@ -319,7 +319,18 @@ class Guard:
             if not usable_rect(bounds):
                 overlapping.append(policy.PROTECTED)
             elif policy.overlaps(rect, (bounds,)):
-                other_kind, other_masks = self._classify(other, self._read("facts", other))
+                facts = self._read("facts", other)
+                other_kind, other_masks = self._classify(other, facts)
+                if (other_kind == policy.PROTECTED and getattr(facts, "own", None) is True
+                        and getattr(facts, "elevated", None) is False):
+                    # Jarvis's own helper windows (the driving badge, the
+                    # frame, the voice pop-up) lie over every maximised
+                    # window while a chat drives, so refusing here stopped
+                    # all driving (live trial 2). They are blacked out of the
+                    # capture and left out of the tree like a HUD card.
+                    # Every other protected window still refuses.
+                    masks += (bounds,)
+                    continue
                 overlapping.append(other_kind)
                 masks += tuple(mask for mask in other_masks if policy.overlaps(rect, (mask,)))
         if not policy.may_capture(kind, overlapping):

@@ -40,7 +40,10 @@ CLICK = {"window": WINDOW, "ref": REF, "purpose": "Click the fixture button", "r
 HOST = "fixture.test.ts.net"
 BRIEF = (
     '[Desktop driving instructions]\n'
+    # lead, after live trial 2: two lines added (no skills; how to open an app)
+    'Use only the hud_window tools for windows. Do not load a skill for this. '
     'List windows first with hud_window_list. Take a snapshot before acting and act by ref. '
+    'To open an app, use the Start or Search button on the taskbar (an explorer.exe window). '
     'Give every acting call a purpose. Set risky to "yes" for anything that sends, submits, '
     'pays, deletes, installs or changes system settings, and whenever unsure. '
     'Terminals are see-only here. Use the terminal tool. '
