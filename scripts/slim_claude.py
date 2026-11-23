@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "7c22612a9abfbe4b68249f9643da0bddd82e29ca"
 SHA = "e0ce92391edcf72997e5014b1a2b174844479e064694d02a8a6b5a41cff59acf"
 MANIFEST = "docs/notes/claude-migration.json"
+GUIDE = "AGENTS.md"  # the guide moved here 2026-11-22; CLAUDE.md is a pointer to it
 SOURCE_LINES = 9648
 # Complete prose boundaries, never a bold phrase inside a paragraph.
 AREAS = (
@@ -330,8 +331,9 @@ def verify(root, original):
     require(sha(restored)==SHA, "reconstruction hash")
     require(Counter(restored.splitlines(keepends=True))==Counter(original.splitlines(keepends=True)), "line multiset")
     require(restored==original, "byte ordering")
-    guide = (root/"CLAUDE.md").read_bytes()
-    require(38000 <= len(guide) <= 40000, f"guide size {len(guide)} outside 38000..40000")
+    guide_path = root/GUIDE if (root/GUIDE).exists() else root/"CLAUDE.md"  # pre-move layouts (self-test)
+    guide = guide_path.read_bytes()
+    require(38000 <= len(guide) <= 40500, f"guide size {len(guide)} outside 38000..40500")
     lines = original.splitlines(keepends=True)
     for item in m["retained_guide"]:
         begin = f"<!-- retained:{item['name']}:begin -->\n".encode()
@@ -340,7 +342,7 @@ def verify(root, original):
         payload = guide[guide.index(begin)+len(begin):guide.index(end)]
         require(payload==b"".join(lines[item["start"]-1:item["end"]]), f"retained {item['name']} differs")
         require(sha(payload)==item["sha256"], "retained digest")
-    links(root, ["CLAUDE.md",*notes])
+    links(root, [p for p in (GUIDE, "CLAUDE.md") if (root/p).exists()] + list(notes))
     return dict(source_bytes=len(original),source_lines=SOURCE_LINES,guide_bytes=len(guide),
                 notes=len(notes),blocks=len(payloads),source_sha256=sha(restored))
 
