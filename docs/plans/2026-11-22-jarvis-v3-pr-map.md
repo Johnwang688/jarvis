@@ -1082,7 +1082,7 @@ S1–S6. It is the owner's decision.
 - **Spec:**
   - The draft prompt gets the `style/<audience>.md` guide + 2–3 of John's
     past messages to the same person or bucket, from `session_search`.
-  - Drafts are stored in Jarvis; send goes through `gmail.send`. No new
+  - Drafts are stored in Jarvis; send goes through the `gmail_send` tool (`jarvis/tools/gmail.py`, the `gmail.send` scope). No new
     Gmail scope. Gmail-side drafts are out of scope.
   - When John edits a draft in the brief editor, the diff (draft → sent) is
     saved and queued as a **style lesson** for L2 (memory review into

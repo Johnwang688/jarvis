@@ -554,7 +554,9 @@ class Checks(unittest.TestCase):
             self.assertEqual(cfg[key], value)
         self.assertNotIn("sandbox_mode", cfg)
         self.assertEqual(cfg["features"], {"exec_permission_approvals": True})
-        self.assertNotIn("project_doc_max_bytes", cfg)
+        # Never the trading firm's 0 (project docs off, D10); raised past Codex's 32 KiB
+        # default so the whole AGENTS.md guide loads (PR #413 review).
+        self.assertEqual(cfg["project_doc_max_bytes"], 65536)
         self.assertEqual(cfg["projects"][str(self.work)]["trust_level"], "trusted")
         self.assertFalse(os.path.lexists(home / "auth.json"))
         self.assertEqual(cfg["cli_auth_credentials_store"], "ephemeral")
