@@ -11,6 +11,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_DIRS = ("jarvis/v2/", "hud/")
 SHARED_GATE_FILES = {"jarvis/v2/owner_ops.py", "jarvis/v2/permissions.py"}
+# Escape line breaks and keep literal backslashes distinct from those escapes.
+PATH_ESCAPES = str.maketrans({
+    char: ascii(char)[1:-1] for char in "\\" "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+})
 
 
 def git(repo, *args):
@@ -33,11 +37,15 @@ def report(repo, since):
     except RuntimeError as error:
         raise RuntimeError(f"cannot resolve {since!r} to a commit: {error}") from error
 
+    if git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
+        raise RuntimeError("shallow repository: complete history is required")
+
     # Keep both sides of a rename visible as a deletion and an addition.
     history = git(
         repo, "log", "--no-merges", "--full-history", "--topo-order", "--root", "--no-follow",
         "--no-show-signature", "--no-notes", "--no-decorate", "--no-color",
-        "--no-ext-diff", "--no-textconv", "--no-relative", "--no-renames", "--name-only", "-z",
+        "--no-ext-diff", "--no-textconv", "--no-relative", "--no-renames",
+        "--ignore-submodules=none", "--name-only", "-z",
         "--abbrev=7", "--encoding=UTF-8", "--format=%x00%h %s",
         f"{base.decode('ascii').strip()}..HEAD", "--", *FROZEN_DIRS,
     ).decode("utf-8", errors="surrogateescape")
@@ -54,10 +62,11 @@ def report(repo, since):
         print(header)
         subject = header.partition(" ")[2]
         for path in sorted(paths):
+            display_path = path.translate(PATH_ESCAPES)
             if path in SHARED_GATE_FILES:
-                print(f"  shared gate: {path}")
+                print(f"  shared gate: {display_path}")
             else:
-                print(f"  frozen: {path}")
+                print(f"  frozen: {display_path}")
                 if not subject.startswith("v2-fix:"):
                     violated = True
     return violated

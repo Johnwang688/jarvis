@@ -88,6 +88,26 @@ class Report(unittest.TestCase):
         self.assertEqual(result.stdout.splitlines(),
                          [f"{sha} v2-fix: handle a crash", "  frozen: jarvis/v2/later.py"])
 
+    def test_shallow_history_is_an_error_in_report_mode(self):
+        self.commit("v2-fix: archiving", "hud/archive.ts")
+        (self.repo / ".git" / "shallow").write_text(self.git("rev-parse", "HEAD") + "\n")
+        result = self.report("--repo", str(self.repo))
+        self.assertEqual(result.returncode, 2, (result.stdout, result.stderr))
+        self.assertEqual(result.stdout, "")
+        self.assertIn("shallow", result.stderr)
+
+    def test_path_line_breaks_and_literal_backslash_have_distinct_output(self):
+        subject = "v2-fix: add fixtures"
+        sha = self.commit(subject, "hud/é\nchild", r"hud/é\nchild", "hud/a\r\nb\u2028c")
+        result = self.report("--repo", str(self.repo), "--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            f"{sha} {subject}",
+            r"  frozen: hud/a\r\nb\u2028c",
+            r"  frozen: hud/é\nchild",
+            r"  frozen: hud/é\\nchild",
+        ])
+
     def test_shared_only_under_git_config(self):
         sha = self.commit("update shared gate", "jarvis/v2/permissions.py")
         self.git("config", "core.abbrev", "12")
