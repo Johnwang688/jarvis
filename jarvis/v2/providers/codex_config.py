@@ -901,6 +901,9 @@ def _denied(table: dict) -> list[Path]:
     return [Path(k) for k, v in table.items() if v == "deny" and "*" not in k]
 
 
+PROJECT_DOC_MAX_BYTES = 65536
+
+
 def config_text(brief: Brief, home: Path | None = None) -> str:
     """A session's private config. `home` is its private Codex home: given,
     the commands get `sandbox_home(home)` as HOME (prepare passes it), and
@@ -914,7 +917,10 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="ephemeral", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
-                  web_search="live", check_for_update_on_startup=False)
+                  web_search="live", check_for_update_on_startup=False,
+                  # The repo guide (AGENTS.md, ~41 KB) is past Codex's 32 KiB default;
+                  # a truncated guide drops the invariants and decisions (#413 review).
+                  project_doc_max_bytes=PROJECT_DOC_MAX_BYTES)
     if brief.model is not None:
         values["model"] = brief.model
     if brief.effort is not None:

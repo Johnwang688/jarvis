@@ -25,6 +25,8 @@ COMMIT = "7c22612a9abfbe4b68249f9643da0bddd82e29ca"
 SHA = "e0ce92391edcf72997e5014b1a2b174844479e064694d02a8a6b5a41cff59acf"
 MANIFEST = "docs/notes/claude-migration.json"
 GUIDE = "AGENTS.md"  # the guide moved here 2026-11-22; CLAUDE.md is a pointer to it
+POINTER = "CLAUDE.md"
+IMPORT_LINE = "@AGENTS.md"  # Claude Code's import of the guide
 SOURCE_LINES = 9648
 # Complete prose boundaries, never a bold phrase inside a paragraph.
 AREAS = (
@@ -331,8 +333,10 @@ def verify(root, original):
     require(sha(restored)==SHA, "reconstruction hash")
     require(Counter(restored.splitlines(keepends=True))==Counter(original.splitlines(keepends=True)), "line multiset")
     require(restored==original, "byte ordering")
-    guide_path = root/GUIDE if (root/GUIDE).exists() else root/"CLAUDE.md"  # pre-move layouts (self-test)
-    guide = guide_path.read_bytes()
+    require((root/GUIDE).is_file(), f"{GUIDE} missing: the guide lives there")
+    pointer = (root/POINTER).read_text() if (root/POINTER).is_file() else ""
+    require(IMPORT_LINE in pointer.splitlines(), f"{POINTER} must import the guide with a line {IMPORT_LINE!r}")
+    guide = (root/GUIDE).read_bytes()
     require(38000 <= len(guide) <= 40500, f"guide size {len(guide)} outside 38000..40500")
     lines = original.splitlines(keepends=True)
     for item in m["retained_guide"]:
@@ -342,7 +346,7 @@ def verify(root, original):
         payload = guide[guide.index(begin)+len(begin):guide.index(end)]
         require(payload==b"".join(lines[item["start"]-1:item["end"]]), f"retained {item['name']} differs")
         require(sha(payload)==item["sha256"], "retained digest")
-    links(root, [p for p in (GUIDE, "CLAUDE.md") if (root/p).exists()] + list(notes))
+    links(root, [GUIDE, POINTER, *notes])
     return dict(source_bytes=len(original),source_lines=SOURCE_LINES,guide_bytes=len(guide),
                 notes=len(notes),blocks=len(payloads),source_sha256=sha(restored))
 
@@ -357,6 +361,9 @@ def self_test(outputs, original):
         root=Path(tmp)
         def reset():
             write(root, outputs)
+            # The migrated layout (2026-11-22): the guide in AGENTS.md, CLAUDE.md a pointer.
+            (root/POINTER).replace(root/GUIDE)
+            (root/POINTER).write_bytes((ROOT/POINTER).read_bytes())
             for target in re.findall(r"\[[^\]\n]*\]\(([^)\n]+)\)",outputs["CLAUDE.md"].decode()):
                 if target.startswith("#") or target in outputs:
                     continue
