@@ -130,7 +130,8 @@ class RealTree(unittest.TestCase):
 REGISTRY_PROBE = """
 import importlib, json, pkgutil, sys
 from jarvis import tools
-snap = lambda: [list(tools.REGISTRY), sorted(tools.GROUPS), sorted(tools.EXPLICIT_ONLY)]
+snap = lambda: [list(tools.REGISTRY), sorted(tools.EXPLICIT_ONLY), tools.default_names(),
+                {n: [list(g.core), list(g.extra)] for n, g in sorted(tools.GROUPS.items())}]
 assert not any(m == "jarvis.v3" or m.startswith("jarvis.v3.") for m in sys.modules), "v3 imported early"
 before = snap()
 import jarvis.v3
