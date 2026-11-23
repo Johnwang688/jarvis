@@ -1,4 +1,12 @@
-"""The loopback v3 daemon and its status endpoint."""
+"""The loopback v3 daemon and its status endpoint.
+
+Stated limits (verifier r2, 2026-11-23): a request whose header block is
+malformed is parsed leniently by http.server (the Host/Origin guards still
+apply); a data dir reached through a symlinked *parent* is that directory and
+gets 0700 (only a symlinked final component is refused). Run it as
+`python -m jarvis agentd` (the unit's ExecStart, A4): that path skips the model
+stack; the installed `jarvis` console script imports it (never calls it).
+"""
 
 from datetime import datetime, timezone
 import errno
