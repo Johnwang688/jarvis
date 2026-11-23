@@ -1,4 +1,13 @@
-"""Statically check imports across the v2/v3 package boundary."""
+"""Statically check imports across the v2/v3 package boundary.
+
+An accident guard against a confused agent or a careless edit, not an
+adversarial boundary (AGENTS.md: confinement is against a confused agent).
+It reads source, never runs it. Stated limits (verifier r2, 2026-11-23):
+runtime reflection; `__import__`/`import_module` with computed arguments, a
+dotted `fromlist` entry, a `globals` dict naming `__package__`, or an aliased
+builtin; and a v2 namespace folder sharing a plain module's name (a
+`from jarvis.v2.<allowed> import x` there may be misread as a submodule).
+"""
 
 import ast
 from dataclasses import dataclass
