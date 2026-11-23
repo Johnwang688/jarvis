@@ -4,4 +4,5 @@ imports v3. When v3 needs different behavior from a v2 module, copy the
 module into v3 and change it there.
 
 `jarvis agentd` serves the v3 status API on loopback port 8410 by default.
+`jarvis agent start` switches to v3, and `jarvis hud` switches back to v2.
 """
