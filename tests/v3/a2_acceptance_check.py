@@ -127,15 +127,29 @@ class RealTree(unittest.TestCase):
         self.assertEqual(imports.reverse_violations(ROOT / "jarvis" / "v2"), [])
 
 
+REGISTRY_PROBE = """
+import importlib, json, pkgutil, sys
+from jarvis import tools
+snap = lambda: [list(tools.REGISTRY), sorted(tools.GROUPS), sorted(tools.EXPLICIT_ONLY)]
+assert not any(m == "jarvis.v3" or m.startswith("jarvis.v3.") for m in sys.modules), "v3 imported early"
+before = snap()
+import jarvis.v3
+for mod in pkgutil.walk_packages(jarvis.v3.__path__, "jarvis.v3."):
+    importlib.import_module(mod.name)
+print(json.dumps({"before": before, "after": snap()}))
+"""
+
+
 class Registry(unittest.TestCase):
     def test_importing_v3_leaves_v2_tools_alone(self):
-        from jarvis import tools
-        import jarvis.v3
-        before = (list(tools.REGISTRY), sorted(tools.GROUPS), sorted(tools.EXPLICIT_ONLY))
-        for mod in pkgutil.walk_packages(jarvis.v3.__path__, "jarvis.v3."):
-            importlib.import_module(mod.name)
-        after = (list(tools.REGISTRY), sorted(tools.GROUPS), sorted(tools.EXPLICIT_ONLY))
-        self.assertEqual(before, after)
+        # A fresh interpreter: earlier tests in this file import jarvis.v3.
+        import json, os, subprocess, sys
+        r = subprocess.run([sys.executable, "-c", REGISTRY_PROBE], capture_output=True, text=True,
+                           timeout=120, cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertTrue(data["before"][0], "registry should not be empty")
+        self.assertEqual(data["before"], data["after"])
 
 
 if __name__ == "__main__":
