@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import shutil
 import socket
-import stat
 from subprocess import CompletedProcess, DEVNULL, TimeoutExpired, run
 import tempfile
 import time
@@ -163,20 +162,25 @@ def v3_active(env: Env) -> bool:
     return _unit_up(env, V3_UNIT)
 
 
+def v3_responds(env: Env) -> bool:
+    return _is_v3(env.v3_status())
+
+
 def _down(env: Env, unit: str, port: int) -> bool:
     return not _unit_up(env, unit) and env.port_free(port)
 
 
 def _wait_for(env: Env, unit: str, condition: Callable[[], bool], wait: float, what: str) -> None:
     deadline = env.clock() + wait
-    while True:
+    while env.clock() <= deadline:
         ready = condition()
         remaining = deadline - env.clock()
         if ready and remaining >= 0:
             return
         if remaining <= 0:
-            raise SwitchError(unit, f"Timed out after {wait:g} s waiting for {what}.")
+            break
         env.sleep(min(POLL, remaining))
+    raise SwitchError(unit, f"Timed out after {wait:g} s waiting for {what}.")
 
 
 def _wait_down(env: Env, unit: str, port: int, wait: float) -> None:
@@ -213,6 +217,24 @@ def _report_failure(env: Env, exc: SwitchError) -> int:
     return 1
 
 
+def _restore_source(env: Env, source: str, target: str, target_port: int, wait: float) -> None:
+    env.out(f"Rolling back to {source}.")
+    try:
+        _stop_and_disable(env, target)
+        _wait_down(env, target, target_port, wait)
+        if source == V2_UNIT:
+            _start_v2(env, wait)
+        else:
+            _enable(env, V3_UNIT)
+            _wait_for(env, V3_UNIT, lambda: v3_responds(env), wait, f"{V3_UNIT} status")
+            env.out(f"{V3_UNIT} is running.")
+    except SwitchError as exc:
+        env.out(f"Rollback to {source} failed.")
+        _report_failure(env, exc)
+    else:
+        env.out(f"Restored {source}.")
+
+
 def _busy_refusal(status: dict) -> str | None:
     for key in ("turns_running", "approvals_pending"):
         count = status.get(key)
@@ -223,8 +245,9 @@ def _busy_refusal(status: dict) -> str | None:
 
 
 def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
+    source_stopped = False
     try:
-        if _is_v3(env.v3_status()) and _down(env, V2_UNIT, config.DAEMON_PORT):
+        if v3_responds(env) and _down(env, V2_UNIT, config.DAEMON_PORT):
             env.out(f"{V3_UNIT} is already running.")
             return 0
 
@@ -242,23 +265,22 @@ def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
                 return 3
             env.out(f"--force overrides the {V2_UNIT} refusal. {refusal}")
 
-        _stop_and_disable(env, V2_UNIT)
+        env.out(f"Stopping and disabling {V2_UNIT}.")
+        _change(env, V2_UNIT, "stop", V2_UNIT, absent_ok=True)
+        source_stopped = True
+        _change(env, V2_UNIT, "disable", V2_UNIT, absent_ok=True)
         _wait_down(env, V2_UNIT, config.DAEMON_PORT, wait)
-        try:
-            _enable(env, V3_UNIT)
-        except SwitchError as exc:
-            if exc.missing:
-                env.out("Run `jarvis agent install` to install the v3 user unit.")
-                try:
-                    _start_v2(env, wait)
-                except SwitchError as recovery:
-                    _report_failure(env, recovery)
-            raise
-        _wait_for(env, V3_UNIT, lambda: _is_v3(env.v3_status()), wait, f"{V3_UNIT} status")
+        _enable(env, V3_UNIT)
+        _wait_for(env, V3_UNIT, lambda: v3_responds(env), wait, f"{V3_UNIT} status")
         env.out(f"{V3_UNIT} is running.")
         return 0
     except SwitchError as exc:
-        return _report_failure(env, exc)
+        if exc.unit == V3_UNIT and exc.missing:
+            env.out("Run `jarvis agent install` to install the v3 user unit.")
+        _report_failure(env, exc)
+        if source_stopped:
+            _restore_source(env, V2_UNIT, V3_UNIT, config.V3_API_PORT, wait)
+        return 1
 
 
 def _check_v3_idle(env: Env) -> None:
@@ -266,15 +288,22 @@ def _check_v3_idle(env: Env) -> None:
 
 
 def to_v2(env: Env, *, wait: float = WAIT) -> int:
+    source_stopped = False
     try:
         if v3_active(env):
             _check_v3_idle(env)
-            _stop_and_disable(env, V3_UNIT)
+            env.out(f"Stopping and disabling {V3_UNIT}.")
+            _change(env, V3_UNIT, "stop", V3_UNIT, absent_ok=True)
+            source_stopped = True
+            _change(env, V3_UNIT, "disable", V3_UNIT, absent_ok=True)
         _wait_down(env, V3_UNIT, config.V3_API_PORT, wait)
         _start_v2(env, wait)
         return 0
     except SwitchError as exc:
-        return _report_failure(env, exc)
+        _report_failure(env, exc)
+        if source_stopped:
+            _restore_source(env, V3_UNIT, V2_UNIT, config.DAEMON_PORT, wait)
+        return 1
 
 
 def stop_v3(env: Env, *, wait: float = WAIT) -> int:
@@ -347,33 +376,49 @@ def _write_unit(path: Path, data: bytes, mode: int = 0o644) -> None:
 
 def install_unit(env: Env, *, unit_path: Path, python: str, repo: Path) -> int:
     try:
+        if unit_path.is_symlink():
+            env.out(f"Refusing to install {unit_path}: the unit path is a symlink.")
+            return 1
         data = _unit_text(python, repo)
         try:
-            with unit_path.open("rb") as handle:
-                existing = handle.read()
-                mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+            existing = unit_path.read_bytes()
         except FileNotFoundError:
             existing = None
         if existing == data:
             env.out(f"{unit_path} unchanged.")
             return 0
+        created_parents = []
+        parent = unit_path.parent
+        while not parent.exists():
+            created_parents.append(parent)
+            parent = parent.parent
         unit_path.parent.mkdir(parents=True, exist_ok=True)
+        backup = None
         if existing is not None:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             backup = unit_path.with_name(f"{unit_path.name}.bak-{stamp}")
-            with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
-                handle.write(existing)
-            env.out(f"Backed up {unit_path} to {backup}.")
-        _write_unit(unit_path, data)
+            os.link(unit_path, backup, follow_symlinks=False)
+        try:
+            _write_unit(unit_path, data)
+        except OSError:
+            if backup is not None:
+                backup.unlink()
+            for parent in created_parents:
+                parent.rmdir()
+            raise
         try:
             _change(env, V3_UNIT, "daemon-reload")
         except SwitchError:
-            # Restore the old bytes so a retry will attempt the reload again.
-            if existing is None:
+            # Put the original file back so a retry will attempt the reload again.
+            if backup is None:
                 unit_path.unlink()
+                for parent in created_parents:
+                    parent.rmdir()
             else:
-                _write_unit(unit_path, existing, mode)
+                backup.replace(unit_path)
             raise
+        if backup is not None:
+            env.out(f"Backed up {unit_path} to {backup}.")
         env.out(f"Installed {unit_path}.")
         return 0
     except (OSError, ValueError) as exc:

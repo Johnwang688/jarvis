@@ -329,17 +329,21 @@ v2's frontend components by importing them.
     or unreadable status, unless the owner passes `--force`. The v3 HUD
     hook reports its absence until A5.
   - Plain `jarvis hud` switches back when the v3 unit is active, then
-    opens the v2 HUD as before. The v3 idle-check hook is reserved for A6+.
+    opens the v2 HUD. If the unit is inactive and the v3 API identifies a
+    foreground daemon, the command asks the owner to stop it with Ctrl+C
+    in its terminal. The v3 idle-check hook is reserved for A6+.
   - A switch stops and disables the source unit, waits for it to go down
     and release its API port, then enables and starts the target and waits
-    for its status. If the v3 unit is missing, the switch restores daemon2
-    and tells the owner to run `jarvis agent install`.
+    for its status. After a failure following the source stop, the switch
+    stops and disables the target, waits for it to release its port, and
+    restores the source. A missing v3 unit prompts `jarvis agent install`.
   - `jarvis agent stop` waits for the v3 unit and port to be down.
     `jarvis agent restart` checks that v2 is down and waits for fresh v3
     status. All four action parsers have only zero-argument options.
   - `jarvis agent install` atomically writes the mode 0644 user unit with
     ExecStart `<repo>/.venv/bin/python -m jarvis agentd`, backs up any
-    different unit, and reloads systemd. Enabling and starting are separate.
+    different unit, and reloads systemd. It refuses a symlinked unit and
+    rolls back the file change if the reload fails.
   - A6 covers ownership of the phone listener, voice wake word, desktop bridge
     and cron.
 - **Acceptance:**

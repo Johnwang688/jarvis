@@ -69,7 +69,7 @@ class DefaultEnv(unittest.TestCase):
 
 
 class Switch(unittest.TestCase):
-    def test_command_failure_aborts_at_each_step(self):
+    def test_command_failure_at_each_step(self):
         for source, target, operation in (
             (switch.V2_UNIT, switch.V3_UNIT, switch.to_v3),
             (switch.V3_UNIT, switch.V2_UNIT, switch.to_v2),
@@ -83,14 +83,27 @@ class Switch(unittest.TestCase):
 
                     def fail(*args):
                         if args == step:
-                            world.calls.append(list(args))
+                            if index == 2:
+                                systemctl(*args)  # enable --now can fail after enabling the unit
+                            else:
+                                world.calls.append(list(args))
                             return CompletedProcess(args, 1, "", "injected failure")
                         return systemctl(*args)
 
                     world.systemctl = fail
                     self.assertEqual(operation(world.env()), 1)
-                    self.assertEqual(world.verbs(), [list(args) for args in steps[:index + 1]])
+                    expected = [list(args) for args in steps[:index + 1]]
+                    if index:
+                        expected += [["stop", target], ["disable", target], ["enable", "--now", source]]
+                    self.assertEqual(world.verbs(), expected)
                     output = "\n".join(world.lines)
+                    world.sleep(2)
+                    self.assertTrue(world._active(source))
+                    self.assertTrue(world.enabled[source])
+                    self.assertFalse(world._active(target))
+                    self.assertFalse(world.enabled[target])
+                    if index:
+                        self.assertIn(f"Restored {source}", output)
                     self.assertIn("injected failure", output)
                     self.assertIn(f"journalctl --user -u {step[-1]} -n 50 --no-pager", output)
                     self.assertIn("jarvis hud", output)
@@ -112,7 +125,10 @@ class Switch(unittest.TestCase):
                 self.assertEqual(switch.to_v3(world.env()), 0)
 
     def test_state_query_failure_does_not_count_as_down(self):
-        for source, operation in ((switch.V2_UNIT, switch.to_v3), (switch.V3_UNIT, switch.to_v2)):
+        for source, target, operation in (
+            (switch.V2_UNIT, switch.V3_UNIT, switch.to_v3),
+            (switch.V3_UNIT, switch.V2_UNIT, switch.to_v2),
+        ):
             with self.subTest(source=source):
                 world = World(v2_active=source == switch.V2_UNIT, v3_active=source == switch.V3_UNIT)
                 env = world.env()
@@ -125,7 +141,10 @@ class Switch(unittest.TestCase):
 
                 env.systemctl = command
                 self.assertEqual(operation(env), 1)
-                self.assertEqual(world.verbs(), [["stop", source], ["disable", source]])
+                self.assertEqual(world.verbs(), [
+                    ["stop", source], ["disable", source],
+                    ["stop", target], ["disable", target], ["enable", "--now", source],
+                ])
                 self.assertIn("Failed to connect to bus", "\n".join(world.lines))
 
     def test_waits_for_port_after_unit_is_down(self):
@@ -164,13 +183,77 @@ class Switch(unittest.TestCase):
         self.assertEqual(switch.to_v3(env, wait=3.1), 1)
         self.assertAlmostEqual(world.now, 1003.1)
         self.assertTrue(world.active[switch.V2_UNIT])
+        self.assertTrue(world.enabled[switch.V2_UNIT])
         self.assertNotIn(["enable", "--now", switch.V3_UNIT], world.verbs())
 
     def test_start_deadline_is_honoured_and_identity_is_required(self):
+        for source, target, operation in (
+            (switch.V2_UNIT, switch.V3_UNIT, switch.to_v3),
+            (switch.V3_UNIT, switch.V2_UNIT, switch.to_v2),
+        ):
+            with self.subTest(target=target):
+                world = World(v2_active=source == switch.V2_UNIT, v3_active=source == switch.V3_UNIT)
+                env = world.env()
+                polls = []
+
+                def wrong_status():
+                    polls.append(world.now)
+                    world._active(target)
+                    if target == switch.V3_UNIT:
+                        return {"service": "inventory", "version": "v3"}
+                    return {"version": 1}, None
+
+                def command(*args):
+                    if args == ("enable", "--now", source):
+                        self.assertFalse(world._active(target))
+                        self.assertFalse(world.enabled[target])
+                    return world.systemctl(*args)
+
+                if target == switch.V3_UNIT:
+                    env.v3_status = wrong_status
+                else:
+                    env.v2_status = wrong_status
+                env.systemctl = command
+                self.assertEqual(operation(env, wait=2.1), 1)
+                self.assertAlmostEqual(polls[-1], 1004.1)
+                self.assertTrue(world._active(source))
+                self.assertTrue(world.enabled[source])
+                self.assertIn(f"Restored {source}", "\n".join(world.lines))
+
+    def test_rollback_reports_target_cleanup_failure_without_starting_source(self):
         world = World()
-        world.v3_status = lambda: {"service": "inventory", "version": "v3"}
-        self.assertEqual(switch.to_v3(world.env(), wait=2.1), 1)
-        self.assertAlmostEqual(world.now, 1004.1)
+        env = world.env()
+
+        def command(*args):
+            if args == ("enable", "--now", switch.V3_UNIT):
+                world.systemctl(*args)
+                return CompletedProcess(args, 1, "", "partial start")
+            if args == ("stop", switch.V3_UNIT):
+                return CompletedProcess(args, 1, "", "cleanup failed")
+            return world.systemctl(*args)
+
+        env.systemctl = command
+        self.assertEqual(switch.to_v3(env), 1)
+        self.assertNotIn(["enable", "--now", switch.V2_UNIT], world.verbs())
+        output = "\n".join(world.lines)
+        self.assertIn("partial start", output)
+        self.assertIn("cleanup failed", output)
+        self.assertIn(f"Rollback to {switch.V2_UNIT} failed", output)
+
+    def test_oversleep_cannot_start_a_poll(self):
+        world = World(v2_active=False, v3_active=True)
+        env = world.env()
+        polls = []
+
+        def command(*args):
+            if args == ("is-active", switch.V3_UNIT):
+                polls.append(world.now)
+            return world.systemctl(*args)
+
+        env.systemctl = command
+        env.sleep = lambda delay: world.sleep(delay + 0.01)
+        self.assertEqual(switch.stop_v3(env, wait=0.1), 1)
+        self.assertEqual(polls, [1000.0])
 
     def test_missing_v3_restores_enabled_and_running_v2(self):
         world = World(v3_installed=False)
@@ -225,13 +308,49 @@ class Install(unittest.TestCase):
             unit.write_bytes(b"old unit\n")
             unit.chmod(0o600)
             kwargs = {"unit_path": unit, "repo": repo, "python": str(repo / ".venv/bin/python")}
+            original = unit.stat()
             env = world.env()
             env.systemctl = lambda *args: CompletedProcess(args, 1, "", "reload failed")
             self.assertEqual(switch.install_unit(env, **kwargs), 1)
             self.assertEqual(unit.read_bytes(), b"old unit\n")
             self.assertEqual(stat.S_IMODE(unit.stat().st_mode), 0o600)
+            self.assertEqual(unit.stat().st_ino, original.st_ino)
+            self.assertEqual(unit.stat().st_mtime_ns, original.st_mtime_ns)
+            self.assertEqual(list(repo.iterdir()), [unit])
             self.assertEqual(switch.install_unit(world.env(), **kwargs), 0)
             self.assertEqual(world.verbs(), [["daemon-reload"]])
+
+    def test_symlink_is_refused_without_writes_or_reload(self):
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), TemporaryDirectory() as directory:
+                world = World()
+                repo = Path(directory)
+                source = repo / "managed.service"
+                if not dangling:
+                    source.write_bytes(b"old unit\n")
+                unit = repo / "jarvis-agent.service"
+                unit.symlink_to(source.name)
+                before = set(repo.iterdir())
+                self.assertEqual(switch.install_unit(
+                    world.env(), unit_path=unit, repo=repo, python=str(repo / ".venv/bin/python"),
+                ), 1)
+                self.assertEqual(unit.readlink(), Path(source.name))
+                self.assertEqual(set(repo.iterdir()), before)
+                if not dangling:
+                    self.assertEqual(source.read_bytes(), b"old unit\n")
+                self.assertEqual(world.calls, [])
+                self.assertIn("symlink", "\n".join(world.lines))
+
+    def test_failed_first_install_removes_new_unit_and_directories(self):
+        with TemporaryDirectory() as directory:
+            repo = Path(directory)
+            unit = repo / "systemd/user/jarvis-agent.service"
+            env = World().env()
+            env.systemctl = lambda *args: CompletedProcess(args, 1, "", "reload failed")
+            self.assertEqual(switch.install_unit(
+                env, unit_path=unit, repo=repo, python=str(repo / ".venv/bin/python"),
+            ), 1)
+            self.assertEqual(list(repo.iterdir()), [])
 
 
 class Cli(unittest.TestCase):
@@ -287,6 +406,28 @@ class Cli(unittest.TestCase):
                     to_v2.assert_not_called()
                 if result:
                     v2_running.assert_not_called()
+                else:
+                    v2_running.assert_called_once_with(config.DAEMON_PORT)
+
+    def test_hud_foreground_refusal_requires_v3_identity(self):
+        from jarvis import __main__ as main
+        from jarvis.v2 import daemon
+
+        args = argparse.Namespace(action="open", no_window=True)
+        for service, expected in (("jarvis-agentd", 1), ("inventory", 0)):
+            with self.subTest(service=service):
+                world = World()
+                env = world.env()
+                env.v3_status = lambda: {"service": service}
+                with (patch.object(switch, "default_env", return_value=env),
+                      patch.object(switch, "to_v2") as to_v2,
+                      patch.object(daemon, "is_running", return_value=True) as v2_running,
+                      patch.object(config, "HUD_DEV", True)):
+                    self.assertEqual(main.cmd_hud(args), expected)
+                to_v2.assert_not_called()
+                if expected:
+                    v2_running.assert_not_called()
+                    self.assertIn("Ctrl+C in its terminal", "\n".join(world.lines))
                 else:
                     v2_running.assert_called_once_with(config.DAEMON_PORT)
 
