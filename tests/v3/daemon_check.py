@@ -1,9 +1,11 @@
 """HTTP guards, shutdown and CLI checks for the v3 daemon."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from http.client import HTTPConnection, parse_headers
 from http.server import ThreadingHTTPServer
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -15,11 +17,13 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from jarvis import config
-from jarvis.v3.daemon import Daemon
+from jarvis.v3 import cli
+from jarvis.v3.daemon import Daemon, _status_handler
 
 
 def request(port, method="GET", path="/v3/status", headers=()):
@@ -107,6 +111,7 @@ class DaemonCheck(unittest.TestCase):
                     self.assertGreater(int(headers["Content-Length"]), 0)
                 elif expected == 200:
                     status = json.loads(body)
+                    self.assertEqual(status["service"], "jarvis-agentd")
                     self.assertEqual(status["data_dir"], str(self.data))
                     self.assertEqual(datetime.fromisoformat(status["started_at"]).utcoffset(), timedelta(0))
                     self.assertGreaterEqual(status["uptime_s"], 0)
@@ -127,6 +132,19 @@ class DaemonCheck(unittest.TestCase):
         self.assertTrue(status.startswith(b"HTTP/1.0 400 "), status)
         self.assert_protected(headers)
         self.assertIn("error", json.loads(body))
+
+    def test_http09_has_framed_host_refusal(self):
+        handler_type = _status_handler(self.data)
+        handler = handler_type.__new__(handler_type)
+        handler.server = SimpleNamespace(server_port=0)
+        handler.rfile = BytesIO(b"GET /v3/status\r\n")
+        handler.wfile = BytesIO()
+        handler.handle_one_request()
+
+        handler.wfile.seek(0)
+        self.assertTrue(handler.wfile.readline().startswith(b"HTTP/1.0 421 "))
+        self.assert_protected(parse_headers(handler.wfile))
+        self.assertIn("error", json.load(handler.wfile))
 
     def test_loopback_bind(self):
         def loopback_only(address, handler):
@@ -154,9 +172,24 @@ class DaemonCheck(unittest.TestCase):
 
     def test_repairs_existing_data_dir_mode(self):
         self.data.mkdir()
-        self.data.chmod(0o755)
+        self.data.chmod(0)
         self.daemon.start()
         self.assertEqual(stat.S_IMODE(self.data.stat().st_mode), 0o700)
+
+    def test_refuses_data_dir_symlink_before_bind(self):
+        target = self.data.with_name("target")
+        target.mkdir()
+        target.chmod(0o750)
+        self.data.symlink_to(target, target_is_directory=True)
+        with patch("jarvis.v3.daemon.ThreadingHTTPServer") as server:
+            with self.assertRaisesRegex(RuntimeError, "data directory.*symlink"):
+                self.daemon.start()
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o750)
+            target.rmdir()
+            with self.assertRaisesRegex(RuntimeError, "data directory.*symlink"):
+                self.daemon.start()
+            server.assert_not_called()
+        self.assertFalse(target.exists())
 
     def test_concurrent_stop_during_request(self):
         self.daemon.start()
@@ -191,6 +224,29 @@ class DaemonCheck(unittest.TestCase):
 
 
 class CliCheck(unittest.TestCase):
+    def test_agent_help_paths_skip_model_stack(self):
+        forbidden = {"jarvis.agent", "jarvis.llm", "jarvis.models", "jarvis.v2.providers"}
+        for command in (["agentd", "--help"], ["agent", "status", "--help"]):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, "-X", "importtime", "-m", "jarvis", *command],
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                imports = {line.rsplit("|", 1)[-1].strip() for line in result.stderr.splitlines()}
+                self.assertFalse(imports & forbidden, imports & forbidden)
+
+    def test_status_requires_service_identity(self):
+        for body in (b'{"version":"v3"}', b'{"version":"v3","service":"inventory"}', b'not JSON'):
+            with self.subTest(body=body), patch.object(config, "V3_API_PORT", 0), patch.object(
+                cli, "HTTPConnection"
+            ) as connection, redirect_stdout(StringIO()) as output:
+                connection.return_value.getresponse.return_value = SimpleNamespace(
+                    status=200, read=lambda: body
+                )
+                self.assertEqual(cli.status(None), 1)
+                self.assertIn("Something else answers on 127.0.0.1:0", output.getvalue())
+
     def test_agentd_shuts_down_on_signals(self):
         for sig in (signal.SIGTERM, signal.SIGINT):
             with self.subTest(signal=sig), tempfile.TemporaryDirectory() as data:
