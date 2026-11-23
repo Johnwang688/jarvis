@@ -128,15 +128,26 @@ class RealTree(unittest.TestCase):
 
 
 REGISTRY_PROBE = """
-import importlib, json, pkgutil, sys
+import importlib, json, sys
+from pathlib import Path
 from jarvis import tools
-snap = lambda: [list(tools.REGISTRY), sorted(tools.EXPLICIT_ONLY), tools.default_names(),
-                {n: [list(g.core), list(g.extra)] for n, g in sorted(tools.GROUPS.items())}]
+def snap():
+    reg = {n: [t.name, t.description, json.dumps(t.schema, sort_keys=True), bool(t.dangerous),
+               getattr(t.func, "__module__", ""), getattr(t.func, "__qualname__", ""), id(t), id(t.func)]
+           for n, t in tools.REGISTRY.items()}
+    return [list(tools.REGISTRY), reg, sorted(tools.EXPLICIT_ONLY), tools.default_names(),
+            {n: [list(g.core), list(g.extra)] for n, g in sorted(tools.GROUPS.items())}]
 assert not any(m == "jarvis.v3" or m.startswith("jarvis.v3.") for m in sys.modules), "v3 imported early"
 before = snap()
 import jarvis.v3
-for mod in pkgutil.walk_packages(jarvis.v3.__path__, "jarvis.v3."):
-    importlib.import_module(mod.name)
+root = Path(jarvis.v3.__file__).parent
+# Every .py file, namespace folders (no __init__.py) included, by its dotted name.
+for path in sorted(root.rglob("*.py")):
+    rel = path.relative_to(root.parent.parent).with_suffix("")
+    parts = list(rel.parts)
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    importlib.import_module(".".join(parts))
 print(json.dumps({"before": before, "after": snap()}))
 """
 
