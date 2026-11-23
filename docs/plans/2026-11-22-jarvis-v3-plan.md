@@ -17,7 +17,7 @@ two owner requests, the same day:
 
 The owner asked to plan carefully before committing to anything.
 
-**Build breakdown:** [`2026-11-22-jarvis-v3-pr-map.md`](2026-11-22-jarvis-v3-pr-map.md) lists every PR with its dependencies, spec and acceptance criteria.
+**Build breakdown:** [`2026-11-22-jarvis-v3-pr-map.md`](2026-11-22-jarvis-v3-pr-map.md) lists every PR with its dependencies, spec and acceptance criteria. **v2 is archived first (§21):** `jarvis hud` stays v2, and `jarvis agent` is v3.
 
 **The v3 goal in one line:** Jarvis is a chief of staff. It knows John's
 world, handles the routine on its own, notices what needs doing before John
@@ -603,3 +603,37 @@ Answered 2026-11-22; see §20.
 Still open: §13's default matrix needs the owner's review line by line (B0).
 The model for the planner and consolidation jobs is open too; it is Claude
 subscription per H9, but which tier is undecided.
+
+---
+
+## 21. Owner decisions: archive v2 first (2026-11-23)
+
+Before the v3 build starts, v2 is archived. It stays reachable through
+`jarvis hud`, and v3 gets its own command, `jarvis agent`.
+
+| # | Decision |
+|---|---|
+| A-1 | **v2 is frozen but fully working.** `jarvis hud` opens v2 exactly as today: chats, providers, inbox, Discord and tools all run. Only security and bug fixes, each in its own PR. Tagged `v2-final`. |
+| A-2 | **One daemon at a time.** `jarvis agent` stops daemon2 and starts the v3 daemon. `jarvis hud` does the reverse. Whichever runs owns cron, the voice wake word, the phone listener (8408) and the desktop bridge. |
+| A-3 | **v3 gets a new HUD (`hud3/`) built on shared parts.** It imports v2's frontend components (aurora glass, orb, Browser, terminals, editor) instead of copying them, and copies a component only when v3 must change it. |
+
+What this changes in the rest of the plan:
+
+- **"Retire" becomes "not included."** H2 (retire providers) and H7 (retire
+  Discord) now mean v3 is built without them. They remain in v2, which runs
+  whenever the owner switches to it. §7's "After" column describes v3, and
+  §8 phase 6 becomes a cutover with no deletions: `jarvis-agent` becomes the
+  unit enabled at login.
+- **H1 (T3 as a panel in the HUD)** applies to the v3 HUD; v2's HUD is not
+  modified.
+- **H8 (phone)** is v3's own phone surface on the same port 8408, possible
+  because only one daemon runs. v2's phone, chat views included, is
+  unchanged inside v2.
+- **New code** lives in `jarvis/v3/`, `tests/v3/` and `hud3/`. v3 imports
+  from `jarvis.v2` only through an allowlist, and v2's toolsets are pinned
+  so v3 tools can't leak into them.
+- **The shared gate** (`rules.py`, `permissions.py`, `protected_state.py`,
+  owner ops) serves both versions. It is the one place both may change, and
+  it gains agent refusals for `jarvis agent` and the `jarvis-agent` unit.
+
+PR map: Track A (A1–A6, wave 0), and the rewritten Tracks T and R.
