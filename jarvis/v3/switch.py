@@ -7,19 +7,25 @@ from http.client import HTTPConnection, HTTPException
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import stat
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, DEVNULL, TimeoutExpired, run
 import tempfile
 import time
 
 from jarvis import config
-from jarvis.v2 import owner_ops
 from .daemon import SERVICE_NAME
 
-V2_UNIT = owner_ops.UNIT
+V2_UNIT = "jarvis-daemon2"
 V3_UNIT = "jarvis-agent"
 WAIT = 30.0
+POLL = 0.25
+STATUS_TIMEOUT = 2.0
+STATUS_CAP = 1 << 20
+SYSTEMCTL_TIMEOUT = 90.0
+REFUSED = "refused"
+UP = ("active", "activating", "reloading", "refreshing")
 
 
 @dataclass
@@ -37,14 +43,38 @@ def _is_v3(status: dict | None) -> bool:
     return isinstance(status, dict) and status.get("service") == SERVICE_NAME
 
 
+def _read_v2_status() -> tuple[dict | None, str | None]:
+    """Only a refused connection means nothing is listening on the v2 port."""
+    connection = HTTPConnection("127.0.0.1", config.DAEMON_PORT, timeout=STATUS_TIMEOUT)
+    try:
+        connection.request("GET", "/status")
+        response = connection.getresponse()
+        if response.status != 200:
+            return None, f"/status answered HTTP {response.status}"
+        status = json.loads(response.read(STATUS_CAP))
+        if not isinstance(status, dict):
+            return None, "/status did not answer with a JSON object"
+        return status, None
+    except ConnectionRefusedError:
+        return None, REFUSED
+    except TimeoutError:
+        return None, f"/status did not answer within {STATUS_TIMEOUT:g} s"
+    except ValueError:
+        return None, "/status did not answer with JSON"
+    except Exception as exc:
+        return None, f"/status could not be read ({type(exc).__name__})"
+    finally:
+        connection.close()
+
+
 def _read_v3_status() -> dict | None:
     port = config.V3_API_PORT
-    connection = HTTPConnection("127.0.0.1", port, timeout=owner_ops.STATUS_TIMEOUT)
+    connection = HTTPConnection("127.0.0.1", port, timeout=STATUS_TIMEOUT)
     try:
         connection.request("GET", "/v3/status", headers={"Host": f"127.0.0.1:{port}"})
         response = connection.getresponse()
         if response.status == 200:
-            status = json.loads(response.read(owner_ops.STATUS_CAP))
+            status = json.loads(response.read(STATUS_CAP))
             if _is_v3(status):
                 return status
     except (OSError, HTTPException, ValueError):
@@ -65,12 +95,17 @@ def _port_free(port: int) -> bool:
     return True
 
 
-def default_env() -> Env:
-    def systemctl(*args: str) -> CompletedProcess:
-        timeout = owner_ops.SYSTEMCTL_TIMEOUT if args[0] in ("stop", "enable", "restart") else 15.0
-        return owner_ops.systemctl(*args, timeout=timeout)
+def _run_systemctl(*args: str) -> CompletedProcess:
+    executable = shutil.which("systemctl")
+    if not executable or executable.startswith("/mnt/"):
+        raise OSError("systemctl is not on PATH")
+    timeout = SYSTEMCTL_TIMEOUT if args[0] in ("stop", "enable", "restart") else 15.0
+    return run([executable, "--user", *args], capture_output=True, text=True,
+               timeout=timeout, stdin=DEVNULL)
 
-    return Env(systemctl, owner_ops.read_status, _read_v3_status, _port_free,
+
+def default_env() -> Env:
+    return Env(_run_systemctl, _read_v2_status, _read_v3_status, _port_free,
                time.monotonic, time.sleep, print)
 
 
@@ -84,8 +119,11 @@ class SwitchError(RuntimeError):
 def _systemctl(env: Env, unit: str, *args: str) -> CompletedProcess:
     try:
         return env.systemctl(*args)
-    except owner_ops.OpsRefused as exc:
-        raise SwitchError(unit, str(exc)) from exc
+    except TimeoutExpired as exc:
+        raise SwitchError(unit, f"systemctl --user {' '.join(args)} did not return "
+                          f"within {exc.timeout:g} s.") from exc
+    except OSError as exc:
+        raise SwitchError(unit, f"Could not run systemctl: {exc}") from exc
 
 
 def _command_error(unit: str, result: CompletedProcess, *args: str) -> SwitchError:
@@ -110,7 +148,7 @@ def _unit_up(env: Env, unit: str) -> bool:
     args = ("is-active", unit)
     result = _systemctl(env, unit, *args)
     state = (result.stdout or "").strip()
-    if result.returncode == 0 or state in (*owner_ops.UP, "deactivating", "maintenance"):
+    if result.returncode == 0 or state in (*UP, "deactivating", "maintenance"):
         return True
     if (result.returncode == 3 and state in ("inactive", "failed")
             or result.returncode == 4 and state in ("inactive", "unknown", "") and not result.stderr):
@@ -138,7 +176,7 @@ def _wait_for(env: Env, unit: str, condition: Callable[[], bool], wait: float, w
             return
         if remaining <= 0:
             raise SwitchError(unit, f"Timed out after {wait:g} s waiting for {what}.")
-        env.sleep(min(owner_ops.POLL, remaining))
+        env.sleep(min(POLL, remaining))
 
 
 def _wait_down(env: Env, unit: str, port: int, wait: float) -> None:
@@ -175,6 +213,15 @@ def _report_failure(env: Env, exc: SwitchError) -> int:
     return 1
 
 
+def _busy_refusal(status: dict) -> str | None:
+    for key in ("turns_running", "approvals_pending"):
+        count = status.get(key)
+        if type(count) is int and count > 0:
+            return (f"{V2_UNIT} has running turns or pending approvals. "
+                    "Wait for them to finish or pass --force to switch anyway.")
+    return None
+
+
 def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
     try:
         if _is_v3(env.v3_status()) and _down(env, V2_UNIT, config.DAEMON_PORT):
@@ -182,13 +229,13 @@ def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
             return 0
 
         status, why = env.v2_status()
-        if status is None and why == owner_ops.REFUSED:
+        if status is None and why == REFUSED:
             refusal = None
         elif status is None or status.get("version") != 2:
             refusal = (f"Can't check {V2_UNIT} for running turns or approvals "
                        f"({why or 'unexpected status'}). Pass --force to switch anyway.")
         else:
-            refusal = owner_ops.busy_refusal(status)
+            refusal = _busy_refusal(status)
         if refusal:
             if not force:
                 env.out(str(refusal))

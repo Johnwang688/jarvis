@@ -1,6 +1,7 @@
 """A4 failure paths, CLI wiring, and state transitions on an injected clock."""
 
 import argparse
+from http.client import RemoteDisconnected
 from pathlib import Path
 import stat
 from subprocess import CompletedProcess
@@ -11,6 +12,60 @@ from unittest.mock import patch
 from a4_acceptance_check import World
 from jarvis import config
 from jarvis.v3 import cli, switch
+
+
+class DefaultEnv(unittest.TestCase):
+    def test_v2_status_uses_configured_loopback_endpoint(self):
+        with (patch.object(config, "DAEMON_PORT", 18405),
+              patch.object(switch, "HTTPConnection") as connect):
+            connection = connect.return_value
+            response = connection.getresponse.return_value
+            response.status = 200
+            response.read.return_value = b'{"version": 2}'
+            self.assertEqual(switch.default_env().v2_status(), ({"version": 2}, None))
+            connect.assert_called_once_with("127.0.0.1", 18405, timeout=2.0)
+            connection.request.assert_called_once_with("GET", "/status")
+            response.read.assert_called_once_with(1 << 20)
+            connection.close.assert_called_once_with()
+
+    def test_v2_status_distinguishes_connection_refusal_from_an_unreadable_status(self):
+        cases = (
+            (ConnectionRefusedError(), 200, b"{}", "refused"),
+            (TimeoutError(), 200, b"{}", "/status did not answer within 2 s"),
+            (RemoteDisconnected(), 200, b"{}", "/status could not be read (RemoteDisconnected)"),
+            (None, 503, b"{}", "/status answered HTTP 503"),
+            (None, 200, b"?", "/status did not answer with JSON"),
+            (None, 200, b"[]", "/status did not answer with a JSON object"),
+        )
+        for error, code, body, reason in cases:
+            with self.subTest(reason=reason), patch.object(switch, "HTTPConnection") as connect:
+                connection = connect.return_value
+                connection.request.side_effect = error
+                response = connection.getresponse.return_value
+                response.status = code
+                response.read.return_value = body
+                self.assertEqual(switch.default_env().v2_status(), (None, reason))
+                connection.close.assert_called_once_with()
+
+    def test_systemctl_uses_resolved_native_argv(self):
+        with (patch.object(switch.shutil, "which", return_value="/usr/bin/systemctl") as which,
+              patch.object(switch, "run") as run):
+            self.assertIs(switch.default_env().systemctl("stop", switch.V3_UNIT), run.return_value)
+            which.assert_called_once_with("systemctl")
+            run.assert_called_once_with(
+                ["/usr/bin/systemctl", "--user", "stop", switch.V3_UNIT],
+                capture_output=True, text=True, timeout=90.0, stdin=switch.DEVNULL,
+            )
+
+    def test_systemctl_refuses_missing_or_windows_executable(self):
+        for executable in (None, "/mnt/c/bin/systemctl"):
+            with (self.subTest(executable=executable),
+                  patch.object(switch.shutil, "which", return_value=executable),
+                  patch.object(switch, "run") as run):
+                env = World(v2_active=False, v3_active=True).env()
+                env.systemctl = switch.default_env().systemctl
+                self.assertEqual(switch.stop_v3(env), 1)
+                run.assert_not_called()
 
 
 class Switch(unittest.TestCase):
@@ -46,6 +101,15 @@ class Switch(unittest.TestCase):
         self.assertEqual(switch.to_v3(world.env()), 3)
         self.assertEqual(world.verbs(), [])
         self.assertIn("--force", "\n".join(world.lines))
+
+    def test_nonpositive_and_noninteger_busy_counts_are_ignored(self):
+        for count in (0, -1, True, 1.5, "2", None):
+            with self.subTest(count=count):
+                world = World()
+                world.v2_status = lambda: (
+                    {"version": 2, "turns_running": count, "approvals_pending": count}, None,
+                )
+                self.assertEqual(switch.to_v3(world.env()), 0)
 
     def test_state_query_failure_does_not_count_as_down(self):
         for source, operation in ((switch.V2_UNIT, switch.to_v3), (switch.V3_UNIT, switch.to_v2)):

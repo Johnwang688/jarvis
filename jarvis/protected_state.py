@@ -3284,6 +3284,10 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                             ("restart", "_restart", "rebuild", "pull", "npm_ci", "systemctl",
                              "hand_off")),
     # A4: register jarvis.v3.switch and its writer entry points here.
+    "jarvis.v3.switch": (("agent", "start"),
+                         ("to_v3", "to_v2", "install_unit", "stop_v3", "restart_v3", "main",
+                          "default_env", "_run_systemctl", "_systemctl", "_change", "_stop_and_disable",
+                          "_enable", "_start_v2", "_write_unit")),
 }
 
 # The protected systemd units can also be changed directly. On 2026-10-11,

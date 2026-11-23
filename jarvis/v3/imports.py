@@ -15,7 +15,6 @@ from pathlib import Path
 
 
 ALLOWED_V2: dict[str, str] = {
-    "jarvis.v2.owner_ops": "shared gate/ops: daemon2 status, busy refusal and systemctl helpers (A-2)",
     "jarvis.v2.redact": "Reuse credential redaction for text shown to owners and models.",
     "jarvis.v2.push": "Reuse encrypted owner Web Push with count and rank only.",
     "jarvis.v2.quiet": "Reuse quiet-hours settings and local-time window calculations.",
