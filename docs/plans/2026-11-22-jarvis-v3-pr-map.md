@@ -244,27 +244,25 @@ Owner decisions A-1–A-3 (plan §21): v2 is frozen but fully working through
 v2's frontend components by importing them.
 
 ### A1: Tag `v2-final` and freeze v2
-- **Scope:** annotated tag; a short "v2 is archived" section in AGENTS.md;
-  a new `frozen v2` flag family in `jarvis/v2/pr_facts.py` (the last v2
-  feature, since it is how the freeze is seen); `tests/v2/pr_facts_check.py`.
+- **Scope:** annotated tag, a short "v2 is archived" section in AGENTS.md,
+  `scripts/v2_freeze_report.py`, and `tests/v3/` checks for the freeze.
 - **Spec:**
   - Annotated tag `v2-final` on the `main` commit that follows the AGENTS.md
     move (#413). The owner pushes the tag (an outward action).
-  - AGENTS.md section, ≤ 500 bytes:
-    - v2 lives in `jarvis/v2/` and `hud/`, frozen at `v2-final`, and opens
-      with `jarvis hud`;
-    - fixes only, each in its own PR;
-    - new work goes in `jarvis/v3/`, `tests/v3/` and `hud3/`.
-
-    Keep the guide within its byte cap; raise the cap in
-    `scripts/slim_claude.py` in the same PR, with the reason, if needed.
-  - PR rows and summaries flag any PR touching `jarvis/v2/**` or `hud/**`
-    with `frozen v2`, so reviews and the owner see it. The shared gate files
-    (see §0.3) are not flagged.
+  - AGENTS.md section, ≤ 700 bytes. v2 opens with `jarvis hud`. Fixes go in
+    separate PRs with `v2-fix:` commit subjects. New work goes in `jarvis/v3/`,
+    `tests/v3/` and `hud3/` and starts with `jarvis agent`. The archive rule
+    takes the guide past its previous cap, so `scripts/slim_claude.py` allows
+    up to 41,000 bytes.
+  - The report lists non-merge commits touching `jarvis/v2/` or `hud/` after
+    `v2-final` (or `--since REF`). It labels `jarvis/v2/owner_ops.py` and
+    `jarvis/v2/permissions.py` as shared gates. `--check` fails when a commit
+    touches a frozen file without a `v2-fix:` subject prefix. The report runs
+    independently of PR review and merge gating.
 - **Acceptance:**
   - [ ] Tag exists and points at the intended commit.
-  - [ ] pr_facts flags a fixture PR touching `jarvis/v2/x.py` and
-    `hud/src/y.ts`; it doesn't flag `jarvis/v3/**` or `jarvis/rules.py`.
+  - [ ] `tests/v3/a1_acceptance_check.py` and `tests/v3/v2_freeze_check.py`
+    verify the report and its exit codes against local Git fixtures.
   - [ ] `slim_claude.py --check` passes.
 - **Size:** S.
 

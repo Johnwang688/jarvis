@@ -333,7 +333,7 @@ def verify(root, original):
     require(restored==original, "byte ordering")
     guide_path = root/GUIDE if (root/GUIDE).exists() else root/"CLAUDE.md"  # pre-move layouts (self-test)
     guide = guide_path.read_bytes()
-    require(38000 <= len(guide) <= 40500, f"guide size {len(guide)} outside 38000..40500")
+    require(38000 <= len(guide) <= 41000, f"guide size {len(guide)} outside 38000..41000")
     lines = original.splitlines(keepends=True)
     for item in m["retained_guide"]:
         begin = f"<!-- retained:{item['name']}:begin -->\n".encode()

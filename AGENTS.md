@@ -82,6 +82,16 @@ the point of the project, not an accident.
 
 <!-- retained:purpose-and-environment:end -->
 
+## v2 is archived
+
+v2 lives in `jarvis/v2/` and `hud/`, is frozen at `v2-final`, and opens with
+`jarvis hud`. Only security and bug fixes go there, each in its own PR with a
+`v2-fix:` commit subject. New work goes in `jarvis/v3/`, `tests/v3/` and `hud3/`
+and starts with `jarvis agent`. The shared gate files `jarvis/v2/owner_ops.py`
+and `jarvis/v2/permissions.py` serve both versions. Run
+`scripts/v2_freeze_report.py --check` to see and check the freeze.
+See [PR map A1](docs/plans/2026-11-22-jarvis-v3-pr-map.md#a1-tag-v2-final-and-freeze-v2).
+
 ## Working on v2
 
 Codex chats hold no GitHub login (CG-0): push/PRs use Codex-only `chat_git`
