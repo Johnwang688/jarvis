@@ -53,11 +53,16 @@ class ImportBoundary(unittest.TestCase):
             ("function alias call", "from importlib import import_module as load\nload('jarvis.{version}.{name}')", "{name}", 2),
             ("relative keyword call", "import_module('...{version}.{name}', package='jarvis.v3.sub')", "{name}", 1),
             ("relative positional call", "importlib.import_module('..{version}.{name}', 'jarvis.v2')", "{name}", 1),
+            ("keyword name call", "import_module(package='jarvis.v3', name='..{version}.{name}')", "{name}", 1),
+            ("keyword fromlist call", "__import__('jarvis.{version}', fromlist=['{name}'])", "{name}", 1),
+            ("positional fromlist call", "__import__('jarvis.{version}', None, None, ('{name}',))", "{name}", 1),
+            ("keyword level call", "__import__(name='{version}.{name}', globals=globals(), level=3)", "{name}", 1),
+            ("positional level call", "__import__('{version}.{name}', globals(), None, (), 3)", "{name}", 1),
             ("nested", "def f():\n    class C:\n        try:\n            import jarvis.{version}.{name}\n        except ImportError:\n            pass", "{name}", 4),
         ]
         directions = [
             (violations, "v2", "daemon", "v3"),
-            (reverse_violations, "v3", "vault", "v2"),
+            (reverse_violations, "v3", "imports", "v2"),
         ]
         for scan, version, name, own_version in directions:
             for label, source, suffix, line in forms:
@@ -137,6 +142,46 @@ class ImportBoundary(unittest.TestCase):
         self.assertEqual(violations(self.base), [Violation(path, 2, "jarvis.v2")])
         self.assertEqual(reverse_violations(self.base), [Violation(path, 2, "jarvis.v3")])
 
+    def test_builtin_fromlist_resolves_all_modules_and_falls_back_for_symbols(self):
+        path = self.write(
+            "calls.py",
+            "__import__('jarvis.v2', fromlist=['quiet', 'model', 'daemon', 'model'])\n"
+            "__import__('jarvis.v2.quiet', fromlist=['within'])\n"
+            "__import__('jarvis.v2.providers', fromlist=['claude'])\n"
+            "__import__('jarvis.v2.daemon', fromlist=['Daemon'])\n"
+            "__import__('jarvis.v2.daemon', fromlist=members)\n"
+            "__import__('', globals(), fromlist=['v2', 'v3'], level=2)\n"
+            "__import__('jarvis.v2', fromlist=['__doc__'])\n",
+        )
+        self.assertEqual(
+            violations(self.base),
+            [
+                Violation(path, 1, "jarvis.v2.model"),
+                Violation(path, 1, "jarvis.v2.daemon"),
+                Violation(path, 3, "jarvis.v2.providers.claude"),
+                Violation(path, 4, "jarvis.v2.daemon"),
+                Violation(path, 5, "jarvis.v2.daemon"),
+                Violation(path, 6, "jarvis.v2"),
+                Violation(path, 7, "jarvis.v2"),
+            ],
+        )
+        self.assertEqual(reverse_violations(self.base), [Violation(path, 6, "jarvis.v3")])
+
+    def test_linked_packages_use_each_path_and_skip_ancestor_cycles(self):
+        shared = self.write("shared/__init__.py", "from ... import v2, v3\n").parent
+        root = self.base / "scan"
+        root.mkdir()
+        aliases = [root / "first", root / "second"]
+        for alias in aliases:
+            alias.symlink_to(shared, target_is_directory=True)
+        (shared / "back").symlink_to(root, target_is_directory=True)
+
+        for scan, module in [(violations, "jarvis.v2"), (reverse_violations, "jarvis.v3")]:
+            with self.subTest(scan=scan.__name__):
+                self.assertEqual(
+                    scan(root), [Violation(alias / "__init__.py", 1, module) for alias in aliases]
+                )
+
     def test_unresolvable_and_unparseable(self):
         bad = self.write("bad.py", "\ndef (:\n")
         relative = self.write(
@@ -144,10 +189,12 @@ class ImportBoundary(unittest.TestCase):
             "from ....x import thing\n"
             "import_module('..v2.daemon')\n"
             "import_module('..v3.vault', package=current_package)\n"
-            "import_module('...v2.daemon', package='jarvis.v3')\n",
+            "import_module('...v2.daemon', package='jarvis.v3')\n"
+            "__import__('v2.daemon', globals(), level=3)\n"
+            "__import__('v2.daemon', globals(), level=current_level)\n",
         )
         expected = [Violation(bad, 2, "<unparseable>")] + [
-            Violation(relative, line, "<unresolvable>") for line in range(1, 5)
+            Violation(relative, line, "<unresolvable>") for line in range(1, 7)
         ]
         self.assertEqual(violations(self.base), expected)
         self.assertEqual(reverse_violations(self.base), expected)

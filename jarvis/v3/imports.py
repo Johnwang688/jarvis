@@ -28,9 +28,7 @@ class Violation:
     module: str
 
 
-def _absolute(name: str, package: str) -> str:
-    suffix = name.lstrip(".")
-    level = len(name) - len(suffix)
+def _absolute(name: str, package: str, level: int) -> str:
     if level == 0:
         return name
 
@@ -39,21 +37,26 @@ def _absolute(name: str, package: str) -> str:
         return _UNRESOLVABLE
 
     base = ".".join(parts[: len(parts) - level + 1])
-    return f"{base}.{suffix}" if suffix else base
+    return f"{base}.{name}" if name else base
 
 
-def _from_target(base: str, member: str, boundary: str) -> str:
+def _from_target(
+    base: str, member: str, boundary: str, *, require_module: bool = False
+) -> str:
     if member == "*" or base == _UNRESOLVABLE:
         return base
 
     candidate = f"{base}.{member}"
-    if base in ("jarvis", boundary):
+    if not all(part.isidentifier() for part in candidate.split(".")):
+        return base
+    package_root = base in ("jarvis", boundary)
+    if package_root and not require_module:
         return candidate
-    if base.startswith(boundary + "."):
+    if package_root or base.startswith(boundary + "."):
         # A from-import can name a symbol of the source module or a child
         # module. Use the source layout to identify nested modules.
         child = _JARVIS_DIR.joinpath(*candidate.split(".")[1:])
-        if child.with_suffix(".py").is_file() or (child / "__init__.py").is_file():
+        if child.with_suffix(".py").is_file() or child.is_dir():
             return candidate
     return base
 
@@ -62,6 +65,36 @@ def _string(node: ast.AST | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def _call_arg(node: ast.Call, position: int, name: str) -> ast.AST | None:
+    if position < len(node.args):
+        return node.args[position]
+    return next((keyword.value for keyword in node.keywords if keyword.arg == name), None)
+
+
+def _builtin_targets(node: ast.Call, target: str, package: str, boundary: str) -> list[str]:
+    level = _call_arg(node, 4, "level")
+    if level is not None and not (
+        isinstance(level, ast.Constant) and isinstance(level.value, int) and level.value >= 0
+    ):
+        return [_UNRESOLVABLE]
+
+    base = _absolute(target, package, 0 if level is None else level.value)
+    fromlist = _call_arg(node, 3, "fromlist")
+    if not isinstance(fromlist, (ast.List, ast.Tuple)):
+        return [base]
+
+    # Like a from-import, report children when they resolve and the base for
+    # attributes. One call can spell the same target more than once.
+    targets = []
+    for item in fromlist.elts:
+        member = _string(item)
+        module = base if member is None else _from_target(
+            base, member, boundary, require_module=True
+        )
+        targets.append(module)
+    return list(dict.fromkeys(targets)) or [base]
 
 
 def _import_targets(tree: ast.AST, package: str, boundary: str):
@@ -83,10 +116,10 @@ def _import_targets(tree: ast.AST, package: str, boundary: str):
             for alias in node.names:
                 yield node.lineno, alias.name
         elif isinstance(node, ast.ImportFrom):
-            base = _absolute("." * node.level + (node.module or ""), package)
+            base = _absolute(node.module or "", package, node.level)
             for alias in node.names:
                 yield node.lineno, _from_target(base, alias.name, boundary)
-        elif isinstance(node, ast.Call) and node.args:
+        elif isinstance(node, ast.Call):
             match node.func:
                 case ast.Attribute(value=ast.Name(id=owner), attr="import_module") if owner in importlib_names:
                     is_import_module = True
@@ -97,26 +130,43 @@ def _import_targets(tree: ast.AST, package: str, boundary: str):
                 case _:
                     continue
 
-            target = _string(node.args[0])
+            target = _string(_call_arg(node, 0, "name"))
             if target is None:
                 continue
-            relative_package = ""
-            if target.startswith("."):
-                package_arg = next(
-                    (keyword.value for keyword in node.keywords if keyword.arg == "package"),
-                    None,
-                )
-                if package_arg is None and is_import_module and len(node.args) >= 2:
-                    package_arg = node.args[1]
-                relative_package = _string(package_arg) or ""
-            yield node.lineno, _absolute(target, relative_package)
+            if is_import_module:
+                name = target.lstrip(".")
+                relative_package = _string(_call_arg(node, 1, "package")) or ""
+                yield node.lineno, _absolute(name, relative_package, len(target) - len(name))
+            else:
+                for module in _builtin_targets(node, target, package, boundary):
+                    yield node.lineno, module
+
+
+def _python_files(directory: Path):
+    if not directory.is_dir():
+        return
+
+    pending = [(directory, frozenset())]
+    while pending:
+        current, ancestors = pending.pop()
+        stat = current.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in ancestors:
+            continue
+        # Check only ancestors so aliases get their own package and path.
+        ancestors = ancestors | {identity}
+        for child in current.iterdir():
+            if child.is_dir():
+                pending.append((child, ancestors))
+            elif child.name.endswith(".py") and child.is_file():
+                yield child
 
 
 def _violations(
     directory: Path, package: str, boundary: str, allowed: dict[str, str]
 ) -> list[Violation]:
     found = []
-    for path in directory.rglob("*.py"):
+    for path in _python_files(directory):
         file_package = ".".join((package, *path.relative_to(directory).parent.parts))
         try:
             tree = ast.parse(path.read_bytes(), filename=str(path))
