@@ -4002,12 +4002,11 @@ def _daemon_spans(unit: str, full: bool = True) -> list[tuple[str, int, int]]:
             for text in _daemon_command_lines().get(unit, ())]
 
 
-def _socket_spans(unit: str) -> list[tuple[str, int, int]]:
-    """A daemon's listening sockets as `ss -ltnp` and `netstat -tlnp` print
-    them, each with the span of its port a selection must reach."""
+def _socket_spans(unit: str | None = None) -> list[tuple[str, int, int]]:
+    """Listening socket rows for one daemon or both, with each port's span."""
     out = []
     for port in sorted(_daemon_ports()):
-        if _port_daemon(port) != unit:
+        if unit is not None and _port_daemon(port) != unit:
             continue
         for text in (f'LISTEN 0 5 127.0.0.1:{port} 0.0.0.0:* users:(("python3",pid=4242,fd=5))',
                      f"tcp 0 0 127.0.0.1:{port} 0.0.0.0:* LISTEN 4242/python3"):
@@ -4027,7 +4026,8 @@ def _holds(run: str, text: str, ci: bool) -> bool:
 def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase: bool = False,
                   literal: bool = False, syntax: str = "ere", line: str = "",
                   budget: list[int] | None = None,
-                  spans: list[tuple[str, int, int]] | None = None):
+                  spans: list[tuple[str, int, int]] | None = None,
+                  cost_spans: list[tuple[str, int, int]] | None = None):
     """Whether a process pattern matches the daemon: `how` is "overlap" (a
     match whose span overlaps the part of a text a selection must reach —
     its op word on command lines, or a port, `spans`), "exact" (a whole
@@ -4042,7 +4042,9 @@ def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase
     of the pattern contains (`_required_runs`: `node` in `node.*vite`) is set
     aside, so a pattern that cannot match the daemon is told so cheaply,
     however costly matching it would be."""
-    if _wild_word(pattern):
+    # In a regex, a bare `$` is an anchor. Only a dollar followed by a
+    # shell expansion starter (or a backtick) is still a runtime unknown.
+    if (_wild_word(pattern) if literal else re.search(r"\$[\w{(\[*@#?$!-]|`", pattern)):
         return None
     spans = spans if spans is not None else _daemon_spans(unit, full)
     if how == "overlap":
@@ -4065,13 +4067,19 @@ def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase
         budget[1] -= len(source)
     try:
         tree = _sre_parse.parse(source, flags)
+        # Keep the conservative reading for an anchored pattern that can
+        # match without consuming any text, such as a bare `$`.
+        if "$" in pattern and tree.getwidth()[0] == 0:
+            return None
         ci = bool((flags | getattr(getattr(tree, "state", None), "flags", 0)) & re.IGNORECASE)
         runs = _required_runs(tree)
         spans = [s for s in spans if all(_holds(r, s[0], ci) for r in runs)]
         if not spans:
             return False
+        cost = spans if cost_spans is None else [
+            s for s in cost_spans if all(_holds(r, s[0], ci) for r in runs)]
         work = _regex_work(tree, [(len(t), end if how == "overlap" else 1 if how == "exact"
-                                   else len(t) + 1) for t, _, end in spans], _REGEX_BUDGET + 1)
+                                   else len(t) + 1) for t, _, end in cost], _REGEX_BUDGET + 1)
         if work > _REGEX_BUDGET or (budget is not None and work > budget[0]):
             return COSTLY
         rx = re.compile(source, flags)
@@ -4432,7 +4440,8 @@ def _socket_source(stem: str, tokens: list[str], state: "_Owner") -> None:
     state.kills.listings.add("sockets")
 
 
-def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]]):
+def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]], *,
+                cost_spans: list[tuple[str, int, int]] | None = None):
     """Whether the line's greps, between them, pass on one of `spans`' texts
     and select it at its span: every grep keeps it (a match anywhere, or none
     for `-v`) and one that is not `-v` matches it there. True, False, or
@@ -4443,7 +4452,8 @@ def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]]):
 
     def tell(pattern, syntax, icase, how):
         found = _daemon_match(pattern, unit=unit, how=how, icase=icase, literal=syntax == "fixed",
-                              syntax=syntax, line=kills.line, budget=kills.work[unit], spans=spans)
+                              syntax=syntax, line=kills.line, budget=kills.work[unit], spans=spans,
+                              cost_spans=cost_spans)
         return True if found is None else found
 
     def any_of(results):
@@ -4484,8 +4494,11 @@ def _listings_filtered_by_grep(kills: "_Kills") -> tuple[str, str] | None:
                         "on the daemon's port")):
         if kind not in kills.listings:
             continue
+        # A3a charged regex work over all protected socket rows. Partition
+        # matches by daemon without reducing that cost estimate for either.
+        cost_spans = _socket_spans() if kind == "sockets" else None
         for unit, word in units:
-            found = _grep_chain(kills, unit, spans(unit))
+            found = _grep_chain(kills, unit, spans(unit), cost_spans=cost_spans)
             if found is True:
                 return unit, source.format(word=word)
             if found == COSTLY and not kills.unsure:

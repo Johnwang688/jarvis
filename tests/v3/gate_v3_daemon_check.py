@@ -1,11 +1,15 @@
 """Exercise the shared owner-operation gate on strings. No command is executed."""
 from __future__ import annotations
 
+import importlib.util
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import jarvis
 from jarvis import config, protected_state, rules
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -66,10 +70,34 @@ ORDINARY = (
 COSTLY = (*v1.REVIEW_48_DELTA_ASK, *v2.REVIEW_48_DELTA_V2_ASK)
 # Explicitly empty or runtime-provided patterns/units and daemon-wide operations
 # can reach either daemon. The legacy reason is retained in those cases.
-AMBIGUOUS = ("n2$", "echo jarvis-daemon2 | xargs", "echo restart jarvis-daemon2 | xargs")
+AMBIGUOUS = ("echo jarvis-daemon2 | xargs", "echo restart jarvis-daemon2 | xargs")
+
+
+def legacy_protected_state():
+    root = Path(__file__).resolve().parents[2]
+    source = subprocess.check_output(
+        ["git", "show", "origin/v3/a3a-daemon:jarvis/protected_state.py"], cwd=root)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "protected_state.py"
+        path.write_bytes(source)
+        spec = importlib.util.spec_from_file_location("jarvis._a3a_protected_state", path)
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: module}):
+            spec.loader.exec_module(module)
+    return module
 
 
 class GateParity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.legacy = legacy_protected_state()
+
+    def assert_daemon2_verdict(self, command, actual):
+        with patch.object(jarvis, "protected_state", self.legacy):
+            legacy = rules.decide(command)
+        self.assertEqual(actual.decision, legacy.decision)
+        self.assertEqual(actual.reason.encode(), legacy.reason.encode())
+
     def test_daemon_twins(self):
         # The existing cost fixtures pin this checkout path for matching work.
         with patch.object(config, "REPO_ROOT", Path("/home/u/projects/Jarvis")):
@@ -78,6 +106,7 @@ class GateParity(unittest.TestCase):
                     other = twin(command)
                     with self.subTest(v2=command, v3=other):
                         old, new = rules.decide(command), rules.decide(other)
+                        self.assert_daemon2_verdict(command, old)
                         if expected is None:
                             self.assertNotEqual(old.decision, rules.DENY)
                         else:
@@ -87,6 +116,36 @@ class GateParity(unittest.TestCase):
                                 and not any(marker in command for marker in AMBIGUOUS)):
                             self.assertIn("v3 daemon", new.reason)
                             self.assertIn("jarvis agentd", new.reason)
+
+    def test_socket_filter_cost(self):
+        for listing in ("ss -ltnp", "netstat -tlnp"):
+            for v2_pattern, v3_pattern in (
+                    (".*:84[07][57].*", ".*:84[17][07].*"),
+                    (".{0,16}:84[07][57].{0,32}", ".{0,16}:84[17][07].{0,32}")):
+                with self.subTest(listing=listing, pattern=v2_pattern):
+                    template = f"{listing} | grep -E '{{pattern}}' | xargs kill"
+                    v2 = template.format(pattern=v2_pattern)
+                    old = rules.decide(v2)
+                    self.assert_daemon2_verdict(v2, old)
+                    for verdict in (old, rules.decide(template.format(pattern=v3_pattern))):
+                        self.assertEqual(verdict.decision, rules.ASK)
+                        self.assertIn("too complex to judge whether a `grep` over sockets", verdict.reason)
+
+    def test_regex_anchor_is_distinct_from_shell_expansion(self):
+        for template in ("pkill -f '{pattern}'", "killall -r '{pattern}'",
+                         "pgrep -f '{pattern}' | xargs kill",
+                         "ps aux | grep -E '{pattern}' | xargs kill"):
+            for pattern in ("agentd$", "(agentd$|node$)"):
+                command = template.format(pattern=pattern)
+                with self.subTest(command=command):
+                    verdict = rules.decide(command)
+                    self.assertEqual(verdict.decision, rules.DENY)
+                    self.assertIn("v3 daemon (`jarvis agentd`, unit `jarvis-agent`)", verdict.reason)
+        for command in ("pkill -f $P", "pkill -f $$", "pkill -f $?", "pkill -f '$'"):
+            with self.subTest(command=command):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.DENY)
+                self.assert_daemon2_verdict(command, verdict)
 
     def test_case_insensitive_pattern(self):
         for word, version in (("DAEMON2", "v2"), ("AGENTD", "v3")):
