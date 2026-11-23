@@ -1,6 +1,15 @@
-"""The loopback v3 daemon and its status endpoint."""
+"""The loopback v3 daemon and its status endpoint.
+
+Stated limits (verifier r2, 2026-11-23): a request whose header block is
+malformed is parsed leniently by http.server (the Host/Origin guards still
+apply); a data dir reached through a symlinked *parent* is that directory and
+gets 0700 (only a symlinked final component is refused). Run it as
+`python -m jarvis agentd` (the unit's ExecStart, A4): that path skips the model
+stack; the installed `jarvis` console script imports it (never calls it).
+"""
 
 from datetime import datetime, timezone
+import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -9,6 +18,9 @@ import threading
 import time
 
 from jarvis import config
+
+
+SERVICE_NAME = "jarvis-agentd"
 
 
 def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
@@ -56,6 +68,10 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
         def parse_request(self):
             if not super().parse_request():
                 return False
+            # HTTP/0.9 has no headers. Some Python versions store a plain dict.
+            if self.request_version == "HTTP/0.9":
+                self.send_error(421)
+                return False
             port = self.server.server_port
             hosts = self.headers.get_all("Host", [])
             if len(hosts) != 1 or not config.own_host_header(hosts[0], port):
@@ -77,6 +93,7 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
                 self.send_error(404)
                 return
             self._json(200, {
+                "service": SERVICE_NAME,
                 "version": "v3",
                 "pid": pid,
                 "started_at": started_at,
@@ -87,6 +104,26 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
         do_HEAD = do_GET
 
     return Handler
+
+
+def _prepare_data_dir(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except FileExistsError:
+        # Check the existing entry below, including dangling symlinks.
+        pass
+    try:
+        fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno in (errno.ENOTDIR, errno.ELOOP):
+            raise RuntimeError(f"v3 data directory must be a directory without a final symlink: {path}") from exc
+        raise
+    try:
+        # O_PATH works even with mode 000. The procfs path pins chmod to the
+        # opened directory if the original path is replaced after open().
+        os.chmod(f"/proc/self/fd/{fd}", 0o700)
+    finally:
+        os.close(fd)
 
 
 class Daemon:
@@ -105,8 +142,7 @@ class Daemon:
         with self._lock:
             if self._server is not None:
                 return
-            self._data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._data_dir.chmod(0o700)
+            _prepare_data_dir(self._data_dir)
             try:
                 server = ThreadingHTTPServer(
                     ("127.0.0.1", self._requested_port), _status_handler(self._data_dir)

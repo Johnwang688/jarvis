@@ -332,6 +332,8 @@ v2's frontend components by importing them.
     sleep.
   - Both refuse while the other daemon has running turns or tasks, listing
     them, unless `--force`.
+  - The unit's ExecStart is `<repo>/.venv/bin/python -m jarvis agentd`, never the
+    `jarvis` console script: the `-m` path skips the model stack (A3a review r2).
   - The switch also moves the systemd *enable* to the chosen unit, so a
     reboot keeps the last choice. Print what changed.
   - Single-owner resources follow whichever daemon runs: phone 8408, voice
