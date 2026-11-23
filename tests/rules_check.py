@@ -2326,8 +2326,7 @@ OWNER_OPS_ORDINARY = (
     'grep -n restart jarvis/v2/owner_ops.py',
     'python tests/v2/owner_ops_check.py',
     'python -m pytest tests/v2/owner_ops_check.py',
-    'jarvis hud',
-    'jarvis hud --no-window',
+    # `jarvis hud` is an owner op since v3 A3b (it switches daemons in A4).
     'jarvis chat',
     'jarvis route',
     'systemctl --user status jarvis-daemon2',
@@ -3074,7 +3073,11 @@ def owner_op_checks() -> None:
         verdict = rules.decide(command)
         assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
         assert "hud install" in verdict.reason, verdict.reason
-    for command in ("jarvis hud", "jarvis hud --no-window", "echo Run jarvis hud install after merging",
+    # v3 A3b (owner decision A-2): plain `jarvis hud` switches daemons once A4 lands, so it is
+    # an owner op in every spelling now; mentions of it stay allowed.
+    for command in ("jarvis hud", "jarvis hud --no-window", "jarvis hud open"):
+        assert rules.decide(command).decision == rules.DENY, f"{command!r}: {rules.decide(command)}"
+    for command in ("echo Run jarvis hud install after merging",
                     'grep -rn "hud_install.main" jarvis/ && python3 tests/v2/hud_install_check.py',
                     "rg -n 'import hud_install' jarvis && python -m pytest tests",
                     'python3 -c "print(\'hud\', \'install\')"',

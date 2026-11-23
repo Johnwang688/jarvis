@@ -1935,7 +1935,7 @@ def installed_hud_deny_checks():
                    f"{line!r} says why it asks ({asker.seen[-1].reason!r})")
             asker_no = Asker(Decision.DENY)
             permit_no = build_permit(context(brief), asker_no)
-            for line in ("jarvis hud", "cat jarvis/v2/hud_install.py",
+            for line in ("cat jarvis/v2/hud_install.py",  # plain `jarvis hud` is an owner op since v3 A3b
                          'git commit -m "docs: run jarvis hud install after a merge"'):
                 eq(rules.decide(line).decision != rules.DENY, True,
                    f"{line!r} is not refused by the installer rule")
