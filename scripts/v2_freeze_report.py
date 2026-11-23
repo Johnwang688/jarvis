@@ -37,6 +37,8 @@ def report(repo, since):
     except RuntimeError as error:
         raise RuntimeError(f"cannot resolve {since!r} to a commit: {error}") from error
 
+    # Fails closed: any shallow repository exits 2, even one whose boundary is
+    # exactly the baseline (complete range). Run it on a full clone.
     if git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
         raise RuntimeError("shallow repository: complete history is required")
 
@@ -45,7 +47,7 @@ def report(repo, since):
         repo, "log", "--no-merges", "--full-history", "--topo-order", "--root", "--no-follow",
         "--no-show-signature", "--no-notes", "--no-decorate", "--no-color",
         "--no-ext-diff", "--no-textconv", "--no-relative", "--no-renames",
-        "--ignore-submodules=none", "--name-only", "-z",
+        "--ignore-submodules=none", f"-O{os.devnull}", "--name-only", "-z",
         "--abbrev=7", "--encoding=UTF-8", "--format=%x00%h %s",
         f"{base.decode('ascii').strip()}..HEAD", "--", *FROZEN_DIRS,
     ).decode("utf-8", errors="surrogateescape")
