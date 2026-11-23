@@ -1,6 +1,7 @@
 """A4 failure paths, CLI wiring, and state transitions on an injected clock."""
 
 import argparse
+from datetime import datetime, timedelta, timezone
 from http.client import RemoteDisconnected
 from pathlib import Path
 import stat
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from a4_acceptance_check import World
-from jarvis import config
+from jarvis import config, protected_state
 from jarvis.v3 import cli, switch
 
 
@@ -93,20 +94,46 @@ class Switch(unittest.TestCase):
                     world.systemctl = fail
                     self.assertEqual(operation(world.env()), 1)
                     expected = [list(args) for args in steps[:index + 1]]
-                    if index:
-                        expected += [["stop", target], ["disable", target], ["enable", "--now", source]]
+                    if index == 2:
+                        expected += [["stop", target], ["disable", target]]
+                    expected.append(["enable", "--now", source])
                     self.assertEqual(world.verbs(), expected)
                     output = "\n".join(world.lines)
-                    world.sleep(2)
                     self.assertTrue(world._active(source))
                     self.assertTrue(world.enabled[source])
                     self.assertFalse(world._active(target))
                     self.assertFalse(world.enabled[target])
-                    if index:
-                        self.assertIn(f"Restored {source}", output)
+                    self.assertIn(f"Restored {source}", output)
                     self.assertIn("injected failure", output)
                     self.assertIn(f"journalctl --user -u {step[-1]} -n 50 --no-pager", output)
                     self.assertIn("jarvis hud", output)
+
+    def test_failed_source_commands_with_side_effects_restore_the_source(self):
+        for source, target, operation in (
+            (switch.V2_UNIT, switch.V3_UNIT, switch.to_v3),
+            (switch.V3_UNIT, switch.V2_UNIT, switch.to_v2),
+        ):
+            for verb, delayed in (("stop", False), ("stop", True), ("disable", False)):
+                with self.subTest(source=source, verb=verb, delayed=delayed):
+                    world = World(v2_active=source == switch.V2_UNIT, v3_active=source == switch.V3_UNIT)
+                    env = world.env()
+
+                    def command(*args):
+                        result = world.systemctl(*args)
+                        if args == (verb, source):
+                            if not delayed:
+                                world.sleep(2)
+                                self.assertFalse(world._active(source))
+                            return CompletedProcess(args, 1, "", "job failed after submission")
+                        return result
+
+                    env.systemctl = command
+                    self.assertEqual(operation(env, wait=3), 1)
+                    world.sleep(3)
+                    self.assertTrue(world._active(source))
+                    self.assertTrue(world.enabled[source])
+                    self.assertFalse(world._active(target))
+                    self.assertIn(f"Restored {source}.", world.lines)
 
     def test_busy_approval_refuses_before_mutating_systemd(self):
         world = World()
@@ -135,7 +162,9 @@ class Switch(unittest.TestCase):
                 original = env.systemctl
 
                 def command(*args):
-                    if args == ("is-active", source) and ["stop", source] in world.verbs():
+                    verbs = world.verbs()
+                    if (args == ("is-active", source) and ["stop", source] in verbs
+                            and ["enable", "--now", source] not in verbs):
                         return CompletedProcess(args, 1, "", "Failed to connect to bus.")
                     return original(*args)
 
@@ -143,9 +172,10 @@ class Switch(unittest.TestCase):
                 self.assertEqual(operation(env), 1)
                 self.assertEqual(world.verbs(), [
                     ["stop", source], ["disable", source],
-                    ["stop", target], ["disable", target], ["enable", "--now", source],
+                    ["enable", "--now", source],
                 ])
                 self.assertIn("Failed to connect to bus", "\n".join(world.lines))
+                self.assertIn(f"Restored {source}.", world.lines)
 
     def test_waits_for_port_after_unit_is_down(self):
         world = World()
@@ -220,7 +250,7 @@ class Switch(unittest.TestCase):
                 self.assertTrue(world.enabled[source])
                 self.assertIn(f"Restored {source}", "\n".join(world.lines))
 
-    def test_rollback_reports_target_cleanup_failure_without_starting_source(self):
+    def test_rollback_does_not_restart_source_while_target_has_a_pending_start(self):
         world = World()
         env = world.env()
 
@@ -228,8 +258,10 @@ class Switch(unittest.TestCase):
             if args == ("enable", "--now", switch.V3_UNIT):
                 world.systemctl(*args)
                 return CompletedProcess(args, 1, "", "partial start")
-            if args == ("stop", switch.V3_UNIT):
+            if args in (("stop", switch.V3_UNIT), ("disable", "--now", switch.V3_UNIT)):
                 return CompletedProcess(args, 1, "", "cleanup failed")
+            if args[0] == "list-jobs" and switch.V3_UNIT in world.pending:
+                return CompletedProcess(args, 0, "1 jarvis-agent.service start waiting\n", "")
             return world.systemctl(*args)
 
         env.systemctl = command
@@ -239,6 +271,72 @@ class Switch(unittest.TestCase):
         self.assertIn("partial start", output)
         self.assertIn("cleanup failed", output)
         self.assertIn(f"Rollback to {switch.V2_UNIT} failed", output)
+
+    def test_rollback_verifies_shutdown_even_when_cleanup_reports_failure(self):
+        world = World()
+        env = world.env()
+
+        def command(*args):
+            result = world.systemctl(*args)
+            if args in (("enable", "--now", switch.V3_UNIT), ("stop", switch.V3_UNIT),
+                        ("disable", "--now", switch.V3_UNIT)):
+                return CompletedProcess(args, 1, "", "job reported failure after taking effect")
+            return result
+
+        env.systemctl = command
+        self.assertEqual(switch.to_v3(env, wait=3), 1)
+        self.assertTrue(world._active(switch.V2_UNIT))
+        self.assertFalse(world._active(switch.V3_UNIT))
+        self.assertIn(f"Restored {switch.V2_UNIT}.", world.lines)
+
+    def test_failed_target_start_that_is_already_healthy_is_retained(self):
+        world = World()
+        env = world.env()
+
+        def command(*args):
+            result = world.systemctl(*args)
+            if args == ("enable", "--now", switch.V3_UNIT):
+                world.sleep(2)
+                return CompletedProcess(args, 1, "", "start reported failure after taking effect")
+            return result
+
+        env.systemctl = command
+        self.assertEqual(switch.to_v3(env, wait=3), 1)
+        self.assertTrue(world._active(switch.V3_UNIT))
+        self.assertFalse(world._active(switch.V2_UNIT))
+        self.assertEqual(world.verbs()[-1], ["enable", "--now", switch.V3_UNIT])
+        self.assertIn(f"{switch.V3_UNIT} is running and {switch.V2_UNIT} is stopped.", world.lines)
+
+    def test_rollback_starts_source_directly_if_reenabling_fails(self):
+        world = World(v3_installed=False)
+        env = world.env()
+
+        def command(*args):
+            if args == ("enable", "--now", switch.V2_UNIT):
+                return CompletedProcess(args, 1, "", "could not enable source")
+            return world.systemctl(*args)
+
+        env.systemctl = command
+        self.assertEqual(switch.to_v3(env, wait=3), 1)
+        self.assertTrue(world._active(switch.V2_UNIT))
+        self.assertFalse(world.enabled[switch.V2_UNIT])
+        self.assertIn("could not enable source", "\n".join(world.lines))
+        self.assertIn(f"Restored {switch.V2_UNIT}.", world.lines)
+
+    def test_rollback_requires_an_identified_source_after_reenable(self):
+        world = World(v3_installed=False)
+        env = world.env()
+
+        def status():
+            if ["enable", "--now", switch.V2_UNIT] in world.verbs():
+                return {"version": 1}, None
+            return world.v2_status()
+
+        env.v2_status = status
+        self.assertEqual(switch.to_v3(env, wait=3), 1)
+        self.assertTrue(world._active(switch.V2_UNIT))
+        self.assertNotIn(f"Restored {switch.V2_UNIT}.", world.lines)
+        self.assertIn(f"Rollback to {switch.V2_UNIT} failed.", world.lines)
 
     def test_oversleep_cannot_start_a_poll(self):
         world = World(v2_active=False, v3_active=True)
@@ -271,7 +369,7 @@ class Switch(unittest.TestCase):
     def test_restart_waits_for_fresh_status_and_stop_waits_for_shutdown(self):
         world = World(v2_active=False, v3_active=True)
         world.v3_status = lambda: {
-            "service": "jarvis-agentd", "pid": 1, "started_at": int(world.now >= 1003),
+            "service": "jarvis-agentd", "pid": 1 if world.now < 1003 else 2,
         }
         self.assertEqual(switch.restart_v3(world.env()), 0)
         self.assertEqual(world.now, 1003)
@@ -279,6 +377,23 @@ class Switch(unittest.TestCase):
         self.assertEqual(switch.stop_v3(world.env()), 0)
         self.assertEqual(world.now, 1005)
         self.assertFalse(world.active[switch.V3_UNIT])
+
+    def test_restart_uses_start_time_when_the_preflight_read_failed(self):
+        issued = datetime(2026, 11, 23, 12, tzinfo=timezone.utc)
+        for age, expected in ((-600, 1), (1, 0), (None, 1)):
+            with self.subTest(age=age), patch.object(switch, "datetime", wraps=datetime) as dates:
+                dates.now.return_value = issued
+                world = World(v2_active=False, v3_active=True)
+                status = {"service": "jarvis-agentd", "pid": 1234}
+                if age is not None:
+                    status["started_at"] = (issued + timedelta(seconds=age)).isoformat()
+                def read_status():
+                    if world.now >= 1002:
+                        return status
+                    return None
+
+                world.v3_status = read_status
+                self.assertEqual(switch.restart_v3(world.env(), wait=3), expected)
 
 
 class Install(unittest.TestCase):
@@ -354,6 +469,16 @@ class Install(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
+    def test_gate_refuses_cli_writers_and_allows_status(self):
+        for name in ("run_daemon", "start", "stop", "restart", "install", "main", "status"):
+            with self.subTest(name=name):
+                command = f'python -c "from jarvis.v3.cli import {name}; {name}(None)"'
+                result = protected_state.owner_op(command)
+                if name == "status":
+                    self.assertIsNone(result)
+                else:
+                    self.assertIn("decision A-2", result or "")
+
     def test_owner_action_options_take_no_values(self):
         parser = argparse.ArgumentParser()
         commands = parser.add_subparsers()

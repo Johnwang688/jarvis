@@ -3288,6 +3288,8 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                          ("to_v3", "to_v2", "install_unit", "stop_v3", "restart_v3", "main",
                           "default_env", "_run_systemctl", "_systemctl", "_change", "_stop_and_disable",
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
+    "jarvis.v3.cli": (("agent", "start"),
+                      ("run_daemon", "start", "stop", "restart", "install", "main")),
 }
 
 # The protected systemd units can also be changed directly. On 2026-10-11,

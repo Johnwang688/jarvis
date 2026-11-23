@@ -334,12 +334,15 @@ v2's frontend components by importing them.
     in its terminal. The v3 idle-check hook is reserved for A6+.
   - A switch stops and disables the source unit, waits for it to go down
     and release its API port, then enables and starts the target and waits
-    for its status. After a failure following the source stop, the switch
-    stops and disables the target, waits for it to release its port, and
-    restores the source. A missing v3 unit prompts `jarvis agent install`.
+    for its unit and status to verify. Recovery starts as soon as the
+    source stop is attempted. After a failure, an identified running target
+    can stay up if the source is down. Otherwise the switch clears any
+    attempted target start, restores the source, and verifies its status.
+    A missing v3 unit prompts `jarvis agent install`.
   - `jarvis agent stop` waits for the v3 unit and port to be down.
     `jarvis agent restart` checks that v2 is down and waits for fresh v3
-    status. All four action parsers have only zero-argument options.
+    status from a changed PID or a process started after the restart was
+    issued. All four action parsers have only zero-argument options.
   - `jarvis agent install` atomically writes the mode 0644 user unit with
     ExecStart `<repo>/.venv/bin/python -m jarvis agentd`, backs up any
     different unit, and reloads systemd. It refuses a symlinked unit and
