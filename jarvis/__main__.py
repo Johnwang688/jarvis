@@ -1026,6 +1026,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="restart: restart even while a turn is running")
     daemon2.set_defaults(func=cmd_daemon2)
 
+    from .v3 import cli as v3_cli
+
+    agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
+    agentd.set_defaults(func=v3_cli.run_daemon)
+
+    agent = sub.add_parser("agent", help="v3 daemon commands")
+    agent_sub = agent.add_subparsers(dest="action", required=True)
+    agent_status = agent_sub.add_parser("status", help="show v3 daemon status")
+    agent_status.set_defaults(func=v3_cli.status)
+
     discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
     discord_sub = discord.add_subparsers(dest="action", required=True)
     slash = discord_sub.add_parser("commands", help="check or register the slash commands")
