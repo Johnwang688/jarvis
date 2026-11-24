@@ -4048,9 +4048,7 @@ def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase
     of the pattern contains (`_required_runs`: `node` in `node.*vite`) is set
     aside, so a pattern that cannot match the daemon is told so cheaply,
     however costly matching it would be."""
-    # In a regex, a bare `$` is an anchor. Only a dollar followed by a
-    # shell expansion starter (or a backtick) is still a runtime unknown.
-    if (_wild_word(pattern) if literal else re.search(r"\$[\w{(\[*@#?$!-]|`", pattern)):
+    if _wild_word(pattern):
         return None
     spans = spans if spans is not None else _daemon_spans(unit, full)
     if how == "overlap":
@@ -4073,10 +4071,6 @@ def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase
         budget[1] -= len(source)
     try:
         tree = _sre_parse.parse(source, flags)
-        # Keep the conservative reading for an anchored pattern that can
-        # match without consuming any text, such as a bare `$`.
-        if "$" in pattern and tree.getwidth()[0] == 0:
-            return None
         ci = bool((flags | getattr(getattr(tree, "state", None), "flags", 0)) & re.IGNORECASE)
         runs = _required_runs(tree)
         spans = [s for s in spans if all(_holds(r, s[0], ci) for r in runs)]

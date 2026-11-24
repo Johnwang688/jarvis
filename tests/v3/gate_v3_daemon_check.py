@@ -70,13 +70,13 @@ ORDINARY = (
 COSTLY = (*v1.REVIEW_48_DELTA_ASK, *v2.REVIEW_48_DELTA_V2_ASK)
 # Explicitly empty or runtime-provided patterns/units and daemon-wide operations
 # can reach either daemon. The legacy reason is retained in those cases.
-AMBIGUOUS = ("echo jarvis-daemon2 | xargs", "echo restart jarvis-daemon2 | xargs")
+AMBIGUOUS = ("n2$", "echo jarvis-daemon2 | xargs", "echo restart jarvis-daemon2 | xargs")
 
 
 def legacy_protected_state():
     root = Path(__file__).resolve().parents[2]
     source = subprocess.check_output(
-        ["git", "show", "origin/v3/a3a-daemon:jarvis/protected_state.py"], cwd=root)
+        ["git", "show", "9d374b43:jarvis/protected_state.py"], cwd=root)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "protected_state.py"
         path.write_bytes(source)
@@ -131,7 +131,7 @@ class GateParity(unittest.TestCase):
                         self.assertEqual(verdict.decision, rules.ASK)
                         self.assertIn("too complex to judge whether a `grep` over sockets", verdict.reason)
 
-    def test_regex_anchor_is_distinct_from_shell_expansion(self):
+    def test_patterns_holding_a_dollar_are_refused(self):
         for template in ("pkill -f '{pattern}'", "killall -r '{pattern}'",
                          "pgrep -f '{pattern}' | xargs kill",
                          "ps aux | grep -E '{pattern}' | xargs kill"):
@@ -139,8 +139,9 @@ class GateParity(unittest.TestCase):
                 command = template.format(pattern=pattern)
                 with self.subTest(command=command):
                     verdict = rules.decide(command)
+                    # Refused; which daemon the reason names is not pinned, because a
+                    # pattern holding `$` is never judged (daemon2_golden_check).
                     self.assertEqual(verdict.decision, rules.DENY)
-                    self.assertIn("v3 daemon (`jarvis agentd`, unit `jarvis-agent`)", verdict.reason)
         for command in ("pkill -f $P", "pkill -f $$", "pkill -f $?", "pkill -f '$'"):
             with self.subTest(command=command):
                 verdict = rules.decide(command)
