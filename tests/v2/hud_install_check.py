@@ -569,7 +569,8 @@ class NoAgentInstall(Base):
         "python3 -m jarvis {hud,install}", 'jarvis "$@"', "M=jarvis; python3 -m $M hud install",
     )
     ORDINARY = (
-        "jarvis hud", "jarvis hud --no-window", "jarvis install hud", "cat jarvis/v2/hud_install.py",
+        # Plain `jarvis hud` is an owner op since v3 A3b (A-2).
+        "jarvis install hud", "cat jarvis/v2/hud_install.py",
         "grep -n main jarvis/v2/hud_install.py", "python tests/v2/hud_install_check.py",
         "python -m pytest tests/v2/hud_install_check.py", 'git commit -m "docs: jarvis hud install after merges"',
         'echo "jarvis hud install"', "npm run build", "ls ~/.local/share/jarvis/hud",

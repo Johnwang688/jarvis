@@ -3289,8 +3289,17 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                           "default_env", "_run_systemctl", "_systemctl", "_change", "_stop_and_disable",
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
     "jarvis.v3.cli": (("agent", "start"),
-                      ("run_daemon", "start", "stop", "restart", "install", "main")),
+                      ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands")),
 }
+
+
+def _owner_module_file(module: str) -> tuple[str, str]:
+    """(the folder its file must be in, or "" for any; the file's name). v3's
+    `cli.py` and `switch.py` are names any project has, so they count only in a
+    `v3` folder: a refusal cannot be approved, and a false one blocks everyone
+    (`python cli.py`, Opus review 2026-11-23)."""
+    parent, _, last = module.rpartition(".")
+    return ("v3" if parent == "jarvis.v3" else ""), last + ".py"
 
 # The protected systemd units can also be changed directly. On 2026-10-11,
 # `systemctl --user restart jarvis-daemon2` was ALLOW in `rules.decide`
@@ -3851,8 +3860,12 @@ def _daemon_ports() -> frozenset[int]:
 
 
 def _port_daemon(port: int) -> str:
-    """Attribute a protected port to the v3 status listener or the legacy v2 reason."""
-    return _V3_UNIT if port in (8410, config.V3_API_PORT) else _V2_UNIT
+    """Whose rule a protected port falls under: v3's status listener only when
+    no v2 listener is configured there (one daemon runs at a time, so the two
+    may share a port; v2's rule is the older one and stays as it was)."""
+    v2 = {config.FACE_PORT, config.DESKTOP_PORT, config.DAEMON_PORT, config.SPOTIFY_AUTH_PORT,
+          config.REMOTE_PORT, config.VOICE_LINK_PORT, config.WORKSHOP_PORT}
+    return _V3_UNIT if port in (8410, config.V3_API_PORT) and port not in v2 else _V2_UNIT
 
 
 def _signal_word(word: str) -> str | None:
@@ -4034,8 +4047,7 @@ def _holds(run: str, text: str, ci: bool) -> bool:
 def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase: bool = False,
                   literal: bool = False, syntax: str = "ere", line: str = "",
                   budget: list[int] | None = None,
-                  spans: list[tuple[str, int, int]] | None = None,
-                  cost_spans: list[tuple[str, int, int]] | None = None):
+                  spans: list[tuple[str, int, int]] | None = None):
     """Whether a process pattern matches the daemon: `how` is "overlap" (a
     match whose span overlaps the part of a text a selection must reach —
     its op word on command lines, or a port, `spans`), "exact" (a whole
@@ -4078,10 +4090,8 @@ def _daemon_match(pattern: str, *, unit: str, how: str, full: bool = True, icase
         spans = [s for s in spans if all(_holds(r, s[0], ci) for r in runs)]
         if not spans:
             return False
-        cost = spans if cost_spans is None else [
-            s for s in cost_spans if all(_holds(r, s[0], ci) for r in runs)]
         work = _regex_work(tree, [(len(t), end if how == "overlap" else 1 if how == "exact"
-                                   else len(t) + 1) for t, _, end in cost], _REGEX_BUDGET + 1)
+                                   else len(t) + 1) for t, _, end in spans], _REGEX_BUDGET + 1)
         if work > _REGEX_BUDGET or (budget is not None and work > budget[0]):
             return COSTLY
         rx = re.compile(source, flags)
@@ -4442,8 +4452,7 @@ def _socket_source(stem: str, tokens: list[str], state: "_Owner") -> None:
     state.kills.listings.add("sockets")
 
 
-def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]], *,
-                cost_spans: list[tuple[str, int, int]] | None = None):
+def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]]):
     """Whether the line's greps, between them, pass on one of `spans`' texts
     and select it at its span: every grep keeps it (a match anywhere, or none
     for `-v`) and one that is not `-v` matches it there. True, False, or
@@ -4454,8 +4463,7 @@ def _grep_chain(kills: "_Kills", unit: str, spans: list[tuple[str, int, int]], *
 
     def tell(pattern, syntax, icase, how):
         found = _daemon_match(pattern, unit=unit, how=how, icase=icase, literal=syntax == "fixed",
-                              syntax=syntax, line=kills.line, budget=kills.work[unit], spans=spans,
-                              cost_spans=cost_spans)
+                              syntax=syntax, line=kills.line, budget=kills.work[unit], spans=spans)
         return True if found is None else found
 
     def any_of(results):
@@ -4496,11 +4504,8 @@ def _listings_filtered_by_grep(kills: "_Kills") -> tuple[str, str] | None:
                         "on the daemon's port")):
         if kind not in kills.listings:
             continue
-        # A3a charged regex work over all protected socket rows. Partition
-        # matches by daemon without reducing that cost estimate for either.
-        cost_spans = _socket_spans() if kind == "sockets" else None
         for unit, word in units:
-            found = _grep_chain(kills, unit, spans(unit), cost_spans=cost_spans)
+            found = _grep_chain(kills, unit, spans(unit))
             if found is True:
                 return unit, source.format(word=word)
             if found == COSTLY and not kills.unsure:
@@ -4993,7 +4998,9 @@ def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
             return OWNER_OPS[path]
         if re.search(r"\brun_module\s*\(\s*['\"]" + re.escape(module) + r"['\"]", source):
             return OWNER_OPS[path]
-        if re.search(r"\brun_path\s*\([^)]*" + re.escape(last) + r"\.py", source):
+        folder, name = _owner_module_file(module)
+        where = re.escape(folder) + r"[\\/]+" if folder else ""
+        if re.search(r"\brun_path\s*\([^)]*" + where + re.escape(name), source):
             return OWNER_OPS[path]
     # The CLI itself, with an owner path's words: `runpy.run_module("jarvis")`
     # with `sys.argv` set, `jarvis.__main__.main([...])`, `cmd_hud(…install…)`.
@@ -5123,7 +5130,8 @@ def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str
         script = _owner_word(what or "", state, environ=False)
         stem_of = rules._basename(script)
         for module, (path, _) in OWNER_OP_MODULES.items():
-            if stem_of == module.rpartition(".")[2] + ".py":
+            folder, name = _owner_module_file(module)
+            if stem_of == name and folder in ("", rules._basename(os.path.dirname(script))):
                 return OWNER_OPS[path]
         # The CLI run as a script: its console-script launcher
         # (`python3 ~/.local/bin/jarvis restart`) or the package itself.
@@ -5485,8 +5493,13 @@ def _could_be_owner_op(command: str) -> bool:
     flat = command.replace("\\\n", "")
     for ch in ("'", '"', "\\"):
         flat = flat.replace(ch, "")
-    if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS)
-            or any(module.rpartition(".")[2] in flat for module in OWNER_OP_MODULES)
+    # `agent` is an ordinary word, so it counts only where the CLI is named, or
+    # could be by a word known only at run time: parsing a segment can end in
+    # "too complex", which would hide a refusal later on the line.
+    if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS if path[0] != "agent")
+            or ("agent" in flat and ("jarvis" in flat or _WILD.search(flat)))
+            or any(module.rpartition(".")[2] in flat and _owner_module_file(module)[0] in flat
+                   for module in OWNER_OP_MODULES)
             or any(word in flat for word in _DAEMON_WORDS)
             or any(word in flat for word in _KILL_WORDS)):
         return True

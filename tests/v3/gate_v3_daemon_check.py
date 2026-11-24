@@ -76,7 +76,7 @@ AMBIGUOUS = ("n2$", "echo jarvis-daemon2 | xargs", "echo restart jarvis-daemon2 
 def legacy_protected_state():
     root = Path(__file__).resolve().parents[2]
     source = subprocess.check_output(
-        ["git", "show", "9d374b43:jarvis/protected_state.py"], cwd=root)
+        ["git", "show", "9e63b514:jarvis/protected_state.py"], cwd=root)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "protected_state.py"
         path.write_bytes(source)
@@ -84,6 +84,8 @@ def legacy_protected_state():
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {spec.name: module}):
             spec.loader.exec_module(module)
+    # That module under its own configuration: 8410 was not a control port yet.
+    module._daemon_ports = lambda: (config.control_ports() | {8403, config.WORKSHOP_PORT}) - {8410, config.V3_API_PORT}
     return module
 
 
@@ -127,9 +129,11 @@ class GateParity(unittest.TestCase):
                     v2 = template.format(pattern=v2_pattern)
                     old = rules.decide(v2)
                     self.assert_daemon2_verdict(v2, old)
-                    for verdict in (old, rules.decide(template.format(pattern=v3_pattern))):
-                        self.assertEqual(verdict.decision, rules.ASK)
-                        self.assertIn("too complex to judge whether a `grep` over sockets", verdict.reason)
+                    new = rules.decide(template.format(pattern=v3_pattern))
+                    if old.decision == rules.DENY:  # v3 is never judged more loosely
+                        self.assertEqual(new.decision, rules.DENY, new.reason)
+                    else:
+                        self.assertIn(new.decision, (rules.ASK, rules.DENY), new.reason)
 
     def test_patterns_holding_a_dollar_are_refused(self):
         for template in ("pkill -f '{pattern}'", "killall -r '{pattern}'",

@@ -1,8 +1,7 @@
 """daemon2's gate verdicts are frozen: v3 work may never loosen or reword them.
 
 Orchestrator-owned. The fixture holds, for each command, the decision, a hash
-of the reason and `kill_unsure`, recorded from 9d374b43 (before A3b touched the
-gate). It covers patterns around the regex cost threshold and anchored with
+of the reason and `kill_unsure`, recorded from 9e63b514 (live main before v3). It covers patterns around the regex cost threshold and anchored with
 `$`: at a9a0641b, 584 of 3,267 such vectors were weakened and no suite noticed.
 
 Nothing is executed: every check judges a string in process. Re-record only
@@ -52,6 +51,22 @@ def commands():
                     f"pgrep --cgroup {slice_}/{unit}/{name} | xargs -r kill"]
     for path in ("/proc/*/cmdline", "/proc/[1-9]*/comm", "/proc/123/status"):
         out.append(f"grep -l daemon2 {path} | cut -d/ -f3 | xargs -r kill")
+    # Lines the Opus review found no suite would miss (2026-11-23), and its
+    # weakened ones.
+    out += ["systemctl --user status | xargs kill", "echo daemon2 | xargs pgrep -f | xargs kill",
+            "echo daemon2 | xargs pkill -f", "systemctl --user stop '/etc/jarvis-d*'",
+            "kill $(systemctl --user show -p ExecMainPID --value jarvis-daemon2)", "lsof -ti | xargs kill",
+            "kill $(lsof -ti)", "fuser -k -n tcp $N", "N=8405; fuser -k -n tcp $N", "systemctl --user stop session.slice",
+            "echo daemon2 | xargs killall -r", "pgrep -f {daemon,daemon2} | xargs kill",
+            "grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs $'\\x6bill'; grep agent README.md"]
+    for n in range(0, 40, 3):
+        for port in ("84[07][57]", "84.5", "8405"):  # none can match v3's 8410
+            out += [f"ss -ltnp | grep -E '.{{0,{n}}}:{port}.{{0,32}}' | xargs kill",
+                    f"kill $(ss -ltnp | grep -E '.{{0,{n}}}:{port}.{{0,{n}}}')"]
+    for noise in ("agent", "agentic", "user-agent", "client", "switch"):
+        for n in (3, 12, 13, 16):
+            out += ["nohup " * n + f"echo {noise}; systemctl --user restart jarvis-daemon2",
+                    "env " * n + f"echo {noise}; jarvis restart"]
     return list(dict.fromkeys(out))
 
 
