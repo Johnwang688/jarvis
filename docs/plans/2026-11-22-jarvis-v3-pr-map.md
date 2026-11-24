@@ -322,29 +322,37 @@ v2's frontend components by importing them.
 - **Scope:** `jarvis/v3/switch.py`, the `jarvis agent` and `jarvis hud`
   entry points, `tests/v3/switch_check.py`.
 - **Spec:**
-  - `jarvis agent` stops `jarvis-daemon2`, starts `jarvis-agent` and opens
-    the v3 HUD.
-  - `jarvis hud` stops `jarvis-agent` and starts daemon2, then behaves as
-    today.
-  - Both **wait for the actual state** (unit inactive, port free), not a
-    sleep.
-  - Both refuse while the other daemon has running turns or tasks, listing
-    them, unless `--force`.
-  - The unit's ExecStart is `<repo>/.venv/bin/python -m jarvis agentd`, never the
-    `jarvis` console script: the `-m` path skips the model stack (A3a review r2).
-  - The switch also moves the systemd *enable* to the chosen unit, so a
-    reboot keeps the last choice. Print what changed.
-  - Single-owner resources follow whichever daemon runs: phone 8408, voice
-    wake word, desktop bridge, cron. v3 serves the phone on the same 8408,
-    so `tailscale serve` is unchanged.
-  - The v2 side of `jarvis hud` gains only the "stop jarvis-agent first"
-    step. That is a v2 fix PR, flagged `frozen v2`.
+  - `jarvis agent start [--force]` switches from `jarvis-daemon2` to
+    `jarvis-agent`. It exits 3 if v2 has running turns, pending approvals
+    or unreadable status, unless the owner passes `--force`. The v3 HUD
+    hook reports its absence until A5.
+  - Plain `jarvis hud` switches back when the v3 unit is active, then
+    opens the v2 HUD. If the unit is inactive and the v3 API identifies a
+    foreground daemon, the command asks the owner to stop it with Ctrl+C
+    in its terminal. The v3 idle-check hook is reserved for A6+.
+  - A switch stops and disables the source unit, waits for it to go down
+    and release its API port, then enables and starts the target and waits
+    for its unit and status to verify. Recovery starts as soon as the
+    source stop is attempted. After a failure, an identified running target
+    can stay up if the source is down. Otherwise the switch clears any
+    attempted target start, restores the source, and verifies its status.
+    A missing v3 unit prompts `jarvis agent install`.
+  - `jarvis agent stop` waits for the v3 unit and port to be down.
+    `jarvis agent restart` checks that v2 is down and waits for fresh v3
+    status from a changed PID or a process started after the restart was
+    issued. All four action parsers have only zero-argument options.
+  - `jarvis agent install` atomically writes the mode 0644 user unit with
+    ExecStart `<repo>/.venv/bin/python -m jarvis agentd`, backs up any
+    different unit, and reloads systemd. It refuses a symlinked unit and
+    rolls back the file change if the reload fails.
+  - A6 covers ownership of the phone listener, voice wake word, desktop bridge
+    and cron.
 - **Acceptance:**
   - [ ] With a fake `systemctl`, both directions are tested: stop order,
     waits, enable moves.
-  - [ ] Refusal while work is running, and `--force`.
-  - [ ] v3 refuses to bind 8408 while daemon2 holds it, with a clear
-    message, and vice versa.
+  - [ ] v2 busy or unreadable status refuses the switch unless forced.
+  - [ ] A missing v3 unit restores daemon2. Install backs up changes and is
+    idempotent.
   - [ ] Both commands stay agent-refused (A3 matrix).
 - **Depends:** A3. **Size:** M.
 

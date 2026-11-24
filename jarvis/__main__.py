@@ -414,6 +414,16 @@ def cmd_hud(args) -> int:
     if not config.HUD_DEV and hud_install.newest(config.HUD_DIR) is None:
         console.print("[yellow]No HUD is installed, so the window will say so. "
                       "Run `jarvis hud install` first.[/yellow]")
+    from .v3 import switch
+    env = switch.default_env()
+    if switch.v3_active(env):
+        result = switch.to_v2(env)
+        if result:
+            return result
+    elif switch.v3_responds(env):
+        env.out("The foreground v3 daemon is running. Stop it with Ctrl+C in its terminal, "
+                "then run `jarvis hud` again.")
+        return 1
     if not is_running(config.DAEMON_PORT):
         child = subprocess.Popen([sys.executable, "-m", "jarvis", "daemon2"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

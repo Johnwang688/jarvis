@@ -3,10 +3,12 @@
 import argparse
 from http.client import HTTPConnection, HTTPException
 import json
+from pathlib import Path
 import signal
 import time
 
 from jarvis import config
+from . import switch
 from .daemon import Daemon, SERVICE_NAME
 
 
@@ -55,6 +57,37 @@ def status(_args) -> int:
     return 1
 
 
+def _open_v3_hud(env: switch.Env) -> None:
+    """A5 hook for opening the installed v3 HUD."""
+    env.out("no v3 HUD yet")
+
+
+def start(args) -> int:
+    env = switch.default_env()
+    result = switch.to_v3(env, force=args.force)
+    if result == 0:
+        _open_v3_hud(env)
+    return result
+
+
+def stop(_args) -> int:
+    return switch.stop_v3(switch.default_env())
+
+
+def restart(_args) -> int:
+    return switch.restart_v3(switch.default_env())
+
+
+def install(_args) -> int:
+    repo = Path(config.REPO_ROOT)
+    return switch.install_unit(
+        switch.default_env(),
+        unit_path=Path.home() / ".config/systemd/user/jarvis-agent.service",
+        python=str(repo / ".venv/bin/python"),
+        repo=repo,
+    )
+
+
 def add_commands(sub):
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
@@ -63,6 +96,13 @@ def add_commands(sub):
     agent_sub = agent.add_subparsers(dest="action", required=True)
     agent_status = agent_sub.add_parser("status", help="show v3 daemon status")
     agent_status.set_defaults(func=status)
+    # The owner-op gate recognizes the action word. Options must take no values.
+    agent_start = agent_sub.add_parser("start", help="switch to the v3 daemon")
+    agent_start.add_argument("--force", action="store_true", help="switch even if v2 is busy")
+    agent_start.set_defaults(func=start)
+    agent_sub.add_parser("stop", help="stop the v3 daemon").set_defaults(func=stop)
+    agent_sub.add_parser("restart", help="restart the v3 daemon").set_defaults(func=restart)
+    agent_sub.add_parser("install", help="install the v3 systemd user unit").set_defaults(func=install)
 
 
 def main(argv: list[str]) -> int:
