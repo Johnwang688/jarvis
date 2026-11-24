@@ -87,11 +87,11 @@ the point of the project, not an accident.
 
 ## Environment
 
-- **WSL2 (Ubuntu 26.04) on Windows 11.** WSLg is active, so headed GUI apps
+- **WSL2 on Windows.** WSLg is active, so headed GUI apps
   render on the Windows desktop.
 - Code lives on the Linux filesystem at `~/projects/Jarvis`. **Never move it to
   `/mnt/c`** — 9p is slow and mangles permissions/line endings. Windows can
-  already reach it at `\\wsl.localhost\Ubuntu\home\johnw\projects`.
+  already reach it at `\\wsl.localhost\<distro>\home\<user>\projects`.
 - **System Python 3.14 has no `ensurepip`, so `python3 -m venv` fails.** Use
   `uv` (already installed): `uv venv`, `uv pip install -e .`.
 - `jarvis` is symlinked from `~/.local/bin` into `.venv/bin/jarvis`, so source
