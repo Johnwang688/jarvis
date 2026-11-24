@@ -3,7 +3,7 @@
 Working instructions for agents changing Jarvis. Read this guide, then the area
 notes and design/decision documents for the code you will touch. Update current
 rules here; put history, review findings and measured results in the area
-note. Keep this guide near 38–40 KB.
+note. Keep this guide near 38–44 KB.
 
 The previous file is preserved verbatim in [area notes](#area-index), with a
 [migration manifest](docs/notes/claude-migration.json). Those notes mix live rules,
@@ -17,6 +17,37 @@ Invariants and decisions are retained byte for byte.
 
 Tool-call labels: A value split by shell quoting can still appear in a label;
 labels are untrusted text ([HUD notes](docs/notes/hud-workspace.md)).
+
+## This repository is public (owner, 2026-11-23)
+
+Everything committed, pushed or posted here is on the open internet for good:
+files, every commit in history, commit messages, branch names, PR and issue text,
+comments and CI logs. Deleting or rewriting later does not take it back.
+
+**Never put here:**
+- **Credentials**, real or expired: keys, tokens, cookies, passwords, OAuth client
+  secrets, `.env` values, pairing and one-time codes, passkey or signing material.
+- **Personal data:** the owner's email, phone, address, accounts or schedule; anyone
+  else's name or words; mail, calendar, document, chat or transcript contents; memory
+  and vault entries.
+- **The owner's machines and how they are reached:** real hostnames, device and
+  tailnet names, IP addresses, tunnel addresses, which services listen or are exposed,
+  sign-in and permission settings, process or file listings.
+- **A working way around a gap that is live and unfixed.** Tell the owner privately,
+  fix it, then describe the fix.
+- **Local notes** (`PAUSE*.md`, checkpoints, questions for the owner) unless the owner
+  says so.
+
+Write "the owner's machine". In examples and tests use obvious fakes:
+`example.invalid`, `192.0.2.1`, `user@example.com`, `fake-token`.
+
+**Before every commit** read `git diff --cached`; stage files by name, never
+`git add -A` or `.`. **Before the first push of a branch** read all of
+`git log -p origin/main..HEAD`, including commits you did not write. A failing secret
+scanner stops the work until each finding is explained. Write PR text to the same rule.
+
+**If something leaks:** stop, tell the owner at once, and rotate a leaked credential
+first. Rewrite history or force-push only when the owner says so.
 
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
