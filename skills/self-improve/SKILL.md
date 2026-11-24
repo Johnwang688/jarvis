@@ -14,7 +14,7 @@ asks, only the change they asked for, one change per request.
    each page tells you the offset to continue from. Stopping at page one
    means working from a third of the rules. Then read every file you intend
    to change.
-2. **Checkpoint first**: `run_command` `git add -A && git commit -m
+2. **Checkpoint first**: `run_command` `git commit -a -m
    "checkpoint before <change>"`. If git is not clean, say so and stop —
    the owner may have uncommitted work.
 3. **Off limits, no exceptions**: secrets.py, files.py, tools/__init__.py,
