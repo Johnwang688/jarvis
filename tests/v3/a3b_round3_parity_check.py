@@ -18,7 +18,7 @@ import jarvis
 from jarvis import config, protected_state, rules
 
 
-BASE = "9d374b43"
+BASE = "9e63b514"  # live main before v3
 ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT = Path("/home/u/projects/Jarvis")
 NAMED_CHECKOUT = CHECKOUT / "daemon2-review"
@@ -171,6 +171,8 @@ class BaseParity(unittest.TestCase):
     def test_gate_keeps_legacy_verdicts(self):
         source = subprocess.check_output(["git", "show", f"{BASE}:jarvis/protected_state.py"], cwd=ROOT)
         base = load_source(source, "jarvis._a3b_round3_base")
+        # The base under its own configuration: 8410 was not a control port yet.
+        base._daemon_ports = lambda: (config.control_ports() | {8403, config.WORKSHOP_PORT}) - {8410, config.V3_API_PORT}
         total = 0
         differences = []
         counts = dict(weaker=0, reasons=0, ordinary=0)
