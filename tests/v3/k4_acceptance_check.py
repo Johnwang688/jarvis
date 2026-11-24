@@ -104,6 +104,15 @@ class Shell(Base):
             for line in self.reads(p):
                 self.assertEqual(P1.static_verdict(line).decision, rules.ALLOW, line)
 
+    def test_program_reads_stay(self):
+        """A program that only reads a record is judged as it is for any other file."""
+        other = self.home / "project" / "data.json"
+        for p in (self.v3 / "policy.json", self.v3 / "budget.jsonl", self.inside[0], self.home / ".claude.json"):
+            for line in ("python3 -c \"print(open('{}').read())\"", "jq . {}", "node -e \"console.log(require('fs').readFileSync('{}','utf8'))\"", "diff {} /tmp/a", "cp {} /tmp/copy"):
+                got, want = P1.static_verdict(line.format(p)), P1.static_verdict(line.format(other))
+                self.assertNotEqual(got.decision, rules.DENY, line.format(p))
+                self.assertIn(got.decision, (want.decision, rules.ASK), line.format(p))
+
     def test_ordinary_work_is_as_before(self):
         for p in self.free:
             for line in self.writes(p):
