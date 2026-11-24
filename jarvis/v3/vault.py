@@ -43,13 +43,19 @@ class VaultError(ValueError):
     """A vault error whose text is safe to return to a tool caller."""
 
 
+class _DirectoryModeError(VaultError):
+    """An owner-owned vault directory needs its permissions tightened."""
+
+
 class Location(NamedTuple):
     folder: str
     name: str
 
     @property
     def ref(self) -> str:
-        return f"{self.folder}/{self.name}" if self.folder else self.name
+        if self.folder and self.name:
+            return f"{self.folder}/{self.name}"
+        return self.folder or self.name
 
     @property
     def filename(self) -> str:
@@ -153,7 +159,7 @@ def safe_summary(text: str) -> str:
 
 
 @contextmanager
-def _directory(parent: int, name: str, *, create: bool = False):
+def _directory(parent: int, name: str, *, create: bool = False, tighten: bool = False):
     if create:
         try:
             os.mkdir(name, 0o700, dir_fd=parent)
@@ -161,19 +167,19 @@ def _directory(parent: int, name: str, *, create: bool = False):
             pass
     fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     try:
-        _private_directory(fd, tighten=create)
+        _private_directory(fd, f"Vault folder {name}", tighten=create or tighten)
         yield fd
     finally:
         os.close(fd)
 
 
-def _private_directory(fd: int, *, tighten: bool) -> None:
+def _private_directory(fd: int, label: str, *, tighten: bool) -> None:
     info = os.fstat(fd)
     if info.st_uid != os.getuid():
         raise VaultError("Vault directories must belong to the vault owner.")
     if stat.S_IMODE(info.st_mode) != 0o700:
         if not tighten:
-            raise VaultError("Vault directories must have mode 0700.")
+            raise _DirectoryModeError(f"{label} must have mode 0700.")
         os.fchmod(fd, 0o700)
 
 
@@ -192,6 +198,7 @@ def _regular_file(directory: int, name: str, flags: int = os.O_RDONLY, *, privat
 
 
 def _read_file(directory: int, name: str, *, private: bool = True) -> bytes:
+    # An owner's editor leaves 0644 behind; the 0700 folder keeps it private, and the next write makes it 0600.
     with _regular_file(directory, name, private=private) as fd:
         with os.fdopen(fd, "rb", closefd=False) as stream:
             raw = stream.read(_MAX_FILE_BYTES + 1)
@@ -227,21 +234,21 @@ class Vault:
     def _locked(self, *, write: bool = False):
         with open_directory(self.root, create=write) as root:
             fcntl.flock(root, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
-            _private_directory(root, tighten=write)
+            _private_directory(root, "Vault root", tighten=write)
             yield root
 
     @contextmanager
-    def _folder(self, root: int, folder: str, *, create: bool = False):
+    def _folder(self, root: int, folder: str, *, create: bool = False, write: bool = False):
         if folder:
-            with _directory(root, folder, create=create) as directory:
+            with _directory(root, folder, create=create, tighten=write) as directory:
                 yield directory
         else:
             yield root
 
-    def _load(self, root: int, location: Location) -> Entry | None:
+    def _load(self, root: int, location: Location, *, write: bool = False) -> Entry | None:
         try:
-            with self._folder(root, location.folder) as directory:
-                raw = _read_file(directory, location.filename)
+            with self._folder(root, location.folder, write=write) as directory:
+                raw = _read_file(directory, location.filename, private=False)
         except FileNotFoundError:
             if location.folder:
                 return None
@@ -253,7 +260,7 @@ class Vault:
         description = "Owner profile" if location.name == "USER" else "Open commitments"
         return Entry(location, description, "owner", "", date.today().isoformat())
 
-    def _resolve(self, root: int, ref: str, *, pending_archive: bool = False) -> Entry:
+    def _resolve(self, root: int, ref: str, *, write: bool = False, pending_archive: bool = False) -> Entry:
         if not isinstance(ref, str):
             raise VaultError("Invalid memory name.")
         if ref in _ROOT_ENTRIES:
@@ -264,11 +271,20 @@ class Vault:
         if not _slug(name) or (slash and folder not in FOLDERS):
             raise VaultError("Use a memory slug or folder/slug.")
         matches = []
+        mode_error = None
         for parent in (folder,) if slash else FOLDERS:
-            entry = self._load(root, Location(parent, name))
+            try:
+                entry = self._load(root, Location(parent, name), write=write)
+            except _DirectoryModeError as exc:
+                if slash:
+                    raise
+                mode_error = mode_error or exc
+                continue
             if entry is not None and (entry.status == "active" or pending_archive):
                 matches.append(entry)
         if not matches:
+            if mode_error is not None:
+                raise mode_error
             raise VaultError("Memory entry was not found.")
         if len(matches) > 1:
             refs = safe_summary(", ".join(entry.location.ref for entry in matches))
@@ -289,6 +305,10 @@ class Vault:
                             yield from self._row(directory, Location(parent, name))
             except FileNotFoundError:
                 continue
+            except _DirectoryModeError:
+                if folder:
+                    raise
+                yield Location(parent, ""), None
             except (OSError, VaultError):
                 if folder:
                     raise
@@ -296,7 +316,7 @@ class Vault:
     @staticmethod
     def _row(directory: int, location: Location):
         try:
-            entry = _parse(location, _read_file(directory, location.filename))
+            entry = _parse(location, _read_file(directory, location.filename, private=False))
         except FileNotFoundError:
             return
         except (OSError, UnicodeError, VaultError):
@@ -306,7 +326,7 @@ class Vault:
                 yield location, entry
 
     def entries(self, folder: str = "") -> list[tuple[Location, Entry | None]]:
-        """Return active entries and locations of unreadable file entries."""
+        """Return active entries and locations of unreadable entries or wrong-mode folders."""
         if folder != "" and (not isinstance(folder, str) or folder not in FOLDERS):
             raise VaultError("Unknown memory folder.")
         try:
@@ -367,7 +387,7 @@ class Vault:
 
     def _add(self, root: int, entry: Entry, *, importing: bool = False):
         location = entry.location
-        existing = self._load(root, location)
+        existing = self._load(root, location, write=True)
         if existing is not None and (existing.status == "active" or importing):
             raise VaultError(f"Memory entry {safe_summary(location.ref)} already exists.")
         self._check_caps(root, entry, adding=True)
@@ -385,7 +405,7 @@ class Vault:
         if not isinstance(old, str) or not isinstance(new, str):
             raise VaultError("Patch values must be text.")
         with self._locked(write=True) as root:
-            entry = self._resolve(root, name)
+            entry = self._resolve(root, name, write=True)
             location = entry.location
             if location not in reads:
                 raise VaultError("Read the memory entry in this session before patching.")
@@ -416,7 +436,7 @@ class Vault:
     @staticmethod
     def _was_archived(directory: int, location: Location) -> bool:
         try:
-            with _directory(directory, ".archive") as archive:
+            with _directory(directory, ".archive", tighten=True) as archive:
                 return any(filename == location.filename or filename.startswith(location.name + ".")
                            for filename in os.listdir(archive))
         except FileNotFoundError:
@@ -426,12 +446,12 @@ class Vault:
         if not isinstance(replaced_by, str):
             raise VaultError("Invalid replacement name.")
         with self._locked(write=True) as root:
-            entry = self._resolve(root, name, pending_archive=True)
+            entry = self._resolve(root, name, write=True, pending_archive=True)
             location = entry.location
             if not location.folder:
                 raise VaultError("This fixed vault entry cannot be archived.")
             if entry.status == "active":
-                replacement = self._resolve(root, replaced_by).location if replaced_by else None
+                replacement = self._resolve(root, replaced_by, write=True).location if replaced_by else None
                 if replacement == location:
                     raise VaultError("Choose a different active replacement.")
                 entry = replace(entry, status="archived", updated=date.today().isoformat(),
@@ -481,6 +501,8 @@ class Vault:
 
 
 def entry_summary(location: Location, entry: Entry | None) -> str:
+    if not location.name:
+        return f"Vault folder {location.folder} must have mode 0700."
     if entry is None:
         return f"{safe_summary(location.ref)} (unreadable entry)"
     label = safe_summary(f"{location.ref} — {entry.description}")
