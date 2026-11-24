@@ -24,6 +24,7 @@ CHUNK_CHARS = 4_000
 PAGE_CHUNKS = 5
 MAX_RESULTS = 20
 MAX_QUERY_CHARS = 1_000
+EXCERPT_BEFORE, EXCERPT_AFTER = 120, 240
 
 _SCHEMA = (
     """CREATE TABLE docs (
@@ -226,8 +227,9 @@ class Index:
         self.close()
 
     @contextmanager
-    def _transaction(self, *, write: bool = False):
+    def _transaction(self, *, write: bool = False, wait_s: float = 30.0):
         with self._lock:
+            self._db.execute(f"PRAGMA busy_timeout={int(wait_s * 1000)}")
             self._db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 yield self._db
@@ -306,11 +308,11 @@ class Index:
         with self._transaction() as db:
             for table, expression in strategies:
                 if expression and (hits := self._hits(db, table, expression, limit)):
-                    return [self._discovery(db, hit, table, expression) for hit in hits]
+                    return [self._discovery(db, hit, table, expression, query) for hit in hits]
         return []
 
     @staticmethod
-    def _discovery(db, hit, table, expression) -> dict:
+    def _discovery(db, hit, table, expression, query) -> dict:
         doc_id, seq = hit["id"], hit["seq"]
         last = db.execute("SELECT max(seq) FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()[0]
         sequences = sorted(set(range(1, 4)) | set(range(last - 2, last + 1)) | set(range(seq - 5, seq + 6)))
@@ -321,6 +323,11 @@ class Index:
             f"SELECT snippet({table}, 0, '', '', ' … ', 32), text FROM {table}(?) WHERE rowid=?",
             (expression, hit["chunk_id"]),
         ).fetchone()
+        # A trigram snippet is a few dozen characters and can stop inside the match: cut around the words themselves.
+        at = text.casefold().find(query.casefold())
+        if at != -1 and len(text.casefold()) == len(text):
+            start, end = max(0, at - EXCERPT_BEFORE), at + len(query) + EXCERPT_AFTER
+            excerpt = ("… " if start else "") + text[start:end] + (" …" if end < len(text) else "")
         for message in messages:
             if message["seq"] == seq:
                 message.update(text=text, excerpt=excerpt)

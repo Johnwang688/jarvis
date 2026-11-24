@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import time
 
@@ -22,6 +23,7 @@ _MAX_LINE = 1024 * 1024
 _BATCH_BYTES = 256 * 1024
 _BATCH_LINES = 128
 _CURSOR_SAMPLE = 4_096
+_WRITER_WAIT_S = 30.0
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
@@ -32,6 +34,23 @@ class Stats:
     chunks: int = 0
     skipped: int = 0
     done: bool = True
+
+
+class _Limit:
+    """When this run must stop, and how long it may wait for another writer."""
+
+    def __init__(self, budget_s, stop):
+        self._deadline = None if budget_s is None else time.monotonic() + budget_s
+        self._stop = stop
+        self.busy = False
+
+    def __call__(self) -> bool:
+        return (self.busy or (self._stop is not None and self._stop.is_set())
+                or (self._deadline is not None and time.monotonic() >= self._deadline))
+
+    def wait_s(self) -> float:
+        return _WRITER_WAIT_S if self._deadline is None else min(
+            _WRITER_WAIT_S, max(0.0, self._deadline - time.monotonic()))
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,8 @@ def _claude(row, stamp):
     role = row.get("type")
     message = row.get("message")
     if role not in ("user", "assistant") or not isinstance(message, dict) or message.get("role") != role:
+        return
+    if row.get("isMeta"):       # the CLI's own reminders, stored under the user's role
         return
     content = message.get("content")
     if isinstance(content, str):
@@ -210,7 +231,7 @@ def _file(index, source, root, relative, directory, stats, stopped):
         # The file is opened inside the write transaction, so another process
         # cannot advance its cursor while this batch reads or resets it.
         try:
-            with index._transaction(write=True) as db, _regular(directory, relative.name) as (handle, info):
+            with index._transaction(write=True, wait_s=stopped.wait_s()) as db, _regular(directory, relative.name) as (handle, info):
                 row = db.execute("""SELECT dev, ino, offset, digest, skipping FROM cursors
                                     WHERE file_key=?""", (doc_id,)).fetchone()
                 old = _Cursor(*row) if row is not None else None
@@ -256,6 +277,11 @@ def _file(index, source, root, relative, directory, stats, stopped):
         except OSError:
             stats.skipped += 1
             return
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode & 0xFF != sqlite3.SQLITE_BUSY:
+                raise
+            stopped.busy = True     # another writer holds the index: this run ends, the next goes on
+            return
 
         stats.lines += len(lines)
         stats.skipped += skipped
@@ -299,12 +325,7 @@ def _walk(index, source, root, relative, directory, stats, stopped):
 
 def ingest(index: Index, *, claude=None, codex=None, jarvis=None, budget_s=None, stop=None) -> Stats:
     """Resume each transcript and atomically commit its chunks and cursor."""
-    deadline = time.monotonic() + budget_s if budget_s is not None else None
-
-    def stopped():
-        return ((stop is not None and stop.is_set())
-                or (deadline is not None and time.monotonic() >= deadline))
-
+    stopped = _Limit(budget_s, stop)
     roots = {
         "claude": Path.home() / ".claude" / "projects" if claude is None else Path(claude),
         "codex": Path.home() / ".codex" / "sessions" if codex is None else Path(codex),
