@@ -1104,6 +1104,9 @@ class MockDaemon:
                 url = urlparse(self.path)
                 path = url.path
                 w = mock.world
+                if path == "/hud/sensitive":
+                    self._record("POST", path, self._body())
+                    return self._json({"ok": True})
                 if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
                     return
                 if mock_inbox.handle(self, mock, "POST", path):       # owner, then the answer

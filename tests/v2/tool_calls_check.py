@@ -169,7 +169,7 @@ class Labels(unittest.TestCase):
         command = "echo fake-secret-'token-value'"
         self.assertEqual(tool_calls.label("Bash", {"command": command}, str(self.project)), command)
         checkout = Path(__file__).resolve().parents[2]
-        for path in (checkout / "CLAUDE.md", checkout / "docs/hud-api.md"):
+        for path in (checkout / "AGENTS.md", checkout / "docs/hud-api.md"):
             self.assertTrue("A value split by shell quoting can still appear in a label" in path.read_text(),
                             str(path) + " must state the quoted-value limit")
 

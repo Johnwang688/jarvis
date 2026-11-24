@@ -36,6 +36,8 @@ export class ApiError extends Error {
   }
 }
 
+export type DesktopDrivingState = { enabled: boolean; thread_id: string | null; badge_showing: boolean };
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   const text = await res.text();
@@ -100,6 +102,8 @@ export const api = {
   /** How many panes a chat's ask showed in this window (counts only; docs/hud-api.md "Agent panes"). */
   agentPanesReport: (body: { window: string; request_id: string; placed: number; not_placed: number }) =>
     req<unknown>("/agent-panes/report", json(body)),
+  reportHudSensitive: (body: { client_id: string; cards: number; editors: number }, signal: AbortSignal) =>
+    req<unknown>("/hud/sensitive", { ...json(body), signal }),
   setBrowserSound: (sound: boolean) => req<unknown>("/browser/settings", patch({ sound })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 
@@ -131,6 +135,15 @@ export const api = {
     provider?: string;
     brief?: { model?: string; effort?: string; speed?: string };
   }) => req<Thread>("/threads", json(body)),
+  newDesktopDriverChat: (projectId: string): Promise<Thread> => api.openThread({
+    project_id: projectId, role: "chat", provider: "codex",
+    brief: { model: "gpt-6.2-sol", effort: "medium", speed: "ultrafast" },
+  }),
+  desktopDriving: () => req<DesktopDrivingState>("/desktop-driving"),
+  setDesktopDriving: (id: string, on: boolean) =>
+    req<DesktopDrivingState>(`/threads/${encodeURIComponent(id)}/desktop-driving`, patch({ on })),
+  stopDesktopDriving: (id: string) =>
+    req<DesktopDrivingState>(`/threads/${encodeURIComponent(id)}/desktop-driving/stop`, json({})),
   /** A chat thread's model and effort, from its next message; `model: null`
    * is the default. Never its provider. */
   setThreadModel: (id: string, body: { model?: string | null; effort?: string | null; speed?: string | null; speed_model?: string | null }) =>

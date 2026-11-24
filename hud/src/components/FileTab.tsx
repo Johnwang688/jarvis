@@ -25,6 +25,7 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
+import { editorRegion } from "../lib/hudSensitive";
 import type { FsResult, Tree, TreeEntry } from "../types";
 import { EditorStatus } from "./EditorStatus";
 import { SearchView, type SearchAsk } from "./SearchView";
@@ -788,7 +789,7 @@ export function FileTab(props: {
           />
         ) : null}
       </div>
-      <div className="editorwrap">
+      <div className="editorwrap" {...(env ? editorRegion : undefined)}>
         <EditorTabs
           tabs={tabs}
           info={info}

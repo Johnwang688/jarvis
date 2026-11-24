@@ -285,6 +285,12 @@ def session_mcp(brief: Brief) -> dict | None:
     return None
 
 
+def _watch_window_tools(brief: Brief) -> bool:
+    from ..mcp_session import WATCH_WINDOWS_VARIABLE
+    server = session_mcp(brief)
+    return server is not None and server.get("env", {}).get(WATCH_WINDOWS_VARIABLE) == "1"
+
+
 def validate_mcp(brief: Brief, effective: dict) -> None:
     """Compare measured 0.161 readback without putting token values in errors."""
     expected = session_mcp(brief)
@@ -895,6 +901,9 @@ def _denied(table: dict) -> list[Path]:
     return [Path(k) for k, v in table.items() if v == "deny" and "*" not in k]
 
 
+PROJECT_DOC_MAX_BYTES = 65536
+
+
 def config_text(brief: Brief, home: Path | None = None) -> str:
     """A session's private config. `home` is its private Codex home: given,
     the commands get `sandbox_home(home)` as HOME (prepare passes it), and
@@ -908,13 +917,18 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="ephemeral", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
-                  web_search="live", check_for_update_on_startup=False)
+                  web_search="live", check_for_update_on_startup=False,
+                  # The repo guide (AGENTS.md, ~41 KB) is past Codex's 32 KiB default;
+                  # a truncated guide drops the invariants and decisions (#413 review).
+                  project_doc_max_bytes=PROJECT_DOC_MAX_BYTES)
     if brief.model is not None:
         values["model"] = brief.model
     if brief.effort is not None:
         values["model_reasoning_effort"] = brief.effort
     lines = [f"{k} = {_value(v)}" for k, v in values.items()]
     lines += ["[features]", f"{FEATURE} = true"]
+    if _watch_window_tools(brief):
+        lines.append("mcp_tool_list_changed = true")
     lines += ["[shell_environment_policy]", 'inherit = "all"']
     if home is not None:
         lines.append(f"set = {_value({'HOME': str(sandbox_home(home))})}")
@@ -946,6 +960,8 @@ def check_effective(brief: Brief, effective: dict, home: Path | None) -> None:
         _refuse(f"feature {FEATURE} is not on")
     if features.get(TURN_WIDE_FEATURE) not in (None, False):
         _refuse(f"feature {TURN_WIDE_FEATURE} is on")
+    if _watch_window_tools(brief) and features.get("mcp_tool_list_changed") is not True:
+        _refuse("feature mcp_tool_list_changed is off")
     profiles = effective.get("permissions")
     profile = profiles.get(PROFILE) if isinstance(profiles, dict) else None
     if not isinstance(profile, dict):

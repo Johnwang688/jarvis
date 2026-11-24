@@ -103,10 +103,17 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/browser/drive_downloads.py",
         "jarvis/v2/tools/hud_browser_act.py",
         "jarvis/v2/tools/hud_desktop.py",
+        "jarvis/v2/tools/hud_window.py",
         "jarvis/desktop.py",
         "windows/desktopwire.py",
         "windows/bridge.py",
         "windows/uiatree.py",
+        "windows/windowpolicy.py",
+        "windows/desktopguard.py",
+        "windows/driveui.py",
+        "jarvis/v2/desktop_risk.py",
+        "jarvis/v2/desktop_driver.py",
+        "jarvis/v2/hud_sensitive.py",
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",
@@ -459,7 +466,7 @@ RECORD_TREES = (
     "deleting",      # a permanent delete's staging folder and manifest
     "vex",           # VEX build locks and unfinished-build markers
 )
-RECORD_FILES = ("decisions.jsonl",)
+RECORD_FILES = ("decisions.jsonl", "desktop_actions.jsonl")
 
 
 def _resolve_all(paths) -> set[Path]:

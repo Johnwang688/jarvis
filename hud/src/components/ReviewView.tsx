@@ -26,6 +26,7 @@
 // Under a live approval card the whole view is inert and every control off.
 // Every string from the daemon is React text (lib/inbox's untrusted rule).
 
+import { approvalRegion } from "../lib/hudSensitive";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../api";
 import { clockOf, decisionOf, deferredOf, questionOf, briefOf } from "../lib/inbox";
@@ -456,7 +457,7 @@ export function ReviewView(props: ReviewViewProps) {
         ) : null}
       </div>
       {confirming ? (
-        <div className="review-confirm-veil">
+        <div className="review-confirm-veil" {...approvalRegion}>
           <div className="review-confirm" role="dialog" aria-modal="true" aria-label="Approve these calls"
                data-testid="review-confirm" ref={dialogRef}
                onKeyDownCapture={(e) => {

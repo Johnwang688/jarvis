@@ -132,7 +132,7 @@ def state_checks() -> None:
 
 def skill_checks() -> None:
     text = SKILL.read_text(encoding="utf-8")
-    for needle in ("checkpoint", "git", "Off limits", "test suites", "CLAUDE.md"):
+    for needle in ("checkpoint", "git", "Off limits", "test suites", "CLAUDE.md", "AGENTS.md first"):
         assert needle in text, f"skill lost its {needle!r} rule"
     print("ok  skill: self-improve exists with checkpoint/off-limits/test rules")
 

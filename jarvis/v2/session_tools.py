@@ -39,7 +39,10 @@ from dataclasses import dataclass, field
 
 from .model import ProviderName, Role
 from .mcp_catalog import MCP_TOOLS, MCP_READ_ONLY
+from jarvis import config
+
 from .tools.hud_desktop import HUD_DESKTOP_TOOLS
+from .tools.hud_window import HUD_WINDOW_TOOLS
 
 # What a Claude tool name looks like for a tool of the jarvis server:
 # `mcp__<server>__<tool>`.
@@ -167,6 +170,12 @@ def unregister(name: str) -> None:
     SESSION_TOOLS.pop(name, None)
 
 
+for _name in HUD_WINDOW_TOOLS:
+    _read_only = _name == "hud_window_list"
+    register(SessionTool(_name, providers=_CHAT_PROVIDERS, read_only=_read_only,
+                         foreground_only=True, desk_only=True, owner_gated=not _read_only))
+
+
 def _provider_name(provider) -> str:
     return provider.value if isinstance(provider, ProviderName) else str(provider)
 
@@ -184,7 +193,10 @@ def for_provider(provider) -> list[SessionTool]:
     from jarvis import tools
     from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post, hud_subagents, hud_open_browser  # noqa: F401 — register implementations
     offered = []
+    window_drive = config.desktop_drive()
     for entry in sorted(entries, key=lambda e: e.name):
+        if entry.name in HUD_WINDOW_TOOLS and not window_drive:
+            continue
         if entry.name not in tools.REGISTRY:
             continue
         if entry.owner_gated and (entry.read_only or not entry.foreground_only

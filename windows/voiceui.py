@@ -11,6 +11,11 @@ import queue
 import struct
 import time
 
+if __package__:
+    from . import driveui
+else:
+    import driveui
+
 STATES = ("hidden", "listening", "transcribing", "thinking", "answering", "profile_choice", "done", "error")
 CYAN, AMBER, RED = "#67e8f9", "#fbbf24", "#fb7185"
 PANEL, INK = "#14232e", "#edf6fa"
@@ -529,3 +534,204 @@ class AuroraEdges:
     def close(self):
         self.set_visible(False)
         self.closed = True
+
+
+class _Paint(ctypes.Structure):
+    _fields_ = [("dc", w.HDC), ("erase", w.BOOL), ("rect", w.RECT),
+                ("restore", w.BOOL), ("update", w.BOOL), ("reserved", w.BYTE * 32)]
+
+
+class _KeyEvent(ctypes.Structure):
+    _fields_ = [("key", w.DWORD), ("scan", w.DWORD), ("flags", w.DWORD),
+                ("time", w.DWORD), ("extra", ctypes.c_size_t)]
+
+
+class _BadgeMonitorInfo(ctypes.Structure):
+    _fields_ = [("size", w.DWORD), ("screen", w.RECT), ("work", w.RECT), ("flags", w.DWORD)]
+
+
+class _DriveWin32(_AuroraWin32):
+    def __init__(self, window_proc, key_proc):
+        # Windows verification pending: shared user32/gdi32 loading and DPI/window bindings.
+        super().__init__()
+        # Windows verification pending: native class, GDI and low-level hook signatures (including on x64).
+        u, g = self.user, self.gdi
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        callback = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
+        hook_callback = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, w.WPARAM, w.LPARAM)
+        self.window_proc, self.key_proc = callback(window_proc), hook_callback(key_proc)
+
+        class WindowClass(ctypes.Structure):
+            _fields_ = [("style", w.UINT), ("proc", callback), ("class_extra", ctypes.c_int),
+                        ("window_extra", ctypes.c_int), ("instance", w.HINSTANCE), ("icon", w.HICON),
+                        ("cursor", w.HANDLE), ("background", w.HBRUSH), ("menu", w.LPCWSTR),
+                        ("name", w.LPCWSTR)]
+
+        def signature(fn, result, *args):
+            fn.restype, fn.argtypes = result, args
+
+        rect = ctypes.POINTER(w.RECT)
+        integer = ctypes.c_int
+        signature(kernel.GetModuleHandleW, w.HMODULE, w.LPCWSTR)
+        signature(u.RegisterClassW, w.ATOM, ctypes.POINTER(WindowClass))
+        signature(u.UnregisterClassW, w.BOOL, w.LPCWSTR, w.HINSTANCE)
+        signature(u.MonitorFromPoint, w.HMONITOR, w.POINT, w.DWORD)
+        signature(u.GetMonitorInfoW, w.BOOL, w.HMONITOR, ctypes.POINTER(_BadgeMonitorInfo))
+        signature(u.SetLayeredWindowAttributes, w.BOOL, w.HWND, w.COLORREF, w.BYTE, w.DWORD)
+        signature(u.SetWindowPos, w.BOOL, w.HWND, w.HWND, integer, integer, integer, integer, w.UINT)
+        signature(u.DefWindowProcW, ctypes.c_ssize_t, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
+        signature(u.BeginPaint, w.HDC, w.HWND, ctypes.POINTER(_Paint))
+        signature(u.EndPaint, w.BOOL, w.HWND, ctypes.POINTER(_Paint))
+        signature(u.FillRect, integer, w.HDC, rect, w.HBRUSH)
+        signature(u.InvalidateRect, w.BOOL, w.HWND, rect, w.BOOL)
+        signature(u.DrawTextW, integer, w.HDC, w.LPCWSTR, integer, rect, w.UINT)
+        signature(g.CreateSolidBrush, w.HBRUSH, w.COLORREF)
+        signature(g.SetTextColor, w.COLORREF, w.HDC, w.COLORREF)
+        signature(g.SetBkMode, integer, w.HDC, integer)
+        signature(g.GetStockObject, w.HGDIOBJ, integer)
+        signature(u.SetWindowsHookExW, w.HANDLE, integer, hook_callback, w.HINSTANCE, w.DWORD)
+        signature(u.CallNextHookEx, ctypes.c_ssize_t, w.HANDLE, integer, w.WPARAM, w.LPARAM)
+        signature(u.UnhookWindowsHookEx, w.BOOL, w.HANDLE)
+
+        # Windows verification pending: register the helper-owned window class.
+        self.instance = kernel.GetModuleHandleW(None)
+        self.name = "JarvisDrivingBadge"
+        klass = WindowClass(proc=self.window_proc, instance=self.instance, name=self.name)
+        if not u.RegisterClassW(ctypes.byref(klass)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def primary_screen(self):
+        # Windows verification pending: the primary monitor owns (0, 0) in physical pixels.
+        with self.physical_pixels():
+            monitor = self.user.MonitorFromPoint(w.POINT(0, 0), 1)  # MONITOR_DEFAULTTOPRIMARY
+            info = _BadgeMonitorInfo(size=ctypes.sizeof(_BadgeMonitorInfo))
+            if not self.user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        bounds = info.screen
+        return driveui.Rect(bounds.left, bounds.top, bounds.right, bounds.bottom)
+
+    def window(self, bounds, title, *, transparent):
+        # Windows verification pending: layered WS_EX_TRANSPARENT passes input to other processes.
+        style = AURORA_WINDOW_STYLE if transparent else AURORA_WINDOW_STYLE & ~0x20
+        left, top, right, bottom = bounds
+        with self.physical_pixels():
+            hwnd = self.user.CreateWindowExW(style, self.name, title, 0x80000000, left, top,
+                                             right - left, bottom - top, None, None, self.instance, None)
+        if not hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not self.user.SetLayeredWindowAttributes(hwnd, 0, 255, 2):  # LWA_ALPHA
+            self.user.DestroyWindow(hwnd)
+            raise ctypes.WinError(ctypes.get_last_error())
+        return hwnd
+
+    def show(self, hwnd):
+        # Windows verification pending: raise each window without moving, resizing or activating it.
+        if not self.user.SetWindowPos(hwnd, -1, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_SHOWWINDOW | 3):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def paint(self, hwnd, width, height, text, text_width, button):
+        # Windows verification pending: GDI painting on the two layered windows.
+        paint = _Paint()
+        dc = self.user.BeginPaint(hwnd, ctypes.byref(paint))
+        try:
+            bounds = w.RECT(0, 0, width, height)
+            brush = self.gdi.CreateSolidBrush(0x3C334D if button else 0x2E2314)
+            try:
+                self.user.FillRect(dc, ctypes.byref(bounds), brush)
+            finally:
+                self.gdi.DeleteObject(brush)
+            self.gdi.SetTextColor(dc, 0xFAF6ED)
+            self.gdi.SetBkMode(dc, 1)  # TRANSPARENT
+            font = self.gdi.SelectObject(dc, self.gdi.GetStockObject(17))  # DEFAULT_GUI_FONT
+            try:
+                label = w.RECT(0, 0, text_width, height)
+                self.user.DrawTextW(dc, text, -1, ctypes.byref(label), 0x25)  # single line, centred
+            finally:
+                self.gdi.SelectObject(dc, font)
+        finally:
+            self.user.EndPaint(hwnd, ctypes.byref(paint))
+
+
+class DriveBadge:
+    """Two topmost windows, so only the Stop rectangle receives input."""
+
+    def __init__(self, stop):
+        self.stop = stop
+        self.api = self.layout = self.panel = self.button = self.hook = None
+
+    def set_visible(self, visible):
+        if not visible or os.name != "nt":
+            self._hide()
+            return False
+        try:
+            if self.api is None:
+                self.api = _DriveWin32(self._window_event, self._key_event)
+            layout = driveui.badge_layout(self.api.primary_screen())
+            if layout != self.layout:
+                self._hide()
+                if layout is None:
+                    return False
+                self.layout = layout
+                self.panel = self.api.window(layout.badge, "Jarvis is driving", transparent=True)
+                self.button = self.api.window(layout.stop, "Stop", transparent=False)
+                self.api.show(self.panel)
+                self.api.show(self.button)
+                # Windows verification pending: WH_KEYBOARD_LL on the Tk message pump.
+                self.hook = self.api.user.SetWindowsHookExW(13, self.api.key_proc, self.api.instance, 0)
+                # Windows verification pending: repaint the panel with the hook result.
+                self.api.user.InvalidateRect(self.panel, None, False)
+            return self.button is not None
+        except (OSError, AttributeError, ctypes.ArgumentError):
+            self._hide()
+            return False
+
+    def _key_event(self, code, message, data):
+        # Windows verification pending: KBDLLHOOKSTRUCT layout and forwarding every event.
+        # The key is passed on whatever happens here: an exception that left
+        # this callback would leave the keyboard to chance (review, CU-3c).
+        try:
+            if code == 0 and self.layout is not None and self.button and message in (0x100, 0x104):  # WM_[SYS]KEYDOWN
+                event = ctypes.cast(data, ctypes.POINTER(_KeyEvent)).contents
+                if driveui.physical_escape(event.key, event.flags, True):
+                    self.stop("esc")
+        except Exception:
+            pass
+        return self.api.user.CallNextHookEx(None, code, message, data)
+
+    def _window_event(self, hwnd, message, wparam, lparam):
+        if message == 0x21:  # WM_MOUSEACTIVATE
+            return 3  # MA_NOACTIVATE
+        if self.layout is not None and hwnd in (self.button, self.panel):
+            badge, stop = self.layout
+            button = hwnd == self.button
+            if button and message == 0x201:  # WM_LBUTTONDOWN
+                # Windows verification pending: client mouse coordinates and nonactivating click delivery.
+                x, y = ctypes.c_short(lparam & 0xFFFF).value, ctypes.c_short(lparam >> 16).value
+                if driveui.hits_stop(stop, stop.left + x, stop.top + y):
+                    self.stop("badge")
+                return 0
+            if message == 0xF:  # WM_PAINT
+                bounds = stop if button else badge
+                width, height = bounds.right - bounds.left, bounds.bottom - bounds.top
+                text = "Stop" if button else driveui.badge_text(bool(self.hook))
+                self.api.paint(hwnd, width, height, text, width if button else stop.left - badge.left, button)
+                return 0
+        # Windows verification pending: default dispatch for unhandled window messages.
+        return self.api.user.DefWindowProcW(hwnd, message, wparam, lparam)
+
+    def _hide(self):
+        self.layout = None
+        # Windows verification pending: remove the hook and destroy both windows on the Tk thread.
+        if self.hook and self.api.user.UnhookWindowsHookEx(self.hook):
+            # A failed unhook keeps its handle so close() tries again.
+            self.hook = None
+        for hwnd in (self.button, self.panel):
+            if hwnd:
+                self.api.user.DestroyWindow(hwnd)
+        self.panel = self.button = None
+
+    def close(self):
+        self._hide()
+        if self.api is not None:
+            # Windows verification pending: release the class after its last HWND is destroyed.
+            self.api.user.UnregisterClassW(self.api.name, self.api.instance)

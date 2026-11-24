@@ -15,17 +15,18 @@ import time
 import wave
 
 if __package__:
-    from .voicewire import Capture, Client, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from .voicewire import Capture, Client, DesktopRelay, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     from .voicetype import Typer
     from .voiceactions import Actions
     from .voiceflow import Flow
-    from . import voiceui, voicewake
+    from . import driveui, voiceui, voicewake
 else:
-    from voicewire import Capture, Client, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
+    from voicewire import Capture, Client, DesktopRelay, HotkeyMachine, MicrophoneRelay, new_nonce, KeyFileError, LinkError, NotJarvis, load_key, wav_bytes
     try:
         from voicetype import Typer
         from voiceactions import Actions
         from voiceflow import Flow
+        import driveui
         import voiceui
         import voicewake
     except ModuleNotFoundError:
@@ -33,7 +34,7 @@ else:
         from windows.voicetype import Typer
         from windows.voiceactions import Actions
         from windows.voiceflow import Flow
-        from windows import voiceui, voicewake
+        from windows import driveui, voiceui, voicewake
 
 VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_D = 0x11, 0xA2, 0xA3, ord("D")
 
@@ -258,10 +259,21 @@ class Agent:
         self.root.withdraw()
         self.overlay = voiceui.Overlay(self.root, recording=self.recording.is_set)
         self.aurora = voiceui.AuroraEdges(self.root)
+        self.desktop_relay = None
+        self.drive_badge = voiceui.DriveBadge(self.stop_driving)
         self.desktop_key = DesktopTalkKey(self.user32, lambda: self.overlay.set_state(
             "error", "Ctrl+D is in use by another app. Close that app's Ctrl+D shortcut to dictate."))
         self.player = Player()
         self.wake = None
+
+    def stop_driving(self, reason):
+        relay = self.desktop_relay
+        if relay is not None:
+            relay.request_stop(reason)
+
+    def driving(self):
+        relay = getattr(self, "desktop_relay", None)
+        return relay is not None and relay.indicator() is not None
 
     def share_frame(self, pcm):
         relay = self.relay
@@ -551,6 +563,11 @@ class Agent:
                     try:
                         client = Client(self.host, self.port, load_key(self.key_path), timeout=90.0)
                         client.connect()
+                        if hasattr(self, "desktop_relay"):
+                            if self.desktop_relay is not None:
+                                self.desktop_relay.close()
+                            self.desktop_relay = DesktopRelay(client)
+                            self.desktop_relay.thread.start()
                         if retired_choices:
                             # Carry only reply recognition (Chrome profile and
                             # website prompts) across a reconnect.
@@ -651,7 +668,8 @@ class Agent:
                         if generation == self.generation:
                             self.player.begin()
                         flow = Flow(client, typer, actions, _FlowUI(self, generation), self.player,
-                                    can_act=can_act, revoked_at=lambda authority=authority: authority.revoked_at)
+                                    can_act=can_act, driving=self.driving,
+                                    revoked_at=lambda authority=authority: authority.revoked_at)
                         speech_end = capture.speech_end if capture else item[3] if len(item) > 3 else None
                         def metric(label, start, end):
                             if start is not None and generation == self.generation:
@@ -680,6 +698,8 @@ class Agent:
         finally:
             if hasattr(self, "online"):
                 self.online.clear()
+            if getattr(self, "desktop_relay", None) is not None:
+                self.desktop_relay.close()
             if client:
                 client.close()
             if actions:
@@ -697,13 +717,21 @@ class Agent:
                 self.overlay.set_state("error", self.wake.reason)
         except Exception:
             self.overlay.set_state("error", "Wake word unavailable; Right Ctrl still works.")
+        badge = getattr(self, "drive_badge", None)
+
         def check_stop():
             if self.stop_requested.is_set():
                 self.root.quit()
             else:
                 mic_active = self.wake_status() == "ready" or (
                     self.recording.is_set() and (self.tapped or self.capture is not None))
-                self.aurora.set_visible(self.online.is_set() and mic_active)
+                relay = getattr(self, "desktop_relay", None)
+                indicator = relay.indicator() if relay is not None else None
+                show = driveui.visibility(indicator is not None, self.online.is_set(), mic_active)
+                self.aurora.set_visible(show.frame)
+                shown = badge is not None and badge.set_visible(show.badge)
+                if relay is not None:
+                    relay.badge_shown(indicator if shown else None)
                 self.root.after(100, check_stop)
         if hasattr(self, "stop_requested"):
             self.root.after(100, check_stop)
@@ -711,6 +739,11 @@ class Agent:
             self.root.mainloop()
         finally:
             self.done.set()
+            relay = getattr(self, "desktop_relay", None)
+            if relay is not None:
+                relay.close()
+            if badge is not None:
+                badge.close()
             if hasattr(self, "aurora"):
                 self.aurora.close()
             self.player.stop()

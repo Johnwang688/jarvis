@@ -778,6 +778,18 @@ def windows_extra(name: str) -> bool:
     return folded == "appdata" or folded.startswith("ntuser")
 
 
+# Inside a profile's closed `AppData`, the one folder v2's shell may name
+# without asking (owner decisions CU-D12 and, for the whole folder rather
+# than its `sdk` alone, 2026-11-19): the storage of VS Code's or Cursor's VEX
+# extension (the C++ SDK, its toolchain, logs). Each tuple is the path below
+# the profile, case-folded. Other extensions' storage and all else under
+# `AppData` stay closed. A constant, never a setting, so no agent can widen
+# it. Running the device tool there is refused by its own rule (`rules.vex_line`).
+WINDOWS_VEX_SDK: tuple[tuple[str, ...], ...] = tuple(
+    ("appdata", "roaming", editor, "user", "globalstorage", "vexrobotics.vexcode")
+    for editor in ("code", "cursor"))
+
+
 def windows_closed_name(name: str) -> bool:
     """A profile entry closed to agents: a dot entry or `windows_extra`."""
     return name.startswith(".") or windows_extra(name)
@@ -995,6 +1007,11 @@ ONSHAPE_API = os.environ.get("JARVIS_ONSHAPE_API", "https://cad.onshape.com/api/
 # every boot).
 DESKTOP_PORT = int(os.environ.get("JARVIS_DESKTOP_PORT", "8404"))
 
+
+def desktop_drive() -> bool:
+    return os.environ.get("JARVIS_DESKTOP_DRIVE") == "1"
+
+
 # Where the Windows-side venv lives. Windows Python cannot be a repo venv —
 # it is a different OS's interpreter — so the bridge gets its own, created by
 # `jarvis desktop setup`.
@@ -1142,7 +1159,10 @@ def _load_dotenv() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        key = key.strip()
+        # Windows window driving requires an explicit daemon environment opt-in.
+        if key != "JARVIS_DESKTOP_DRIVE":
+            os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 _load_dotenv()

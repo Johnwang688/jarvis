@@ -80,6 +80,7 @@
 // HTML or Markdown. Under a card everything here is inert (the veil), every
 // button is disabled too, and the handlers refuse.
 
+import { approvalRegion } from "../lib/hudSensitive";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
@@ -652,7 +653,7 @@ export function InboxView(props: InboxViewProps) {
       const why = reasonText(deferred.reason, deferred.layer);
       const hasBlock = !!(deferred.command || deferred.args);
       return (
-        <div className="ir-body" data-testid="inbox-deferred">
+        <div className="ir-body" data-testid="inbox-deferred" {...approvalRegion}>
           {deferred.headline ? <div className="ir-text" data-testid="inbox-deferred-headline">{deferred.headline}</div> : null}
           <div className="ir-answer" data-testid="inbox-deferred-buttons">
             {deferred.grantable ? (

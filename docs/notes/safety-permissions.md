@@ -3922,3 +3922,52 @@ backstop) still read bodies as commands: the owner deferred them
 (`docs/plans/2026-11-16-heredoc-bodies-plan.md` §10), as well as gap G
 (layer 2 reads no `$(…)` or shell-fed here-string). Regression:
 `tests/v2/heredoc_credentials_read_check.py`.
+
+**GB-1 extends the HD-0 reading (2026-11-18).** The shared
+`rules.heredoc_data_reading` keeps the whole-line gate above. When it passes,
+every v2 always-ask rule and the nested credential scan judge the shell
+around the bodies. Both versions' protected-state detector keeps the
+operator's redirects and interpreter source checks. ANSI-C decoding stays
+outside the synthetic here-string payloads. The VEX body backstop
+still checks bodies when any variant lacks the proof. A redirect into the
+allowlist still denies, including in mode `all`.
+
+The data proof keeps the raw reading when it sees a shell comment outside
+the bodies or the rewrite changes the context of a backslash-newline.
+A trailing backslash in a Bash comment leaves the next physical line
+separate, so moving a body past that backslash can hide a command from
+the gate's segment scanner.
+
+Single-quoted `sed -i`, `node -e` and `python3 -c` arguments already stay
+in their shell segment. Quoted substitutions and protected names in
+interpreter source have separate gate-state checks. The merge gate also
+keeps its own interpreter-source scan. Git is outside HD-0's inert program
+list, so a direct `git commit -F -` keeps the raw reading.
+Regression: `tests/v2/heredoc_layer2_check.py`.
+## The VEX extension folder is not a credential path for v2's shell (GB-3, 2026-11-19)
+
+Owner decision CU-D12, widened by the owner on 2026-11-19 from the `sdk`
+subfolder to the whole folder. `credentials-path` asked for every read of
+the VEX extension's storage under a Windows profile's closed `AppData`. v2's
+shell rule now leaves out a path at or below
+`<profile>/AppData/Roaming/{Code,Cursor}/User/globalStorage/vexrobotics.vexcode`
+(`config.WINDOWS_VEX_SDK`, a constant, never a setting): as written with no
+`..`, no glob below the profile and no name Windows would trim, in a named
+profile, and resolving to itself (a link on the way gets no exception). The
+one glob allowed is `Users/*` in the profile's place with every later piece
+fixed, and only when every profile it can match passes the same check.
+Other extensions' storage and all else under `AppData` ask as before.
+The exception is for reading (Opus review, 2026-11-19): only a segment whose
+program is on `_VEX_READERS` (ls, cat, head, tail, grep without `-R`, find
+without `-L`/`-exec`/`-delete`, `sed -n` with a print script, and the like),
+written bare, with no `..` piece and no substitution among its words, and no
+redirection but its errors to `/dev/null` or onto its output, gets it (the
+second review: `echo x > V/b` writes, `grep --deref`, `diff -r`, `ls -LR` and
+`du -L` follow a link below the folder, so those options or programs are out). Any other program that names the folder asks as before, so nothing can
+be written there unasked: a write could plant a link (`ln -s ../github.auth
+V/l; cat V/l/token`), `tar -C V`/`env -C V`/`git -C V` move a relative
+operand into it, and `find -exec` runs anything. Pieces are plain ASCII
+names (no `@(…)` extglob, no letter that only folds to ASCII), and a shared
+folder (`Public`, `All Users`) that holds the path voids the glob. Only the shell rule
+changed: v1's file tools, `run_readonly`, v2's read tools and Codex's closed
+paths still refuse `AppData` whole. `tests/v2/vex_sdk_path_check.py`.

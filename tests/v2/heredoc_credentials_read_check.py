@@ -5,12 +5,11 @@ A Claude sub-agent's read-only log check was carded `always-ask rule
 credentials-read`: its `python3 - <<'EOF'` body held the Python line `pass`,
 and layer 2 split the raw line, so `pass` was judged as the password store
 (`_CREDENTIAL_READ_STEMS`). Now `credentials-read` reads a line with its data
-bodies set aside (`permissions._heredoc_data_reading`), but only on a line
+bodies set aside (`rules.heredoc_data_reading`), but only on a line
 where every program is inert (`HEREDOC_INERT_PROGRAMS`) or is the
 `python3 -`/`node -` a body is the program of, and nothing live, grouped or
 renamed is on it. Anything else keeps the raw reading, so every line asked
-on main is still asked. The owner deferred the same change for the other layer-2 rules
-(docs/plans/2026-11-16-heredoc-bodies-plan.md §10).
+on main is still asked. GB-1 reuses that reading for the other layer-2 rules.
 """
 from __future__ import annotations
 
@@ -160,7 +159,7 @@ class HeredocCredentialsRead(unittest.TestCase):
         for command in DATA:
             with self.subTest(command=command):
                 self.assertNotEqual(rule_of(command), "credentials-read")
-                self.assertIsNotNone(permissions._heredoc_data_reading(command))
+                self.assertIsNotNone(rules.heredoc_data_reading(command))
 
     def test_reported_line_is_not_asked(self):
         self.assertIsNone(rule_of(REPORTED))
@@ -180,22 +179,22 @@ class HeredocCredentialsRead(unittest.TestCase):
                 self.assertEqual(match[0] if match else None, "credentials-read")
 
     def test_an_unsure_inlining_keeps_the_raw_reading(self):
-        def unsure(text, keep=True, bodies=None, unsure=None):
+        def unsure(text, **kwargs):
             raise rules.TooComplex
         with patch.object(rules, "_inline_heredocs", unsure):
-            self.assertIsNone(permissions._heredoc_data_reading(REPORTED))
+            self.assertIsNone(rules.heredoc_data_reading(REPORTED))
             self.assertEqual(rule_of(REPORTED), "credentials-read")
 
         real = rules._inline_heredocs
         clean = "cat > notes.txt <<'EOF'\npass\nEOF"
-        self.assertIsNotNone(permissions._heredoc_data_reading(clean))
+        self.assertIsNotNone(rules.heredoc_data_reading(clean))
 
-        def flagged(text, keep=True, bodies=None, unsure=None):
-            out = real(text, keep=keep, bodies=bodies, unsure=unsure)
+        def flagged(text, *, unsure, **kwargs):
+            out = real(text, unsure=unsure, **kwargs)
             unsure.append("flagged")
             return out
         with patch.object(rules, "_inline_heredocs", flagged):
-            self.assertIsNone(permissions._heredoc_data_reading(clean))
+            self.assertIsNone(rules.heredoc_data_reading(clean))
 
     def test_each_guard_alone(self):
         # One line per guard that only that guard refuses (the others would
@@ -206,6 +205,7 @@ class HeredocCredentialsRead(unittest.TestCase):
                 ("syntax", "cat <<'EOF' > a.txt; { true; }\nhi\nEOF"),
                 ("live in double quotes", "cat <<'EOF' \"$(true)\"\nhi\nEOF"),
                 ("PATH=", "PATH=/tmp/evil cat <<'EOF'\nhi\nEOF"),
+                ("PATH split by quotes", "P'A'TH=/tmp/evil cat <<'EOF'\nhi\nEOF"),
                 ("compound closer", "if true; then cat <<'EOF'; fi\nhi\nEOF"),
                 ("program not inert", "cat <<'EOF' > a.txt\nhi\nEOF\nsort a.txt"),
                 ("program by path", "cat <<'EOF' > a.txt\nhi\nEOF\n./a.txt"),
@@ -225,7 +225,7 @@ class HeredocCredentialsRead(unittest.TestCase):
                 ("python beside another body",
                  "cat > x.sh <<'A'\nhi\nA\npython3 - <<'P'\nprint(1)\nP")):
             with self.subTest(guard=guard):
-                self.assertIsNone(permissions._heredoc_data_reading(command))
+                self.assertIsNone(rules.heredoc_data_reading(command))
 
     def test_the_reading_refuses_what_it_cannot_place(self):
         # The reading's own contract. Today the verdict is the same either
@@ -240,22 +240,22 @@ class HeredocCredentialsRead(unittest.TestCase):
                 # a here-string written as one, fed to a shell
                 "cat > n <<'EOF'\nhi\nEOF\nbash <<< 'pass show x'"):
             with self.subTest(command=command):
-                self.assertIsNone(permissions._heredoc_data_reading(command))
+                self.assertIsNone(rules.heredoc_data_reading(command))
 
     def test_the_table_lists_no_program_that_runs_its_input(self):
         runners = rules.SHELLS | {"source", ".", "eval", "exec", "xargs", "ssh", "env", "uv", "npx",
                                   "sudo", "su", "nohup", "timeout", "parallel", "make", "awk",
                                   "sed", "find", "sort", "at", "batch", "git", "taskset", "strace",
                                   "python3", "node", "perl"}
-        self.assertFalse(permissions.HEREDOC_INERT_PROGRAMS & runners)
+        self.assertFalse(rules.HEREDOC_INERT_PROGRAMS & runners)
 
     def test_a_program_added_to_the_list_is_what_lets_a_line_through(self):
         # The list is the only gate for the line's other programs: with
         # `make` on it, the Makefile route opens (and without it, closes).
         line = "cat > Makefile <<'EOF'\nall:\n\tpass show github\nEOF\nmake"
         self.assertEqual(rule_of(line), "credentials-read")
-        wide = permissions.HEREDOC_INERT_PROGRAMS | {"make"}
-        with patch.object(permissions, "HEREDOC_INERT_PROGRAMS", wide):
+        wide = rules.HEREDOC_INERT_PROGRAMS | {"make"}
+        with patch.object(rules, "HEREDOC_INERT_PROGRAMS", wide):
             self.assertIsNone(rule_of(line))
 
 

@@ -1107,9 +1107,12 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str],
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
         judge = v1_files.credential_folder_judge()
-        return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge)
+        # The VEX folder exception: only for a segment that reads, as written
+        # (the wrapper-peeled `tokens` and the raw words must both say so).
+        vex = _vex_reader(tokens, segment) and _vex_reader(rules._tokens(rules.strip_redirections(segment)))
+        return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge, vex)
                     for token in tokens + _path_words(segment))
-                or _shell_walk_holds(tokens, bases)
+                or _shell_walk_holds(tokens, bases, vex)
                 or _xargs_unseen(segment, tokens))
     if kind == "credential_read":
         return _reads_credential(tokens, bases) or _git_env_risky(segment)
@@ -1199,7 +1202,146 @@ def _glob_reaches(pattern: str) -> bool:
     return covers(users, tail=True)
 
 
-def _word_reaches_credential(word: str, bases, judge) -> bool:
+_VEX_SDK_PROFILES = 64
+# What a piece of an excepted path may be made of: plain ASCII name
+# characters. Anything else gets no exception: `:` and `=` join a second path
+# onto the word, `\\` is a separator to Windows, a stream name follows `:`,
+# `@(…)` and `+(…)` are patterns under extglob, and a letter that only folds
+# to ASCII (`ſ`) is another folder on a case-sensitive drive.
+_VEX_SDK_PIECE = re.compile(r"[A-Za-z0-9_ .\-]+")
+
+# The exception is for reading. Only a segment whose program is one of these,
+# written bare, with none of the listed options, gets it; every other program
+# that names the folder asks as before (a writer could plant a link there, a
+# `-C`/`--chdir` option moves a relative operand into it, `find -exec` runs
+# anything). The list says what is safe, never what is dangerous.
+_VEX_READERS: dict[str, tuple[str, ...]] = {
+    "ls": ("-L", "--dereference"), "cat": (), "head": (), "tail": (),
+    "wc": ("--files0-from",), "stat": (), "strings": (), "cd": (), "pushd": (),
+    "echo": (), "test": (), "basename": (), "dirname": (), "cmp": (),
+    "md5sum": ("-c", "--check"), "sha256sum": ("-c", "--check"),
+    "grep": ("-R", "--dereference-recursive", "-f", "--file"),
+    "rg": ("-L", "--follow", "-f", "--file", "--pre", "--hostname-bin"),
+    "find": ("-L", "-H", "-follow", "-exec", "-execdir", "-ok", "-okdir", "-delete",
+             "-fprint", "-fprint0", "-fprintf", "-fls", "-files0-from"),
+}
+_VEX_SED_PRINT = re.compile(r"[0-9$,]*p")
+_VEX_ASSIGNED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$\(")
+
+
+def _vex_reader(tokens: list[str], segment: str | None = None) -> bool:
+    """Whether the segment only reads: its program is on `_VEX_READERS`
+    (written bare; a `NAME=$(` in front is the usual `SDK=$(ls -d …)`) and
+    carries none of that program's excluded options, or it is `sed -n` with
+    one print script. No word may have a `..` piece or hold an expansion,
+    and the segment (when given) redirects nothing but its errors, to
+    `/dev/null` or onto its output: a redirection writes."""
+    if not tokens:
+        return False
+    if segment is not None:
+        try:
+            redirects = rules.redirections(segment)
+        except Exception:      # noqa: BLE001 — unreadable: no exception
+            return False
+        for redirect in redirects:
+            if segment[redirect.start:redirect.end].replace(" ", "") not in ("2>&1", "2>/dev/null"):
+                return False
+    words = list(tokens)
+    words[0] = _VEX_ASSIGNED.sub("", words[0], count=1)
+    program = words[0]
+    if any(".." in word.split("/") or "$" in word or "`" in word for word in words):
+        return False        # an expansion could be an option (`o=-R; grep $o`) or a sed command
+    if program == "sed":
+        return (len(words) >= 4 and words[1] == "-n"
+                and bool(_VEX_SED_PRINT.fullmatch(words[2].strip("'\"")))
+                and not any(word.startswith("-") for word in words[3:]))
+    excluded = _VEX_READERS.get(program)
+    if excluded is None:
+        return False
+    for word in words[1:]:
+        if not word.startswith("-"):
+            continue
+        name = word.split("=", 1)[0]
+        if name in excluded:
+            return False
+        if word.startswith("--") and len(name) > 2 and any(
+                option.startswith(name) for option in excluded if option.startswith("--")):
+            return False        # GNU reads an unambiguous prefix (`--deref`) as the option
+        if not word.startswith("--") and any(
+                len(option) == 2 and option[1] in word[1:] for option in excluded):
+            return False        # a short option inside a cluster (`-rnR`)
+    return True
+
+
+def _vex_sdk_parts(path: str) -> list[str] | None:
+    """The pieces of `path` below the Windows users folder when it is at or
+    below a profile's VEX extension folder as written (`config.WINDOWS_VEX_SDK`),
+    else None. No `..` or `.` piece, no empty piece, no piece Windows would
+    read as another name (a trailing dot or space), and only plain ASCII
+    name characters (`_VEX_SDK_PIECE`; `*` alone may stand for the profile)."""
+    root = os.path.abspath(config.windows_users_root()).rstrip("/")
+    if not path.startswith("/") or len(path) > 4096 or "\0" in path:
+        return None
+    if not path.casefold().startswith(root.casefold() + "/"):
+        return None
+    parts = path[len(root) + 1:].rstrip("/").split("/")
+    if any(part in ("", ".", "..") or part != part.rstrip(". ")
+           or not (_VEX_SDK_PIECE.fullmatch(part) or (index == 0 and part == "*"))
+           for index, part in enumerate(parts)):
+        return None
+    below = tuple(part.lower() for part in parts[1:])
+    if not any(below[:len(sdk)] == sdk for sdk in config.WINDOWS_VEX_SDK):
+        return None
+    return parts
+
+
+def _vex_sdk_path(path: str) -> bool:
+    """A fixed path at or below a profile's VEX extension folder, which holds no
+    credential (`config.WINDOWS_VEX_SDK`): the profile is one named folder
+    (not a dot entry or a shared one), no piece is a glob, and the path
+    resolves to itself, so no link on the way leads anywhere else. A path
+    that cannot be resolved gets no exception."""
+    parts = _vex_sdk_parts(path)
+    if parts is None or any(_GLOB_MAGIC & set(part) for part in parts):
+        return False
+    profile = parts[0]
+    if (config.windows_closed_name(profile) or profile.casefold() in config.WINDOWS_NOT_PROFILES):
+        return False
+    try:
+        return os.path.realpath(path).casefold() == os.path.abspath(path).casefold()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _vex_sdk_glob(pattern: str) -> bool:
+    """`<users>/*/<the VEX folder>/…` with every later piece fixed: the one
+    glob that finds it whoever the profile is. True only when every
+    profile it could match passes `_vex_sdk_path`; a users folder that cannot
+    be listed, or holds too many entries, gets no exception."""
+    parts = _vex_sdk_parts(pattern)
+    if parts is None or parts[0] != "*" or any(_GLOB_MAGIC & set(part) for part in parts[1:]):
+        return False
+    root = pattern[:len(pattern) - len("/".join(parts)) - 1]
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    if len(names) > _VEX_SDK_PROFILES:
+        return False
+    tail = "/".join(parts[1:])
+    for name in names:
+        if name.startswith("."):
+            continue      # the shell's `*` skips dot entries
+        # A shared folder (`Public`, `All Users`) is matched by `*` too, and
+        # is no profile: if the path exists there, the glob gets no exception.
+        candidate = f"{root}/{name}/{tail}"
+        folder = "/".join([root, name, *parts[1:1 + len(config.WINDOWS_VEX_SDK[0])]])
+        if os.path.lexists(folder) and not _vex_sdk_path(candidate):
+            return False
+    return True
+
+
+def _word_reaches_credential(word: str, bases, judge, vex: bool = False) -> bool:
     """A shell word that names a path in a credential folder or store, a
     Windows profile's closed entry, or through `/proc/<pid>/{cwd,root,…}`:
     each brace variant placed where the shell finds it (`_place_word`), a
@@ -1219,9 +1361,9 @@ def _word_reaches_credential(word: str, bases, judge) -> bool:
             if _proc_reach(placed) == 2:
                 return True
             if _GLOB_MAGIC & set(placed):
-                if _glob_reaches(placed):
+                if _glob_reaches(placed) and not (vex and _vex_sdk_glob(placed)):
                     return True
-            elif judge(placed):
+            elif judge(placed) and not (vex and _vex_sdk_path(placed)):
                 return True
     return False
 
@@ -1267,7 +1409,7 @@ def _walk_recursive(tokens: list[str]) -> bool:
     return program in _WALKERS
 
 
-def _shell_walk_holds(tokens: list[str], bases) -> bool:
+def _shell_walk_holds(tokens: list[str], bases, vex: bool = False) -> bool:
     """A recursive search or walk whose root holds a credential folder or
     store (`files.credential_folder_holds`, the read tools' reading), or lies
     in one: its operands as the shell finds them (`~`, `$HOME`, a relative
@@ -1289,6 +1431,8 @@ def _shell_walk_holds(tokens: list[str], bases) -> bool:
             text = _place_word(word, base)
             if text is None:
                 return True
+            if vex and (_vex_sdk_path(text) or _vex_sdk_glob(text)):
+                continue        # a walk rooted in the VEX folder reaches no credential
             parts = text.split("/")
             wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
             fixed = ("/".join(parts[:wild]) or "/") if wild is not None else text
@@ -1484,13 +1628,10 @@ _CREDENTIAL_KINDS = frozenset({"credential_command", "credential_path", "credent
 
 def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str]]],
                   targets: list[str], *, inner: list | None = None,
-                  bases: tuple = (None,),
-                  read_segments: list | None = None) -> tuple[bool, str, str]:
+                  bases: tuple = (None,)) -> tuple[bool, str, str]:
     """(matched, rule id, reason) for one rule against one tool call. A
     credential rule also reads `inner`: the commands the line hands another
-    shell (`sh -c STR`, `eval`, `ssh host STR` …). `credential_read` reads
-    `read_segments` in place of `segments` when given: the line with its data
-    here-document bodies set aside (`_heredoc_data_reading`, HD-0)."""
+    shell (`sh -c STR`, `eval`, `ssh host STR` …)."""
     if isinstance(rule, str):
         phrase = tuple(part for part in rule.split() if part)
         if not phrase:
@@ -1520,8 +1661,7 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     require_any = list(rule.get("any") or [])
     forbid = list(rule.get("none") or [])
 
-    own = read_segments if kind == "credential_read" and read_segments is not None else segments
-    judged = own + (inner or []) if kind in _CREDENTIAL_KINDS else own
+    judged = segments + (inner or []) if kind in _CREDENTIAL_KINDS else segments
     for segment, tokens, stems in judged:
         if kind is not None:
             if _kind_matches(str(kind), segment, tokens, stems, bases):
@@ -1543,129 +1683,20 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     return False, "", ""
 
 
-# The data reading (HD-0, docs/plans/2026-11-16-heredoc-bodies-plan.md) is
-# taken only on a line where **every** program is on these lists, so nothing
-# on it can run a body: a list of what is safe, never of what is dangerous
-# (the review of #396 found executors no deny-list held: `make`, `awk
-# system()`, `at -f`, `taskset dash`, `$l` read from a file). A missing entry
-# costs a prompt, never a hole. None of these runs its input or arguments.
-HEREDOC_INERT_PROGRAMS = frozenset({"cat", "tee", "wc", "grep", "head", "tail", "ls", "echo",
-                                    "cd", "pwd", "mkdir", "true"})
-# Programs a body may be fed to only when the body *is* the program: inline
-# source is not read by layer 2 in any spelling (`python3 -c` included), so a
-# Python body is no less read than before. Without a body on their segment,
-# or with `-c`/`-e`/a script, they are not on the list.
-_HEREDOC_PYTHON_ARGS = frozenset({"-", "-u", "-I", "-B", "-E", "-s", "-S", "-q"})
-_HEREDOC_NODE_ARGS = frozenset({"-"})
-# Shell syntax that can route a body's output into a program not judged
-# here, or change which program a name runs: a group, subshell, function
-# body or process substitution (`{ cat <<E; } | sh`, `cat() { sh; }`,
-# `> >(sh)`).
-_HEREDOC_LINE_SYNTAX = ("(", ")", "{", "}", "<(", ">(")
-_HEREDOC_NAME_ENV = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|BASH_FUNC_\w*)\+?=")
-# Redirections a segment may carry: plain reads and writes of a path
-# (`cat > notes.txt <<'EOF'`), never an fd duplication.
-_HEREDOC_REDIRECTS = frozenset({"<<<", "<", ">", ">>", ">|", "&>", "&>>"})
-_HEREDOC_SPECIAL_PATHS = ("/dev/fd", "/proc", "/dev/tcp", "/dev/udp")
-# `grep` may be ugrep (Claude Code's shell wraps it), whose filter, pager,
-# viewer, opener and config options run commands; refused in any spelling,
-# with `-Q`/`--query` (its TUI can open an editor) and rg's `--pre`.
-_HEREDOC_GREP_RUNS = re.compile(
-    r"---|-@|--[a-z-]*(?:filter|pager|view|open|config|pre|query)|-[A-Za-z]*Q")
-
-
-def _heredoc_segment_ok(segment: str, here: bool) -> bool:
-    """The segment runs only an inert program (`HEREDOC_INERT_PROGRAMS`),
-    or, when it is fed a body (`here`), a `python3 -`/`node -` whose program
-    the body is; named as written (no wrapper, no path, no expansion), with
-    only plain path redirections and no `/dev/fd`/`/proc` argument."""
-    words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
-    if not words:
-        return False                # a compound command's closing word (`fi | sh`)
-    program, args = words[0], [w for w in words[1:] if not w.startswith("<<<")]
-    if program in HEREDOC_INERT_PROGRAMS:
-        if program == "grep" and any(_HEREDOC_GREP_RUNS.match(a) for a in args):
-            return False
-    elif here and rules._PYTHON.fullmatch(program):
-        if not set(args) <= _HEREDOC_PYTHON_ARGS:
-            return False
-    elif here and program == "node":
-        if not set(args) <= _HEREDOC_NODE_ARGS:
-            return False
-    else:
-        return False
-    for redirect in rules.redirections(segment):
-        if redirect.op not in _HEREDOC_REDIRECTS:
-            return False
-        if redirect.op != "<<<":
-            word = redirect.word.strip("'\"")
-            if not word or word[0] in "(&" or word.startswith(_HEREDOC_SPECIAL_PATHS):
-                return False
-    return all(not str(a).startswith(_HEREDOC_SPECIAL_PATHS) for a in args)
-
-
-def _heredoc_data_reading(text: str) -> str | None:
-    """`text` with its here-document bodies moved into their operators as
-    here-strings (`rules._inline_heredocs`), when nothing on the line can
-    run a body: every segment passes `_heredoc_segment_ok` (only inert
-    programs, and a body fed only to one of them or to `python3 -`/`node -`),
-    with no group, subshell, function or process substitution, nothing live
-    (`$(…)`, backticks) outside single quotes, and no `PATH=`-style
-    assignment. None otherwise (the inlining raised or flagged itself
-    unsure, a segment or here-string could not be placed), and the caller
-    keeps the raw line, every body line a command, as before HD-0. Only
-    `credentials-read` reads it: a sub-agent's line had a Python body whose
-    `pass` was judged as the password store."""
-    if "<<" not in text:
-        return None
-    flagged: list = []
-    try:
-        inlined = rules._inline_heredocs(text, unsure=flagged)
-    except Exception:       # noqa: BLE001 — too complex: the raw reading
-        return None
-    if flagged or inlined == text:
-        return None
-    joined = rules.join_continuations(inlined)
-    if rules.first_unquoted(joined, _HEREDOC_LINE_SYNTAX):
-        return None
-    # Anything live outside single quotes, a body's included (an unquoted
-    # delimiter leaves its `$(…)` and backticks running).
-    if rules.first_unquoted(joined, ("$(", "`"), double_is_quote=False):
-        return None
-    found = 0
-    cursor = 0
-    interpreted = False
-    try:
-        for segment in rules.segments(inlined):
-            at = joined.find(segment, cursor)
-            if at < 0:
-                return None
-            cursor = at + len(segment)
-            if any(_HEREDOC_NAME_ENV.match(word) for word in rules._tokens(segment)):
-                return None
-            heres = [r for r in rules.redirections(segment) if r.op == "<<<"]
-            found += len(heres)
-            if not _heredoc_segment_ok(segment, bool(heres)):
-                return None
-            words = rules.command_start(rules._tokens(rules.strip_redirections(segment)))
-            interpreted = interpreted or bool(heres and words[0] not in HEREDOC_INERT_PROGRAMS)
-    except Exception:       # noqa: BLE001 — unreadable: the raw reading
-        return None
-    # Every here-string the inlined text holds was placed above (one inside a
-    # substitution or a quote was not): otherwise its program is unknown.
-    if found != joined.count("<<<"):
-        return None
-    # A Python or node body beside another body could run what that one wrote
-    # (`cat > x.sh <<A … ; python3 - <<P os.system('sh x.sh')`): only alone
-    # (review round 3 of #396).
-    if interpreted and found > 1:
-        return None
-    return inlined
-
-
 def _segments_of(text: str) -> list[tuple[str, list[str], list[str]]]:
     """Each segment of `text` (tokens, stems), and what its wrappers and
-    runners start. Raises `rules.TooComplex`."""
+    runners start. Try the data reading first and fall back to raw text
+    if it cannot be walked. Raises `rules.TooComplex`."""
+    reading = rules.heredoc_data_reading(text, keep=False)
+    if reading is not None:
+        try:
+            return _walk_segments(reading)
+        except rules.TooComplex:
+            pass
+    return _walk_segments(text)
+
+
+def _walk_segments(text: str) -> list[tuple[str, list[str], list[str]]]:
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(text):
         tokens = _tokens_of(segment)
@@ -1696,7 +1727,7 @@ def _inner_segments(lines: list[str]) -> list | None:
     while queue:
         text, depth = queue.pop()
         try:
-            found = v1_secrets._inner_commands(text)
+            found = v1_secrets._inner_commands(rules.heredoc_data_reading(text, keep=False) or text)
         except Exception:       # noqa: BLE001 — unreadable is asked
             return None
         for inner in found:
@@ -1742,46 +1773,15 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     """(rule id, reason) if this call is on the always-ask list, else None.
     `cwd` and `shell_cwd` place a walk's relative root (`credentials-path`)."""
     bases = tuple(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or (None,)
-    segments: list[tuple[str, list[str], list[str]]] = []
-    # Each reading's segments: a call with two command fields is matched
-    # field by field as well as joined (#211 bench, MED).
+    # A call with two command fields is matched field by field as well
+    # as joined (#211 bench, MED). A caller may hand in other readings of
+    # the command (GB-2c: the line with proven program variables written out).
     lines = [text for text in (_judged_of(tool, args) if command_readings is None else command_readings)
              if text.strip()]
-    for segment in [part for text in lines for part in rules.segments(text)]:
-        tokens = _tokens_of(segment)
-        stems = [s for s, _ in rules.command_targets(segment)]
-        if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
-            # The program past a reserved word (`then vercel --prod`), which
-            # the allowlist's stems do not peel.
-            stems.append(tokens[0].rsplit("/", 1)[-1].lower())
-        segments.append((segment, tokens, stems))
-        # What a wrapper or runner in front starts is judged too, from rules'
-        # one table: `npx vercel --prod` is a production deploy, and `uv run
-        # git push --force origin main` a force push (2026-10-12).
-        # Past the line's work budget or a nesting cap, what it starts cannot
-        # be told: asked, whatever the rules say (review of PR #75).
-        try:
-            started = rules.started_commands(segment)
-        except rules.TooComplex:
-            return "too-complex", rules.RUNNERS_TOO_COMPLEX
-        for inner in started:
-            segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
-    # `credentials-read` reads each line with its data here-document bodies
-    # set aside (HD-0): a Python body's `pass` is not the password store. A
-    # line without such a reading, or one whose reading cannot be walked,
-    # keeps its raw segments.
-    read_segments: list | None = None
-    readings = [_heredoc_data_reading(text) for text in lines]
-    if any(readings):
-        read_segments = []
-        for text, reading in zip(lines, readings):
-            try:
-                read_segments.extend(_segments_of(reading or text))
-            except rules.TooComplex:
-                try:
-                    read_segments.extend(_segments_of(text))
-                except rules.TooComplex:
-                    return "too-complex", rules.RUNNERS_TOO_COMPLEX
+    try:
+        segments = [part for text in lines for part in _segments_of(text)]
+    except rules.TooComplex:
+        return "too-complex", rules.RUNNERS_TOO_COMPLEX
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     inner = _inner_segments(lines) if lines else []
     # Where a `cd`/`pushd` on the line (or in a string it hands a shell)
@@ -1789,8 +1789,7 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     bases = bases + tuple(b for b in _cd_bases(segments + (inner or []), bases) if b not in bases)
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets,
-                                                 inner=inner, bases=bases,
-                                                 read_segments=read_segments)
+                                                 inner=inner, bases=bases)
         if matched:
             return rule_id, reason
     if inner is None:

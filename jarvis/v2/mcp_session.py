@@ -14,8 +14,8 @@ dispatch — what the daemon answers is all it can say.
 - It never writes the token, or any tool result, to stderr — Claude Code and
   Codex keep an MCP server's stderr in their own logs. stderr is pointed at
   nothing.
-- `initialize` declares tools without `listChanged`: the list is read once,
-  when the CLI connects (D-4).
+- `initialize` declares `listChanged` only when the daemon enables desktop
+  driving. The relay watches its session's desktop tool visibility then.
 - `tools/list` is the daemon's `GET /mcp/tools`, or an empty list on any
   failure. `tools/call` is `POST /mcp/call`, or an `Error:` result on any
   failure: the session ended, or Jarvis restarted.
@@ -36,6 +36,7 @@ PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-03-26", "2024-11-05"})
 TOKEN_VARIABLE = "JARVIS_MCP_TOKEN"
 PORT_VARIABLE = "JARVIS_DAEMON_PORT"
+WATCH_WINDOWS_VARIABLE = "JARVIS_MCP_WATCH_WINDOWS"
 LIST_TIMEOUT_S = 10.0
 # Longer than the approval broker's remote timeout (ten minutes): a dangerous
 # tool waits on the owner, and the relay must not give up first.
@@ -88,9 +89,10 @@ class CallLifetime:
 
 
 class Relay:
-    def __init__(self, token: str, port: int | None):
+    def __init__(self, token: str, port: int | None, *, watch_windows=False):
         self._token = token
         self._port = port
+        self.watch_windows = watch_windows
 
     def _request(self, method: str, path: str, body: dict | None, timeout: float, *, lifetime=None):
         """`(status, payload)` from the daemon, or None on any failure."""
@@ -146,6 +148,22 @@ class Relay:
                 tools.append(tool)
         return {"tools": tools}
 
+    def watch_window_tools(self, listed, lifetime, notify):
+        while not lifetime.cancelled.is_set():
+            got = self._request("GET", f"/mcp/window-tools?listed={int(listed)}",
+                                None, 16, lifetime=lifetime)
+            if got is None or got[0] != 200 or not isinstance(got[1], dict):
+                # A retired token never returns a catalog again. Retry a
+                # transient socket failure without spinning.
+                if got is not None and got[0] in (400, 403, 404):
+                    return
+                lifetime.cancelled.wait(1)
+                continue
+            value = got[1].get("listed")
+            if type(value) is bool and value != listed and not lifetime.cancelled.is_set():
+                listed = value
+                notify({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
     def call_tool(self, name: str, arguments: dict, *, codex_context=None, lifetime=None) -> dict:
         body = {"name": name, "arguments": arguments}
         if codex_context is not None:
@@ -197,9 +215,8 @@ def _route(relay: Relay, method: str, params: dict, *, lifetime=None):
         version = params.get("protocolVersion")
         if not isinstance(version, str):
             raise RPCError(-32602, "protocolVersion must be a string")
-        # No `listChanged`: the list is read once, when the CLI connects.
         return {"protocolVersion": version if version in PROTOCOL_VERSIONS else PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {"listChanged": True} if getattr(relay, "watch_windows", False) else {}},
                 "serverInfo": {"name": "jarvis", "version": "2.0"}}
     if method == "ping":
         return {}
@@ -258,6 +275,7 @@ def serve(relay: Relay, source, sink) -> None:
     write_lock = threading.Lock()
     active_lock = threading.Lock()
     active = {}
+    window_watch = None
 
     def write(response) -> None:
         if response is None:
@@ -329,8 +347,21 @@ def serve(relay: Relay, source, sink) -> None:
                                 active.pop(request_id)
                         raise
                 continue
-            write(handle(relay, message))
+            response = handle(relay, message)
+            write(response)
+            if (window_watch is None and getattr(relay, "watch_windows", False)
+                    and isinstance(message, dict) and message.get("method") == "tools/list"
+                    and response is not None and "result" in response):
+                listed = any(tool["name"] == "hud_window_list" for tool in response["result"]["tools"])
+                window_watch = CallLifetime()
+                window_watch.worker = threading.Thread(
+                    target=relay.watch_window_tools, args=(listed, window_watch, write),
+                    name="jarvis-mcp-window-catalog", daemon=True)
+                window_watch.worker.start()
     finally:
+        if window_watch is not None:
+            window_watch.cancel()
+            window_watch.worker.join(0.5)
         # Mark first, then shut down every exact connection; no new worker
         # may reconnect after EOF, including one still inside connect().
         with active_lock:
@@ -359,7 +390,7 @@ def main() -> int:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
     except OSError:
         pass
-    relay = Relay(token, port)
+    relay = Relay(token, port, watch_windows=os.environ.pop(WATCH_WINDOWS_VARIABLE, "") == "1")
     del token
     # Protocol writes go to the original stdout; anything else that prints
     # would corrupt the stream, so fd 1 is pointed at the (silenced) stderr.

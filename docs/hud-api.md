@@ -296,6 +296,23 @@ every one of these routes asks (`kind`):
   files, 4 MB each, text inlined and scrubbed, protected names refused as
   a bracketed note).
 
+### Desktop driving
+
+The Browser's owner, HUD listener, Origin and loopback Host checks apply to
+these routes. Each returns `{"enabled": bool, "thread_id": string | null}`.
+
+- `GET /desktop-driving` reads the daemon's current state.
+- `PATCH /threads/{id}/desktop-driving` takes `{"on": bool}`. Turning it
+  on requires an active Codex or Claude chat and `JARVIS_DESKTOP_DRIVE=1`
+  in the daemon's launch environment. A different chat holding the grant
+  yields 409. A repeated `on: true` keeps the existing grant.
+- `POST /threads/{id}/desktop-driving/stop` takes `{}`. It revokes the
+  named chat's grant and interrupts its current turn if one is running.
+
+The grant lives only in memory. Changes publish `desktop_driving` to prompt
+HUD windows to read the state again. The New desktop driver chat action
+uses `POST /threads` with the existing Codex model, effort and speed fields.
+
 ## Tasks (additions)
 
 - `GET /tasks/{id}/threads` → `[{"thread_id", "role", "provider", "model",
@@ -3596,6 +3613,19 @@ named (400 otherwise). An id nothing waits for (unknown, or the 3 s wait
 already over) is 404; a second window's answer is 409 (the first wins). No
 query string. The body carries counts and ids only, never a URL, name or
 word, and decides nothing: it is only what the chat is told.
+
+## HUD protection regions
+
+    POST /hud/sensitive   {client_id, cards, editors} -> {"ok": true}
+
+Owner-only through `projects.owner_only` on the HUD listener with a loopback
+`Host` and the page's own `Origin`. The request has exactly those three keys
+and no query parameters. The client id is 32 lowercase hex characters, made
+anew per page load. Each count is an integer from 0 to 64. The daemon holds
+reports in memory for up to 60 seconds and uses a count only when exactly one
+client has reported within five seconds. A pending broker approval also
+requires a nonzero card count. The Windows guard checks the count against a
+live accessibility scan, including when the report says zero.
 
 **Bus record** `browser_open` (`hud_open_browser`, decisions D2–D5): `{thread_id,
 data: {urls: [url, …], request_id?}}`, 1–11 URLs as the daemon judged them
