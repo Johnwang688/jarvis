@@ -1,8 +1,9 @@
 """Orchestrator-owned acceptance tests for C1 (implementers: do not edit; if one is wrong, stop and say why).
 
 Contract: jarvis/v3/tools/calendar.py
-  CalendarTools(*, request=None, approve=None, propose=None, now=time.time)     text results, never raises, errors start with "Error:"
-    request(method, url, *, params=None, json=None) -> (status, body dict)      default: httpx with google_auth.access_token(), one retry after a 401 (invalidate), bounded time and size
+  CalendarTools(*, request=None, approve=None, propose=None, now=time.time, transport=None)     text results, never raises, errors start with "Error:"
+    request(method, url, *, params=None, json=None) -> (status, body dict)      default: an httpx.Client over `transport` (None = httpx's own), streamed with a byte cap,
+        google_auth.access_token(), one retry after a 401 (invalidate), a total time limit, no redirects
     approve(action: str, details: dict) -> bool        every write asks (H10). None = deny. Details hold exactly what will be sent.
     propose(details: dict) -> str                      None = "Error: ..." (proposals come with I3)
   calendar_list(start, end, calendar="primary")  calendar_free(start, end, min_minutes=30)
@@ -22,9 +23,10 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from jarvis import google_auth, tools, untrusted
 from jarvis.v3 import imports
-from jarvis.v3.tools import calendar as cal
 from jarvis.v3.tools.calendar import CalendarTools
 
 REPO = Path(__file__).resolve().parents[2]
@@ -316,31 +318,43 @@ class Auth(unittest.TestCase):
     def test_default_request_refreshes_once_and_never_leaks(self):
         seen = []
 
-        class R:
-            def __init__(self, code):
-                self.status_code, self.headers, self.content = code, {}, b'{"items": []}'
-
-            def json(self):
-                return {"items": []}
-
-        def fake(method, url, **kw):
-            seen.append(kw["headers"]["Authorization"])
-            return R(401 if len(seen) == 1 else 200)
-        with patch.object(google_auth, "access_token", side_effect=["tok-one", "tok-two"]), patch.object(google_auth, "invalidate") as inv, patch.object(cal.httpx, "request", side_effect=fake):
-            out = CalendarTools(now=lambda: NOW).calendar_list("2026-11-25", "2026-11-26")
+        def fake(request):
+            seen.append(request.headers["authorization"])
+            return httpx.Response(401 if len(seen) == 1 else 200, json={"items": []})
+        with patch.object(google_auth, "access_token", side_effect=["tok-one", "tok-two"]), patch.object(google_auth, "invalidate") as inv:
+            out = CalendarTools(now=lambda: NOW, transport=httpx.MockTransport(fake)).calendar_list("2026-11-25", "2026-11-26")
         self.assertFalse(out.startswith("Error:"), out)
         self.assertEqual((seen, inv.call_count), (["Bearer tok-one", "Bearer tok-two"], 1))
+
+        def redirect(request):
+            seen.append(str(request.url))
+            return httpx.Response(302, headers={"location": "https://evil.example/"})
+        seen.clear()
+        with patch.object(google_auth, "access_token", return_value="tok"):
+            self.assertTrue(CalendarTools(now=lambda: NOW, transport=httpx.MockTransport(redirect)).calendar_list("2026-11-25", "2026-11-26").startswith("Error:"))
+        self.assertEqual(len(seen), 1)
+
+        def flood(request):
+            def chunks():
+                for _ in range(4096):
+                    seen.append("chunk")
+                    yield b"x" * 65536
+            return httpx.Response(200, content=chunks())
+        seen.clear()
+        with patch.object(google_auth, "access_token", return_value="tok"):
+            self.assertTrue(CalendarTools(now=lambda: NOW, transport=httpx.MockTransport(flood)).calendar_list("2026-11-25", "2026-11-26").startswith("Error:"))
+        self.assertLess(len(seen), 400)
         with patch.object(google_auth, "access_token", side_effect=google_auth.AuthError("not connected; run `jarvis auth google`")):
             self.assertIn("auth google", CalendarTools(now=lambda: NOW).calendar_list("2026-11-25", "2026-11-26"))
 
     def test_a_write_is_never_retried_after_an_unknown_result(self):
         calls = []
 
-        def fake(method, url, **kw):
-            calls.append(method)
-            raise cal.httpx.ReadTimeout("slow")
-        with patch.object(google_auth, "access_token", return_value="t"), patch.object(cal.httpx, "request", side_effect=fake):
-            out = CalendarTools(approve=lambda *a: True, now=lambda: NOW).calendar_create("S", "2026-11-25T18:00", "2026-11-25T19:00")
+        def fake(request):
+            calls.append(request.method)
+            raise httpx.ReadTimeout("slow")
+        with patch.object(google_auth, "access_token", return_value="t"):
+            out = CalendarTools(approve=lambda *a: True, now=lambda: NOW, transport=httpx.MockTransport(fake)).calendar_create("S", "2026-11-25T18:00", "2026-11-25T19:00")
         self.assertTrue(out.startswith("Error:"))
         self.assertEqual(calls, ["POST"])
         self.assertIn("may", out.lower())           # it may have been created: say so
