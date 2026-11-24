@@ -37,6 +37,7 @@ DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 # daemon with no name configured holds no fourth port at all.
 REMOTE_PORT = int(os.environ.get("JARVIS_REMOTE_PORT", "8408"))
 VOICE_LINK_PORT = int(os.environ.get("JARVIS_VOICE_LINK_PORT", "8409"))
+V3_API_PORT = int(os.environ.get("JARVIS_V3_PORT", "8410"))
 # A tailnet machine name: lowercase DNS labels, at least `<machine>.<tailnet>`
 # in front of `.ts.net`. Nothing else is a name the phone can reach through
 # `tailscale serve`, and a loopback spelling (`localhost`, `127.0.0.1`) must
@@ -115,11 +116,11 @@ def is_loopback(host: str) -> bool:
 # 8404 the desktop bridge's listener, 8405 the daemon (v2's API, which serves
 # the HUD page too), 8406 the Spotify consent callback, 8408 the phone's
 # remote listener (`REMOTE_PORT`, phone design PH-1), 8409 the paired voice
-# link. 8403, the workshop, is
+# link, and 8410 the v3 API. 8403, the workshop, is
 # deliberately absent: v1's designer browses its own work there, and nothing
 # on it can approve or change anything. `hud/src/lib/devopen.ts`'s
 # `CONTROL_PORTS` mirrors this set (tests/v2/remote_listener_check.py).
-DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406, 8408, 8409})
+DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406, 8408, 8409, 8410})
 
 
 def control_ports() -> frozenset[int]:
@@ -133,7 +134,10 @@ def control_ports() -> frozenset[int]:
     shell), and this process cannot see that. Read at call time, so a test
     that repoints a port is covered.
     """
-    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT, REMOTE_PORT, VOICE_LINK_PORT}
+    return DEFAULT_CONTROL_PORTS | {
+        FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT, REMOTE_PORT,
+        VOICE_LINK_PORT, V3_API_PORT,
+    }
 
 
 def own_host_header(value, port) -> bool:
@@ -502,6 +506,7 @@ CHAT_WORKTREES_DIR = Path(
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
+V3_DIR = Path(os.environ.get("JARVIS_V3_DIR", "~/.local/share/jarvis/v3")).expanduser()
 
 
 def chat_git_mirrors_dir() -> Path:

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+
+if __name__ == "__main__" and sys.argv[1:2] in (["agentd"], ["agent"]):
+    from .v3.cli import main as v3_main
+
+    sys.exit(v3_main(sys.argv[1:]))
+
 import argparse
 import json
-import sys
 import threading
 
 from rich.console import Console
@@ -1025,6 +1031,10 @@ def build_parser() -> argparse.ArgumentParser:
     daemon2.add_argument("--force", action="store_true",
                          help="restart: restart even while a turn is running")
     daemon2.set_defaults(func=cmd_daemon2)
+
+    from .v3 import cli as v3_cli
+
+    v3_cli.add_commands(sub)
 
     discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
     discord_sub = discord.add_subparsers(dest="action", required=True)

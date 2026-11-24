@@ -296,35 +296,27 @@ v2's frontend components by importing them.
 - **Size:** S.
 
 ### A3: `jarvis agent` and the v3 daemon skeleton ⚑ boundary
-- **Scope:** `jarvis/v3/daemon.py`, `jarvis/v3/api.py`, the `agent`
-  subcommand in `jarvis/__main__.py` (`jarvis agent [run|install|status]`;
-  the name is free, since `agent` today is only a `jarvis bench` family), a
-  `jarvis-agent.service` unit template, `config` constants, the owner-op
-  detector, `tests/v3/daemon_check.py`.
+- **Scope:** Split into A3a (daemon, status CLI and control port) and A3b
+  (shared gate refusals). A4 adds the switch, install and unit.
 - **Spec:**
-  - A v3 daemon with its own loopback API port (a new `V3_API_PORT`
-    constant; choose a free port and record it). It reuses v2's identity,
-    Host and Origin checks through A2.
-  - Data under `V3_DIR`.
-  - `Daemon.start()` never calls a model.
-  - The new port is added to `config.control_ports()`, so the browser and
-    fetch refuse it (parity test).
-  - `jarvis agent install` (owner-run) writes the user unit and builds hud3
-    (A5). `jarvis agent run` runs in the foreground. `status` reports health.
-  - **Owner-op parity:** the switch, install and restart forms of
+  - **A3a:** `jarvis agentd` runs the daemon in the foreground.
+    `jarvis agent status` reads its loopback API (`V3_API_PORT`, default
+    8410). The API enforces exact Host and Origin checks and refuses framing
+    on every response. Data lives under `V3_DIR`. `Daemon.start()` never
+    calls a model. Browser and fetch refuse the API via `config.control_ports()`.
+  - **A3b:** the switch, install and restart forms of
     `jarvis agent`, plus `systemctl --user … jarvis-agent`, are refused for
     agents, exactly like `jarvis hud`, `jarvis restart` and daemon2's unit
-    today. Killing the v3 daemon by pattern or by a fed PID is DENY for
-    agents, matching the 2026-10-11 daemon2 kill rule and its sources. v1/v2
-    parity holds.
+    today. Kill patterns at the word `agentd` and kills by a fed PID are
+    DENY for agents, matching the 2026-10-11 daemon2 rule and its sources.
+    v1/v2 parity holds.
 - **Acceptance:**
   - [ ] Boots in a temp HOME on an ephemeral port with no model call (a
     fake provider asserts zero calls).
   - [ ] `control_ports()` parity test includes the new port.
   - [ ] Agent-refusal matrix for every new command form, the unit name and
     pattern kills, with mutation evidence.
-  - [ ] Unit template test.
-- **Depends:** A2. **Size:** M.
+- **Depends:** A3a on A2, A3b on A3a. **Size:** M.
 
 ### A4: One-at-a-time switch
 - **Scope:** `jarvis/v3/switch.py`, the `jarvis agent` and `jarvis hud`
@@ -338,6 +330,8 @@ v2's frontend components by importing them.
     sleep.
   - Both refuse while the other daemon has running turns or tasks, listing
     them, unless `--force`.
+  - The unit's ExecStart is `<repo>/.venv/bin/python -m jarvis agentd`, never the
+    `jarvis` console script: the `-m` path skips the model stack (A3a review r2).
   - The switch also moves the systemd *enable* to the chosen unit, so a
     reboot keeps the last choice. Print what changed.
   - Single-owner resources follow whichever daemon runs: phone 8408, voice
