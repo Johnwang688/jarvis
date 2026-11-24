@@ -45,6 +45,13 @@ def commands():
         for verb in ("stop", "restart", "kill", "mask", "disable --now", "enable --now", "start", "status",
                      "is-active", "show -p MainPID", "cat", "reset-failed"):
             out.append(f"systemctl --user {verb} {unit}")
+    slice_ = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice"
+    for unit in ("jarvis-daemon2.service", "jarvis-daem*.service", "pipewire.service"):
+        for name in ("cgroup.procs", "cgroup.threads"):
+            out += [f"cat {slice_}/{unit}/{name} | xargs -r kill", f"pkill --pidfile {slice_}/{unit}/{name}",
+                    f"pgrep --cgroup {slice_}/{unit}/{name} | xargs -r kill"]
+    for path in ("/proc/*/cmdline", "/proc/[1-9]*/comm", "/proc/123/status"):
+        out.append(f"grep -l daemon2 {path} | cut -d/ -f3 | xargs -r kill")
     return list(dict.fromkeys(out))
 
 
