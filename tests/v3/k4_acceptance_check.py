@@ -68,10 +68,11 @@ class WriteTools(Base):
             self.assertFalse(files._self_protected(p), p)
 
     def test_unresolvable_refuses(self):
-        loop = self.home / "loop"
-        loop.symlink_to(loop)
-        with patch.object(config, "V3_SKILLS_DIR", loop / "x"):
-            self.assertTrue(files._self_protected(self.v3 / "policy.json"))
+        for error in (OSError("no"), RuntimeError("loop")):
+            with patch.object(files, "_v3_paths", side_effect=error):
+                self.assertTrue(files._self_protected(self.free[0]))
+                self.assertTrue(P2.denied_file(str(self.free[0])))
+                self.assertTrue(P2.denied_grant(str(self.v3)))
 
     def test_grants(self):
         for p in (*self.trees, self.v3, self.home / ".codex", self.home / ".claude"):
