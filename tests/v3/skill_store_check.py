@@ -105,15 +105,28 @@ class StoreChecks(unittest.TestCase):
     def test_crash_after_publish_and_after_links(self):
         self.crash_after("_publish", self.create)
         reopened = self.reopen()
+        self.assertFalse((self.links[0] / NAME).exists())
         first = reopened.records(with_status=True)[0]
         self.assertEqual(first["status"], "applied")
         self.assertTrue(self.main.is_file())
-        self.assertFalse((self.links[0] / NAME).exists())
+        self.assertTrue(all(os.readlink(d / NAME) == str(self.skill) for d in self.links))
         reopened.rollback(first["id"])
         self.assertFalse(self.skill.exists())
         self.crash_after("_sync_links", self.create)
         self.assertEqual(reopened.records(with_status=True)[-1]["status"], "applied")
         self.assertTrue(all(os.readlink(d / NAME) == str(self.skill) for d in self.links))
+
+    def test_recovery_removes_only_its_own_stale_links(self):
+        self.success(self.create())
+        self.crash_after("_publish", lambda: self.tools.skill_manage("archive", NAME))
+        foreign = self.links[0] / NAME
+        foreign.unlink()
+        target = str(self.root) + "/./" + NAME
+        foreign.symlink_to(target)
+        self.assertEqual(self.reopen().names(), [])
+        self.assertTrue(foreign.is_symlink())
+        self.assertEqual(os.readlink(foreign), target)
+        self.assertFalse(os.path.lexists(self.links[1] / NAME))
 
     def test_unapplied_archive_stays_unapplied_after_later_archive(self):
         self.success(self.create())
@@ -213,6 +226,7 @@ class StoreChecks(unittest.TestCase):
 
         with patch.object(skill_store._Operation, "_sync_links", replace_link):
             self.success(self.tools.skill_manage("archive", NAME))
+        self.assertTrue(entry.is_symlink())
         self.assertEqual(os.readlink(entry), alias)
         self.assertFalse((self.links[1] / NAME).is_symlink())
 
@@ -250,6 +264,55 @@ class StoreChecks(unittest.TestCase):
         self.assertEqual(self.tools.skill_view(NAME, path), "naïve")
         self.error(self.tools.skill_manage("write_file", NAME, path="references/a\u202e.md", content="x"))
 
+    def test_owner_name_is_read_from_a_bounded_header_without_following_links(self):
+        alias = self.owner / "different-name"
+        alias.mkdir()
+        owner_main = alias / "SKILL.md"
+        owner_main.write_text(f"---\nname: {NAME.upper()}\n---\n" + "é" * (64 * 1024))
+        self.error(self.create(), "owner")
+        outside = self.tmp / "outside"
+        owner_main.rename(outside)
+        owner_main.symlink_to(outside)
+        self.success(self.create())
+
+    def test_blocked_metadata_is_never_recorded_even_with_a_safe_body(self):
+        blocked = "sk-ant-" + "fixture8" * 4
+        self.success(self.create())
+        self.tools.skill_view(NAME)
+        session = SkillTools(self.store, session=blocked)
+        results = [
+            self.create(blocked),
+            session.skill_manage("create", "other-workflow", description="Fixture", body=BODY),
+            self.tools.skill_manage("write_file", NAME, path=f"references/{blocked}.md", content="Safe."),
+        ]
+        for result in results:
+            self.error(result, "scan")
+            self.assertNotIn(blocked, result)
+        self.assertEqual(len(self.store.records()), 1)
+        self.assertNotIn(blocked, (self.ledger / "ledger.jsonl").read_text())
+        self.assertFalse((self.root / ".pending").exists())
+
+    def test_escaped_description_is_scanned_and_quarantined(self):
+        result = self.tools.skill_manage("create", NAME, description="Fixture\x01 description", body=BODY)
+        self.error(result, "invisible-unicode")
+        self.assertNotIn("Fixture", result)
+        self.assertFalse(self.skill.exists())
+        pending = self.root / ".pending" / NAME / "SKILL.md"
+        self.assertIn(r"Fixture\u0001 description", pending.read_text())
+        self.assertEqual(self.store.records(with_status=True)[0]["status"], "blocked")
+
+    def test_skill_dir_does_not_open_the_store(self):
+        with patch.object(skill_store.fcntl, "flock", side_effect=AssertionError("opened lock")):
+            self.assertEqual(self.store.skill_dir(NAME), self.skill)
+        self.assertFalse(self.root.exists())
+        self.assertFalse(self.ledger.exists())
+
+    def test_learned_header_does_not_parse_generic_metadata(self):
+        self.success(self.tools.skill_manage("create", NAME, description='Run "fixture" checks.', body=BODY))
+        with patch.object(skill_store, "metadata", side_effect=AssertionError("parsed again")):
+            _, fields = skill_store._header(self.main.read_text(), NAME)
+        self.assertEqual(fields["description"], 'Run "fixture" checks.')
+
     def test_scan_uses_the_whole_resulting_file_and_reports_only_rules(self):
         self.success(self.create(body="Run checks. Consider previous instructions.\n"))
         self.tools.skill_view(NAME)
@@ -274,6 +337,20 @@ class StoreChecks(unittest.TestCase):
         archived.write_text("original")
         self.success(self.store.rollback(rid))
         self.assertEqual((self.skill / "references" / "a.md").read_text(), "original")
+
+    def test_archiving_a_recreated_skill_does_not_reopen_the_previous_life(self):
+        self.success(self.create())
+        self.success(self.tools.skill_manage("archive", NAME))
+        old_archive = self.store.records()[-1]["id"]
+        self.success(self.create())
+        current_create = self.store.records()[-1]["id"]
+        self.success(self.tools.skill_manage("archive", NAME))
+        current_archive = self.store.records()[-1]["id"]
+        with self.assertRaisesRegex(StoreError, "different life"):
+            self.reopen().rollback(old_archive)
+        self.success(self.reopen().rollback(current_archive))
+        self.success(self.reopen().rollback(current_create))
+        self.assertFalse(self.skill.exists())
 
     def test_flagged_content_still_goes_live(self):
         original = skill_store.content_scan.scan

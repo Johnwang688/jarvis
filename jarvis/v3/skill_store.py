@@ -25,6 +25,7 @@ MAX_BYTES = 24 * 1024
 MAX_FILES = 60
 _MAIN = "SKILL.md"
 _AUX = ("references", "templates")
+_OWNER_READ_LIMIT = 64 * 1024
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE = os.O_NOFOLLOW | os.O_NONBLOCK
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -98,14 +99,21 @@ def _header(text, name):
     if not sep or lines[0] != "---" or len(lines) != len(_FIELDS) + 1:
         raise StoreError("Invalid learned skill frontmatter.")
     raw = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
-    fields = metadata(text)
-    if (set(raw) != _FIELDS or fields.keys() != raw.keys() or raw["name"] != _scalar(name)
+    if (set(raw) != _FIELDS or raw["name"] != _scalar(name)
             or raw["created_by"] != "agent" or any(raw[k] not in ("true", "false")
                                                    for k in ("pinned", "locked"))):
         raise StoreError("Invalid learned skill frontmatter.")
-    desc = _description(fields["description"])
-    if not (_plain_description(raw["description"]) or raw["description"] == _json(desc)):
-        raise StoreError("Invalid description field in learned skill frontmatter.")
+    written = raw["description"]
+    if _plain_description(written):
+        raw["description"] = _description(written)
+    else:
+        try:
+            desc = _description(json.loads(written))
+        except ValueError:
+            raise StoreError("Invalid description field in learned skill frontmatter.") from None
+        if written != _json(desc):
+            raise StoreError("Invalid description field in learned skill frontmatter.")
+        raw["description"] = desc
     _text(body, required=True)
     return lines[1:], raw
 
@@ -116,6 +124,28 @@ def _json(value):
 
 def _digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _scan_metadata(*values):
+    if any(not content_scan.scan(value, purpose="skill").ok for value in values):
+        raise StoreError("Skill metadata failed its content scan.")
+
+
+def _scan_file(text, name, path):
+    verdict = content_scan.scan(text, purpose="skill")
+    if path != _MAIN:
+        return verdict
+    _, fields = _header(text, name)
+    description = content_scan.scan(fields["description"], purpose="skill")
+    if verdict.ok and not description.ok:
+        # A quoted scalar can hide characters from the literal file scan.
+        # Attribute those hits to the scalar as written in the file.
+        label = "\ndescription: "
+        start = text.index(label) + len(label)
+        span = (start, text.index("\n", start))
+        hits = tuple(content_scan.Hit(hit.rule, span, hit.severity) for hit in description.hits)
+        verdict = content_scan.Verdict((*verdict.hits, *hits))
+    return verdict
 
 
 def _stat(fd, name):
@@ -186,11 +216,11 @@ def _open_file(parent, name, flags=os.O_RDONLY, *, private=True):
         raise
 
 
-def _read(parent, name, *, private=True, limit=MAX_BYTES + 2048):
+def _read(parent, name, *, private=True, limit=MAX_BYTES + 2048, prefix=False):
     with os.fdopen(_open_file(parent, name, private=private), "rb") as file:
         initial = os.fstat(file.fileno())
-        data = file.read(limit + 1)
-        if len(data) > limit:
+        data = file.read(limit if prefix else limit + 1)
+        if not prefix and len(data) > limit:
             raise StoreError("The skill file exceeds its size limit.")
         if _stamp(initial) != _stamp(os.fstat(file.fileno())):
             raise StoreError("The skill file changed while being read.")
@@ -282,12 +312,17 @@ class SkillStore:
         self._links = None if links is None else tuple(links)
         self._owners = None if owner_roots is None else tuple(owner_roots)
 
+    def _root_path(self):
+        root = self._root
+        if root is None:
+            override = os.environ.get("JARVIS_LEARNED_SKILLS")
+            root = Path(override).expanduser() if override else config.V3_DIR / "skills"
+        return Path(os.path.abspath(root))
+
     @contextmanager
     def _operation(self):
         consumers = (Path.home() / ".claude/skills", Path.home() / ".codex/skills")
-        root = Path(os.path.abspath(self._root if self._root is not None else (
-            Path(os.environ["JARVIS_LEARNED_SKILLS"]).expanduser()
-            if os.environ.get("JARVIS_LEARNED_SKILLS") else config.V3_DIR / "skills")))
+        root = self._root_path()
         ledger = Path(os.path.abspath(self._ledger if self._ledger is not None else config.V3_DIR / "skill-ledger"))
         links = tuple(Path(os.path.abspath(p)) for p in (consumers if self._links is None else self._links))
         owners = (config.REPO_ROOT / "skills", *consumers) if self._owners is None else self._owners
@@ -301,11 +336,21 @@ class SkillStore:
             _verify(root_fd, ".store.lock", os.fstat(lock_fd))
             ledger_fd = stack.enter_context(open_directory(ledger, create=True))
             _private_root(ledger_fd)
-            yield _Operation(root, root_fd, ledger, ledger_fd, lock_fd, links, owners)
+            op = _Operation(root, root_fd, ledger, ledger_fd, lock_fd, links, owners)
+            op.recover_links()
+            yield op
 
     def records(self, *, with_status=False):
         with self._operation() as op:
-            rows = op.records()
+            rows = []
+            for row in op.records():
+                # Older stores could record blocked metadata. Keep the receipt
+                # available internally without displaying the blocked strings.
+                try:
+                    _scan_metadata(row["skill"], row["path"], row["session"])
+                except StoreError:
+                    continue
+                rows.append(row)
             if with_status:
                 return [dict(row, status=op.status(row)) for row in rows]
             return rows
@@ -328,8 +373,7 @@ class SkillStore:
     def skill_dir(self, name):
         """Return the conventional path. Store I/O always uses pinned descriptors."""
         _name(name)
-        with self._operation() as op:
-            return op.root / name
+        return self._root_path() / name
 
     def _view(self, name, path, views):
         _leaf(name)
@@ -338,11 +382,14 @@ class SkillStore:
             owner = op.owner(name, keep=stack)
             if owner is not None:
                 parent, entry = owner
+                if is_credential_name(entry):
+                    raise StoreError("No such skill file.")
                 skill = _directory(stack, parent, entry, private=False)
                 folder = op.folder(stack, skill, parts, private=False)
                 if folder is None:
                     raise StoreError("No such skill file.")
-                return redact.for_model_strict(_read(folder, parts[-1], private=False, limit=64 * 1024).decode())
+                return redact.for_model_strict(_read(folder, parts[-1], private=False,
+                                                     limit=_OWNER_READ_LIMIT).decode())
             _name(name)
             skill = op.learned(stack, name, required=True)
             revision = op.revision(skill)
@@ -411,21 +458,39 @@ class _Operation:
             raise
 
     def owner(self, name, *, keep=None):
+        folded = name.casefold()
         for path in self.owners:
             with ExitStack() as stack:
                 try:
                     fd = stack.enter_context(open_directory(path))
                 except FileNotFoundError:
                     continue
-                for entry in os.listdir(fd):
-                    if entry.casefold() != name.casefold():
-                        continue
-                    if entry == name and path in self.links and self._ours(fd, name):
-                        continue
+                entries = os.listdir(fd)
+                if path in self.links and name in entries and self._ours(fd, name):
+                    entries.remove(name)
+                entry = next((entry for entry in entries if entry.casefold() == folded), None)
+                if entry is None:
+                    entry = next((entry for entry in entries if self._declares(fd, entry, folded)), None)
+                if entry is not None:
                     if keep is not None:
                         keep.callback(stack.pop_all().close)
                     return fd, entry
         return None
+
+    @staticmethod
+    def _declares(root, entry, folded):
+        if is_credential_name(entry):
+            return False
+        try:
+            with ExitStack() as stack:
+                _leaf(entry)
+                skill = _directory(stack, root, entry, private=False)
+                text = _read(skill, _MAIN, private=False, limit=_OWNER_READ_LIMIT, prefix=True)
+                _verify(root, entry, os.fstat(skill))
+        except (OSError, ValueError):
+            return False
+        # A large body can end mid-character in the bounded read.
+        return metadata(text.decode(errors="surrogateescape")).get("name", "").casefold() == folded
 
     def require_unowned(self, name):
         if self.owner(name) is not None:
@@ -549,6 +614,8 @@ class _Operation:
         return True
 
     def _sync_links(self, name, *, live):
+        if live and not self._linkable(name):
+            return " Consumer links need attention."
         errors = False
         for path in self.links:
             try:
@@ -570,6 +637,41 @@ class _Operation:
             except (OSError, StoreError):
                 errors = True
         return " Consumer links need attention." if errors else ""
+
+    def _linkable(self, name):
+        try:
+            _name(name)
+            with ExitStack() as stack:
+                skill = self.learned(stack, name, required=True)
+                _header(_read(skill, _MAIN).decode(), name)
+                _verify(self.root_fd, name, os.fstat(skill))
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def recover_links(self):
+        # Both sides can be reconstructed after a crash. An empty or staged
+        # directory doesn't qualify as a live skill, and only exact links
+        # count as ours when removing entries from a consumer.
+        live = {name for name in os.listdir(self.root_fd) if self._linkable(name)}
+        missing = set()
+        stale = set()
+        for path in self.links:
+            try:
+                with open_directory(path) as fd:
+                    entries = set(os.listdir(fd))
+                    missing.update(live - entries)
+                    stale.update(name for name in entries - live
+                                 if _SLUG.fullmatch(name) and self._ours(fd, name))
+            except FileNotFoundError:
+                missing.update(live)
+            except OSError:
+                continue
+        for name in sorted(stale):
+            self._sync_links(name, live=False)
+        for name in sorted(missing):
+            if self.owner(name) is None:
+                self._sync_links(name, live=True)
 
     def _quarantine(self, stack, row, parts, data):
         pending = _directory(stack, self.root_fd, ".pending", create=True)
@@ -618,9 +720,10 @@ class _Operation:
             os.fsync(source)
 
     def change(self, action, name, path, before, after, skill, revision, *,
-               actor="owner", session="", tainted=False, snapshot=None):
+               actor="owner", session="", tainted=False, snapshot=None, restored_from=None):
         parts = _path(path)
-        verdict = (content_scan.scan(after.decode(), purpose="skill") if after is not None
+        _scan_metadata(name, path, session)
+        verdict = (_scan_file(after.decode(), name, path) if after is not None
                    else content_scan.Verdict(())).to_json()
         row = {"id": uuid4().hex, "ts": datetime.now(timezone.utc).isoformat(), "op": action,
                "skill": name, "path": path, "before": _digest(before) if before is not None else None,
@@ -664,7 +767,10 @@ class _Operation:
             # consumes its staged inode; a removal creates its archive entry.
             # These witnesses change in the live rename itself, so a crash just
             # before or after it is distinguishable without a second commit write.
-            _atomic(txn, "intent", _digest(_json(row).encode()).encode())
+            intent = _digest(_json(row).encode())
+            if restored_from is not None:
+                intent += "\n" + restored_from
+            _atomic(txn, "intent", intent.encode())
             self._append(row)
             self._publish(name, skill, revision, source, entry, expected, dest, target, after)
             warning = self._sync_links(name, live=path != _MAIN or after is not None)
@@ -747,25 +853,61 @@ class _Operation:
             views[name] = (self.revision(skill), seen if after is not None else seen - {path})
         return result
 
-    def _applied(self, stack, row):
+    def _receipt(self, stack, row):
+        """Return the archive source ID, an empty string for other applied changes, or None."""
         try:
             txns = _directory(stack, self.root_fd, ".transactions")
             txn = _directory(stack, txns, row["id"])
-            intent = _read(txn, "intent")
+            intent, sep, restored_from = _read(txn, "intent").partition(b"\n")
             if intent != _digest(_json(row).encode()).encode():
-                return False
+                return None
+            if sep and (row["op"] != "rollback" or row["path"] != _MAIN
+                        or row["before"] is not None or not _ID.fullmatch(restored_from.decode())):
+                return None
             if row["after"] is None:
                 archive = _directory(stack, self.root_fd, ".archive")
-                return _stat(archive, row["id"]) is not None
-            return _stat(txn, "change") is None
-        except FileNotFoundError:
-            return False
+                applied = _stat(archive, row["id"]) is not None
+            else:
+                applied = _stat(txn, "change") is None
+            return restored_from.decode() if applied else None
+        except (FileNotFoundError, UnicodeError):
+            return None
 
     def status(self, row):
         if not row["scan"]["ok"]:
             return "blocked"
         with ExitStack() as stack:
-            return "applied" if self._applied(stack, row) else "unapplied"
+            return "applied" if self._receipt(stack, row) is not None else "unapplied"
+
+    def _same_life(self, rows, row):
+        # Applied creates start lives. A restore carries the archive's life
+        # forward, and an unapplied intent never changes the active life.
+        life = recorded = None
+        archives = {}
+        for change in rows:
+            if change["skill"] != row["skill"] or not change["scan"]["ok"]:
+                continue
+            rid = change["id"]
+            if change["path"] == _MAIN and None in (change["before"], change["after"]):
+                with ExitStack() as stack:
+                    restored_from = self._receipt(stack, change)
+                if restored_from is None:
+                    continue
+                if change["after"] is None:
+                    archives[rid] = (life, change["before"])
+                elif restored_from:
+                    source = archives.get(restored_from)
+                    life = source[0] if source and source[1] == change["after"] else rid
+                elif change["op"] == "rollback":
+                    # Old restore receipts lack the source ID. Inherit a life
+                    # only if the restored bytes identify it unambiguously.
+                    matches = {origin for origin, sha in archives.values() if sha == change["after"]}
+                    life = matches.pop() if len(matches) == 1 else rid
+                else:
+                    life = rid
+            if rid == row["id"]:
+                recorded = life
+        return recorded is not None and recorded == life
 
     def _snapshot(self, skill, revision, main):
         files = {_MAIN: main}
@@ -775,6 +917,7 @@ class _Operation:
                 continue
             if path == _MAIN:
                 continue
+            _scan_metadata(path)
             parts = _path(path)
             with ExitStack() as child:
                 folder = self.folder(child, skill, parts)
@@ -806,10 +949,13 @@ class _Operation:
         return files
 
     def rollback(self, rid):
-        row = next((row for row in self.records() if row["id"] == rid), None)
+        rows = self.records()
+        row = next((row for row in rows if row["id"] == rid), None)
         with ExitStack() as stack:
-            if row is None or not row["scan"]["ok"] or not self._applied(stack, row):
+            if row is None or self.status(row) != "applied":
                 raise StoreError("No applied live skill change for that ledger ID.")
+            if not self._same_life(rows, row):
+                raise StoreError("The ledger change belongs to a different life of this skill.")
             name, path = row["skill"], row["path"]
             self.require_unowned(name)
             parts = _path(path)
@@ -832,4 +978,4 @@ class _Operation:
                 elif current is None and sum("/" in entry for entry in revision[1]) >= MAX_FILES:
                     raise StoreError("The skill has reached its reference and template file limit.")
             return self.change("rollback", name, path, current, previous, skill, revision,
-                               snapshot=snapshot)
+                               snapshot=snapshot, restored_from=rid if snapshot is not None else None)
