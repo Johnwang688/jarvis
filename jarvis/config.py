@@ -511,6 +511,7 @@ V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
 V3_DIR = Path(os.environ.get("JARVIS_V3_DIR", "~/.local/share/jarvis/v3")).expanduser()
+V3_INDEX_DB = Path(os.environ.get("JARVIS_INDEX_DB") or V3_DIR / "index.sqlite").expanduser()
 
 
 def chat_git_mirrors_dir() -> Path:
