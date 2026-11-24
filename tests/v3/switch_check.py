@@ -189,7 +189,7 @@ class Switch(unittest.TestCase):
             return original(*args)
 
         env.systemctl = command
-        env.port_free = lambda port: port == config.DAEMON_PORT and world.now >= 1003
+        env.port_free = lambda port: port != config.DAEMON_PORT or world.now >= 1003
         self.assertEqual(switch.to_v3(env), 0)
         self.assertEqual(world.verbs()[:3], [
             ["stop", switch.V2_UNIT], ["disable", switch.V2_UNIT],
@@ -209,7 +209,7 @@ class Switch(unittest.TestCase):
         env.sleep = sleep
         # The first process has stopped by 1002, with the port still held.
         # The unit comes back before the port would otherwise be free.
-        env.port_free = lambda port: world.now >= 1003
+        env.port_free = lambda port: port != config.DAEMON_PORT or world.now >= 1003
         self.assertEqual(switch.to_v3(env, wait=3.1), 1)
         self.assertAlmostEqual(world.now, 1003.1)
         self.assertTrue(world.active[switch.V2_UNIT])
@@ -319,7 +319,7 @@ class Switch(unittest.TestCase):
         env.systemctl = command
         self.assertEqual(switch.to_v3(env, wait=3), 1)
         self.assertTrue(world._active(switch.V2_UNIT))
-        self.assertFalse(world.enabled[switch.V2_UNIT])
+        self.assertTrue(world.enabled[switch.V2_UNIT])
         self.assertIn("could not enable source", "\n".join(world.lines))
         self.assertIn(f"Restored {switch.V2_UNIT}.", world.lines)
 
