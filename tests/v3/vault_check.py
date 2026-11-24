@@ -125,7 +125,7 @@ class VaultChecks(unittest.TestCase):
         self.assertIn("changed since the read", self.tools.memory_patch("tea", "Mint", "Black"))
         self.assertEqual(self.entry.read_bytes(), edited)
         read = self.tools.memory_read("tea")
-        self.assertIn('description: "Tea: the drink"\r\n', read)
+        self.assertIn('description: Tea: the drink\r\n', read)      # as the owner typed it
         self.assertIn("source: calendar:fixture\r\n", read)
         old = "Mint tea.\r\n---\r\nstatus: archived\r\n---\r\nSecond"
         new = old.replace("Mint", "Black")
