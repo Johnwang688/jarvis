@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPException
 import json
+from math import inf
 import os
 from pathlib import Path
 import shutil
@@ -25,6 +26,7 @@ STATUS_CAP = 1 << 20
 SYSTEMCTL_TIMEOUT = 90.0
 REFUSED = "refused"
 UP = ("active", "activating", "reloading", "refreshing")
+BOOT_DISABLED = ("disabled", "masked", "not-found")
 
 
 @dataclass
@@ -167,17 +169,24 @@ def v3_responds(env: Env) -> bool:
     return _is_v3(env.v3_status())
 
 
-def _down(env: Env, unit: str, port: int) -> bool:
-    return not _unit_up(env, unit) and env.port_free(port)
+def _check_target_port(env: Env, unit: str, port: int) -> None:
+    if not _unit_up(env, unit) and not env.port_free(port):
+        raise SwitchError(unit, f"Cannot start {unit}: port {port} is already in use "
+                          f"while {unit} is stopped.")
 
 
-def _wait_for(env: Env, unit: str, condition: Callable[[], bool], wait: float, what: str,
+def _down(env: Env, unit: str, port: int | None, *, deadline: float = inf) -> bool:
+    return (not _unit_up(env, unit)
+            and (port is None or env.clock() <= deadline and env.port_free(port)))
+
+
+def _wait_for(env: Env, unit: str, condition: Callable[[float], bool], wait: float, what: str,
               *, retry_errors: bool = False) -> None:
     deadline = env.clock() + wait
     last_error = None
     while env.clock() <= deadline:
         try:
-            ready = condition()
+            ready = condition(deadline)
             last_error = None
         except SwitchError as exc:
             if not retry_errors:
@@ -195,7 +204,7 @@ def _wait_for(env: Env, unit: str, condition: Callable[[], bool], wait: float, w
 
 
 def _wait_down(env: Env, unit: str, port: int, wait: float) -> None:
-    _wait_for(env, unit, lambda: _down(env, unit, port), wait,
+    _wait_for(env, unit, lambda deadline: _down(env, unit, port, deadline=deadline), wait,
               f"{unit} to stop and port {port} to be free")
 
 
@@ -232,13 +241,19 @@ def _v2_ready(env: Env) -> bool:
     return isinstance(status, dict) and status.get("version") == 2
 
 
-def _ready(env: Env, unit: str) -> bool:
-    return _unit_up(env, unit, ready=True) and (_v2_ready(env) if unit == V2_UNIT else v3_responds(env))
+def _ready(env: Env, unit: str, *, deadline: float = inf) -> bool:
+    if not _unit_up(env, unit, ready=True) or env.clock() > deadline:
+        return False
+    return _v2_ready(env) if unit == V2_UNIT else v3_responds(env)
 
 
-def _wait_up(env: Env, unit: str, wait: float, *, other: str, other_port: int,
+def _wait_up(env: Env, unit: str, wait: float, *, other: str, other_port: int | None,
              recovering: bool = False) -> None:
-    _wait_for(env, unit, lambda: _ready(env, unit) and _down(env, other, other_port), wait,
+    def up(deadline: float) -> bool:
+        return (_ready(env, unit, deadline=deadline) and env.clock() <= deadline
+                and _down(env, other, other_port, deadline=deadline))
+
+    _wait_for(env, unit, up, wait,
               f"{unit} status with {other} stopped", retry_errors=recovering)
     env.out(f"{unit} is running.")
 
@@ -255,7 +270,20 @@ def _report_failure(env: Env, exc: SwitchError) -> int:
     return 1
 
 
-def _restore_source(env: Env, source: str, source_port: int, target: str, target_port: int,
+def _unit_enablement(env: Env, unit: str) -> str:
+    args = ("is-enabled", unit)
+    result = _systemctl(env, unit, *args)
+    state = (result.stdout or "").strip()
+    if result.returncode == 0 or state in BOOT_DISABLED:
+        return state
+    error = _command_error(unit, result, *args)
+    detail = (result.stderr or "").lower()
+    if error.missing or (unit in detail and "no such file or directory" in detail):
+        return "not-found"
+    raise error
+
+
+def _restore_source(env: Env, source: str, source_port: int, target: str,
                     wait: float, *, target_attempted: bool) -> None:
     try:
         if _ready(env, target) and _down(env, source, source_port):
@@ -268,11 +296,14 @@ def _restore_source(env: Env, source: str, source_port: int, target: str, target
     try:
         stopped = not target_attempted or _stop_and_disable(env, target, recovering=True)
 
-        def target_down() -> bool:
-            if not _down(env, target, target_port):
+        def target_down(deadline: float) -> bool:
+            # The source can run even when something else has bound the target's port.
+            if _unit_up(env, target):
                 return False
             if stopped:
                 return True
+            if env.clock() > deadline:
+                return False
             # If neither stop command completed, an inactive unit could still
             # have a queued start job from the failed enable --now.
             args = ("list-jobs", "--no-legend", "--no-pager", f"{target}.service")
@@ -281,20 +312,46 @@ def _restore_source(env: Env, source: str, source_port: int, target: str, target
                 raise _command_error(target, result, *args)
             return not result.stdout.strip()
 
-        _wait_for(env, target, target_down, wait, f"{target} and port {target_port} to be clear",
-                  retry_errors=True)
-        env.out(f"{target} is stopped and its port is free.")
+        _wait_for(env, target, target_down, wait, f"{target} to stop", retry_errors=True)
+
+        target_disabled = False
         try:
-            # This also replaces a source stop job that may still be pending.
-            _enable(env, source)
+            target_disabled = _unit_enablement(env, target) in BOOT_DISABLED
+            if not target_disabled:
+                try:
+                    _change(env, target, "disable", target, absent_ok=True)
+                except SwitchError as exc:
+                    _report_failure(env, exc)
+                target_disabled = _unit_enablement(env, target) in BOOT_DISABLED
         except SwitchError as exc:
             _report_failure(env, exc)
+        if not target_disabled:
+            env.out(f"Could not confirm {target} is disabled at login.")
+
+        started = False
+        if target_disabled:
+            try:
+                # This also replaces a source stop job that may still be pending.
+                _enable(env, source)
+                started = True
+            except SwitchError as exc:
+                _report_failure(env, exc)
+        if not started:
             env.out(f"Trying to start {source} directly.")
             try:
                 _change(env, source, "start", source)
-            except SwitchError as start_error:
-                _report_failure(env, start_error)
-        _wait_up(env, source, wait, other=target, other_port=target_port, recovering=True)
+            except SwitchError as exc:
+                _report_failure(env, exc)
+            if target_disabled:
+                try:
+                    if _unit_enablement(env, source) != "enabled":
+                        _change(env, source, "enable", source)
+                except SwitchError as exc:
+                    _report_failure(env, exc)
+        _wait_up(env, source, wait, other=target, other_port=None, recovering=True)
+        if not target_disabled or _unit_enablement(env, source) != "enabled":
+            env.out(f"{source} is running, but rollback could not restore the login configuration.")
+            return
     except SwitchError as exc:
         env.out(f"Rollback to {source} failed.")
         _report_failure(env, exc)
@@ -332,6 +389,7 @@ def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
                 return 3
             env.out(f"--force overrides the {V2_UNIT} refusal. {refusal}")
 
+        _check_target_port(env, V3_UNIT, config.V3_API_PORT)
         source_stop_attempted = True
         _stop_and_disable(env, V2_UNIT)
         _wait_down(env, V2_UNIT, config.DAEMON_PORT, wait)
@@ -345,7 +403,7 @@ def to_v3(env: Env, *, force: bool = False, wait: float = WAIT) -> int:
             env.out("Run `jarvis agent install` to install the v3 user unit.")
         _report_failure(env, exc)
         if source_stop_attempted:
-            _restore_source(env, V2_UNIT, config.DAEMON_PORT, V3_UNIT, config.V3_API_PORT, wait,
+            _restore_source(env, V2_UNIT, config.DAEMON_PORT, V3_UNIT, wait,
                             target_attempted=target_attempted)
         return 1
 
@@ -357,6 +415,7 @@ def _check_v3_idle(env: Env) -> None:
 def to_v2(env: Env, *, wait: float = WAIT) -> int:
     source_stop_attempted = target_attempted = False
     try:
+        _check_target_port(env, V2_UNIT, config.DAEMON_PORT)
         if v3_active(env):
             _check_v3_idle(env)
             source_stop_attempted = True
@@ -369,7 +428,7 @@ def to_v2(env: Env, *, wait: float = WAIT) -> int:
     except SwitchError as exc:
         _report_failure(env, exc)
         if source_stop_attempted:
-            _restore_source(env, V3_UNIT, config.V3_API_PORT, V2_UNIT, config.DAEMON_PORT, wait,
+            _restore_source(env, V3_UNIT, config.V3_API_PORT, V2_UNIT, wait,
                             target_attempted=target_attempted)
         return 1
 
@@ -412,8 +471,9 @@ def restart_v3(env: Env, *, wait: float = WAIT) -> int:
         issued = datetime.now(timezone.utc)
         _change(env, V3_UNIT, "restart", V3_UNIT)
 
-        def restarted() -> bool:
-            return _unit_up(env, V3_UNIT, ready=True) and _fresh_v3(env.v3_status(), previous, issued)
+        def restarted(deadline: float) -> bool:
+            return (_unit_up(env, V3_UNIT, ready=True) and env.clock() <= deadline
+                    and _fresh_v3(env.v3_status(), previous, issued))
 
         _wait_for(env, V3_UNIT, restarted, wait, f"a fresh {V3_UNIT} status")
         env.out(f"{V3_UNIT} restarted.")
