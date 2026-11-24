@@ -1,6 +1,7 @@
 """Search the private v3 session index for context."""
 
 from itertools import groupby
+from typing import Annotated
 
 from jarvis import untrusted
 from jarvis.v2 import redact
@@ -53,7 +54,15 @@ def _search(index, query, mode, doc, around, limit):
     return _render(docs, mode) if docs else "No matching sessions."
 
 
-def session_search(query="", mode="discover", doc="", around=0, limit=5, *, index=None) -> str:
+def session_search(
+    query: Annotated[str, "Search text in discover mode."] = "",
+    mode: Annotated[str, "Choose discover, scroll, read, or recent."] = "discover",
+    doc: Annotated[str, "Indexed document ID for scroll or read."] = "",
+    around: Annotated[int, "Message sequence for scroll or page number for read."] = 0,
+    limit: Annotated[int, "Maximum number of results to return."] = 5,
+    *,
+    index=None,
+) -> str:
     """Discover, scroll, read or browse recent indexed sessions."""
     if mode not in ("discover", "scroll", "read", "recent"):
         return "Choose discover, scroll, read, or recent."

@@ -1,0 +1,249 @@
+"""Newline-delimited MCP over v3's bound brain toolset."""
+
+from copy import deepcopy
+from functools import cached_property
+from inspect import Parameter, getdoc, signature
+import json
+import os
+import sys
+from threading import Thread
+from typing import Annotated, Unpack, get_args, get_origin, get_type_hints
+from uuid import uuid4
+
+from jarvis.v2 import redact
+
+from .index import Index
+from .tools.memory import MemoryTools
+from .tools.session_search import session_search
+from .tools.skills import SkillTools
+from .vault import Vault
+
+
+PROFILE = (
+    "memory_add", "memory_archive", "memory_list", "memory_patch", "memory_read",
+    "memory_search", "session_search", "skill_manage", "skill_view",
+)
+PROTOCOL_VERSION = "2025-06-18"
+PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2024-11-05"})
+_MAX_LINE = 1024 * 1024
+_RESULT_CHARS = 32_000
+_JSON_TYPES = {str: "string", int: "integer", bool: "boolean"}
+_PYTHON_TYPES = {value: key for key, value in _JSON_TYPES.items()}
+
+
+def _schema(method, *, internal=()):
+    properties = {}
+    required = []
+
+    def add(name, annotation, mandatory):
+        if get_origin(annotation) is not Annotated:
+            raise TypeError(f"Missing tool parameter description for {name}")
+        kind, description = get_args(annotation)
+        properties[name] = {"type": _JSON_TYPES[kind], "description": description}
+        if mandatory:
+            required.append(name)
+
+    hints = get_type_hints(method, include_extras=True)
+    for param in signature(method).parameters.values():
+        if param.name == "self" or param.name in internal:
+            continue
+        hint = hints[param.name]
+        if param.kind is Parameter.VAR_KEYWORD and get_origin(hint) is Unpack:
+            (fields,) = get_args(hint)
+            for name, field in get_type_hints(fields, include_extras=True).items():
+                add(name, field, name in fields.__required_keys__)
+        else:
+            add(param.name, hint, param.default is Parameter.empty)
+    return {"type": "object", "properties": properties,
+            "required": required, "additionalProperties": False}
+
+
+_METHODS = {
+    name: (session_search if name == "session_search" else
+           getattr(MemoryTools if name.startswith("memory_") else SkillTools, name))
+    for name in PROFILE
+}
+_SCHEMAS = {name: _schema(method, internal=("index",) if name == "session_search" else ())
+            for name, method in _METHODS.items()}
+
+
+def _result(text, *, error=False):
+    return {"content": [{"type": "text", "text": text}], "isError": error}
+
+
+def _valid(arguments, schema):
+    return (isinstance(arguments, dict)
+            and arguments.keys() >= set(schema["required"])
+            and all(key in schema["properties"]
+                    and type(value) is _PYTHON_TYPES[schema["properties"][key]["type"]]
+                    for key, value in arguments.items()))
+
+
+class Brain:
+    def __init__(self, *, vault=None, index=None, store=None, session=None):
+        self._memory = MemoryTools(Vault() if vault is None else vault)
+        self._index = index
+        self._store = store
+        self._session = uuid4().hex if session is None else session
+
+    @cached_property
+    def _skills(self):
+        store = self._store
+        if store is None:
+            # The store shares v1 skill metadata parsing, which imports the
+            # legacy registry. Defer it until a skill is actually requested.
+            from .skill_store import SkillStore
+
+            store = SkillStore()
+        return SkillTools(store, session=self._session, actor="foreground")
+
+    def _search(self, **arguments):
+        with Index(self._index) as opened:
+            return session_search(index=opened, **arguments)
+
+    def list_tools(self):
+        return {"tools": [
+            {"name": name, "description": getdoc(_METHODS[name]),
+             "inputSchema": deepcopy(_SCHEMAS[name])}
+            for name in PROFILE
+        ]}
+
+    def call(self, name, arguments):
+        if name not in PROFILE:
+            return _result("Error: Tool is outside the brain profile.", error=True)
+        if not _valid(arguments, _SCHEMAS[name]):
+            return _result("Error: Arguments do not match the tool schema.", error=True)
+        try:
+            if name == "session_search":
+                text = self._search(**arguments)
+            else:
+                target = self._memory if name.startswith("memory_") else self._skills
+                text = getattr(target, name)(**arguments)
+            clean = redact.for_display(text)[:_RESULT_CHARS]
+            return _result(clean, error=text.startswith(("Error:", "Refused:")))
+        except (Exception, SystemExit):      # a tool that exits ends its call, never the server
+            return _result("Error: The brain tool could not complete safely.", error=True)
+
+
+# Framing copied from jarvis.v2.mcp so importing it cannot load its tool catalog.
+class RPCError(Exception):
+    def __init__(self, code, message):
+        self.code, self.message = code, message
+
+
+def _route(method, params, brain):
+    if method == "initialize":
+        version = params.get("protocolVersion")
+        if not isinstance(version, str):
+            raise RPCError(-32602, "protocolVersion must be a string")
+        return {"protocolVersion": version if version in PROTOCOL_VERSIONS else PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "jarvis-brain", "version": "3.0"}}
+    if method in {"notifications/initialized", "ping"}:
+        return {}
+    if method == "tools/list":
+        return brain.list_tools()
+    if method == "tools/call":
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise RPCError(-32602, "tools/call requires a name")
+        return brain.call(name, params.get("arguments", {}))
+    raise RPCError(-32601, "Method not found")
+
+
+def _error(request_id, code, message):
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _handle(message, brain):
+    if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+            or not isinstance(message.get("method"), str)
+            or ("id" in message and type(message["id"]) not in (str, int))):
+        return _error(None, -32600, "Invalid Request")
+    # Notifications must not execute tools.
+    if "id" not in message:
+        return None
+    request_id = message["id"]
+    try:
+        params = message.get("params", {})
+        if not isinstance(params, dict):
+            raise RPCError(-32602, "params must be an object")
+        return {"jsonrpc": "2.0", "id": request_id,
+                "result": _route(message["method"], params, brain)}
+    except RPCError as exc:
+        return _error(request_id, exc.code, exc.message)
+    except Exception:
+        return _error(request_id, -32603, "Internal error")
+
+
+def _reject_constant(_value):
+    raise ValueError("Invalid JSON constant")
+
+
+def serve(source, sink, brain):
+    while line := source.readline(_MAX_LINE + 1):
+        if len(line) > _MAX_LINE:
+            while line and not line.endswith(b"\n"):
+                line = source.readline(_MAX_LINE + 1)
+            response = _error(None, -32700, "Request line too long")
+        elif not line.endswith(b"\n"):
+            response = _error(None, -32700, "Incomplete request line")
+        else:
+            try:
+                message = json.loads(line.decode("utf-8"), parse_constant=_reject_constant)
+            except (ValueError, RecursionError):
+                response = _error(None, -32700, "Parse error")
+            else:
+                response = _handle(message, brain)
+        if response is not None:
+            data = json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n"
+            try:
+                sink.write(data)
+                sink.flush()
+            except BrokenPipeError:
+                return
+
+
+def _drain_chatter(read_fd, diagnostic_fd):
+    # Client applications log stderr. Even a tool's unexpected print may
+    # include private input or output, so forward a fixed notice only.
+    with os.fdopen(read_fd, "rb", buffering=0) as stream:
+        if stream.read(8192):
+            try:
+                os.write(diagnostic_fd, b"jarvis-brain suppressed unexpected tool output.\n")
+            except OSError:
+                pass
+            while stream.read(8192):
+                pass
+
+
+def main():
+    stdout_fd, stderr_fd = sys.stdout.fileno(), sys.stderr.fileno()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        with (os.fdopen(os.dup(stdout_fd), "w", encoding="utf-8", buffering=1) as protocol,
+              os.fdopen(os.dup(stderr_fd), "wb") as diagnostic):
+            read_fd, write_fd = os.pipe()
+            drain = Thread(target=_drain_chatter, args=(read_fd, diagnostic.fileno()), daemon=True)
+            drain.start()
+            try:
+                os.dup2(write_fd, stderr_fd)
+                os.dup2(stderr_fd, stdout_fd)
+            finally:
+                os.close(write_fd)
+            try:
+                serve(sys.stdin.buffer, protocol, Brain())
+            finally:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                finally:
+                    os.dup2(protocol.fileno(), stdout_fd)
+                    os.dup2(diagnostic.fileno(), stderr_fd)
+                    drain.join(timeout=1)
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
+    except Exception:
+        return 1
+    return 0
