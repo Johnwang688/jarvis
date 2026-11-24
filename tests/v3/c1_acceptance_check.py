@@ -36,7 +36,9 @@ BASE = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 
 
 def ev(id="e1", title="Lab", start="2026-11-25T10:00:00-06:00", end="2026-11-25T11:00:00-06:00", tag=False, **kw):
-    d = {"id": id, "etag": f'"{id}-1"', "summary": title, "status": "confirmed", "start": {"dateTime": start}, "end": {"dateTime": end},
+    """`start`/`end` without a time make an all-day event."""
+    when = lambda v: {"dateTime": v} if "T" in v else {"date": v}
+    d = {"id": id, "etag": f'"{id}-1"', "summary": title, "status": "confirmed", "start": when(start), "end": when(end),
          "organizer": {"self": True}, "creator": {"self": True}}
     if tag:
         d["extendedProperties"] = {"private": {"jarvis": "1"}}
@@ -110,7 +112,7 @@ class Base(unittest.TestCase):
 
 class Reading(Base):
     def test_list(self):
-        t = self.make(ev(), ev("e2", "Trip", start="x", end="y", **{"start": {"date": "2026-11-26"}, "end": {"date": "2026-11-27"}}), ev("e3", "Gone", status="cancelled"))
+        t = self.make(ev(), ev("e2", "Trip", start="2026-11-26", end="2026-11-27"), ev("e3", "Gone", status="cancelled"))
         out = self.ok(t.calendar_list("2026-11-25", "2026-11-27"))
         for part in ("e1", "Lab", "10:00", "Trip", "2026-11-26"):
             self.assertIn(part, out)
@@ -159,7 +161,7 @@ class Reading(Base):
         self.assertIn("17:00", out)
         self.assertNotIn("14:00", out)
         self.assertNotIn("09:00", out)         # 09:00-09:10 is shorter than 30 minutes
-        t = self.make(ev("a", start="x", end="y", **{"start": {"date": "2026-11-25"}, "end": {"date": "2026-11-26"}}))
+        t = self.make(ev("a", start="2026-11-25", end="2026-11-26"))
         self.assertIn("no free", self.ok(t.calendar_free("2026-11-25T09:00", "2026-11-25T17:00")).lower())
         for m in (0, -5, 100_000, "x", None, True):
             self.bad(t.calendar_free("2026-11-25T09:00", "2026-11-25T17:00", m))
