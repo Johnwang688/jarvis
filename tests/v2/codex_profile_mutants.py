@@ -159,7 +159,9 @@ MUTANTS = [
     # Review of #224 (delta): Windows profiles.
     ("Windows profiles not closed", CFG,
      "    for profile in windows_profiles():", "    for profile in []:", WIN),
-    ("AppData readable", CFG,
+    # The name test moved to config.windows_extra (8ee5efa7, shared with
+    # the read tools' judge); Codex's _windows_extra calls it.
+    ("AppData readable", CONFIG,
      '    return folded == "appdata" or folded.startswith("ntuser")',
      '    return folded.startswith("ntuser")', WIN),
     ("a profile's dot-entries readable", CFG,
@@ -218,7 +220,7 @@ MUTANTS = [
     ("the owner told at every turn", CODEX,
      "        notices, s.notices = s.notices, []", "        notices = s.notices", TOLD),
     ("a notice dropped from the transcript", "jarvis/v2/hud_api.py",
-     '"text", "user", "model_set", "notice"):', '"text", "user", "model_set"):',
+     '"text", "user", "model_set", "notice", "cli_turn",', '"text", "user", "model_set", "cli_turn",',
      ["tests/v2/hud_backend_check.py", "Backend.test_a_provider_notice_is_a_system_line_never_a_failure"]),
     # 2. Symlinked profile folders.
     ("symlinked profiles skipped again", CFG,
