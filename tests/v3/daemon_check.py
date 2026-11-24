@@ -49,7 +49,9 @@ class DaemonCheck(unittest.TestCase):
 
     def assert_protected(self, headers):
         self.assertEqual(headers["X-Frame-Options"], "DENY")
-        self.assertEqual(headers["Content-Security-Policy"], "frame-ancestors 'none'")
+        directives = headers["Content-Security-Policy"].split("; ")
+        self.assertIn("frame-ancestors 'none'", directives)
+        self.assertIn("default-src 'none'", directives)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 

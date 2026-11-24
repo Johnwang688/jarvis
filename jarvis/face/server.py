@@ -1445,8 +1445,8 @@ def launch_window(url: str, size: tuple[int, int] = (1280, 860)) -> subprocess.P
                              "such as Default or Profile 2")
         profile_args = [f"--profile-directory={profile}"]
         root_url = f"http://localhost:{config.FACE_PORT}/"
-        if url == root_url:
-            app_id = chrome_app_id(root_url)
+        if url in (root_url, f"http://localhost:{config.V3_API_PORT}/"):
+            app_id = chrome_app_id(url)
             resource = (Path(config.WINDOWS_LOCALAPPDATA) / "Google" / "Chrome" / "User Data"
                         / profile / "Web Applications" / "Manifest Resources" / app_id)
             # Existence only: never open or inspect anything inside the profile.

@@ -8,7 +8,8 @@ import signal
 import time
 
 from jarvis import config
-from . import switch
+from jarvis.v2 import hud_install
+from . import hud, switch
 from .daemon import Daemon, SERVICE_NAME
 
 
@@ -57,16 +58,11 @@ def status(_args) -> int:
     return 1
 
 
-def _open_v3_hud(env: switch.Env) -> None:
-    """A5 hook for opening the installed v3 HUD."""
-    env.out("no v3 HUD yet")
-
-
 def start(args) -> int:
     env = switch.default_env()
     result = switch.to_v3(env, force=args.force)
     if result == 0:
-        _open_v3_hud(env)
+        hud.open_window(env.out)
     return result
 
 
@@ -78,10 +74,21 @@ def restart(_args) -> int:
     return switch.restart_v3(switch.default_env())
 
 
-def install(_args) -> int:
+def install(args) -> int:
+    env = switch.default_env()
+    try:
+        built = hud.install_hud(allow_dirty=args.allow_dirty)
+    except (hud_install.InstallRefused, OSError) as exc:
+        env.out(f"jarvis agent install: {exc}")
+        return 1
+    description = hud_install.describe(built)
+    if built.dirty:
+        description = (description.removesuffix(" in hud/.")
+                       + " in the v3 frontend inputs.")
+    env.out(description)
     repo = Path(config.REPO_ROOT)
     return switch.install_unit(
-        switch.default_env(),
+        env,
         unit_path=Path.home() / ".config/systemd/user/jarvis-agent.service",
         python=str(repo / ".venv/bin/python"),
         repo=repo,
@@ -102,7 +109,9 @@ def add_commands(sub):
     agent_start.set_defaults(func=start)
     agent_sub.add_parser("stop", help="stop the v3 daemon").set_defaults(func=stop)
     agent_sub.add_parser("restart", help="restart the v3 daemon").set_defaults(func=restart)
-    agent_sub.add_parser("install", help="install the v3 systemd user unit").set_defaults(func=install)
+    agent_install = agent_sub.add_parser("install", help="install the v3 HUD and systemd user unit")
+    agent_install.add_argument("--allow-dirty", action="store_true", help="install with uncommitted frontend changes")
+    agent_install.set_defaults(func=install)
 
 
 def main(argv: list[str]) -> int:

@@ -611,12 +611,14 @@ def _hud_roots() -> set[Path]:
     """Every folder the HUD is or could be served from, resolved: the install
     root `config.HUD_DIR` always — even in a process started with
     JARVIS_HUD_DEV=1, whose tools would otherwise leave it writable (review of
-    PR #44, L4) — and `config.HUD_DIST`, which is `hud/dist` under that flag.
+    PR #44, L4), `config.HUD_DIST`, which is `hud/dist` under that flag,
+    and the v3 install root `config.HUD3_DIR`.
     The one definition the write tools, v2's grants and `protected_state`'s
     shell check share. Raises OSError/RuntimeError when a root cannot be
     resolved; callers refuse then."""
     return {Path(config.HUD_DIR).expanduser().resolve(),
-            Path(config.HUD_DIST).expanduser().resolve()}
+            Path(config.HUD_DIST).expanduser().resolve(),
+            Path(config.HUD3_DIR).expanduser().resolve()}
 
 
 def _hud_build(resolved: Path) -> bool:

@@ -21,7 +21,8 @@ class Http09Check(unittest.TestCase):
         status, *headers = head.split(b"\r\n")
         self.assertIn(status.split()[1], (b"403", b"421"))
         self.assertIn(b"X-Frame-Options: DENY", headers)
-        self.assertIn(b"Content-Security-Policy: frame-ancestors 'none'", headers)
+        (policy,) = [h for h in headers if h.startswith(b"Content-Security-Policy: ")]
+        self.assertIn(b"frame-ancestors 'none'", policy)
         self.assertIn(b"Cache-Control: no-store", headers)
         self.assertIn(b"X-Content-Type-Options: nosniff", headers)
 

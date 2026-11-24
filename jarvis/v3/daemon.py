@@ -1,4 +1,4 @@
-"""The loopback v3 daemon and its status endpoint.
+"""The loopback v3 daemon, its status endpoint and its installed HUD.
 
 Stated limits (verifier r2, 2026-11-23): a request whose header block is
 malformed is parsed leniently by http.server (the Host/Origin guards still
@@ -18,16 +18,18 @@ import threading
 import time
 
 from jarvis import config
+from . import hud
 
 
 SERVICE_NAME = "jarvis-agentd"
 
 
-def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
+def _status_handler(data_dir: Path, hud_dir: Path | None = None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
     directory = str(data_dir)
+    hud_root = config.HUD3_DIR if hud_dir is None else hud_dir
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
@@ -37,7 +39,7 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
 
         def end_headers(self):
             self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", hud.CSP)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             super().end_headers()
@@ -52,10 +54,12 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
             self._json(code, {"error": self.responses[code][0]})
 
         def _json(self, code, payload):
-            body = json.dumps(payload).encode("utf-8")
+            self._reply(code, "application/json", json.dumps(payload).encode("utf-8"))
+
+        def _reply(self, code, kind, body):
             try:
                 self.send_response(code)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", kind)
                 self.send_header("Content-Length", str(len(body)))
                 if code == 405:
                     self.send_header("Allow", "GET, HEAD")
@@ -89,17 +93,22 @@ def _status_handler(data_dir: Path) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self):
             # http.server collapses leading slashes in self.path.
-            if self.requestline.split()[1] != "/v3/status":
+            path = self.requestline.split()[1].partition("?")[0]
+            if path == "/v3/status":
+                self._json(200, {
+                    "service": SERVICE_NAME,
+                    "version": "v3",
+                    "pid": pid,
+                    "started_at": started_at,
+                    "uptime_s": time.monotonic() - started_tick,
+                    "data_dir": directory,
+                })
+            elif (asset := hud.static_file(hud_root, path)) is not None:
+                self._reply(200, *asset)
+            elif path == "/":
+                self._json(503, {"error": hud.MISSING_HUD})
+            else:
                 self.send_error(404)
-                return
-            self._json(200, {
-                "service": SERVICE_NAME,
-                "version": "v3",
-                "pid": pid,
-                "started_at": started_at,
-                "uptime_s": time.monotonic() - started_tick,
-                "data_dir": directory,
-            })
 
         do_HEAD = do_GET
 
@@ -127,9 +136,11 @@ def _prepare_data_dir(path: Path) -> None:
 
 
 class Daemon:
-    def __init__(self, port: int | None = None, data_dir: Path | None = None):
+    def __init__(self, port: int | None = None, data_dir: Path | None = None,
+                 hud_dir: Path | None = None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._data_dir = config.V3_DIR if data_dir is None else Path(data_dir)
+        self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
         self._lock = threading.Lock()
@@ -145,7 +156,7 @@ class Daemon:
             _prepare_data_dir(self._data_dir)
             try:
                 server = ThreadingHTTPServer(
-                    ("127.0.0.1", self._requested_port), _status_handler(self._data_dir)
+                    ("127.0.0.1", self._requested_port), _status_handler(self._data_dir, self._hud_dir)
                 )
             except OSError as exc:
                 raise RuntimeError(

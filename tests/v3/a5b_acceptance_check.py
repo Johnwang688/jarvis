@@ -258,11 +258,16 @@ class Protected(Base):
         with patch.object(config, "HUD3_DIR", self.root):
             self.assertTrue(permissions.denied_file(str(self.root / "x.js")))
 
-    def test_shell_writes_ask_even_when_allowlisted(self):
-        from jarvis import rules
+    def test_shell_writes_into_it_are_never_allowed(self):
+        from jarvis import permissions as P, rules
         with patch.object(config, "HUD3_DIR", self.root):
-            for line in (f"cp x.js {self.root}/x.js", f"echo 1 > {self.root}/index.html", f"rm -r {self.root}"):
-                self.assertNotEqual(rules.decide(line).decision, "allow", line)
+            for line in (f"cp /tmp/x.js {self.root}/x.js", f"echo 1 > {self.root}/index.html", f"mv /tmp/b {self.root}/b",
+                         f"rsync -a /tmp/dist/ {self.root}/new/"):
+                verdict = P.static_verdict(line)
+                self.assertEqual(verdict.decision, rules.ASK, line)
+                self.assertIn("installed HUD", verdict.reason)
+            self.assertNotEqual(P.static_verdict(f"rm -rf {self.root}").decision, rules.ALLOW)
+            self.assertEqual(P.static_verdict(f"cat {self.root}/index.html").decision, rules.ALLOW)
 
     def test_agents_cannot_run_the_installer(self):
         refused = (

@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from a4_acceptance_check import World
 from jarvis import config, protected_state
-from jarvis.v3 import cli, switch
+from jarvis.v2.hud_install import Build
+from jarvis.v3 import cli, hud, switch
 
 
 class DefaultEnv(unittest.TestCase):
@@ -490,23 +491,28 @@ class Cli(unittest.TestCase):
                 if option.option_strings:
                     self.assertEqual(option.nargs, 0, option.option_strings)
 
-    def test_agent_start_uses_force_and_reports_hud_hook(self):
+    def test_agent_start_uses_force_and_opens_the_hud(self):
         world = World(v2_busy=True)
-        with patch.object(switch, "default_env", return_value=world.env()):
+        env = world.env()
+        with (patch.object(switch, "default_env", return_value=env),
+              patch.object(hud, "open_window") as window):
             self.assertEqual(cli.main(["agent", "start"]), 3)
-            self.assertNotIn("no v3 HUD yet", world.lines)
+            window.assert_not_called()
             self.assertEqual(cli.main(["agent", "start", "--force"]), 0)
-        self.assertIn("no v3 HUD yet", world.lines)
+        window.assert_called_once_with(env.out)
 
     def test_agent_install_uses_the_user_unit_and_repo_python(self):
         env = World().env()
         home = Path("/test-home")
         repo = Path("/test-repo")
+        built = Build("build-id", home / "hud3", {})
         with (patch.object(Path, "home", return_value=home),
               patch.object(config, "REPO_ROOT", repo),
               patch.object(switch, "default_env", return_value=env),
+              patch.object(hud, "install_hud", return_value=built) as install_hud,
               patch.object(switch, "install_unit", return_value=0) as install):
             self.assertEqual(cli.main(["agent", "install"]), 0)
+        install_hud.assert_called_once_with(allow_dirty=False)
         install.assert_called_once_with(
             env, unit_path=home / ".config/systemd/user/jarvis-agent.service",
             python=str(repo / ".venv/bin/python"), repo=repo,

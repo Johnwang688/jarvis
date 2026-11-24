@@ -3290,6 +3290,7 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
     "jarvis.v3.cli": (("agent", "start"),
                       ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands")),
+    "jarvis.v3.hud": (("agent", "install"), ("main", "install_hud", "npm_build", "_npm", "open_window")),
 }
 
 

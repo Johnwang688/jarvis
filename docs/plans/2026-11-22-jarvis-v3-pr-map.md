@@ -357,6 +357,9 @@ v2's frontend components by importing them.
 - **Depends:** A3. **Size:** M.
 
 ### A5: v3 HUD skeleton (`hud3/`)
+
+Split into A5a (frontend) and A5b (Python installation, serving and launch).
+
 - **Scope:** a new `hud3/` Vite + TypeScript app, served by the v3 daemon and
   installed by `jarvis agent install` as its own Chrome app (profile
   `Default`). A boundary check.
