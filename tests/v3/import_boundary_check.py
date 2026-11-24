@@ -10,6 +10,7 @@ from jarvis.v3.imports import ALLOWED_V2, Violation, reverse_violations, violati
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWLIST = {
+    "jarvis.v2.providers.claude",
     "jarvis.v2.redact",
     "jarvis.v2.push",
     "jarvis.v2.quiet",
@@ -108,7 +109,7 @@ class ImportBoundary(unittest.TestCase):
             "from jarvis import rules\n"
             "from jarvis.v2.quiet import *\n"
             "import jarvis.v2.quiet.child\n"
-            "from jarvis.v2.providers import claude\n"
+            "from jarvis.v2.providers import claude, codex\n"
             "some_other_object.import_module('jarvis.v2.daemon')\n"
             "text = 'import jarvis.v2.daemon'\n",
         )
@@ -116,7 +117,7 @@ class ImportBoundary(unittest.TestCase):
             violations(self.base),
             [
                 Violation(path, 4, "jarvis.v2.quiet.child"),
-                Violation(path, 5, "jarvis.v2.providers.claude"),
+                Violation(path, 5, "jarvis.v2.providers.codex"),
             ],
         )
         self.assertEqual(reverse_violations(self.base), [])
@@ -147,7 +148,7 @@ class ImportBoundary(unittest.TestCase):
             "calls.py",
             "__import__('jarvis.v2', fromlist=['quiet', 'model', 'daemon', 'model'])\n"
             "__import__('jarvis.v2.quiet', fromlist=['within'])\n"
-            "__import__('jarvis.v2.providers', fromlist=['claude'])\n"
+            "__import__('jarvis.v2.providers', fromlist=['claude', 'codex'])\n"
             "__import__('jarvis.v2.daemon', fromlist=['Daemon'])\n"
             "__import__('jarvis.v2.daemon', fromlist=members)\n"
             "__import__('', globals(), fromlist=['v2', 'v3'], level=2)\n"
@@ -158,7 +159,7 @@ class ImportBoundary(unittest.TestCase):
             [
                 Violation(path, 1, "jarvis.v2.model"),
                 Violation(path, 1, "jarvis.v2.daemon"),
-                Violation(path, 3, "jarvis.v2.providers.claude"),
+                Violation(path, 3, "jarvis.v2.providers.codex"),
                 Violation(path, 4, "jarvis.v2.daemon"),
                 Violation(path, 5, "jarvis.v2.daemon"),
                 Violation(path, 6, "jarvis.v2"),

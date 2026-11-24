@@ -6,13 +6,14 @@ Contract: jarvis/v3/claude_jobs.py
   JobResult (frozen): name, model, ok: bool, outcome: "ok"|"error"|"timeout"|"cancelled", text: str, error: str,
           input_tokens, output_tokens (ints; input includes both cache counts), cost_usd: float|None, seconds: float, session_id: str|None
   Expected failures are results (ok False, a one-line `error` the owner can read), never exceptions. Bad arguments raise ValueError.
-  ALLOWED_TOOLS: frozenset[str]    built-in tools a job may be given: {"Read", "Grep", "Glob"}. Plus any "mcp__<server>__<tool>" whose
-                                   <server> is in `mcp_servers`. Anything else (Bash, Write, Edit, WebFetch, Task, "*", "Bash(ls)") -> ValueError.
+  ALLOWED_TOOLS: frozenset[str]    built-in tools a job may be given: none. A job runs with no hooks, so a built-in Read would be a credential
+                                   route nothing judges; jobs read through Jarvis's own MCP tools, which do. A tool is
+                                   "mcp__<server>__<tool>" whose <server> is in `mcp_servers`; anything else -> ValueError.
   MIN_CLI = "2.1.325"              older, or unreadable -> outcome "error" and nothing runs
   MODELS: frozenset[str]           {"haiku", "sonnet", "opus"}; anything else -> ValueError
 argv (after the CLI path), in any order but exactly these:
   -p --output-format json --model M --permission-mode dontAsk --strict-mcp-config --mcp-config FILE
-  --setting-sources= (one empty value) --no-session-persistence --disable-slash-commands --tools CSV-of-builtins ("" when none)
+  --setting-sources= (one empty value) --no-session-persistence --disable-slash-commands --tools "" (no built-in tool, ever)
   --allowedTools CSV (omitted when there are none)
 The prompt goes on stdin, never argv. The MCP file: 0600 in a 0700 folder under config.V3_DIR/jobs, removed afterwards, whatever happened.
 The environment is built from a keep list: nothing of the daemon's own keys reaches the child.
@@ -92,16 +93,17 @@ class Argv(Base):
 
     def test_tools(self):
         servers = {"brain": {"command": "x", "args": []}}
-        self.run_job(tools=("Read", "mcp__brain__memory_add", "Grep"), mcp_servers=servers)
+        self.assertEqual(claude_jobs.ALLOWED_TOOLS, frozenset())
+        self.run_job(tools=("mcp__brain__session_search", "mcp__brain__memory_add"), mcp_servers=servers)
         argv = self.seen()["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep")
-        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read,mcp__brain__memory_add,Grep")
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "mcp__brain__session_search,mcp__brain__memory_add")
         self.assertEqual(json.loads(self.seen()["mcp"]["text"]), {"mcpServers": servers})
 
     def test_refused_arguments_run_nothing(self):
         servers = {"brain": {"command": "x"}}
         bad = [dict(tools=(t,), mcp_servers=servers) for t in
-               ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Skill", "*", "Bash(ls:*)", "Read(/etc/**)",
+               ("Read", "Grep", "Glob", "LS", "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Skill", "*", "Bash(ls:*)", "Read(/etc/**)",
                 "mcp__other__x", "mcp__brain", "mcp__brain__*", "mcp__*", "mcp__brain__a,Bash", "Read Bash", "", " Read", "read", "default", "--x")]
         bad += [dict(model=m) for m in ("", "gpt", "haiku --x", "claude-haiku-5-5", None)]
         bad += [dict(name=n) for n in ("", "a b", "../x", "A" * 80, "a\nb", "-x")]
