@@ -1,4 +1,34 @@
 {
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.threads | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.procs | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.threads | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.procs | xargs -r kill": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.threads | xargs -r kill": [
+"allow",
+"e3b0c44298fc",
+false
+],
 "fuser -k 8400-8409/tcp": [
 "deny",
 "fc7924fc02b9",
@@ -22,6 +52,21 @@ false
 "fuser -k 8408/tcp": [
 "deny",
 "fc7924fc02b9",
+false
+],
+"grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs -r kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"grep -l daemon2 /proc/123/status | cut -d/ -f3 | xargs -r kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"grep -l daemon2 /proc/[1-9]*/comm | cut -d/ -f3 | xargs -r kill": [
+"deny",
+"19266c55bb8e",
 false
 ],
 "kill $(lsof -t -i:8400-8409)": [
@@ -2470,6 +2515,66 @@ false
 false
 ],
 "lsof -i:8408": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.threads | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.procs | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.threads | xargs -r kill": [
+"deny",
+"24664c8c284e",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.procs | xargs -r kill": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.threads | xargs -r kill": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs": [
+"deny",
+"b9c0cc38ded0",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.threads": [
+"deny",
+"b9c0cc38ded0",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.procs": [
+"deny",
+"b9c0cc38ded0",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service/cgroup.threads": [
+"deny",
+"b9c0cc38ded0",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.procs": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.threads": [
 "allow",
 "e3b0c44298fc",
 false

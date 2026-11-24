@@ -4000,11 +4000,13 @@ COSTLY = "too costly to judge"
 
 
 def _daemon_spans(unit: str, full: bool = True) -> list[tuple[str, int, int]]:
-    """Command lines with the span of their final op word, or process names
-    with no span for a selection to overlap."""
+    """Command lines with the span of their op word (its first appearance: a
+    checkout path may hold it too), or process names with no span for a
+    selection to overlap."""
     if not full:
         return [(text, -1, -1) for text in _DAEMON_NAMES]
-    return [(text, text.rindex(" ") + 1, len(text))
+    word = next(word for word, owner in _DAEMON_OP_WORDS.items() if owner == unit)
+    return [(text, text.find(word), text.find(word) + len(word))
             for text in _daemon_command_lines().get(unit, ())]
 
 
