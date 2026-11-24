@@ -1,6 +1,6 @@
 # Jarvis v3: PR map
 
-Status: **draft for owner review, nothing built.** Companion to
+Status: **in progress.** Merged by 2026-11-24: A1–A5, K1–K3, M3. Companion to
 [`2026-11-22-jarvis-v3-plan.md`](2026-11-22-jarvis-v3-plan.md), which holds
 the reasoning and the owner decisions (H1–H9, V1–V5, A-1–A-3).
 
@@ -27,7 +27,7 @@ map says *what* to build; the plan says *why*.
 | **K** | Shared foundations (scanner, Claude job runner, budget) | §6 | no |
 | **M** | Brain: vault, search, skills, jarvis-brain MCP | §6 | no |
 | **L** | Learning loop | §6.3–6.4 | no |
-| **G** | Gate as global hooks | §5 | yes (blocks R) |
+| ~~G~~ | Gate as global hooks: **dropped** (owner, 2026-11-24, H10) | — | — |
 | **C** | Calendar + ingestion | §12.1, §16 | no |
 | **P** | Personal model + writing style | §12 | no |
 | **B** | Briefs + feed | §14 | no |
@@ -35,18 +35,17 @@ map says *what* to build; the plan says *why*.
 | **T** | T3 integration | §3, §4, §7 | yes |
 | **R** | Cutover: v3 becomes the default; docs | §7, §8 phase 6, §21 | yes |
 
-Every track except G, T and R is useful even if the T3 switch is abandoned
+Every track except T and R is useful even if the T3 switch is abandoned
 after the spikes.
 
 ### 0.2 Owner gates (nothing past a gate merges until the owner answers)
 
 | Gate | Decides | Blocks |
 |---|---|---|
-| **OG1** | Go / no-go on the T3 switch, from the S1–S6 findings, and which display option (S1) | T2+, G4+, R1 |
+| **OG1** | Go / no-go on the T3 switch, from the S1 and S3–S6 findings, and which display option (S1) | T2+, R1 |
 | **OG2** | §13 decision-rights matrix, line by line | I1 merge |
 | **OG3** | Which Claude tier runs the planner and nightly consolidation (the reviewer is Haiku, per H9) | P1, I3 merge |
 | **OG4** | Calendar auth: the owner re-runs `jarvis auth google` after C1 merges (human step) | C1 live use, C3 calendar ingester |
-| **OG5** | Shadow → enforce for the global gate hook, from the shadow report | G5 |
 | **OG6** | Parity checklist sign-off: what v3 has versus v2 (S6, updated after T5) | R1 (cutover) |
 
 ### 0.3 Rules for every PR (from CLAUDE.md and the owner's standing instructions)
@@ -105,7 +104,6 @@ New `config` constants, each with an env override as is the pattern in
 | `SIGNALS_DIR` | `V3_DIR/signals` (trigger snapshots) | — |
 | `POLICY_FILE` | `V3_DIR/policy.json` (**protected state**) | — |
 | `BUDGET_LEDGER` | `V3_DIR/budget.jsonl` | — |
-| `GATE_SHADOW_LOG` | `V3_DIR/gate-shadow.jsonl` | — |
 
 ### 1.2 Vault entry
 
@@ -206,7 +204,7 @@ One file per item, `<ts>-<rand>.json`:
 
 ```
 A1 ─▶ A2 ─▶ A3 ─▶ A4, A5, A6    (wave 0: every jarvis/v3 PR builds on A2/A3)
-S1 S2 S3 S4 S5 S6 ─────────────────────────────▶ OG1
+S1 S3 S4 S5 S6 ────────────────────────────────▶ OG1
 K1 ─┬─▶ M2 ─┬─▶ M4 ─▶ L1 ─▶ L2 ─▶ L3
     │       ├─▶ P1 ─▶ P2           ▲
     ├─▶ M5 ─┴─▶ M6                 │
@@ -216,9 +214,8 @@ C1 ─▶ C3, I2
 B1 ─▶ B2, B3, B4, L3, I3
 I1 (after OG2) ─▶ I3 ─▶ I4 ─▶ I5
 I2 ─▶ I3
-G1 ─▶ G2 ─▶ G3 ─▶ G4 ─▶ (shadow ≥ 5 days) ─▶ OG5 ─▶ G5
 T1 ─▶ T4 (also needs A6);  OG1 ─▶ T2 ─▶ T3 ─▶ T5 (needs A5)
-R1 (cutover) needs G5 + T3 + T4 + T5 + A6 + OG6;  R2 last
+R1 (cutover) needs T3 + T4 + T5 + A6 + OG6;  R2 last
 ```
 
 **Suggested waves** (2–4 agents busy, per the owner's pipelining rule):
@@ -226,13 +223,13 @@ R1 (cutover) needs G5 + T3 + T4 + T5 + A6 + OG6;  R2 last
 | Wave | PRs |
 |---|---|
 | 0 | A1, A2, then A3; then A4, A5 (A6a–A6f run beside waves 2–5) |
-| 1 | S1–S6 (one agent, sequential), K1, K2, G1 |
+| 1 | S1–S6 (one agent, sequential), K1, K2 |
 | 2 | M2, M3, K3, M5, C1, B1, T1 |
-| 3 | M4, M6, L1, G2, C2, B2 |
-| 4 | L2, G3, C3, B3, P1, (OG1) T2 |
-| 5 | L3, G4, P2, B4, (OG2) I1, I2, T3 |
+| 3 | M4, M6, K4, L1, C2, B2 |
+| 4 | L2, C3, B3, P1, (OG1) T2 |
+| 5 | L3, P2, B4, (OG2) I1, I2, T3 |
 | 6 | P3, I3, T4, T5 |
-| 7 | P4, I4, (OG5) G5 |
+| 7 | P4, I4 |
 | 8 | I5, (OG6) R1, R2 |
 
 ---
@@ -452,29 +449,9 @@ changing it.
   - [ ] Keyboard-focus implications stated, against CLAUDE.md's "no frame
     takes the keyboard" rule.
 
-### S2: The global gate hook under T3 ⚑ boundary
-- **Question:** do global Claude and Codex hooks fire in T3-started sessions,
-  in every T3 permission mode, and what do deny and ask do?
-- **Spec:**
-  - A stub hook that logs its input and returns a scripted decision (allow,
-    deny, ask), installed into a **temp** HOME's `~/.claude/settings.json`
-    and the Codex hook config.
-  - Start a T3 server against that HOME and run one scripted thread per
-    permission mode: Full access, Supervised, plus the other two documented
-    in `docs/user/permission-modes.md`.
-  - For Codex, find the hook config format on 0.169.1 (`codex features
-    list` shows `hooks stable true`).
-- **Acceptance:**
-  - [ ] A table of {provider × mode × decision} → observed behavior: was
-    the tool blocked, did a T3 approval card appear, did the agent see the
-    reason.
-  - [ ] Hook latency: p50/p95 over ≥ 50 calls.
-  - [ ] A list of T3 actions that never pass through a CLI hook (git
-    operations, worktree creation, PR actions, previews), each marked as
-    acceptable or a gap.
-  - [ ] Whether T3 passes `--setting-sources` or otherwise skips user
-    settings (if it does, global hooks don't load, and the finding is a
-    no-go unless a workaround exists).
+### S2: dropped (owner, 2026-11-24, H10)
+T3 sessions run under T3's and the CLIs' own permission models; Jarvis adds no
+gate hook, so there is nothing to measure.
 
 ### S3: Driving T3 from the daemon
 - **Spec:**
@@ -502,7 +479,7 @@ changing it.
     against the live install).
 
 ### S5: Global MCP server and Stop hook loading under T3
-- **Spec:** with S2's temp HOME, register a stub MCP server globally (Claude
+- **Spec:** in a throwaway HOME, register a stub MCP server globally (Claude
   user scope; Codex `config.toml`) plus a stub `Stop` hook. Check whether
   T3-started sessions see the server despite T3's
   `--allowedTools=mcp__t3-code__*`, and whether the Stop and turn-complete
@@ -518,6 +495,9 @@ changing it.
   views, diff quick review, approval summaries, PR merge flow, chat_git,
   running cost, titles, Discord), find T3's equivalent.
 - **Acceptance:**
+  - [ ] A list of what T3 does itself, outside the CLIs (git operations,
+    worktree creation, PR actions, previews), each marked acceptable or a gap
+    (moved here from S2).
   - [ ] A table with each feature marked native / close / lost, with the T3
     doc reference.
   - [ ] "Lost" items each get a proposed fate: rebuild as a Jarvis panel,
@@ -616,6 +596,26 @@ S1–S6. It is the owner's decision.
 
 ---
 
+### K4: Protected state for v3's data ⚑ boundary
+(G2, kept for Jarvis's own agents.)
+- **Scope:** `jarvis/protected_state.py` and its v2 parity users; tests.
+- **Spec:** for v1 and v2 agents, add as protected: `POLICY_FILE`,
+  `SKILL_LEDGER_DIR`, `LEARNED_SKILLS_DIR` (writes only through
+  `skill_manage`; generic Write/Edit/shell asks, or is denied for the ledger),
+  `REVIEW_QUEUE_DIR`, `BUDGET_LEDGER`, and the global MCP and hook sections
+  `jarvis brain install` writes. Keep the indirect, ancestor and symlink
+  checks, and v1/v2 parity.
+- **Acceptance:**
+  - [ ] Every new path is denied or asked through redirect, `tee`, `sed -i`,
+    `cp`/`mv`, symlink and ancestor routes (the existing matrix style).
+  - [ ] "Permission state cannot authorize its replacement" holds: an
+    allowlist entry can't open these paths.
+  - [ ] A before/after comparison against main: 0 decisions weaker.
+  - [ ] Mutation evidence.
+- **Depends:** M5. **Size:** M.
+
+---
+
 ## 5. Track M: Brain
 
 ### M2: Vault store + memory tools v2
@@ -703,14 +703,13 @@ S1–S6. It is the owner's decision.
     P4's drafting.
   - Bound toolset per invariant 10: dispatch refuses anything outside the
     profile.
-  - Approval hook: dangerous tools ask through the existing `_approver` path
-    until G-track hooks exist; afterwards `mcp__jarvis-brain__*` calls are
-    judged by the global hook like any tool.
+  - Dangerous tools ask through the existing `_approver` path, enforced in the
+    MCP server's own process whoever calls it (H10).
   - `install` writes the user-scope MCP registration for Claude and Codex.
     It backs up the prior file, is idempotent, and prints exactly what it
     changed.
   - The installer is a **CLI the owner runs**. The written config files
-    become protected state (G2).
+    are reported by `status` when they drift.
 - **Acceptance:**
   - [ ] `tools/list` returns exactly the profile.
   - [ ] An out-of-profile call is refused before argument parsing.
@@ -857,99 +856,22 @@ S1–S6. It is the owner's decision.
 
 ---
 
-## 7. Track G: Gate as global hooks ⚑ boundary (whole track)
+## 7. Track G: dropped (owner, 2026-11-24, H10)
 
-### G1: Hook judge command, shadow mode
-- **Scope:** new `jarvis/v3/hooks/gate.py` (`python -m
-  jarvis.v2.hooks.gate`); `tests/v3/hook_gate_check.py`.
-- **Spec:**
-  - Reads a Claude `PreToolUse` payload from stdin and maps the tool to the
-    existing judges **in-process**, with no daemon dependency for DENY:
-    - Bash → `rules.decide`, the full segment judge;
-    - Write/Edit/MultiEdit/NotebookEdit → protected-state and
-      credential-path checks;
-    - Read/Grep/Glob → the credential read refusal;
-    - WebFetch → the control-plane and LAN URL refusal;
-    - `mcp__*` → per-server policy table.
-  - Output per hook contract: DENY → `permissionDecision: deny` with the
-    reason. In **shadow mode** (default) it always returns no decision,
-    i.e. defers to the CLI, and appends `{ts, session, tool, input-redacted,
-    would_decide, reason}` to `GATE_SHADOW_LOG`. Mode is read from a
-    protected file, not env.
-  - Fail-closed policy: in enforce mode, a judge exception → deny with the
-    reason. In shadow mode → log the exception.
-  - Skips nothing based on env (an agent could set env). Recursion and job
-    flags don't relax the gate.
-- **Acceptance:**
-  - [ ] Parity test: replays the existing v2 gate test vectors (the
-    `providers/claude.py` hook tests and `permissions` tests) through the
-    hook and gets the same decisions.
-  - [ ] Mutation evidence on each tool mapping.
-  - [ ] p95 < 150 ms per call (S2 baseline).
-  - [ ] Credentials never appear in the shadow log (redaction test with
-    planted values).
-- **Depends:** S2. **Size:** M.
+No global gate hooks for T3 sessions: they use T3's permission modes and the
+CLIs' own safeguards. What follows from it:
 
-### G2: Protected-state additions
-- **Scope:** `jarvis/protected_state.py` and its v2 parity users; tests.
-- **Spec:** add as protected:
-  - `~/.claude/settings.json` (and `settings.local.json`) hook and MCP
-    sections;
-  - Codex hook and MCP config;
-  - `POLICY_FILE`;
-  - the gate-mode file;
-  - `SKILL_LEDGER_DIR`;
-  - `LEARNED_SKILLS_DIR` (writes only through `skill_manage`; generic
-    Write/Edit/shell → ASK, or DENY for the ledger);
-  - `REVIEW_QUEUE_DIR`.
-
-  Keep the indirect, ancestor and symlink checks, and v1/v2 parity.
-- **Acceptance:**
-  - [ ] Every new path is denied or asked through Bash redirect, `tee`,
-    `sed -i`, `cp`/`mv`, symlink and ancestor routes. Reuse the existing
-    matrix style.
-  - [ ] "Permission state cannot authorize its replacement" holds: a known
-    allowlist entry can't open these paths.
-  - [ ] Mutation evidence.
-- **Depends:** G1. **Size:** M.
-
-### G3: Codex hook adapter
-- **Scope:** `jarvis/v3/hooks/gate_codex.py` (or a mode flag on G1);
-  installer entries.
-- **Spec:** the same judge, adapted to Codex's hook payload and decision
-  format (from S2). Covers shell, apply_patch/file writes and MCP calls.
-  Shadow mode first.
-- **Acceptance:**
-  - [ ] Codex fixture payloads produce the same decisions as G1 for
-    equivalent actions.
-  - [ ] The test vectors for Codex's existing chat config gates are
-    replayed.
-- **Depends:** G1, S2. **Size:** S–M.
-
-### G4: Gate installer + shadow report
-- **Scope:** `jarvis hooks install|status|uninstall|report` (owner-run).
-- **Spec:**
-  - `install` adds the PreToolUse (G1/G3) and Stop (L1) entries to the
-    user-scope configs with a backup; it is idempotent.
-  - `status` shows mode, drift and the last-24 h decision counts.
-  - `report --days N` compares shadow decisions against what the v2 gate
-    decided for the same sessions (where Jarvis-spawned sessions overlap).
-    It lists every would-deny and would-ask, grouped.
-- **Acceptance:**
-  - [ ] Install/uninstall round-trip in temp HOME.
-  - [ ] The report renders from a fixture log.
-  - [ ] Running install twice is a no-op.
-- **Depends:** G1–G3. **Size:** S.
-
-### G5: Enforce (after OG5)
-- **Scope:** flip the default mode and add the ASK mapping chosen from S2:
-  T3 Supervised, or ASK → DENY with the reason.
-- **Acceptance:**
-  - [ ] The owner's OG5 answer is recorded in the plan.
-  - [ ] An enforced DENY is verified in a temp-HOME T3 session (S2 harness).
-  - [ ] CLAUDE.md's Safety summary is updated in R4, not here; this PR adds
-    a dated note to `docs/notes/safety-permissions.md`.
-- **Depends:** G4 + ≥ 5 days of shadow logs + OG5. **Size:** S.
+- **S2 and OG5 are gone, and R1 no longer waits for G5.** S5 checks only the
+  MCP server and the `Stop` hook, which is the learning loop's (L1), not a gate.
+- **Jarvis's own actions stay ask-first** (Track I). I1 still computes levels,
+  but L0/L1 is never executed without an owner tap, and I5's promotions are
+  recorded, not acted on, until the owner decides otherwise.
+- **K4 replaces G2** (Track K): v3's data becomes protected state for Jarvis's
+  own v1/v2 agents, which keep their gate.
+- **Jarvis's own surfaces keep their gates**: the brain MCP enforces its bound
+  toolset, path checks and scanner in its own process, whoever calls it; v2 is
+  unchanged.
+- Nothing in v3 may assume that a T3 session was judged by Jarvis.
 
 ---
 
@@ -1133,8 +1055,8 @@ S1–S6. It is the owner's decision.
     - everything else → batched for B4.
   - Actions: approve, edit, other (free text), not_now, plus feedback taps.
     Approve with a `proposal_id` calls I4.
-  - Expiry: a decision past `default.at` executes its default (if the
-    default is a no-op or L0/L1) or expires.
+  - Expiry: a decision past `default.at` runs its default only if the default
+    is a no-op; anything else expires (H10).
   - Agents can create briefs only through a typed `brief_post` tool (the
     `owner_post` pattern) and can never read or answer them, matching
     today's inbox rule.
@@ -1221,8 +1143,8 @@ S1–S6. It is the owner's decision.
     - money → L2;
     - the gate's DENY classes and schoolwork submission → L3;
     - an unknown kind → `default_level` (L2).
-  - The file is protected state (G2). Only the owner CLI or HUD route
-    writes it.
+  - Only the owner CLI or HUD route writes it. **Every level asks** (H10): the
+    executor needs an approval record for L0 and L1 too.
 - **Acceptance:**
   - [ ] Table tests for every default rule.
   - [ ] Hard rules can't be overridden by a file rule (a test writes a
@@ -1270,7 +1192,7 @@ S1–S6. It is the owner's decision.
     and kind.
   - The planner's own tools are read-only (memory read, session_search,
     calendar_list/free). **It holds no outward tools.**
-  - L2 proposals become briefs (B1). L0/L1 go to I4.
+  - Every proposal becomes a brief (B1); L0/L1 ones are one-tap (H10).
 - **Acceptance:**
   - [ ] Golden tests: each signal kind → the expected proposal shapes from
     a recorded fake response.
@@ -1286,7 +1208,7 @@ S1–S6. It is the owner's decision.
 ### I4: Executor
 - **Scope:** `jarvis/v3/executor.py`, `tests/v3/executor_check.py`.
 - **Spec:**
-  - Runs an approved or L0/L1 proposal:
+  - Runs an approved proposal (H10: L0 and L1 need the approval too):
     - direct brain tools: calendar create/update on tagged events, vault
       writes, labels;
     - **or** starts a T3 thread through T1 (`thread.start`) with a brief
@@ -1316,7 +1238,7 @@ S1–S6. It is the owner's decision.
 - **Acceptance:**
   - [ ] The counting window is tested.
   - [ ] Hard-rule kinds are never proposed.
-  - [ ] An agent can't write the promotion directly (G2 test).
+  - [ ] A promotion is recorded only through the owner CLI or HUD route.
 - **Depends:** I1, I4. **Size:** S.
 
 ---
@@ -1365,7 +1287,7 @@ S1–S6. It is the owner's decision.
     v3 daemon);
   - skills (list, ledger, rollback, pin, lock);
   - cron (v3 schedules);
-  - status (budget, gate shadow/enforce, ingester health, which daemon is
+  - status (budget, ingester health, which daemon is
     active).
 
   T3 owns threads and projects, so hud3 has no thread sidebar of its own.
@@ -1398,7 +1320,7 @@ S1–S6. It is the owner's decision.
   - [ ] Cron agent jobs start T3 threads, with pre-flight validation that
     spends no tokens.
   - [ ] Running the schedule import twice creates no duplicates.
-- **Depends:** T1, M4, A6, G5 (desktop driving from T3 needs the enforced
+- **Depends:** T1, M4, A6, an owner decision (desktop driving from T3 needed the enforced
   gate). **Size:** M.
 
 ### T5: v3 phone (agentic)
@@ -1429,7 +1351,7 @@ never includes them. So this track has no deletions.
 ### R1: Make v3 the default
 - **Spec:**
   - After OG6 (the owner signs off the S6 checklist, updated to "what v3 has
-    versus v2") and G5, `jarvis-agent` becomes the unit enabled at login.
+    versus v2"), `jarvis-agent` becomes the unit enabled at login.
   - `jarvis hud` remains the way into v2 (A4 switch).
   - Record the cutover date in the plan.
 - **Acceptance:**
@@ -1438,13 +1360,13 @@ never includes them. So this track has no deletions.
   - [ ] `jarvis hud` switches to v2 and back, working.
   - [ ] `git diff v2-final -- jarvis/v2 hud` contains only `frozen v2`
     fix PRs.
-- **Depends:** G5, T3, T4, T5, A6, OG6. **Size:** S.
+- **Depends:** T3, T4, T5, A6, OG6. **Size:** S.
 
 ### R2: Docs for v3 as current
 - **Spec:**
   - AGENTS.md: rewrite *Working on v2*, *Phone*, *Inbox* and the *Safety
     design* summaries so each says whether it applies to v2 (archived), to
-    v3, or to both. For v3, global hooks are the gate (G5), T3 runs sessions,
+    v3, or to both. For v3, T3 runs sessions under its own permission model (H10),
     briefs replace the inbox, and the phone is agentic-only.
   - Update `docs/notes/safety-permissions.md`, `control-plane.md`
     (including H6 and the v3 port) and
@@ -1462,15 +1384,15 @@ never includes them. So this track has no deletions.
 ## 14. Definition of done for v3
 
 - [ ] An agent started anywhere (T3, a terminal `claude`, Codex) has memory,
-  session search and skills through jarvis-brain, and is judged by the
-  global gate in enforce mode.
+  session search and skills through jarvis-brain, and runs under
+  T3's and its CLI's own permission model (H10).
 - [ ] After a real multi-step task, a skill is created or patched
   automatically, appears in the evening digest, and can be rolled back in
   one tap.
 - [ ] The morning brief starts from the real calendar and lists due
   schoolwork, open decisions and commitments, in ≤ 8 lines.
 - [ ] A new Canvas assignment results, with no prompt from John, in
-  calendar work blocks (L0/L1) and an L2 brief offering a T3 thread to
+  one-tap briefs for calendar work blocks and one offering a T3 thread to
   start it.
 - [ ] An email asking to meet results in a brief with a draft in John's
   voice and two free slots. One tap sends it, and an edit before sending
