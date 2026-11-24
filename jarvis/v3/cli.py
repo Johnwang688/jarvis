@@ -1,4 +1,4 @@
-"""Command-line entry points for the v3 daemon."""
+"""Command-line entry points for the v3 daemon and vault."""
 
 import argparse
 from http.client import HTTPConnection, HTTPException
@@ -120,6 +120,18 @@ def learned(args) -> int:
     return 0
 
 
+def vault_import(_args) -> int:
+    from .vault import Vault
+
+    try:
+        added, skipped = Vault().import_memory(Path(config.REPO_ROOT) / "memory")
+    except (OSError, ValueError):
+        print("Error: Vault import could not complete.")
+        return 1
+    print(f"Imported {len(added)} memory entries. Skipped {len(skipped)}.")
+    return 0
+
+
 def add_commands(sub):
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
@@ -145,6 +157,10 @@ def add_commands(sub):
     commands.add_parser("rollback", help="undo an applied ledger change").add_argument("id")
     for action in ("pin", "unpin", "lock", "unlock"):
         commands.add_parser(action, help=f"{action} a learned skill").add_argument("name")
+
+    vault = sub.add_parser("vault", help="owner memory vault commands")
+    vault_sub = vault.add_subparsers(dest="action", required=True)
+    vault_sub.add_parser("import", help="copy legacy repo memory into the vault").set_defaults(func=vault_import)
 
 
 def main(argv: list[str]) -> int:

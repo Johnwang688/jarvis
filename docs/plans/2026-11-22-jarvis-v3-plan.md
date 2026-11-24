@@ -37,7 +37,7 @@ Research inputs: a read of Hermes Agent at commit `0f602c5` (docs + `agent/`,
 | # | Decision | Notes |
 |---|---|---|
 | H1 | **The Jarvis HUD and T3 Code run together. T3 shows up as a panel inside the HUD.** T3's thread and project handling replaces the HUD sidebar. T3 replaces the inbox natively, since the inbox was modeled on T3 to begin with. | See §4 for the framing problem this runs into. |
-| H2 | **Retire Jarvis's providers** (Claude/Codex sessions spawned by daemon2). T3 runs every agent session. | The gate has to move first (§5). That is the go/no-go item. |
+| H2 | **Retire Jarvis's providers** (Claude/Codex sessions spawned by daemon2). T3 runs every agent session. | T3 sessions use T3's and the CLIs' own permission models (H10). |
 | H3 | **Jarvis keeps everything else:** voice, PC controls, cron, persistent memory, self-improving skills, and the rest of the non-chat surfaces. | |
 | H4 | **Skills the reviewer writes go live automatically after a scan.** Every change can be rolled back from a ledger and appears in a daily digest. | Hermes-style. The safeguards in §6.4 still apply; none of them need an approval. |
 | H5 | **The always-on part runs on this PC** (daemon2 under WSL systemd). | A VPS can come later. |
@@ -45,6 +45,7 @@ Research inputs: a read of Hermes Agent at commit `0f602c5` (docs + `agent/`,
 | H7 | **Retire Discord** as a Jarvis surface. | Covers the bot, per-project channels and per-task threads. |
 | H8 | **Keep Jarvis's phone surface for the agentic interface** (voice, PC control, memory, cron, Jarvis status). T3's mobile app handles chats. | The phone's thread and chat views retire. The passkey, the 1 h unlock and the loopback-behind-Tailscale rules stay for what remains. |
 | H9 | **The background reviewer runs on the Claude subscription** (`claude -p`, Haiku tier), not OpenRouter. | It spends Claude limits, so it needs a budget (§6.3). |
+| H10 | **No Jarvis gate hooks on T3 sessions** (owner, 2026-11-24). They run under T3's permission modes and the CLIs' own safeguards. | Drops Track G, S2 and OG5 (§5 is kept as the record of what was planned). Jarvis's own actions stay ask-first. |
 
 Earlier decisions still in force: the fast path stays Jarvis's own loop (no
 framework, D2). Skills and memory stay plain markdown files. The memory ladder
@@ -95,7 +96,7 @@ on-demand index is better).
  └──────┬────────────────────────────────┘     │ review queue + reviewer     │
         │ every session loads, via global config│ session indexer             │
         ▼                                       └─────────────────────────────┘
- global Claude/Codex hooks ──▶ Jarvis gate (judge, secrets, protected state)
+ global Stop hook ───────────▶ review queue (learning loop, L1)
  global MCP server ──────────▶ jarvis-brain (memory, search, skills, desktop,
                                 cron, owner_post, Spotify, …)
  Stop / turn-complete hooks ─▶ review queue (files) ─▶ reviewer (claude -p)
@@ -139,6 +140,8 @@ untrusted pages in the Browser.
 ---
 
 ## 5. Moving the gate (the go/no-go)
+
+> **Superseded by H10 (owner, 2026-11-24): not built.**
 
 Today Claude's gate is a `PreToolUse` hook that Jarvis puts into each session
 it spawns (`v2/providers/claude.py` ~L1100). Codex's gate is the config
@@ -188,8 +191,7 @@ sessions, terminal sessions and the fast path (as plain tools) all get it.
   Read-before-write is enforced, and every write is scanned and ledgered.
 - Later, moved over from v2's own tools: desktop/HUD driving, cron,
   owner_post, Spotify and the other integrations, each with its existing
-  approval rule. MCP calls pass through the global `PreToolUse` hook as
-  `mcp__jarvis__*`, so the gate judges them like anything else.
+  approval rule, enforced in the MCP server's own process (H10).
 
 ### 6.2 Memory vault
 
@@ -267,7 +269,7 @@ search results are scrubbed again on the way out.
 | `v2/providers/` (claude, codex*, codex_config/rpc/login/usage), catalogs, `provider.py`, `model.py`, ~9k lines | T3 |
 | Thread/project stores, sidebar, titles, sub-agent panes, chat-to-chat, compact button, fast-mode chip, running cost | T3 (parity checked in S6) |
 | Inbox (WS-0..5), PR rows / merge flow, `chat_git` | T3 (PR watch, worktrees, git) |
-| Approval broker and cards for agent sessions | T3 approvals + global gate hook |
+| Approval broker and cards for agent sessions | T3 approvals (H10) |
 | Discord bot, channels, per-task threads | Retired (H7) |
 | Phone thread/chat views | T3 mobile; Jarvis phone keeps the agentic views (H8) |
 | Fast path, voice, wake word, STT/TTS, speech | Jarvis (unchanged) |
@@ -292,8 +294,7 @@ switch is abandoned.
 
 **Phase 0: spikes. They produce findings, not product code.**
 - S1: how to show T3 with the HUD (§4, options a/b).
-- S2: the global gate hook in T3-started Claude and Codex, in every T3
-  permission mode. Do DENY and ASK work? Is the latency acceptable?
+- S2: dropped (H10).
 - S3: daemon2 drives T3 through `t3 thread start|send|show --json`, and gets
   "turn ended" and "waiting on you" signals, either through the MCP event
   stream or by polling the CLI.
@@ -311,8 +312,7 @@ away from this kind of chat.
 
 **Phase 2: learning loop** (§6.3, §6.4) and the digest.
 
-**Phase 3: gate as global hooks.** Shadow mode first, then enforcement after
-an owner OK (§5). This can run in parallel with phases 1–2.
+**Phase 3: dropped (H10).**
 
 **Phase 4: HUD + T3** (the S1 outcome). Sidebar handover. Jarvis panels for
 the vault, skills, digest and cron. Slim the phone to its agentic views.
@@ -332,9 +332,9 @@ grep tests for the sentences that changed (docs text is tested).
 - **T3 churn.** T3 is pre-1.0 with nightlies several times a day. Integrate
   only through documented surfaces: the `t3` CLI, the `/mcp` endpoint and the
   CLIs' own hooks and config. Never the WebSocket RPC or its sqlite.
-- **Gate coverage.** A global hook covers tools the CLI routes through hooks.
-  Anything T3 does itself (git operations, worktree creation, PR actions) is
-  outside the gate. List those in S2/S6 and judge whether each is acceptable.
+- **Gate coverage.** T3 sessions are governed by T3's permission modes and the
+  CLIs' safeguards (H10). S6 lists what T3 does itself (git operations,
+  worktree creation, PR actions, previews).
 - **Remote access.** T3 has its own sign-in, outside the passkey model the
   phone uses (H6).
 - **Subscription burn.** The reviewer spends Claude limits (H9). The cap and
@@ -497,8 +497,8 @@ If you ignore it: <what Jarvis does by default, and when>
 ```
 signals ──▶ cheap triggers (no tokens) ──▶ planner job (Claude) ──▶ proposals
                                                                     │
-            L0/L1 ──▶ do (T3 thread or Jarvis action) ──▶ digest    │
-            L2    ──▶ brief ──▶ John taps ──▶ do ◀──────────────────┘
+            L0/L1 ──▶ one-tap brief ──▶ John taps ──▶ do ──▶ digest │   (H10: every level asks)
+            L2    ──▶ full brief ───▶ John taps ──▶ do ◀────────────┘
 ```
 
 - **Signals:** new mail; calendar changes; a new Canvas assignment or a
