@@ -40,6 +40,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/calendar.events",
 ]
 
 
@@ -111,6 +112,14 @@ def access_token() -> str:
                     "to re-run `jarvis auth google`."
                 )
             raise AuthError(f"token refresh failed ({error}).")
+
+        rotated = payload.get("refresh_token")
+        if isinstance(rotated, str) and rotated and rotated != bundle["refresh_token"]:
+            # Saved before the new access token is used: the old one may already be dead.
+            try:
+                write_private(config.GOOGLE_TOKEN_PATH, json.dumps({**bundle, "refresh_token": rotated}, indent=2).encode("utf-8"))
+            except OSError as exc:
+                raise AuthError(f"could not save the rotated Google token ({type(exc).__name__}).") from exc
 
         _cached_token = payload["access_token"]
         _expires_at = time.time() + float(payload.get("expires_in", 3600))
