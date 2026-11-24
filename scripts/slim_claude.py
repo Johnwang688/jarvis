@@ -344,8 +344,11 @@ def verify(root, original):
         end = f"<!-- retained:{item['name']}:end -->\n".encode()
         require(guide.count(begin)==guide.count(end)==1, "retained marker")
         payload = guide[guide.index(begin)+len(begin):guide.index(end)]
-        require(payload==b"".join(lines[item["start"]-1:item["end"]]), f"retained {item['name']} differs")
-        require(sha(payload)==item["sha256"], "retained digest")
+        kept = b"".join(lines[item["start"]-1:item["end"]])
+        require(sha(kept)==item["sha256"], "retained digest")
+        # `public_sha256`: the owner had machine details taken out of the public guide
+        # (2026-11-23), so that copy is pinned by its own digest instead.
+        require(sha(payload)==item.get("public_sha256", item["sha256"]), f"retained {item['name']} differs")
     links(root, [GUIDE, POINTER, *notes])
     return dict(source_bytes=len(original),source_lines=SOURCE_LINES,guide_bytes=len(guide),
                 notes=len(notes),blocks=len(payloads),source_sha256=sha(restored))
