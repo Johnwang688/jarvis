@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 from threading import Lock
 import time
 from urllib.request import HTTPErrorProcessor, ProxyHandler, Request, build_opener
@@ -37,7 +38,14 @@ def _open(request, *, timeout):
 def _access_token():
     override = os.environ.get("JARVIS_CLAUDE_CREDENTIALS")
     path = Path(override) if override else Path.home() / ".claude" / ".credentials.json"
-    body = json.loads(path.read_text(encoding="utf-8"))
+    # Never wait on a FIFO, never read without a bound.
+    with open(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC), "rb") as login:
+        if not stat.S_ISREG(os.fstat(login.fileno()).st_mode):
+            return None
+        raw = login.read(_BODY_CAP + 1)
+    if len(raw) > _BODY_CAP:
+        return None
+    body = json.loads(raw)
     oauth = body.get("claudeAiOauth") if isinstance(body, dict) else None
     token = oauth.get("accessToken") if isinstance(oauth, dict) else None
     return token if isinstance(token, str) and token.strip() else None
@@ -124,8 +132,12 @@ def read_windows(*, opener=None) -> list[dict] | None:
     """Read current usage, with a five-minute cache and a short failure back-off."""
     global _cached, _retry_at
     with _lock:
-        if time.monotonic() >= _retry_at:
+        # A window that reset since the reading says nothing about now: read again, early.
+        reset = _cached is not None and any(_expired(w["resets_at"], time.time()) for w in _cached)
+        if reset or time.monotonic() >= _retry_at:
             _cached = _fetch(_open if opener is None else opener)
+            if _cached is not None and any(_expired(w["resets_at"], time.time()) for w in _cached):
+                _cached = None      # the service itself answered with a past window: unknown, and no request loop
             ttl = CLAUDE_USAGE_TTL_S if _cached is not None else _FAILURE_BACKOFF_S
             _retry_at = time.monotonic() + ttl
         return [window.copy() for window in _cached] if _cached is not None else None

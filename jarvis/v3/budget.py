@@ -153,8 +153,11 @@ def _row(when, job, model, input_tokens, output_tokens, usage_pct, outcome) -> d
 class Budget:
     """Share one instance for admission within a daemon.
 
-    The lock file serializes ledger access across processes. Reservations
-    stay in this instance, and completed jobs are visible to every reader.
+    The lock file serializes ledger access across processes, and recorded
+    jobs are visible to every reader. Stated limit: a held slot lives in this
+    instance only (v3 runs one daemon at a time), so a daemon that dies
+    mid-job, or a second process, can pass a cap by the jobs in flight. The
+    usage limit does not depend on it.
     """
 
     def __init__(self, path=None, *, usage, now=time.time, caps=None, daily_cap=None):
@@ -186,32 +189,39 @@ class Budget:
         self._check_job(job)
         with self._lock:
             try:
-                with self._ledger() as ledger:
-                    when = datetime.fromtimestamp(self._now(), _CHICAGO)
-                    day = when.date()
-                    counts = _read_spend(ledger, day)
-                    counts.update(hold.job for hold in self._held.values() if hold.when.date() == day)
-                    if counts[job] >= self._caps[job]:
-                        return Admission(False, f"The daily {job} cap was reached.", "skipped-budget", None, None)
-                    if counts.total() >= self._daily_cap:
-                        return Admission(False, "The daily Claude job cap was reached.", "skipped-budget", None, None)
-                    return self._admit_with_usage(job, when)
+                # The ledger is not locked during the usage request, so the caps are judged again after it:
+                # another process may have spent, and the day may have turned.
+                if (refused := self._over_cap(job)[0]) is not None:
+                    return refused
+                try:
+                    pct = _peak(self._usage(), self._now())
+                except Exception:
+                    pct = None
+                if pct is None:
+                    return Admission(False, "Claude usage is unknown.", "skipped-usage", None, None)
+                if pct >= USAGE_LIMIT:
+                    return Admission(False, f"Claude usage is {pct:g}%.", "skipped-usage", pct, None)
+                refused, when = self._over_cap(job)
+                if refused is not None:
+                    return refused
             except (OSError, RuntimeError):
                 return Admission(False, _LEDGER_ERROR, "skipped-budget", None, None)
+            ticket = uuid4().hex
+            admission = Admission(True, "", "ok", pct, ticket)
+            self._held[ticket] = _Hold(job, when, admission)
+            return admission
 
-    def _admit_with_usage(self, job: str, when: datetime) -> Admission:
-        try:
-            pct = _peak(self._usage(), self._now())
-        except Exception:
-            pct = None
-        if pct is None:
-            return Admission(False, "Claude usage is unknown.", "skipped-usage", None, None)
-        if pct >= USAGE_LIMIT:
-            return Admission(False, f"Claude usage is {pct:g}%.", "skipped-usage", pct, None)
-        ticket = uuid4().hex
-        admission = Admission(True, "", "ok", pct, ticket)
-        self._held[ticket] = _Hold(job, when, admission)
-        return admission
+    def _over_cap(self, job: str) -> tuple[Admission | None, datetime]:
+        with self._ledger() as ledger:
+            when = datetime.fromtimestamp(self._now(), _CHICAGO)
+            counts = _read_spend(ledger, when.date())
+        counts.update(hold.job for hold in self._held.values() if hold.when.date() == when.date())
+        reason = None
+        if counts[job] >= self._caps[job]:
+            reason = f"The daily {job} cap was reached."
+        elif counts.total() >= self._daily_cap:
+            reason = "The daily Claude job cap was reached."
+        return (None if reason is None else Admission(False, reason, "skipped-budget", None, None)), when
 
     def record(self, admission: Admission, result: JobResult) -> None:
         self._check_job(result.name)
