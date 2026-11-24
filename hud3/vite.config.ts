@@ -17,7 +17,8 @@ function sharedPackages(): Plugin {
     async resolveId(id, importer, options) {
       if (!importer?.startsWith(hudRoot + "/") || !/^[\w@][^:]*$/.test(id)) return;
       const result = await this.resolve(id, hud3Importer, { ...options, skipSelf: true });
-      if (!result?.id.startsWith(modules)) {
+      // Vite's CommonJS plugin marks a wrapped module with a leading NUL and a query.
+      if (!result?.id.replace(/^\0/, "").startsWith(modules)) {
         this.error(`Shared HUD package ${id} must resolve from hud3/node_modules`);
       }
       return result;
