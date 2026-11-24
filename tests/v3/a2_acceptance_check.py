@@ -62,7 +62,7 @@ class Forward(unittest.TestCase):
         "g.py": "from ..v2.daemon import Daemon\n",                           # relative from jarvis.v3
         "h.py": "import importlib\nm = importlib.import_module('jarvis.v2.daemon')\n",  # line 2
         "i.py": "m = __import__('jarvis.v2.daemon')\n",
-        "j.py": "def f():\n    import jarvis.v2.providers.claude as c\n",   # nested, line 2
+        "j.py": "def f():\n    import jarvis.v2.providers.codex as c\n",   # nested, line 2
         "k.py": "from jarvis.v2 import redact, daemon\n",                      # one good, one bad
     }
 

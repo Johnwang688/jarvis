@@ -25,6 +25,7 @@ ALLOWED_V2: dict[str, str] = {
     "jarvis.v2.skills_link": "Reuse skill symlink management for Claude Code and Codex.",
     "jarvis.v2.remote_auth": "Reuse phone passkey pairing, verification and session handling.",
     "jarvis.v2.remote_secure": "Reuse remote listener and tailnet checks for owner authority.",
+    "jarvis.v2.providers.claude": "Reuse native Claude CLI resolution, version parsing and isolated environment keys.",
 }
 
 _UNRESOLVABLE = "<unresolvable>"

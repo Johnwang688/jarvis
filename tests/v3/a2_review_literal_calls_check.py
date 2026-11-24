@@ -24,9 +24,9 @@ class LiteralCalls(unittest.TestCase):
             ),
             (
                 violations,
-                "__import__('jarvis.v2.providers', None, None, ('claude',))\n",
+                "__import__('jarvis.v2.providers', None, None, ('codex',))\n",
                 1,
-                "jarvis.v2.providers.claude",
+                "jarvis.v2.providers.codex",
             ),
             (
                 violations,
