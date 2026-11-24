@@ -511,6 +511,11 @@ V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
 V3_DIR = Path(os.environ.get("JARVIS_V3_DIR", "~/.local/share/jarvis/v3")).expanduser()
+V3_POLICY_FILE = Path(os.environ.get("JARVIS_POLICY_FILE") or V3_DIR / "policy.json").expanduser()
+V3_SKILLS_DIR = Path(os.environ.get("JARVIS_LEARNED_SKILLS") or V3_DIR / "skills").expanduser()
+V3_SKILL_LEDGER_DIR = V3_DIR / "skill-ledger"
+V3_REVIEW_QUEUE_DIR = V3_DIR / "review-queue"
+V3_BUDGET_LEDGER = V3_DIR / "budget.jsonl"
 V3_INDEX_DB = Path(os.environ.get("JARVIS_INDEX_DB") or V3_DIR / "index.sqlite").expanduser()
 
 

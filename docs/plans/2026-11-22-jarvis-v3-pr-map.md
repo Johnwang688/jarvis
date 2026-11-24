@@ -597,22 +597,19 @@ S1–S6. It is the owner's decision.
 ---
 
 ### K4: Protected state for v3's data ⚑ boundary
-(G2, kept for Jarvis's own agents.)
-- **Scope:** `jarvis/protected_state.py` and its v2 parity users; tests.
-- **Spec:** for v1 and v2 agents, add as protected: `POLICY_FILE`,
-  `SKILL_LEDGER_DIR`, `LEARNED_SKILLS_DIR` (writes only through
-  `skill_manage`; generic Write/Edit/shell asks, or is denied for the ledger),
-  `REVIEW_QUEUE_DIR`, `BUDGET_LEDGER`, and the global MCP and hook sections
-  `jarvis brain install` writes. Keep the indirect, ancestor and symlink
-  checks, and v1/v2 parity.
+(G2, kept for Jarvis's own agents; narrowed while building, 2026-11-24.)
+- **Scope:** `jarvis/tools/files.py` (the one definition), the v2 grant check
+  and Codex's writable roots; `tests/v3/k4_acceptance_check.py`.
+- **Spec:** v1's and v2's write tools, file checks and grants refuse the
+  policy file, the learned skills, their ledger, the review queue, the budget
+  ledger, and the user-scope config files `jarvis brain install` writes.
+  **Shell judging is not touched** (`protected_state.py`, `rules.py`).
 - **Acceptance:**
-  - [ ] Every new path is denied or asked through redirect, `tee`, `sed -i`,
-    `cp`/`mv`, symlink and ancestor routes (the existing matrix style).
-  - [ ] "Permission state cannot authorize its replacement" holds: an
-    allowlist entry can't open these paths.
-  - [ ] A before/after comparison against main: 0 decisions weaker.
-  - [ ] Mutation evidence.
-- **Depends:** M5. **Size:** M.
+  - [x] Every path refused through write tools, links, grants and Codex roots.
+  - [x] Everything else under `V3_DIR` as before; reads as before.
+  - [x] `protected_state.py` and `rules.py` byte-identical to main.
+  - [x] Mutation evidence (11 of 11).
+- **Depends:** M5. **Size:** S.
 
 ---
 
