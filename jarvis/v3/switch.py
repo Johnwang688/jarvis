@@ -26,7 +26,9 @@ STATUS_CAP = 1 << 20
 SYSTEMCTL_TIMEOUT = 90.0
 REFUSED = "refused"
 UP = ("active", "activating", "reloading", "refreshing")
-BOOT_DISABLED = ("disabled", "masked", "not-found")
+# `is-enabled` states that do not start a unit at login by themselves.
+BOOT_DISABLED = ("disabled", "masked", "masked-runtime", "not-found", "static", "indirect",
+                 "linked", "linked-runtime")
 
 
 @dataclass
@@ -349,8 +351,13 @@ def _restore_source(env: Env, source: str, source_port: int, target: str,
                 except SwitchError as exc:
                     _report_failure(env, exc)
         _wait_up(env, source, wait, other=target, other_port=None, recovering=True)
-        if not target_disabled or _unit_enablement(env, source) != "enabled":
-            env.out(f"{source} is running, but rollback could not restore the login configuration.")
+        try:
+            restored = target_disabled and _unit_enablement(env, source) == "enabled"
+        except SwitchError as exc:  # running either way: an unreadable setting is not a failed rollback
+            _report_failure(env, exc)
+            restored = False
+        if not restored:
+            env.out(f"{source} is running, but rollback could not confirm the login configuration.")
             return
     except SwitchError as exc:
         env.out(f"Rollback to {source} failed.")
