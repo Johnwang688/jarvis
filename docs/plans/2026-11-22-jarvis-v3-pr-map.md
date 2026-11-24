@@ -225,7 +225,7 @@ R1 (cutover) needs G5 + T3 + T4 + T5 + A6 + OG6;  R2 last
 
 | Wave | PRs |
 |---|---|
-| 0 | A1, A2, then A3; then A4, A5, A6 |
+| 0 | A1, A2, then A3; then A4, A5 (A6a–A6f run beside waves 2–5) |
 | 1 | S1–S6 (one agent, sequential), K1, K2, G1 |
 | 2 | M2, M3, K3, M5, C1, B1, T1 |
 | 3 | M4, M6, L1, G2, C2, B2 |
@@ -357,6 +357,9 @@ v2's frontend components by importing them.
 - **Depends:** A3. **Size:** M.
 
 ### A5: v3 HUD skeleton (`hud3/`)
+
+Split into A5a (frontend) and A5b (Python installation, serving and launch).
+
 - **Scope:** a new `hud3/` Vite + TypeScript app, served by the v3 daemon and
   installed by `jarvis agent install` as its own Chrome app (profile
   `Default`). A boundary check.
@@ -381,26 +384,41 @@ v2's frontend components by importing them.
   - [ ] v2's `hud/` builds and its tests pass unchanged.
 - **Depends:** A3. **Size:** M.
 
-### A6: Voice, fast path and desktop bridge in the v3 daemon
-- **Scope:** `jarvis/v3/voice.py`, `jarvis/v3/fastpath.py` (copy-on-write
-  from `v2/providers/fastpath.py` if it must change), desktop bridge wiring;
-  tests.
-- **Spec:**
-  - When v3 runs, it owns the wake word, STT/TTS, and the chat/voice fast
-    path: Jarvis's own loop, unchanged rules (D2, invariants 1–10).
-  - It also owns the desktop bridge (registered apps only, as today).
-  - It reuses the v1 voice modules and allowlisted v2 speech modules.
-  - Spoken work requests go to T3 threads once T4 lands; until then, the
-    fast path answers and offers a brief.
-  - Local voice stays private and offline (Safety design).
-- **Acceptance:**
-  - [ ] The existing voice and fast-path tests are replayed against the v3
-    daemon (fakes, temp HOME).
-  - [ ] Desktop guards are replayed.
-  - [ ] No audio device is opened in tests.
-  - [ ] Wake word and bridge release cleanly on an A4 switch.
-- **Depends:** A3, A4. **Size:** M–L (split voice from the bridge if
-  needed).
+### A6: Voice, fast path and desktop bridge in the v3 daemon (split 2026-11-24)
+
+A survey before building found A6 is several PRs: v2's fast path and voice
+link each reach about 160 v2 modules through `jarvis.v2.daemon` and
+`hud_api`, none of the voice modules is on the A2 allowlist, and v3 has no
+owner sign-in for actions and no approvals yet. Only T4 and R1 wait for A6, so
+it runs beside the later waves, in this order:
+
+- **A6a: owner identity and actions** ⚑ boundary. The v3 window's POST routes:
+  Host/Origin rules as v2's `check_origin`/`is_owner`, JSON only, owner-only by
+  default; a route table test that refuses any unlisted route. No action yet.
+  **Depends:** A5b. **Size:** S.
+- **A6b: fast path chat.** `jarvis/v3/fastpath.py`: the v1 `Agent` (D2,
+  invariants 1–10 unchanged) with a bound, ungated toolset and a deny-all
+  approver; transcripts under `V3_DIR`; a chat panel in hud3. Copy-on-write
+  from `v2/providers/fastpath.py`; no import of `jarvis.v2.daemon`.
+  **Depends:** A6a. **Size:** M.
+- **A6c: approvals in v3** ⚑ boundary. A broker, the approval card panel
+  (hud3 reuses v2's card), and the fast path's gated tools. Agents never reach
+  it (control-plane rules). **Depends:** A6b. **Size:** M.
+- **A6d: speech.** `/stt` and `/say` on the v3 daemon from the v1 voice modules
+  (`voice`, `stt_local`, `stt_settings`, `speaker` import nothing from v2);
+  push-to-talk and the wake word in hud3 from `hud/src/lib`. Local voice stays
+  private and offline. **Depends:** A6a. **Size:** M.
+- **A6e: the Windows voice link (8409)** ⚑ boundary. Copy-on-write from
+  `v2/voice_link.py` with the daemon dependency cut to an interface.
+  **Depends:** A6b, A6d. **Size:** M.
+- **A6f: desktop bridge.** v3 holds `jarvis/desktop.py`'s session while it runs
+  and **stops it on exit** (daemon2 never does: 8404 is freed only when the
+  process ends); registered apps only. **Depends:** A6c. **Size:** S.
+
+Acceptance, across the six: the existing voice, fast-path and desktop-guard
+tests are replayed against the v3 daemon (fakes, temp HOME); no audio device is
+opened in tests; the wake word, link and bridge release cleanly on an A4
+switch. Until T4, a spoken work request is answered and offered as a brief.
 
 ---
 

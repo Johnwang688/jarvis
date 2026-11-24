@@ -378,6 +378,10 @@ HUD_DIR = Path(
 ).expanduser()
 HUD_DEV = os.environ.get("JARVIS_HUD_DEV", "") == "1"
 HUD_DIST = HUD_BUILD if HUD_DEV else HUD_DIR
+HUD3_BUILD = REPO_ROOT / "hud3" / "dist"
+HUD3_DIR = Path(
+    os.environ.get("JARVIS_HUD3_DIR") or Path.home() / ".local" / "share" / "jarvis" / "hud3"
+).expanduser()
 
 # The persistent dangerous-tool allowlist (see permissions.py). Machine-local
 # safety config, so it lives beside the Google token, not in the repo.
