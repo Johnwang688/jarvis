@@ -390,7 +390,8 @@
       "start": 4683,
       "end": 4716,
       "name": "purpose-and-environment",
-      "sha256": "ff9bbde4f23dd10a7a70a9cea47aef3c016d0e85c4264294668d5dece1808449"
+      "sha256": "ff9bbde4f23dd10a7a70a9cea47aef3c016d0e85c4264294668d5dece1808449",
+      "public_sha256": "c9becb24ce8056acfe8db32d59c27448cfee6e6a66987d62f289746ee56c5b3f"
     },
     {
       "start": 4780,
