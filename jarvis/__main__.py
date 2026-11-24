@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-if __name__ == "__main__" and sys.argv[1:2] in (["agentd"], ["agent"]):
+if __name__ == "__main__" and sys.argv[1:2] in (["agentd"], ["agent"], ["brain"]):
     from .v3.cli import main as v3_main
 
     sys.exit(v3_main(sys.argv[1:]))

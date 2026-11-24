@@ -1,4 +1,4 @@
-"""Command-line entry points for the v3 daemon and vault."""
+"""Command-line entry points for v3."""
 
 import argparse
 from http.client import HTTPConnection, HTTPException
@@ -132,6 +132,19 @@ def vault_import(_args) -> int:
     return 0
 
 
+def brain_server(_args) -> int:
+    from . import brain_mcp
+
+    return brain_mcp.main()
+
+
+def brain_registration(args) -> int:
+    from . import brain_install
+
+    return {"install": brain_install.install, "status": brain_install.status,
+            "uninstall": brain_install.uninstall}[args.action]()
+
+
 def add_commands(sub):
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
@@ -161,6 +174,13 @@ def add_commands(sub):
     vault = sub.add_parser("vault", help="owner memory vault commands")
     vault_sub = vault.add_subparsers(dest="action", required=True)
     vault_sub.add_parser("import", help="copy legacy repo memory into the vault").set_defaults(func=vault_import)
+
+    brain = sub.add_parser("brain", help="serve or register the v3 brain MCP")
+    brain_sub = brain.add_subparsers(dest="action", required=True)
+    brain_sub.add_parser("mcp", help="serve the brain over stdio").set_defaults(func=brain_server)
+    for action in ("install", "status", "uninstall"):
+        brain_sub.add_parser(action, help=f"{action} the user-scope brain MCP registration").set_defaults(
+            func=brain_registration)
 
 
 def main(argv: list[str]) -> int:

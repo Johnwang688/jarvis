@@ -49,8 +49,8 @@ class Base(unittest.TestCase):
     def brain(self):
         return Brain(vault=self.vault, index=self.index_path, store=self.store, session="s1")
 
-    def call(self, name, b=None, **args):
-        r = (b or self.b).call(name, args)
+    def call(self, tool_name, b=None, **args):
+        r = (b or self.b).call(tool_name, args)
         self.assertEqual(set(r), {"content", "isError"})
         (c,) = r["content"]
         self.assertEqual(c["type"], "text")
