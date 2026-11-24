@@ -28,6 +28,11 @@ REPO = Path(__file__).resolve().parents[2]
 PLANTED = "ghp" + "_" + "M2n4" * 9
 
 
+def prose(n, word="tea "):
+    """Exactly n characters of ordinary words (a long run of one letter reads as a data blob to K1)."""
+    return (word * (n // len(word) + 1))[:n - 1] + "."
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(os.path.realpath(self.enterContext(tempfile.TemporaryDirectory())))
@@ -46,7 +51,7 @@ class Base(unittest.TestCase):
     def bad(self, text, *words):
         self.assertTrue(text.startswith("Error:"), text)
         for w in words:
-            self.assertIn(str(w), text)
+            self.assertIn(str(w).lower(), text.lower())
         return text
 
     def snapshot(self):
@@ -180,18 +185,18 @@ class Archiving(Base):
 
 class Caps(Base):
     def test_entry_cap(self):
-        self.ok(self.add(name="full", body="x" * 4000))
+        self.ok(self.add(name="full", body=prose(4000)))
         before = self.snapshot()
-        self.bad(self.add(name="over", body="x" * 4007), 7)
+        self.bad(self.add(name="over", body=prose(4007)), 7)
         self.t.memory_read("full")
-        self.bad(self.t.memory_patch("full", "x" * 4000, "y" * 4001), 1)
+        self.bad(self.t.memory_patch("full", prose(4000), prose(4001, "mint ")), 1)
         self.assertEqual(self.snapshot(), before)
 
     def test_user_cap_lists_entries(self):
         self.t.memory_read("USER")
-        self.ok(self.t.memory_patch("USER", "", "a" * 2990))
+        self.ok(self.t.memory_patch("USER", "", prose(2990)))
         before = self.snapshot()
-        self.bad(self.t.memory_patch("USER", "a" * 2990, "b" * 3030), 30)
+        self.bad(self.t.memory_patch("USER", prose(2990), prose(3030, "mint ")), 30)
         self.assertEqual(self.snapshot(), before)
 
     def test_facts_cap(self):

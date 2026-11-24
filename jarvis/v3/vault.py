@@ -1,0 +1,487 @@
+"""The private, file-backed v3 memory vault."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from datetime import date
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+from typing import NamedTuple
+from uuid import uuid4
+
+from jarvis import config
+
+from . import content_scan
+from .index import open_directory
+
+
+USER_CAP = 3_000
+ENTRY_CAP = 4_000
+FACTS_CAP = 400
+FOLDERS = {
+    "people": "person", "projects": "project", "preferences": "preference",
+    "style": "style", "facts": "fact",
+}
+_ROOT_ENTRIES = {"USER": "person", "commitments": "commitment"}
+_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_METADATA_LIMITS = {"description": 240, "source": 500}
+_REQUIRED = {"name", "kind", "description", "source", "updated", "status"}
+_LINE_BREAK_OR_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_MAX_FILE_BYTES = 4 * 64 * 1024
+
+
+class VaultError(ValueError):
+    """A vault error whose text is safe to return to a tool caller."""
+
+
+class Location(NamedTuple):
+    folder: str
+    name: str
+
+    @property
+    def ref(self) -> str:
+        return f"{self.folder}/{self.name}" if self.folder else self.name
+
+    @property
+    def filename(self) -> str:
+        return self.name + ".md"
+
+    @property
+    def kind(self) -> str:
+        return FOLDERS[self.folder] if self.folder else _ROOT_ENTRIES[self.name]
+
+
+@dataclass(frozen=True)
+class Entry:
+    location: Location
+    description: str
+    source: str
+    body: str
+    updated: str
+    status: str = "active"
+    replaced_by: str = ""
+    revision: bytes | None = None
+
+    def markdown(self) -> str:
+        fields = [
+            "---", f"name: {self.location.name}", f"kind: {self.location.kind}",
+            f"description: {self.description}", f"source: {self.source}",
+            f"updated: {self.updated}", f"status: {self.status}",
+        ]
+        if self.replaced_by:
+            fields.append(f"replaced_by: {self.replaced_by}")
+        return "\n".join([*fields, "---", self.body])
+
+
+def _slug(value) -> bool:
+    return isinstance(value, str) and len(value) <= 80 and _SLUG.fullmatch(value) is not None
+
+
+def _metadata(key: str, value) -> None:
+    if (not isinstance(value, str) or len(value) > _METADATA_LIMITS[key]
+            or not value.strip() or _LINE_BREAK_OR_CONTROL.search(value)):
+        raise VaultError(f"{key.capitalize()} must be a short, nonempty single line.")
+
+
+def _body(body, *, allow_empty: bool = False) -> None:
+    if not isinstance(body, str) or "\0" in body or (not allow_empty and not body.strip()):
+        raise VaultError("Memory body must be text without NUL characters and must contain content.")
+
+
+def _parse(location: Location, raw: bytes) -> Entry:
+    header, sep, rest = raw.decode("utf-8").partition("\n")
+    if not sep or header.removesuffix("\r") != "---":
+        raise VaultError("Invalid memory frontmatter.")
+    fields = {}
+    while sep:
+        line, sep, rest = rest.partition("\n")
+        line = line.removesuffix("\r") if sep else line
+        if line == "---":
+            break
+        key, delimiter, value = line.partition(": ")
+        if (not delimiter or key not in _REQUIRED | {"replaced_by"} or key in fields
+                or not value or _LINE_BREAK_OR_CONTROL.search(value)):
+            raise VaultError("Invalid memory frontmatter.")
+        fields[key] = value
+    else:
+        raise VaultError("Invalid memory frontmatter.")
+    if (_REQUIRED - fields.keys() or fields["name"] != location.name or fields["kind"] != location.kind
+            or fields["status"] not in ("active", "archived")):
+        raise VaultError("Invalid memory frontmatter.")
+    if "replaced_by" in fields and (fields["status"] != "archived" or not _slug(fields["replaced_by"])):
+        raise VaultError("Invalid memory replacement reference.")
+    try:
+        if not _DATE.fullmatch(fields["updated"]):
+            raise ValueError
+        date.fromisoformat(fields["updated"])
+    except ValueError:
+        raise VaultError("Invalid memory date.") from None
+    for key in _METADATA_LIMITS:
+        _metadata(key, fields[key])
+    _body(rest, allow_empty=not location.folder)
+    return Entry(location, fields["description"], fields["source"], rest, fields["updated"],
+                 fields["status"], fields.get("replaced_by", ""), _revision(raw))
+
+
+def _revision(raw: bytes) -> bytes:
+    return hashlib.sha256(raw).digest()
+
+
+def _scan(text: str) -> tuple[str, ...]:
+    verdict = content_scan.scan(text, purpose="memory")
+    if not verdict.ok:
+        rules = ", ".join(sorted({hit.rule for hit in verdict.hits if hit.severity == "block"}))
+        raise VaultError(f"Memory scanner blocked content ({rules}).")
+    return tuple(dict.fromkeys(hit.rule for hit in verdict.hits if hit.severity == "flag"))
+
+
+def safe_summary(text: str) -> str:
+    try:
+        _scan(text)
+    except VaultError:
+        return "[withheld by memory scanner]"
+    return text
+
+
+@contextmanager
+def _directory(parent: int, name: str, *, create: bool = False):
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    try:
+        _private_directory(fd, tighten=create)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _private_directory(fd: int, *, tighten: bool) -> None:
+    info = os.fstat(fd)
+    if info.st_uid != os.getuid():
+        raise VaultError("Vault directories must belong to the vault owner.")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        if not tighten:
+            raise VaultError("Vault directories must have mode 0700.")
+        os.fchmod(fd, 0o700)
+
+
+@contextmanager
+def _regular_file(directory: int, name: str, flags: int = os.O_RDONLY, *, private: bool = True):
+    fd = os.open(name, flags | _FILE_FLAGS, 0o600, dir_fd=directory)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise VaultError("Memory files must be owner-owned regular files with one link.")
+        if private and stat.S_IMODE(info.st_mode) != 0o600:
+            raise VaultError("Vault files must have mode 0600.")
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _read_file(directory: int, name: str, *, private: bool = True) -> bytes:
+    with _regular_file(directory, name, private=private) as fd:
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(_MAX_FILE_BYTES + 1)
+    if len(raw) > _MAX_FILE_BYTES:
+        raise VaultError("Memory file is too large to read.")
+    return raw
+
+
+def _atomic_replace(directory: int, filename: str, raw: bytes) -> None:
+    tmp = ".entry-" + uuid4().hex
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS, 0o600, dir_fd=directory)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, filename, src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+class Vault:
+    def __init__(self, root=None):
+        if root is None:
+            root = os.environ.get("JARVIS_VAULT") or Path(config.V3_DIR) / "vault"
+        self.root = Path(root).expanduser().absolute()
+
+    @contextmanager
+    def _locked(self, *, write: bool = False):
+        with open_directory(self.root, create=write) as root:
+            fcntl.flock(root, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+            _private_directory(root, tighten=write)
+            yield root
+
+    @contextmanager
+    def _folder(self, root: int, folder: str, *, create: bool = False):
+        if folder:
+            with _directory(root, folder, create=create) as directory:
+                yield directory
+        else:
+            yield root
+
+    def _load(self, root: int, location: Location) -> Entry | None:
+        try:
+            with self._folder(root, location.folder) as directory:
+                raw = _read_file(directory, location.filename)
+        except FileNotFoundError:
+            if location.folder:
+                return None
+            return self._initial(location)
+        return _parse(location, raw)
+
+    @staticmethod
+    def _initial(location: Location) -> Entry:
+        description = "Owner profile" if location.name == "USER" else "Open commitments"
+        return Entry(location, description, "owner", "", date.today().isoformat())
+
+    def _resolve(self, root: int, ref: str, *, pending_archive: bool = False) -> Entry:
+        if not isinstance(ref, str):
+            raise VaultError("Invalid memory name.")
+        if ref in _ROOT_ENTRIES:
+            return self._load(root, Location("", ref))
+        folder, slash, name = ref.partition("/")
+        if not slash:
+            name = folder
+        if not _slug(name) or (slash and folder not in FOLDERS):
+            raise VaultError("Use a memory slug or folder/slug.")
+        matches = []
+        for parent in (folder,) if slash else FOLDERS:
+            entry = self._load(root, Location(parent, name))
+            if entry is not None and (entry.status == "active" or pending_archive):
+                matches.append(entry)
+        if not matches:
+            raise VaultError("Memory entry was not found.")
+        if len(matches) > 1:
+            refs = safe_summary(", ".join(entry.location.ref for entry in matches))
+            raise VaultError(f"Ambiguous memory name. Choose from {refs}.")
+        return matches[0]
+
+    def _rows(self, root: int, folder: str):
+        if not folder:
+            for name in _ROOT_ENTRIES:
+                location = Location("", name)
+                yield from self._row(root, location)
+        for parent in (folder,) if folder else FOLDERS:
+            try:
+                with self._folder(root, parent) as directory:
+                    for filename in sorted(os.listdir(directory)):
+                        name = filename.removesuffix(".md")
+                        if name != filename and _slug(name):
+                            yield from self._row(directory, Location(parent, name))
+            except FileNotFoundError:
+                continue
+            except (OSError, VaultError):
+                if folder:
+                    raise
+
+    @staticmethod
+    def _row(directory: int, location: Location):
+        try:
+            entry = _parse(location, _read_file(directory, location.filename))
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError, VaultError):
+            yield location, None
+        else:
+            if entry.status == "active":
+                yield location, entry
+
+    def entries(self, folder: str = "") -> list[tuple[Location, Entry | None]]:
+        """Return active entries and locations of unreadable file entries."""
+        if folder != "" and (not isinstance(folder, str) or folder not in FOLDERS):
+            raise VaultError("Unknown memory folder.")
+        try:
+            with self._locked() as root:
+                return list(self._rows(root, folder))
+        except FileNotFoundError:
+            return []
+
+    def read(self, name: str) -> Entry:
+        try:
+            with self._locked() as root:
+                entry = self._resolve(root, name)
+        except FileNotFoundError:
+            if isinstance(name, str) and name in _ROOT_ENTRIES:
+                entry = self._initial(Location("", name))
+            else:
+                raise VaultError("Memory entry was not found.") from None
+        _scan(entry.markdown())
+        return entry
+
+    def _check_caps(self, root: int, entry: Entry, *, adding: bool) -> None:
+        cap = USER_CAP if entry.location.name == "USER" else ENTRY_CAP
+        over_chars = len(entry.body) - cap
+        over_entries = 0
+        if adding and entry.location.folder == "facts":
+            over_entries = sum(row is not None for _, row in self._rows(root, "facts")) + 1 - FACTS_CAP
+        if over_chars > 0 or over_entries > 0:
+            lines = []
+            if over_chars > 0:
+                lines.append(f"Free {over_chars} characters to fit the body cap of {cap}.")
+            if over_entries > 0:
+                lines.append(f"Free {over_entries} active entries from facts to fit the cap of {FACTS_CAP}.")
+            lines.append("Current entries:")
+            lines.extend(entry_summary(location, row) for location, row in self._rows(root, ""))
+            raise VaultError("\n".join(lines))
+
+    @staticmethod
+    def _save(root: int, directory: int, entry: Entry, raw: bytes, rules: tuple[str, ...]):
+        flags = [{"name": entry.location.ref, "rule": rule} for rule in rules]
+        if flags:
+            with _regular_file(root, ".flags.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT) as log:
+                _atomic_replace(directory, entry.location.filename, raw)
+                with os.fdopen(log, "ab", closefd=False) as stream:
+                    stream.write("".join(json.dumps(flag) + "\n" for flag in flags).encode())
+        else:
+            _atomic_replace(directory, entry.location.filename, raw)
+        return replace(entry, revision=_revision(raw)), flags
+
+    def add(self, folder: str, name: str, description: str, body: str, source: str):
+        if not isinstance(folder, str) or folder not in FOLDERS or not _slug(name):
+            raise VaultError("Use a known folder and a short kebab-case memory name.")
+        _metadata("description", description)
+        _metadata("source", source)
+        _body(body)
+        entry = Entry(Location(folder, name), description, source, body, date.today().isoformat())
+        with self._locked(write=True) as root:
+            return self._add(root, entry)
+
+    def _add(self, root: int, entry: Entry, *, importing: bool = False):
+        location = entry.location
+        existing = self._load(root, location)
+        if existing is not None and (existing.status == "active" or importing):
+            raise VaultError(f"Memory entry {safe_summary(location.ref)} already exists.")
+        self._check_caps(root, entry, adding=True)
+        text = entry.markdown()
+        rules = _scan(text)
+        with self._folder(root, location.folder, create=True) as directory:
+            if importing and self._was_archived(directory, location):
+                raise VaultError("Memory entry was previously archived.")
+            if existing is not None:
+                with _directory(directory, ".archive", create=True) as archive:
+                    self._finish_archive(directory, archive, location)
+            return self._save(root, directory, entry, text.encode("utf-8"), rules)
+
+    def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None]):
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise VaultError("Patch values must be text.")
+        with self._locked(write=True) as root:
+            entry = self._resolve(root, name)
+            location = entry.location
+            if location not in reads:
+                raise VaultError("Read the memory entry in this session before patching.")
+            if reads[location] != entry.revision:
+                raise VaultError("Memory entry changed since the read. Read it again before patching.")
+            if not old:
+                if location.folder or entry.body:
+                    raise VaultError("Empty patch text is only valid for an empty profile or commitments.")
+                body = new
+            else:
+                pos = entry.body.find(old)
+                if pos < 0 or entry.body.find(old, pos + 1) >= 0:
+                    raise VaultError("Patch text must occur exactly once in the memory body.")
+                body = entry.body[:pos] + new + entry.body[pos + len(old):]
+            _body(body, allow_empty=not location.folder)
+            entry = replace(entry, body=body, updated=date.today().isoformat())
+            self._check_caps(root, entry, adding=False)
+            text = entry.markdown()
+            rules = _scan(text)
+            with self._folder(root, location.folder) as directory:
+                return self._save(root, directory, entry, text.encode("utf-8"), rules)
+
+    @staticmethod
+    def _finish_archive(directory: int, archive: int, location: Location) -> None:
+        filename = f"{location.name}.{uuid4().hex}.md"
+        os.rename(location.filename, filename, src_dir_fd=directory, dst_dir_fd=archive)
+
+    @staticmethod
+    def _was_archived(directory: int, location: Location) -> bool:
+        try:
+            with _directory(directory, ".archive") as archive:
+                return any(filename == location.filename or filename.startswith(location.name + ".")
+                           for filename in os.listdir(archive))
+        except FileNotFoundError:
+            return False
+
+    def archive(self, name: str, replaced_by: str = ""):
+        if not isinstance(replaced_by, str):
+            raise VaultError("Invalid replacement name.")
+        with self._locked(write=True) as root:
+            entry = self._resolve(root, name, pending_archive=True)
+            location = entry.location
+            if not location.folder:
+                raise VaultError("This fixed vault entry cannot be archived.")
+            if entry.status == "active":
+                replacement = self._resolve(root, replaced_by).location if replaced_by else None
+                if replacement == location:
+                    raise VaultError("Choose a different active replacement.")
+                entry = replace(entry, status="archived", updated=date.today().isoformat(),
+                                replaced_by=replacement.name if replacement else "")
+            self._check_caps(root, entry, adding=False)
+            text = entry.markdown()
+            rules = _scan(text)
+            with self._folder(root, location.folder) as directory:
+                with _directory(directory, ".archive", create=True) as archive:
+                    flags = []
+                    # The status change commits the archive. If the move fails, the
+                    # archived entry stays hidden and a retry can finish the move.
+                    current = self._load(root, location)
+                    if current.status == "active":
+                        entry, flags = self._save(root, directory, entry, text.encode("utf-8"), rules)
+                    self._finish_archive(directory, archive, location)
+                    return entry, flags
+
+    def import_memory(self, source_dir) -> tuple[list[str], list[str]]:
+        """Copy legacy Markdown files with owner provenance. Return added refs and skip reasons."""
+        added, skipped = [], []
+        with open_directory(Path(source_dir).expanduser()) as source:
+            with self._locked(write=True) as root:
+                for filename in sorted(os.listdir(source)):
+                    if filename.startswith(".") or not filename.endswith(".md"):
+                        continue
+                    name = re.sub(r"[^a-z0-9]+", "-", filename[:-3].lower()).strip("-")[:80].rstrip("-")
+                    try:
+                        if not _slug(name):
+                            raise VaultError("Invalid legacy filename.")
+                        body = _read_file(source, filename, private=False).decode("utf-8")
+                        _body(body)
+                        description = next(line.strip().lstrip("# ").strip()
+                                           for line in body.splitlines() if line.strip().lstrip("# ").strip())
+                        description = description[:_METADATA_LIMITS["description"]]
+                        _metadata("description", description)
+                        entry = Entry(Location("facts", name), description, "owner", body,
+                                      date.today().isoformat())
+                        self._add(root, entry, importing=True)
+                    except VaultError as exc:
+                        skipped.append(str(exc).split("\n", 1)[0])
+                    except (OSError, UnicodeError, StopIteration):
+                        skipped.append("Legacy file could not be read.")
+                    else:
+                        added.append(entry.location.ref)
+        return added, skipped
+
+
+def entry_summary(location: Location, entry: Entry | None) -> str:
+    if entry is None:
+        return f"{safe_summary(location.ref)} (unreadable entry)"
+    label = safe_summary(f"{location.ref} — {entry.description}")
+    return f"{label} ({len(entry.body)} chars)"
