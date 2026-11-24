@@ -629,6 +629,31 @@ def _hud_build(resolved: Path) -> bool:
     return any(resolved == root or root in resolved.parents for root in roots)
 
 
+# v3's own state (PR map K4): what Jarvis may do alone, the learned skills and
+# their ledger, the review queue, the budget, and the user-scope config files
+# `jarvis brain install` writes. The v3 daemon and the owner's CLI write them;
+# v1's and v2's write tools and grants refuse them. Only the write tools: the
+# shell check (`protected_state`) takes its first match, so new members there
+# could soften an existing refusal (K4's two probes), and a shell write stays the
+# accepted gap it is for the installed HUD. Read per call, so a test can repoint it.
+def _v3_paths() -> set[Path]:
+    """Files, and folders whose every file counts, resolved. Raises when one cannot be."""
+    home = Path.home()
+    return {Path(p).expanduser().resolve() for p in (
+        config.V3_POLICY_FILE, config.V3_SKILLS_DIR, config.V3_SKILL_LEDGER_DIR,
+        config.V3_REVIEW_QUEUE_DIR, config.V3_BUDGET_LEDGER,
+        home / ".claude.json", home / ".claude" / "settings.json", home / ".claude" / "settings.local.json",
+        home / ".codex" / "config.toml", home / ".codex" / "hooks.json")}
+
+
+def _v3_state(resolved: Path) -> bool:
+    try:
+        paths = _v3_paths()
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+    return any(resolved == path or path in resolved.parents for path in paths)
+
+
 def _self_protected(target: Path) -> bool:
     resolved = target.resolve()
     if resolved in _protected_state():
@@ -636,6 +661,8 @@ def _self_protected(target: Path) -> bool:
     if _git_internal(resolved):
         return True
     if _hud_build(resolved):
+        return True
+    if _v3_state(resolved):
         return True
     if _in_inbox_tree(resolved):
         return True
@@ -660,6 +687,11 @@ def _protect_refusal(target: Path) -> str:
             f"Error: {target.name} is in the built HUD the daemon serves, whose script "
             "can approve what the owner is asked. Change the HUD's source under "
             "hud/src instead; the owner installs it with `jarvis hud install`."
+        )
+    if _v3_state(target.resolve()):
+        return (
+            f"Error: {target.name} is Jarvis v3's own state or agent configuration, which only "
+            "v3 and the owner change. Explain what you wanted changed and why instead."
         )
     if _in_record_tree(target.resolve()):
         return "Error: " + record_refusal(target.name)

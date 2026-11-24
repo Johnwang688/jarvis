@@ -66,7 +66,7 @@ def _safe_root(path: Path) -> bool:
     barred += [Path(config.V2_DATA_DIR).resolve(), owner_home(),
                Path.home() / ".claude", Path.home() / ".codex",
                Path(config.SESSIONS_DIR).resolve(), Path(config.SPILL_DIR).resolve()]
-    barred += list(protected_paths()) + list(files._hud_roots())
+    barred += list(protected_paths()) + list(files._hud_roots()) + list(files._v3_paths())
     barred += [(Path(config.REPO_ROOT) / rel).resolve() for rel in files.SELF_PROTECTED]
     if any(_overlaps(path, item) for item in barred):
         return False
