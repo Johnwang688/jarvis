@@ -1,4 +1,9 @@
-"""Owner CLI for the user-scope Claude and Codex brain registrations."""
+"""Owner CLI for the user-scope Claude and Codex brain registrations.
+
+Stated limits: an agent CLI that rewrites its own config in the instant between
+the last check and the rename is not seen (close it first); an inline
+`mcp_servers = {...}` table in Codex's config is refused, not edited.
+"""
 
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
@@ -328,19 +333,29 @@ def _target(stack, home, path):
 def _plan(action, target, registration, out):
     servers = target.parsed.get(target.table, {})
     present = _SERVER in servers
-    matches = servers.get(_SERVER) == registration
+    current = servers.get(_SERVER)
+    matches = current == registration
+    # The owner may add options of their own (`enabled = false`, a timeout): they are kept.
+    extra = isinstance(current, dict) and bool(current.keys() - registration.keys())
+    ours = isinstance(current, dict) and all(current.get(key) == value for key, value in registration.items())
     codex = target.table == "mcp_servers"
     if codex and (present or _codex_span(target.text)):
         # Even a matching entry needs a removable, owned block.
         _codex_edit(target, None)
     if action == "status":
         detail = ("installed and unchanged" if matches else
+                  "installed; differs by options the owner added" if ours else
                   "registration differs from install" if present else "not installed")
         out(f"{target.path}: {detail}.")
         return matches
     if (action == "install" and matches) or (action == "uninstall" and not present):
         out(f"{target.path}: {'already installed' if matches else 'already absent'}.")
         return None
+    if action == "install" and ours:
+        out(f"{target.path}: already installed, with options you added (kept).")
+        return None
+    if action == "install" and present and extra:
+        raise _Refused("The Jarvis entry was changed and has options of your own. Run `jarvis brain uninstall` first.")
     if not codex and present and not matches and not any(_backups(target)):
         raise _Refused("Existing Claude registration differs and has no Jarvis backup.")
     if action == "uninstall":
@@ -376,7 +391,8 @@ def _apply(action, edits, snapshots, stack, out):
             os.unlink(target.path.name, dir_fd=target.directory)
         else:
             os.replace(temp, target.path.name, src_dir_fd=target.directory, dst_dir_fd=target.directory)
-        out(f"{target.path}: {'installed' if action == 'install' else 'uninstalled'} jarvis-brain.")
+        out(f"{target.path}: {'installed' if action == 'install' else 'uninstalled'} jarvis-brain. "
+            "Restart open Claude Code and Codex sessions to see it.")
         os.fsync(target.directory)
 
 

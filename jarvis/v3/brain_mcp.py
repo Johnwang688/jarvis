@@ -121,7 +121,7 @@ class Brain:
                 text = getattr(target, name)(**arguments)
             clean = redact.for_display(text)[:_RESULT_CHARS]
             return _result(clean, error=text.startswith(("Error:", "Refused:")))
-        except Exception:
+        except (Exception, SystemExit):      # a tool that exits ends its call, never the server
             return _result("Error: The brain tool could not complete safely.", error=True)
 
 
