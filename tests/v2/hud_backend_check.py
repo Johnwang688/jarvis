@@ -3443,6 +3443,11 @@ class CronChecks(unittest.TestCase):
 
     def test_hud_cli(self):
         from jarvis.__main__ import cmd_hud
+        # `jarvis hud` switches daemons when v3 is up; a test must never read (or act on) the owner's real units.
+        for name in ("v3_active", "v3_responds"):
+            stub = patch(f"jarvis.v3.switch.{name}", return_value=False)
+            stub.start()
+            self.addCleanup(stub.stop)
         with patch("jarvis.v2.daemon.is_running", return_value=True), patch("jarvis.face.server.launch_window") as launch:
             self.assertEqual(cmd_hud(SimpleNamespace(no_window=True)), 0)
             launch.assert_not_called()
