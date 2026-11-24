@@ -1,4 +1,9 @@
 {
+"N=8405; fuser -k -n tcp $N": [
+"deny",
+"fc7924fc02b9",
+false
+],
 "cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs | xargs -r kill": [
 "deny",
 "24664c8c284e",
@@ -29,6 +34,126 @@ false
 "e3b0c44298fc",
 false
 ],
+"echo daemon2 | xargs killall -r": [
+"deny",
+"1326a3b0147c",
+false
+],
+"echo daemon2 | xargs pgrep -f | xargs kill": [
+"deny",
+"15d072d534f6",
+false
+],
+"echo daemon2 | xargs pkill -f": [
+"deny",
+"b75006a7a4b4",
+false
+],
+"env env env echo agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env echo agentic; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env echo client; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env echo switch; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env echo user-agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env echo agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env echo agentic; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env echo client; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env echo switch; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env echo user-agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env echo agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env echo agentic; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env echo client; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env echo switch; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env echo user-agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env env env env echo agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env env env env echo agentic; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env env env env echo client; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env env env env echo switch; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"env env env env env env env env env env env env env env env env echo user-agent; jarvis restart": [
+"deny",
+"7a0d2837400c",
+false
+],
+"fuser -k -n tcp $N": [
+"deny",
+"fc7924fc02b9",
+false
+],
 "fuser -k 8400-8409/tcp": [
 "deny",
 "fc7924fc02b9",
@@ -52,6 +177,11 @@ false
 "fuser -k 8408/tcp": [
 "deny",
 "fc7924fc02b9",
+false
+],
+"grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs $'\\x6bill'; grep agent README.md": [
+"deny",
+"19266c55bb8e",
 false
 ],
 "grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs -r kill": [
@@ -90,6 +220,11 @@ false
 false
 ],
 "kill $(lsof -t -i:8408)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(lsof -ti)": [
 "deny",
 "fce1908637d8",
 false
@@ -2194,6 +2329,221 @@ false
 "75e31ced7d99",
 false
 ],
+"kill $(ss -ltnp | grep -E '.{0,0}:84.5.{0,0}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,0}:8405.{0,0}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,0}:84[07][57].{0,0}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,12}:84.5.{0,12}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,12}:8405.{0,12}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,12}:84[07][57].{0,12}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,15}:84.5.{0,15}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,15}:8405.{0,15}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,15}:84[07][57].{0,15}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,18}:84.5.{0,18}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,18}:8405.{0,18}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,18}:84[07][57].{0,18}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,21}:84.5.{0,21}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,21}:8405.{0,21}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,21}:84[07][57].{0,21}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,24}:84.5.{0,24}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,24}:8405.{0,24}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,24}:84[07][57].{0,24}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,27}:84.5.{0,27}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,27}:8405.{0,27}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,27}:84[07][57].{0,27}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,30}:84.5.{0,30}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,30}:8405.{0,30}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,30}:84[07][57].{0,30}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,33}:84.5.{0,33}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,33}:8405.{0,33}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,33}:84[07][57].{0,33}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,36}:84.5.{0,36}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,36}:8405.{0,36}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,36}:84[07][57].{0,36}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,39}:84.5.{0,39}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,39}:8405.{0,39}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,39}:84[07][57].{0,39}')": [
+"ask",
+"54944d7b871f",
+true
+],
+"kill $(ss -ltnp | grep -E '.{0,3}:84.5.{0,3}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,3}:8405.{0,3}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,3}:84[07][57].{0,3}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,6}:84.5.{0,6}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,6}:8405.{0,6}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,6}:84[07][57].{0,6}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,9}:84.5.{0,9}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,9}:8405.{0,9}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(ss -ltnp | grep -E '.{0,9}:84[07][57].{0,9}')": [
+"deny",
+"4b051acd65db",
+false
+],
+"kill $(systemctl --user show -p ExecMainPID --value jarvis-daemon2)": [
+"deny",
+"de58397e52ff",
+false
+],
 "killall -r '(.*)*daemo[n]2$'": [
 "deny",
 "b8e133db2eb8",
@@ -2519,6 +2869,111 @@ false
 "e3b0c44298fc",
 false
 ],
+"lsof -ti | xargs kill": [
+"deny",
+"fce1908637d8",
+false
+],
+"nohup nohup nohup echo agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup echo agentic; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup echo client; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup echo switch; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup echo user-agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agentic; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo client; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo switch; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo user-agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agentic; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo client; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo switch; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo user-agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo agentic; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo client; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo switch; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup nohup echo user-agent; systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
 "pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs | xargs -r kill": [
 "deny",
 "24664c8c284e",
@@ -2547,6 +3002,11 @@ false
 "pgrep --cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service/cgroup.threads | xargs -r kill": [
 "allow",
 "e3b0c44298fc",
+false
+],
+"pgrep -f {daemon,daemon2} | xargs kill": [
+"deny",
+"75e31ced7d99",
 false
 ],
 "pkill --pidfile /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daem*.service/cgroup.procs": [
@@ -6959,6 +7419,216 @@ false
 "e3b0c44298fc",
 false
 ],
+"ss -ltnp | grep -E '.{0,0}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,0}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,0}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,12}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,12}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,12}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,15}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,15}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,15}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,18}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,18}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,18}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,21}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,21}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,21}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,24}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,24}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,24}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,27}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,27}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,27}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,30}:84.5.{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,30}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,30}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,33}:84.5.{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,33}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,33}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,36}:84.5.{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,36}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,36}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,39}:84.5.{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,39}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,39}:84[07][57].{0,32}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.{0,3}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,3}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,3}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,6}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,6}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,6}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,9}:84.5.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,9}:8405.{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.{0,9}:84[07][57].{0,32}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
 "ss -ltnp | grep -E '^daemo[n]2$' | xargs kill": [
 "deny",
 "4b051acd65db",
@@ -7409,9 +8079,19 @@ false
 "e3b0c44298fc",
 false
 ],
+"systemctl --user status | xargs kill": [
+"deny",
+"de58397e52ff",
+false
+],
 "systemctl --user stop '*daemon*'": [
 "deny",
 "60913f4ecfcf",
+false
+],
+"systemctl --user stop '/etc/jarvis-d*'": [
+"deny",
+"fb92d8ce9603",
 false
 ],
 "systemctl --user stop 'jarvis-*'": [
@@ -7437,6 +8117,11 @@ false
 "systemctl --user stop pipewire": [
 "allow",
 "e3b0c44298fc",
+false
+],
+"systemctl --user stop session.slice": [
+"deny",
+"ffd3dae76cdc",
 false
 ]
 }
