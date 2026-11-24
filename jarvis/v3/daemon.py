@@ -93,8 +93,9 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None) -> type[BaseHTT
 
         def do_GET(self):
             # http.server collapses leading slashes in self.path.
-            path = self.requestline.split()[1].partition("?")[0]
-            if path == "/v3/status":
+            target = self.requestline.split()[1]
+            path = target.partition("?")[0]
+            if target == "/v3/status":
                 self._json(200, {
                     "service": SERVICE_NAME,
                     "version": "v3",

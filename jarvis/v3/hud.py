@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from jarvis import config
@@ -37,43 +38,66 @@ _CONTENT_TYPES = {
 MISSING_HUD = "No intact v3 HUD is installed. Run `jarvis agent install`."
 
 
+# A name Vite gave a content hash (`index-Ab3x.js`): the same name is the same bytes in any build.
+_HASHED = re.compile(r"assets/[A-Za-z0-9_.-]+-[A-Za-z0-9_-]+\.[a-z0-9]+")
+
+
+def root_refusal(root: Path) -> str | None:
+    """Why `root` cannot hold the installed v3 HUD, or None: v2's rules, and never v2's own install root
+    (or a folder around or inside it)."""
+    if why := hud_install.root_refusal(root):
+        return why.replace("JARVIS_HUD_DIR", "JARVIS_HUD3_DIR")
+    try:
+        v2_root = Path(config.HUD_DIR).resolve()
+    except (OSError, RuntimeError) as exc:
+        return f"Could not resolve the v2 HUD install root: {exc}"
+    if root == v2_root or v2_root in root.parents or root in v2_root.parents:
+        return "The v3 HUD needs an install root separate from the v2 HUD (JARVIS_HUD3_DIR)."
+    return None
+
+
 def _asset_from_older_build(root: Path, built: hud_install.Build, name: str) -> bytes | None:
-    names = hud_install.builds(root)
-    if names and names[0] == built.id:
-        return hud_install.find(root, name)
-    # find() searches every build, including any newer ones with broken indexes.
-    for older_id in names:
-        if older_id >= built.id:
-            continue
-        older = hud_install.load(root, older_id)
-        if older is not None and (data := hud_install.read(older, name)) is not None:
-            return data
+    for older_id in hud_install.builds(root):
+        # Never from a build newer than the one served: newest() passed it over as broken.
+        if older_id < built.id and (older := hud_install.load(root, older_id)) is not None:
+            if (data := hud_install.read(older, name)) is not None:
+                return data
+    return None
+
+
+def _target(path: str) -> tuple[str, str] | None:
+    """(the build file, its Content-Type) for a permitted, exact request path."""
+    parts = path.split("/")
+    if "%" in path or "\\" in path or "//" in path or any(p in (".", "..") for p in parts):
+        return None
+    if path == "/":
+        return "index.html", "text/html; charset=utf-8"
+    if path == "/manifest.webmanifest":
+        return path[1:], "application/manifest+json"
+    if len(parts) == 3 and parts[0] == "" and parts[1] in ("assets", "icons"):
+        kind = _CONTENT_TYPES.get(Path(parts[2]).suffix)
+        return (path[1:], kind) if kind is not None else None
     return None
 
 
 def static_file(root: Path, path: str) -> tuple[str, bytes] | None:
     """Content-Type and verified bytes for a permitted, exact request path."""
-    parts = path.split("/")
-    if "%" in path or "\\" in path or "//" in path or any(p in (".", "..") for p in parts):
+    if (target := _target(path)) is None or root_refusal(root) is not None:
         return None
-    if path == "/":
-        name, kind = "index.html", "text/html; charset=utf-8"
-    elif path == "/manifest.webmanifest":
-        name, kind = path[1:], "application/manifest+json"
-    elif len(parts) == 3 and parts[0] == "" and parts[1] in ("assets", "icons"):
-        name, kind = path[1:], _CONTENT_TYPES.get(Path(parts[2]).suffix)
-        if kind is None:
+    name, kind = target
+    # An install can prune the build picked here before it is read: pick again, once per kept build.
+    for _ in range(hud_install.KEEP + 1):
+        built = hud_install.newest(root)
+        if built is None:
             return None
-    else:
-        return None
-
-    built = hud_install.newest(root)
-    if built is None:
-        return None
-    data = hud_install.read(built, name)
-    if data is None and name.startswith("assets/") and name not in built.files:
-        data = _asset_from_older_build(root, built, name)
-    return (kind, data) if data is not None else None
+        data = hud_install.read(built, name)
+        if data is None and name not in built.files and _HASHED.fullmatch(name):
+            data = _asset_from_older_build(root, built, name)
+        if data is not None:
+            return kind, data
+        if built.path.exists():
+            return None
+    return None
 
 
 def _dependencies_stale(source: Path) -> bool:
@@ -111,7 +135,16 @@ def npm_build() -> None:
     if _dependencies_stale(source):
         # The flag outranks any .npmrc: packages never run code at install time (owner, 2026-10-15).
         _npm(npm, source, "ci", "--ignore-scripts", timeout=hud_install.NPM_BUILD_TIMEOUT)
-    _npm(npm, source, "run", "build", timeout=hud_install.NPM_BUILD_TIMEOUT)
+    # A build that writes nothing must not publish the previous one's files.
+    index = Path(config.HUD3_BUILD) / "index.html"
+    try:
+        index.unlink(missing_ok=True)
+        _npm(npm, source, "run", "build", timeout=hud_install.NPM_BUILD_TIMEOUT)
+        built = index.is_file()
+    except OSError as exc:
+        raise hud_install.InstallRefused(f"Could not build hud3/: {exc}") from None
+    if not built:
+        raise hud_install.InstallRefused("`npm run build` wrote no index.html. No HUD was installed.")
 
 
 def frontend_dirty() -> bool | None:
@@ -142,22 +175,18 @@ def _require_clean(dirty: bool | None, allow_dirty: bool) -> None:
 def install_hud(*, build=npm_build, allow_dirty: bool = False) -> hud_install.Build:
     """Build the checkout and install it with its Git provenance."""
     root = Path(config.HUD3_DIR)
-    if why := hud_install.root_refusal(root):
+    if why := root_refusal(root):
         raise hud_install.InstallRefused(why)
-    try:
-        v2_root = Path(config.HUD_DIR).resolve()
-    except (OSError, RuntimeError) as exc:
-        raise hud_install.InstallRefused(f"Could not resolve the v2 HUD install root: {exc}") from None
-    if root == v2_root or v2_root in root.parents or root in v2_root.parents:
-        raise hud_install.InstallRefused("The v3 HUD needs an install root separate from the v2 HUD.")
 
     head, dirty = hud_install.git_head(), frontend_dirty()
     _require_clean(dirty, allow_dirty)
     build()
     after_head, after_dirty = hud_install.git_head(), frontend_dirty()
     _require_clean(after_dirty, allow_dirty)
-    if after_head != head and not allow_dirty:
-        raise hud_install.InstallRefused("The checkout moved during the build. Run the install again.")
+    if after_head != head:
+        if not allow_dirty:
+            raise hud_install.InstallRefused("The checkout moved during the build. Run the install again.")
+        after_head = None       # neither commit is what was built
     if after_dirty or dirty:
         dirty = True
     elif after_dirty is None or dirty is None:

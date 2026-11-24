@@ -361,6 +361,8 @@ class Install(Base):
             if "ci" in args:
                 (hud3 / "node_modules").mkdir(exist_ok=True)
                 (hud3 / "node_modules" / ".package-lock.json").write_text("{}")
+            if "build" in args:
+                (self.built / "index.html").write_bytes(INDEX)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch.object(config, "REPO_ROOT", repo), patch.object(hud_install, "npm_path", return_value="/usr/bin/npm"), \
                 patch.object(self.hud.subprocess, "run", side_effect=run):
