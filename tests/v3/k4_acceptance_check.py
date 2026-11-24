@@ -92,17 +92,12 @@ class Shell(Base):
 
     def test_an_allowlist_entry_opens_nothing(self):
         allow = self.home / "allow.json"
-        allow.write_text(json.dumps([{"tool": "run_command", "prefix": w} for w in ("cp", "tee", "rm", "echo", "sed", "mv", "bash", "python3", "git")]))
+        allow.write_text(json.dumps([{"tool": "run_command", "prefix": w} for w in ("cp", "tee", "rm", "echo", "sed", "mv", "bash", "cat", "cd", "dd", "rsync", "install", "ln", "truncate", "chmod")]))
         with patch.object(config, "ALLOWLIST_PATH", allow):
+            self.assertTrue(P1.allows("run_command", {"command": "cp a.txt b.txt"}))      # the entries do work
             for p in (*self.files, *self.inside):
-                for line in self.writes(p)[:8]:
-                    tool = type("T", (), {"name": "run_command", "dangerous": True})()
-                    ok = getattr(P1, "allowlisted", None) or getattr(P1, "is_allowed", None)
-                    if ok is not None:
-                        try:
-                            self.assertFalse(ok(tool, {"command": line}), line)
-                        except TypeError:
-                            self.assertFalse(ok("run_command", {"command": line}), line)
+                for line in self.writes(p):
+                    self.assertFalse(P1.allows("run_command", {"command": line}), line)
 
     def test_reads_stay(self):
         for p in (self.v3 / "policy.json", *self.inside, self.v3 / "budget.jsonl"):
