@@ -38,10 +38,13 @@ _CODE_HOSTS = frozenset({
 })
 
 _FENCE = re.compile(r"[ \t]*(`{3,}|~{3,})([^\r\n]*)")
+_MARKDOWN_PREFIX = re.compile(r"[ \t]*(?:(>)[ \t]?|(?:[-+*]|[0-9]{1,9}[.)])[ \t])")
+_QUOTE_PREFIX = re.compile(r"[ \t]*>[ \t]?")
 _SHELL = frozenset({"", "sh", "bash", "zsh", "ksh", "dash", "ash", "fish", "shell"})
 _CONSOLE = frozenset({
     "console", "terminal", "shell-session", "sh-session", "bash-session", "shellsession",
 })
+_PROMPT = re.compile(r"(?:\([^()\s]+\)[ \t]+)?(?:[\w.-]+(?:@[\w.-]+)?(?::[^\s$#]*)?)?[$#][ \t]+")
 _SOURCE = frozenset({"python", "py", "python3", "javascript", "js", "typescript", "ts", "node"})
 _OVERRIDE = re.compile(
     r"\b(?:ignore|disregard|forget)[ \t]+(?:(?:all|your|the)[ \t]+){0,3}"
@@ -65,7 +68,10 @@ _URL_OR_BLOB = re.compile(
     re.IGNORECASE,
 )
 _IMAGE = re.compile(rf"!\[[^\[\]\n]*\]\(<?({_URL.pattern})", re.IGNORECASE)
+_URL_PATH = re.compile(r"https?://[^/?#]*(/[^?#]*)", re.IGNORECASE)
 _EXPANSION = re.compile(r"\$(?:[\w{(*@#?!$-])|`")
+_NAMED_VARIABLE = re.compile(r"\$[A-Za-z_]")
+_LABEL_PLACEHOLDER = re.compile(r"your-[\w…-]+-here|changeme|x+|example|…+", re.IGNORECASE)
 _CODE_SEND = re.compile(r"\b(?:(?:requests|httpx|axios)\.(?:post|put|patch|get)|fetch)\s*\(")
 _CODE_DATA = re.compile(
     r"\b(?:open|readFile(?:Sync)?|getenv)\s*\(|\b(?:os\.environ|process\.env)\b"
@@ -138,7 +144,8 @@ def _credential_hits(text: str) -> Iterator[Hit]:
             yield Hit("unscannable", match.span(2), "block")
             continue
         for a, b, _ in redact.labelled_spans(match[0]):
-            spans.append((match.start() + a, match.start() + b))
+            if not _LABEL_PLACEHOLDER.fullmatch(match[0][a:b]):
+                spans.append((match.start() + a, match.start() + b))
     end = 0
     start = 0
     for a, b in sorted(spans):
@@ -171,7 +178,15 @@ def _embedded_exfiltration(text: str) -> Iterator[Span]:
             yield match.span()
     for match in _IMAGE.finditer(text):
         url = match[1].rstrip(")")
-        if _EXPANSION.search(url) and not _allowed_host(url):
+        path = _URL_PATH.match(url)
+        # A bare dollar-prefixed name can be a literal path component ($web).
+        # Explicit expansion syntax and expansions outside the path still count.
+        expanded = any(
+            not (path and path.start(1) <= expansion.start() < path.end(1)
+                 and _NAMED_VARIABLE.fullmatch(expansion[0]))
+            for expansion in _EXPANSION.finditer(url)
+        )
+        if expanded and not _allowed_host(url):
             yield match.start(), match.start(1) + len(url)
 
 
@@ -235,6 +250,20 @@ def _denied_segment(segment: str) -> bool:
         return rules._judge_segment(segment, depth=rules.PROGRAM_DEPTH).decision == rules.DENY
 
 
+def _is_lookup(words: list[str]) -> bool:
+    if not words:
+        return False
+    if words[0] in {"which", "type", "hash"}:
+        return True
+    if words[0] == "command":
+        for option in words[1:]:
+            if not re.fullmatch(r"-[pVv]+", option):
+                break
+            if "v" in option or "V" in option:
+                return True
+    return False
+
+
 def _shell_hits(command: str, budget: list[int]) -> set[str]:
     queue = [(command, 0)]
     seen = set()
@@ -259,9 +288,15 @@ def _shell_hits(command: str, budget: list[int]) -> set[str]:
             budget[0] -= 1
             redirects = rules.redirections(segment)
             words = rules.command_start(rules._shell_words(rules.strip_redirections(segment)))
-            if _denied_segment(segment):
+            lookup = _is_lookup(words)
+            judged = segment
+            if lookup and not rules.has_substitution(segment):
+                # The judge also denies destructive names used as operands.
+                # A lookup only names them, but its redirections still run.
+                judged = " ".join([":", *(segment[r.start:r.end] for r in redirects)])
+            if _denied_segment(judged):
                 found.add("denied-shell")
-            if words:
+            if words and not lookup:
                 stem = rules._basename(words[0])
                 args = words[1:]
                 if _network_write(stem, args, piped, redirects):
@@ -296,39 +331,89 @@ def _source_hits(line: str) -> Iterator[str]:
         yield "persistence"
 
 
+def _opening_fence(line: str) -> tuple[re.Match | None, list[int]]:
+    # Zero marks a quote. Positive widths are the continuation indentation
+    # of successive list markers, combined until the next quote.
+    containers: list[int] = []
+    pos = width = 0
+    while prefix := _MARKDOWN_PREFIX.match(line, pos):
+        if prefix[1]:
+            if width:
+                containers.append(width)
+            containers.append(0)
+            width = 0
+        else:
+            padding = width % 4
+            width += len((" " * padding + prefix[0]).expandtabs(4)) - padding
+        pos = prefix.end()
+    if width:
+        containers.append(width)
+    return _FENCE.fullmatch(line, pos), containers
+
+
+def _container_end(line: str, containers: list[int]) -> int | None:
+    pos = 0
+    for width in containers:
+        if width == 0:
+            quote = _QUOTE_PREFIX.match(line, pos)
+            if quote is None:
+                return None
+            pos = quote.end()
+        else:
+            columns = 0
+            while columns < width and pos < len(line):
+                if line[pos] not in " \t":
+                    return None
+                columns += 4 - columns % 4 if line[pos] == "\t" else 1
+                pos += 1
+    return pos
+
+
 def _fenced_hits(text: str) -> Iterator[Hit]:
     fence = None
     language = None
+    containers = []
     pending = []
     offset = start = size = 0
     budget = [_MAX_COMMANDS]
     for raw in text.splitlines(keepends=True):
         line = raw.rstrip("\r\n")
-        end = offset + len(raw)
-        line_end = offset + len(line)
-        match = _FENCE.fullmatch(line)
-        closing = (match and fence and match[1][0] == fence[0]
-                   and len(match[1]) >= len(fence) and not match[2].strip())
-        if pending and closing:
-            yield Hit("unscannable", (start, offset), "block")
-            pending.clear()
-            size = 0
-        if closing:
-            fence = language = None
-        elif fence is None and match and (match[1][0] != "`" or "`" not in match[2]):
-            fence = match[1]
-            words = match[2].lower().split()
-            language = words[0] if words else ""
-        elif language in _SOURCE:
+        line_start = offset
+        line_end = line_start + len(line)
+        offset += len(raw)
+        if fence is not None:
+            content = _container_end(line, containers)
+            match = _FENCE.fullmatch(line, content) if content is not None else None
+            closing = (match and match[1][0] == fence[0] and len(match[1]) >= len(fence)
+                       and not match[2].strip())
+            if closing or content is None:
+                if pending:
+                    yield Hit("unscannable", (start, line_start), "block")
+                    pending.clear()
+                    size = 0
+                fence = language = None
+                if closing:
+                    continue
+        if fence is None:
+            match, containers = _opening_fence(line)
+            if match and (match[1][0] != "`" or "`" not in match[2]):
+                fence = match[1]
+                words = match[2].lower().split()
+                language = words[0] if words else ""
+            continue
+        line = line[content:]
+        if language in _SOURCE:
             for rule in _source_hits(line):
-                yield Hit(rule, (offset, line_end), "block")
+                yield Hit(rule, (line_start + content, line_end), "block")
         elif language in _SHELL or language in _CONSOLE:
             line = line.lstrip()
             if language in _CONSOLE:
-                if line.startswith(("$ ", "# ")) or (pending and line.startswith("> ")):
-                    line = line[2:]
+                prompt = _PROMPT.match(line)
+                if prompt:
+                    line = line[prompt.end():]
+                elif pending and line.startswith(("> ", ">\t")):
+                    line = line[2:].lstrip()
                 elif not pending:
-                    offset = end
                     continue
             if line and (pending or not line.startswith("#")):
                 if not pending:
@@ -336,7 +421,7 @@ def _fenced_hits(text: str) -> Iterator[Hit]:
                 pending.append(line)
                 size += len(line) + 1
                 if size > _MAX_COMMAND + 1:
-                    yield Hit("unscannable", (start, end), "block")
+                    yield Hit("unscannable", (start, offset), "block")
                     return
                 if (len(line) - len(line.rstrip("\\"))) % 2 == 0:
                     span = start, line_end
@@ -346,7 +431,6 @@ def _fenced_hits(text: str) -> Iterator[Hit]:
                             return
                     pending.clear()
                     size = 0
-        offset = end
     if pending:
         yield Hit("unscannable", (start, offset), "block")
 
