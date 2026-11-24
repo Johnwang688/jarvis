@@ -24,12 +24,12 @@ MIN_CLI = "2.1.325"
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_SESSION = re.compile(r"[A-Za-z0-9-]{1,64}")
 _ENV_KEY = re.compile(r"JARVIS_[A-Z0-9_]+")
 _GUARDS = {"JARVIS_JOB", "JARVIS_REVIEWER", "CLAUDE_CODE_DISABLE_CLAUDE_MDS"}
 _VERSION_TIMEOUT = 3.0
 _VERSION_CAP = 4096
 _STDOUT_CAP = 8 * 1024 * 1024
-_STDERR_CAP = 16 * 1024
 _IO_CHUNK = 64 * 1024
 _POLL_INTERVAL = 0.05
 _TERM_GRACE = 0.2
@@ -51,7 +51,7 @@ class JobResult:
     output_tokens: int = 0
     cost_usd: float | None = None
     seconds: float = 0.0
-    session_id: str | None = None
+    session_id: str | None = field(default=None, repr=False)
 
 
 def resolve_cli() -> str | None:
@@ -103,9 +103,7 @@ def _signal_group(pid: int, sig: signal.Signals) -> None:
 class _Output:
     stdout_cap: int
     stdout: bytearray = field(default_factory=bytearray)
-    stderr: bytearray = field(default_factory=bytearray)
     overflow: bool = False
-    stderr_truncated: bool = False
 
     def read(self, fd: int, stream: str) -> bool:
         """Read one chunk. Return whether the pipe can still deliver bytes."""
@@ -116,11 +114,7 @@ class _Output:
             remaining = self.stdout_cap - len(self.stdout)
             self.stdout.extend(chunk[:remaining])
             self.overflow = len(chunk) > remaining
-        else:
-            self.stderr.extend(chunk)
-            if len(self.stderr) > _STDERR_CAP:
-                del self.stderr[:-_STDERR_CAP]
-                self.stderr_truncated = True
+        # stderr is drained and dropped: it can quote the prompt, the MCP config or the environment.
         return True
 
 
@@ -175,11 +169,13 @@ def _capture(argv, *, cwd, env, prompt, timeout, cancel, stdout_cap):
         finally:
             # The leader and any MCP processes share this group. Closing
             # pipes alone cannot stop a child that has closed its own copies.
-            if reason in ("timeout", "cancelled"):
-                _signal_group(proc.pid, signal.SIGTERM)
-                time.sleep(_TERM_GRACE)
-            _signal_group(proc.pid, signal.SIGKILL)
             try:
+                try:
+                    if reason in ("timeout", "cancelled"):
+                        _signal_group(proc.pid, signal.SIGTERM)
+                        time.sleep(_TERM_GRACE)
+                finally:
+                    _signal_group(proc.pid, signal.SIGKILL)
                 # Drain only queued bytes plus any last writes before SIGKILL.
                 # Bound these reads even if a pipe stays open after cleanup.
                 for stream, label in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
@@ -199,19 +195,12 @@ def _capture(argv, *, cwd, env, prompt, timeout, cancel, stdout_cap):
     return reason, returncode, output
 
 
-def _error(message: str, output: _Output) -> str:
-    if not output.stderr or output.stderr_truncated:
-        # Truncation can discard the start of a multiline credential.
-        return message
-    from jarvis.v2.redact import for_display
-
-    tail = output.stderr.decode("utf-8", "replace")
-    try:
-        clean = " ".join(for_display(tail).split())
-    except Exception:
-        return message
-    clean = "".join(char for char in clean if char.isprintable())
-    return f"{message}: {clean[-300:]}" if clean else message
+def _unique(pairs):
+    """A JSON object whose keys are all different: which duplicate wins is the parser's whim."""
+    found = dict(pairs)
+    if len(found) != len(pairs):
+        raise ValueError("duplicate key")
+    return found
 
 
 def _tokens(value) -> int:
@@ -226,11 +215,11 @@ def _result(result: JobResult, reason, returncode: int, output: _Output) -> JobR
     if output.overflow:
         return replace(result, error="Claude job exceeded its output limit.")
     try:
-        reply = json.loads(output.stdout.decode("utf-8"))
+        reply = json.loads(output.stdout.decode("utf-8"), object_pairs_hook=_unique)
     except (ValueError, RecursionError):
         reply = None
     if not isinstance(reply, dict) or reply.get("type") != "result":
-        return replace(result, error=_error("Claude job returned no valid result", output))
+        return replace(result, error=f"Claude job returned no valid result (exit {returncode}).")
 
     usage = reply.get("usage")
     if not isinstance(usage, dict):
@@ -243,31 +232,35 @@ def _result(result: JobResult, reason, returncode: int, output: _Output) -> JobR
         result, input_tokens=min(input_tokens, _TOKEN_LIMIT - 1),
         output_tokens=_tokens(usage.get("output_tokens")),
         cost_usd=float(cost) if type(cost) in (int, float) and 0 <= cost <= sys.float_info.max else None,
-        session_id=session_id if isinstance(session_id, str) else None,
+        session_id=session_id if isinstance(session_id, str) and _SESSION.fullmatch(session_id) else None,
     )
     text = reply.get("result")
     if (returncode != 0 or reply.get("subtype") != "success" or reply.get("is_error") is not False
             or not isinstance(text, str)):
-        return replace(result, error=_error("Claude job failed", output))
+        return replace(result, error=f"Claude job failed (exit {returncode}).")
     return replace(result, ok=True, outcome="ok", text=text)
 
 
 def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli):
     from jarvis import config
     from jarvis.v2.providers.claude import parse_version
+    from jarvis.v3.daemon import _prepare_data_dir
 
     if cancel is not None and cancel.is_set():
         return replace(result, outcome="cancelled", error="Claude job cancelled.")
+    deadline = time.monotonic() + timeout
     cli = resolve_cli() if cli is None else cli
     if not cli:
         return replace(result, error="Claude CLI was not found.")
     try:
         reason, returncode, output = _capture(
-            [cli, "--version"], cwd=cwd, env=env, prompt=b"", timeout=_VERSION_TIMEOUT,
+            [cli, "--version"], cwd=cwd, env=env, prompt=b"", timeout=min(_VERSION_TIMEOUT, timeout),
             cancel=cancel, stdout_cap=_VERSION_CAP,
         )
         if reason == "cancelled" or (cancel is not None and cancel.is_set()):
             return replace(result, outcome="cancelled", error="Claude job cancelled.")
+        if time.monotonic() >= deadline:
+            return replace(result, outcome="timeout", error="Claude job timed out.")
         version = None
         if reason is None and returncode == 0 and not output.overflow:
             parts = output.stdout.decode("utf-8").split(maxsplit=1)
@@ -279,9 +272,10 @@ def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli)
 
     try:
         jobs = config.V3_DIR / "jobs"
-        jobs.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if jobs.is_symlink():
-            return replace(result, error="Claude job directory is a symbolic link.")
+        try:
+            _prepare_data_dir(jobs)
+        except RuntimeError:
+            return replace(result, error="The Claude job directory is not a plain folder.")
         with tempfile.TemporaryDirectory(prefix="job-", dir=jobs) as directory:
             if cancel is not None and cancel.is_set():
                 return replace(result, outcome="cancelled", error="Claude job cancelled.")
@@ -300,7 +294,7 @@ def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli)
                 argv.extend(("--allowedTools", allowed))
             if cancel is not None and cancel.is_set():
                 return replace(result, outcome="cancelled", error="Claude job cancelled.")
-            capture = _capture(argv, cwd=cwd, env=env, prompt=prompt, timeout=timeout,
+            capture = _capture(argv, cwd=cwd, env=env, prompt=prompt, timeout=max(deadline - time.monotonic(), 0.0),
                                cancel=cancel, stdout_cap=_STDOUT_CAP)
         return _result(result, *capture)
     except (OSError, subprocess.TimeoutExpired):

@@ -75,14 +75,14 @@ class ClaudeJobs(Base):
                     'os.write(1, b\'{"result":"\\xc3\')\nos.write(2, b"detail: \\xc3")\nsys.exit(0)')
         result = self.run_job()
         self.assertEqual(result.outcome, "error")
-        self.assertIn("detail: \ufffd", result.error)
+        self.assertNotIn("detail", result.error)
         self.assertEqual(result.text, "")
 
-    def test_stderr_is_scrubbed_even_when_stdout_is_valid_json(self):
+    def test_stderr_never_reaches_the_error(self):
         self.control(exit=1, stderr=f"fake detail {PLANTED}\r\nmore\x1b")
         result = self.run_job()
-        self.assertIn("fake detail", result.error)
-        for unsafe in (PLANTED, "\r", "\n", "\x1b"):
+        self.assertIn("exit 1", result.error)
+        for unsafe in ("fake detail", PLANTED, "\r", "\n", "\x1b"):
             self.assertNotIn(unsafe, result.error)
 
     def test_probe_uses_the_job_environment(self):
