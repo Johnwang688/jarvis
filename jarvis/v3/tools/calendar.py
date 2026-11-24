@@ -33,6 +33,7 @@ _PAGE_SIZE = 100
 _MAX_OUTPUT = 24_000
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _REQUEST_SECONDS = 30
+_READ_SECONDS = 10
 _MAX_WINDOW = timedelta(days=366)
 _MAX_EVENT = timedelta(days=7)
 
@@ -69,7 +70,7 @@ def _instant(value, *, zone=_CHICAGO, allow_date=False):
             zone = _zone(zone)
         early = local.replace(tzinfo=zone, fold=0).astimezone(_UTC)
         late = local.replace(tzinfo=zone, fold=1).astimezone(_UTC)
-        if early != late:
+        if early != late and not _DAY.fullmatch(value):     # a day that starts in a clock change starts at its first instant
             raise _CalendarError("Local time is ambiguous or does not exist. Supply an explicit UTC offset.")
         return early
     except (ValueError, OverflowError):
@@ -238,7 +239,7 @@ class CalendarTools:
                 _remaining(deadline)
                 headers["Authorization"] = f"Bearer {google_auth.access_token()}"
                 with client.stream(
-                    method, url, params=params, json=json, headers=headers, timeout=_remaining(deadline)
+                    method, url, params=params, json=json, headers=headers, timeout=min(_READ_SECONDS, _remaining(deadline))
                 ) as response:
                     status = response.status_code
                     _remaining(deadline)
@@ -464,7 +465,9 @@ class CalendarTools:
         current = self._call("GET", url)
         if _owned_etag(current, event_id) != etag:
             raise _CalendarError("Calendar event changed after approval. Review it before trying again.")
-        self._call(method, url, params=params, body=body, etag=etag)
+        result = self._call(method, url, params=params, body=body, etag=etag)
+        if method == "PATCH" and result.get("id") != event_id:
+            raise _CalendarError("Google Calendar did not confirm the change. The event may have been updated.")
 
     @_text_result
     def calendar_update(self, event_id, *, title=None, start=None, end=None, description=None):
