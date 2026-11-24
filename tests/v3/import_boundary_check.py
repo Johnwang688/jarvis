@@ -10,7 +10,6 @@ from jarvis.v3.imports import ALLOWED_V2, Violation, reverse_violations, violati
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWLIST = {
-    "jarvis.v2.providers.claude",
     "jarvis.v2.redact",
     "jarvis.v2.push",
     "jarvis.v2.quiet",
@@ -20,6 +19,7 @@ ALLOWLIST = {
     "jarvis.v2.skills_link",
     "jarvis.v2.remote_auth",
     "jarvis.v2.remote_secure",
+    "jarvis.v2.providers.claude",
 }
 
 

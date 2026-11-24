@@ -15,7 +15,6 @@ from pathlib import Path
 
 
 ALLOWED_V2: dict[str, str] = {
-    "jarvis.v2.providers.claude": "Reuse native Claude CLI resolution, version parsing and isolated environment keys.",
     "jarvis.v2.redact": "Reuse credential redaction for text shown to owners and models.",
     "jarvis.v2.push": "Reuse encrypted owner Web Push with count and rank only.",
     "jarvis.v2.quiet": "Reuse quiet-hours settings and local-time window calculations.",
@@ -25,6 +24,7 @@ ALLOWED_V2: dict[str, str] = {
     "jarvis.v2.skills_link": "Reuse skill symlink management for Claude Code and Codex.",
     "jarvis.v2.remote_auth": "Reuse phone passkey pairing, verification and session handling.",
     "jarvis.v2.remote_secure": "Reuse remote listener and tailnet checks for owner authority.",
+    "jarvis.v2.providers.claude": "Reuse native Claude CLI resolution, version parsing and isolated environment keys.",
 }
 
 _UNRESOLVABLE = "<unresolvable>"
