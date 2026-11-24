@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import date
 import fcntl
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,11 @@ _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _METADATA_LIMITS = {"description": 240, "source": 500}
 _REQUIRED = {"name", "kind", "description", "source", "updated", "status"}
-_LINE_BREAK_OR_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_KEYS = _REQUIRED | {"replaced_by"}
+_LINE_BREAK_OR_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
+_PLAIN_START = re.compile(r"[A-Za-z]")
+_YAML_SYNTAX = re.compile(r"\s#|:(?:\s|$)|[\[\]{},]")
+_YAML_WORDS = {"y", "yes", "n", "no", "on", "off", "true", "false", "null"}
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _MAX_FILE_BYTES = 4 * 64 * 1024
@@ -76,16 +81,52 @@ class Entry:
     status: str = "active"
     replaced_by: str = ""
     revision: bytes | None = None
+    header: tuple[tuple[str, str], ...] = ()
+    newline: str = "\n"
 
     def markdown(self) -> str:
-        fields = [
-            "---", f"name: {self.location.name}", f"kind: {self.location.kind}",
-            f"description: {self.description}", f"source: {self.source}",
-            f"updated: {self.updated}", f"status: {self.status}",
-        ]
+        fields = {
+            "name": _scalar(self.location.name), "kind": self.location.kind,
+            "description": _scalar(self.description), "source": _scalar(self.source),
+            "updated": self.updated, "status": self.status,
+        }
         if self.replaced_by:
-            fields.append(f"replaced_by: {self.replaced_by}")
-        return "\n".join([*fields, "---", self.body])
+            fields["replaced_by"] = _scalar(self.replaced_by)
+        lines = ["---" + self.newline]
+        for key, raw in self.header:
+            if not key:
+                lines.append(raw)
+            elif key in fields:
+                ending = "\r\n" if raw.endswith("\r\n") else "\n"
+                lines.append(f"{key}: {fields.pop(key)}{ending}")
+        lines.extend(f"{key}: {value}{self.newline}" for key, value in fields.items())
+        return "".join([*lines, "---", self.newline, self.body])
+
+    def scan_markdown(self, text: str) -> tuple[str, ...]:
+        rules = _scan(text)
+        for value in (self.description, self.source):
+            if _scalar(value) not in (value, f'"{value}"'):
+                # JSON escapes can change what the scanner sees in the stored text.
+                rules += _scan(value)
+        return tuple(dict.fromkeys(rules))
+
+
+def _scalar(value: str) -> str:
+    if (_PLAIN_START.match(value) and value == value.rstrip()
+            and not _YAML_SYNTAX.search(value) and value.lower() not in _YAML_WORDS):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _field_value(value: str) -> str:
+    if value.startswith('"'):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            raise VaultError("Invalid memory frontmatter.") from None
+    if not value.strip() or _LINE_BREAK_OR_CONTROL.search(value):
+        raise VaultError("Invalid memory frontmatter.")
+    return value
 
 
 def _slug(value) -> bool:
@@ -104,23 +145,30 @@ def _body(body, *, allow_empty: bool = False) -> None:
 
 
 def _parse(location: Location, raw: bytes) -> Entry:
-    header, sep, rest = raw.decode("utf-8").partition("\n")
-    if not sep or header.removesuffix("\r") != "---":
+    if len(raw) > _MAX_FILE_BYTES:
+        raise VaultError("Memory file is too large to read.")
+    stream = StringIO(raw.decode("utf-8"), newline="\n")
+    opening = stream.readline()
+    if opening not in ("---\n", "---\r\n"):
         raise VaultError("Invalid memory frontmatter.")
+    newline = opening[3:]
     fields = {}
-    while sep:
-        line, sep, rest = rest.partition("\n")
-        line = line.removesuffix("\r") if sep else line
+    layout = []
+    for original in stream:
+        line = original.removesuffix("\r\n").removesuffix("\n")
         if line == "---":
             break
-        key, delimiter, value = line.partition(": ")
-        if (not delimiter or key not in _REQUIRED | {"replaced_by"} or key in fields
-                or not value or _LINE_BREAK_OR_CONTROL.search(value)):
+        key, _, tail = line.partition(":")
+        if key.rstrip() not in _KEYS:
+            layout.append(("", original))
+            continue
+        if key not in _KEYS or key in fields or not tail.startswith(" "):
             raise VaultError("Invalid memory frontmatter.")
-        fields[key] = value
+        fields[key] = _field_value(tail[1:])
+        layout.append((key, original))
     else:
         raise VaultError("Invalid memory frontmatter.")
-    if (_REQUIRED - fields.keys() or fields["name"] != location.name or fields["kind"] != location.kind
+    if (_REQUIRED - fields.keys() or fields["kind"] != location.kind
             or fields["status"] not in ("active", "archived")):
         raise VaultError("Invalid memory frontmatter.")
     if "replaced_by" in fields and (fields["status"] != "archived" or not _slug(fields["replaced_by"])):
@@ -133,9 +181,26 @@ def _parse(location: Location, raw: bytes) -> Entry:
         raise VaultError("Invalid memory date.") from None
     for key in _METADATA_LIMITS:
         _metadata(key, fields[key])
+    rest = stream.read()
     _body(rest, allow_empty=not location.folder)
     return Entry(location, fields["description"], fields["source"], rest, fields["updated"],
-                 fields["status"], fields.get("replaced_by", ""), _revision(raw))
+                 fields["status"], fields.get("replaced_by", ""), _revision(raw), tuple(layout), newline)
+
+
+def _is_archived(raw: bytes) -> bool:
+    # Inspect status independently of the other fields, which may be damaged.
+    opening, sep, rest = raw.partition(b"\n")
+    if not sep or opening not in (b"---", b"---\r"):
+        return False
+    for line in rest.split(b"\n"):
+        line = line.removesuffix(b"\r")
+        if line == b"---":
+            break
+        if line.startswith(b"status: "):
+            with suppress(UnicodeError, VaultError):
+                if _field_value(line[8:].decode("utf-8")) == "archived":
+                    return True
+    return False
 
 
 def _revision(raw: bytes) -> bytes:
@@ -197,17 +262,43 @@ def _regular_file(directory: int, name: str, flags: int = os.O_RDONLY, *, privat
         os.close(fd)
 
 
-def _read_file(directory: int, name: str, *, private: bool = True) -> bytes:
+def _read_bytes(fd: int) -> bytes:
+    with os.fdopen(fd, "rb", closefd=False) as stream:
+        return stream.read(_MAX_FILE_BYTES + 1)
+
+
+def _read_file(directory: int, name: str, *, private: bool = True, allow_prefix: bool = False) -> bytes:
     # An owner's editor leaves 0644 behind; the 0700 folder keeps it private, and the next write makes it 0600.
     with _regular_file(directory, name, private=private) as fd:
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            raw = stream.read(_MAX_FILE_BYTES + 1)
-    if len(raw) > _MAX_FILE_BYTES:
+        raw = _read_bytes(fd)
+    if not allow_prefix and len(raw) > _MAX_FILE_BYTES:
         raise VaultError("Memory file is too large to read.")
     return raw
 
 
-def _atomic_replace(directory: int, filename: str, raw: bytes) -> None:
+def _check_revision(directory: int, filename: str, expected: bytes | None) -> None:
+    try:
+        if expected is None:
+            os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        else:
+            with _regular_file(directory, filename, private=False) as fd:
+                before = os.fstat(fd)
+                raw = _read_bytes(fd)
+                if len(raw) <= _MAX_FILE_BYTES and _revision(raw) == expected:
+                    after = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                    if (before.st_dev == after.st_dev and before.st_ino == after.st_ino
+                            and before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+                            and before.st_ctime_ns == after.st_ctime_ns):
+                        return
+    except FileNotFoundError:
+        if expected is None:
+            return
+    except (OSError, VaultError):
+        pass
+    raise VaultError("Memory entry changed during the write. Read it again.")
+
+
+def _atomic_replace(directory: int, filename: str, raw: bytes, expected: bytes | None) -> None:
     tmp = ".entry-" + uuid4().hex
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS, 0o600, dir_fd=directory)
     try:
@@ -216,12 +307,44 @@ def _atomic_replace(directory: int, filename: str, raw: bytes) -> None:
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
+        _check_revision(directory, filename, expected)
         os.replace(tmp, filename, src_dir_fd=directory, dst_dir_fd=directory)
-    finally:
-        try:
+    except BaseException:
+        with suppress(OSError):
             os.unlink(tmp, dir_fd=directory)
-        except FileNotFoundError:
-            pass
+        raise
+
+
+def _log_flags(root: int, flags: list[dict[str, str]]) -> None:
+    filename = ".flags.jsonl"
+    try:
+        os.stat(filename, dir_fd=root, follow_symlinks=False)
+    except FileNotFoundError:
+        new_log = True
+    else:
+        new_log = False
+    payload = "".join(json.dumps(flag) + "\n" for flag in flags).encode()
+    mode = os.O_WRONLY | os.O_APPEND
+    if new_log:
+        mode |= os.O_CREAT | os.O_EXCL
+    with _regular_file(root, filename, mode) as log:
+        size = os.fstat(log).st_size
+        try:
+            with os.fdopen(log, "ab", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(log)
+            if new_log:
+                os.fsync(root)
+        except OSError:
+            with suppress(OSError):
+                if new_log:
+                    os.unlink(filename, dir_fd=root)
+                    os.fsync(root)
+                else:
+                    os.ftruncate(log, size)
+                    os.fsync(log)
+            raise
 
 
 class Vault:
@@ -264,7 +387,10 @@ class Vault:
         if not isinstance(ref, str):
             raise VaultError("Invalid memory name.")
         if ref in _ROOT_ENTRIES:
-            return self._load(root, Location("", ref))
+            entry = self._load(root, Location("", ref))
+            if entry.status == "active" or pending_archive:
+                return entry
+            raise VaultError("Memory entry was not found.")
         folder, slash, name = ref.partition("/")
         if not slash:
             name = folder
@@ -316,14 +442,16 @@ class Vault:
     @staticmethod
     def _row(directory: int, location: Location):
         try:
-            entry = _parse(location, _read_file(directory, location.filename, private=False))
+            raw = _read_file(directory, location.filename, private=False, allow_prefix=True)
+            if _is_archived(raw):
+                return
+            entry = _parse(location, raw)
         except FileNotFoundError:
             return
         except (OSError, UnicodeError, VaultError):
             yield location, None
         else:
-            if entry.status == "active":
-                yield location, entry
+            yield location, entry
 
     def entries(self, folder: str = "") -> list[tuple[Location, Entry | None]]:
         """Return active entries and locations of unreadable entries or wrong-mode folders."""
@@ -344,7 +472,7 @@ class Vault:
                 entry = self._initial(Location("", name))
             else:
                 raise VaultError("Memory entry was not found.") from None
-        _scan(entry.markdown())
+        entry.scan_markdown(entry.markdown())
         return entry
 
     def _check_caps(self, root: int, entry: Entry, *, adding: bool) -> None:
@@ -352,7 +480,7 @@ class Vault:
         over_chars = len(entry.body) - cap
         over_entries = 0
         if adding and entry.location.folder == "facts":
-            over_entries = sum(row is not None for _, row in self._rows(root, "facts")) + 1 - FACTS_CAP
+            over_entries = sum(1 for _ in self._rows(root, "facts")) + 1 - FACTS_CAP
         if over_chars > 0 or over_entries > 0:
             lines = []
             if over_chars > 0:
@@ -364,15 +492,19 @@ class Vault:
             raise VaultError("\n".join(lines))
 
     @staticmethod
-    def _save(root: int, directory: int, entry: Entry, raw: bytes, rules: tuple[str, ...]):
-        flags = [{"name": entry.location.ref, "rule": rule} for rule in rules]
+    def _save(root: int, directory: int, entry: Entry, raw: bytes, rules: tuple[str, ...],
+              archive_existing: bool = False):
+        location = entry.location
+        expected = entry.revision
+        flags = [{"name": location.ref, "rule": rule} for rule in rules]
         if flags:
-            with _regular_file(root, ".flags.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT) as log:
-                _atomic_replace(directory, entry.location.filename, raw)
-                with os.fdopen(log, "ab", closefd=False) as stream:
-                    stream.write("".join(json.dumps(flag) + "\n" for flag in flags).encode())
-        else:
-            _atomic_replace(directory, entry.location.filename, raw)
+            _check_revision(directory, location.filename, expected)
+            _log_flags(root, flags)
+        if archive_existing:
+            with _directory(directory, ".archive", create=True) as archive:
+                Vault._finish_archive(directory, archive, location, expected)
+            expected = None
+        _atomic_replace(directory, location.filename, raw, expected)
         return replace(entry, revision=_revision(raw)), flags
 
     def add(self, folder: str, name: str, description: str, body: str, source: str):
@@ -392,14 +524,13 @@ class Vault:
             raise VaultError(f"Memory entry {safe_summary(location.ref)} already exists.")
         self._check_caps(root, entry, adding=True)
         text = entry.markdown()
-        rules = _scan(text)
+        rules = entry.scan_markdown(text)
         with self._folder(root, location.folder, create=True) as directory:
             if importing and self._was_archived(directory, location):
                 raise VaultError("Memory entry was previously archived.")
             if existing is not None:
-                with _directory(directory, ".archive", create=True) as archive:
-                    self._finish_archive(directory, archive, location)
-            return self._save(root, directory, entry, text.encode("utf-8"), rules)
+                entry = replace(entry, revision=existing.revision)
+            return self._save(root, directory, entry, text.encode("utf-8"), rules, existing is not None)
 
     def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None]):
         if not isinstance(old, str) or not isinstance(new, str):
@@ -424,13 +555,14 @@ class Vault:
             entry = replace(entry, body=body, updated=date.today().isoformat())
             self._check_caps(root, entry, adding=False)
             text = entry.markdown()
-            rules = _scan(text)
+            rules = entry.scan_markdown(text)
             with self._folder(root, location.folder) as directory:
                 return self._save(root, directory, entry, text.encode("utf-8"), rules)
 
     @staticmethod
-    def _finish_archive(directory: int, archive: int, location: Location) -> None:
+    def _finish_archive(directory: int, archive: int, location: Location, expected: bytes) -> None:
         filename = f"{location.name}.{uuid4().hex}.md"
+        _check_revision(directory, location.filename, expected)
         os.rename(location.filename, filename, src_dir_fd=directory, dst_dir_fd=archive)
 
     @staticmethod
@@ -458,16 +590,18 @@ class Vault:
                                 replaced_by=replacement.name if replacement else "")
             self._check_caps(root, entry, adding=False)
             text = entry.markdown()
-            rules = _scan(text)
+            rules = entry.scan_markdown(text)
+            raw = text.encode("utf-8")
             with self._folder(root, location.folder) as directory:
                 with _directory(directory, ".archive", create=True) as archive:
-                    flags = []
-                    # The status change commits the archive. If the move fails, the
-                    # archived entry stays hidden and a retry can finish the move.
-                    current = self._load(root, location)
-                    if current.status == "active":
-                        entry, flags = self._save(root, directory, entry, text.encode("utf-8"), rules)
-                    self._finish_archive(directory, archive, location)
+                    if _revision(raw) == entry.revision:
+                        self._finish_archive(directory, archive, location, entry.revision)
+                        return entry, []
+                    entry, flags = self._save(root, directory, entry, raw, rules)
+                    # The persisted status already hides the entry. A retry can
+                    # finish moving it if the filesystem or an editor intervenes.
+                    with suppress(OSError, VaultError):
+                        self._finish_archive(directory, archive, location, entry.revision)
                     return entry, flags
 
     def import_memory(self, source_dir) -> tuple[list[str], list[str]]:

@@ -3,7 +3,7 @@
 from functools import wraps
 from threading import RLock
 
-from jarvis.v3.vault import Vault, VaultError, entry_summary, safe_summary
+from jarvis.v3.vault import Vault, VaultError, entry_summary
 
 
 _LIST_CHARS = 48_000
@@ -85,10 +85,12 @@ class MemoryTools:
             if entry is None:
                 continue
             text = entry.markdown()
-            if needle in text.casefold() or needle in location.ref.casefold():
-                clean = safe_summary(text)
-                if clean == text:
-                    matches.append(f"--- {location.ref} ---\n{clean}")
+            if any(needle in value.casefold() for value in (text, location.ref, entry.description, entry.source)):
+                try:
+                    entry.scan_markdown(text)
+                except VaultError:
+                    continue
+                matches.append(f"--- {location.ref} ---\n{text}")
         return _bounded(matches, _SEARCH_CHARS) or "No matching memories."
 
 

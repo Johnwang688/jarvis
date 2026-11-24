@@ -125,8 +125,8 @@ class VaultChecks(unittest.TestCase):
         self.assertIn("changed since the read", self.tools.memory_patch("tea", "Mint", "Black"))
         self.assertEqual(self.entry.read_bytes(), edited)
         read = self.tools.memory_read("tea")
-        self.assertIn("description: Tea: the drink\n", read)
-        self.assertIn("source: calendar:fixture\n", read)
+        self.assertIn('description: "Tea: the drink"\r\n', read)
+        self.assertIn("source: calendar:fixture\r\n", read)
         old = "Mint tea.\r\n---\r\nstatus: archived\r\n---\r\nSecond"
         new = old.replace("Mint", "Black")
         self.assertIn(old, read)
@@ -138,11 +138,9 @@ class VaultChecks(unittest.TestCase):
         original = self.entry.read_bytes()
         for before, after in (
             (b"name: tea\n", b"name: tea\nname: tea\n"),
-            (b"name: tea\n", b"name: coffee\n"),
             (b"kind: fact\n", b"kind: person\n"),
             (b"source: owner\n", b"source:owner\n"),
             (b"source: owner\n", b""),
-            (b"source: owner\n", b"source: owner\nunknown: field\n"),
             (b"description: A drink\n", b"description: A\rdrink\n"),
             (b"description: A drink\n", b"description: A\xe2\x80\xa8drink\n"),
             (b"status: active\n", b"status: active\nreplaced_by: coffee\n"),
@@ -155,7 +153,10 @@ class VaultChecks(unittest.TestCase):
                 self.assertNotEqual(damaged, original)
                 self.entry.write_bytes(damaged)
                 self.assertTrue(self.tools.memory_read("facts/tea").startswith("Error:"))
-                self.assertIn("unreadable entry", self.tools.memory_list("facts"))
+                if b"status: archived\n" in after:
+                    self.assertNotIn("facts/tea", self.tools.memory_list("facts"))
+                else:
+                    self.assertIn("unreadable entry", self.tools.memory_list("facts"))
                 self.assertEqual(self.entry.read_bytes(), damaged)
         self.entry.write_bytes(re.sub(rb"(?m)^updated: .+$", b"updated: 2026-02-30", original))
         self.assertIn("Invalid memory date", self.tools.memory_read("facts/tea"))
@@ -166,7 +167,7 @@ class VaultChecks(unittest.TestCase):
             "facts", "coffee", "Replacement drink", "Black coffee.", "owner"),
             "Added facts/coffee.")
         with patch("jarvis.v3.vault.os.rename", side_effect=OSError("interrupted")):
-            self.assertTrue(self.tools.memory_archive("facts/tea", "coffee").startswith("Error:"))
+            self.assertEqual(self.tools.memory_archive("facts/tea", "coffee"), "Archived facts/tea.")
         pending = self.entry.read_bytes()
         self.assertIn(b"status: archived\nreplaced_by: coffee\n", pending)
         archive = self.entry.parent / ".archive"
