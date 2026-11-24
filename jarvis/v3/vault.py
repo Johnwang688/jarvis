@@ -81,26 +81,28 @@ class Entry:
     status: str = "active"
     replaced_by: str = ""
     revision: bytes | None = None
-    header: tuple[tuple[str, str], ...] = ()
+    header: tuple[tuple[str, str, str], ...] = ()     # (contract key or "", the line, its value)
     newline: str = "\n"
+    closing: str = ""         # the hand-made closing line, kept as it was
 
     def markdown(self) -> str:
         fields = {
-            "name": _scalar(self.location.name), "kind": self.location.kind,
-            "description": _scalar(self.description), "source": _scalar(self.source),
+            "name": self.location.name, "kind": self.location.kind,
+            "description": self.description, "source": self.source,
             "updated": self.updated, "status": self.status,
         }
         if self.replaced_by:
-            fields["replaced_by"] = _scalar(self.replaced_by)
+            fields["replaced_by"] = self.replaced_by
         lines = ["---" + self.newline]
-        for key, raw in self.header:
+        for key, raw, value in self.header:
             if not key:
                 lines.append(raw)
             elif key in fields:
+                new = fields.pop(key)
                 ending = "\r\n" if raw.endswith("\r\n") else "\n"
-                lines.append(f"{key}: {fields.pop(key)}{ending}")
-        lines.extend(f"{key}: {value}{self.newline}" for key, value in fields.items())
-        return "".join([*lines, "---", self.newline, self.body])
+                lines.append(raw if new == value else f"{key}: {_written(key, new)}{ending}")
+        lines.extend(f"{key}: {_written(key, value)}{self.newline}" for key, value in fields.items())
+        return "".join([*lines, self.closing or "---" + self.newline, self.body])
 
     def scan_markdown(self, text: str) -> tuple[str, ...]:
         rules = _scan(text)
@@ -118,12 +120,15 @@ def _scalar(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _written(key: str, value: str) -> str:
+    return value if key in ("kind", "updated", "status") else _scalar(value)
+
+
 def _field_value(value: str) -> str:
     if value.startswith('"'):
-        try:
+        # A hand-made value that is not one JSON string (a comment after it, say) is read as it stands.
+        with suppress(ValueError):
             value = json.loads(value)
-        except ValueError:
-            raise VaultError("Invalid memory frontmatter.") from None
     if not value.strip() or _LINE_BREAK_OR_CONTROL.search(value):
         raise VaultError("Invalid memory frontmatter.")
     return value
@@ -157,15 +162,16 @@ def _parse(location: Location, raw: bytes) -> Entry:
     for original in stream:
         line = original.removesuffix("\r\n").removesuffix("\n")
         if line == "---":
+            closing = original if original.endswith("\n") else original + newline
             break
         key, _, tail = line.partition(":")
         if key.rstrip() not in _KEYS:
-            layout.append(("", original))
+            layout.append(("", original, ""))
             continue
         if key not in _KEYS or key in fields or not tail.startswith(" "):
             raise VaultError("Invalid memory frontmatter.")
         fields[key] = _field_value(tail[1:])
-        layout.append((key, original))
+        layout.append((key, original, fields[key]))
     else:
         raise VaultError("Invalid memory frontmatter.")
     if (_REQUIRED - fields.keys() or fields["kind"] != location.kind
@@ -184,7 +190,7 @@ def _parse(location: Location, raw: bytes) -> Entry:
     rest = stream.read()
     _body(rest, allow_empty=not location.folder)
     return Entry(location, fields["description"], fields["source"], rest, fields["updated"],
-                 fields["status"], fields.get("replaced_by", ""), _revision(raw), tuple(layout), newline)
+                 fields["status"], fields.get("replaced_by", ""), _revision(raw), tuple(layout), newline, closing)
 
 
 def _is_archived(raw: bytes) -> bool:
