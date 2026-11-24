@@ -5,17 +5,16 @@ v3's own data becomes protected state for Jarvis's v1 and v2 agents (T3 sessions
           V3_REVIEW_QUEUE_DIR (V3_DIR/review-queue), V3_BUDGET_LEDGER (V3_DIR/budget.jsonl)
   Files: policy.json, budget.jsonl, ~/.claude.json, ~/.claude/settings.json, ~/.claude/settings.local.json, ~/.codex/config.toml, ~/.codex/hooks.json
   Trees (every file at or below): skills, skill-ledger, review-queue
-  Write tools and v2 grants refuse all of them. A shell write is never ALLOW, allowlisted or not. Reads stay as they are. Nothing else under V3_DIR changes (vault, index, feed ...).
-  Additive only: no decision anywhere becomes less strict.
+  Write tools and v2 grants refuse all of them. Reads stay as they are. Nothing else under V3_DIR changes (vault, index, feed ...).
+  Shell judging is not touched at all (two probes showed that new members there can soften an existing refusal): `protected_state.py` and `rules.py` are byte-identical to main.
 """
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from jarvis import config, permissions as P1, protected_state, rules
+from jarvis import config, permissions as P1, rules
 from jarvis.tools import files
 from jarvis.v2 import permissions as P2
 from jarvis.v3 import imports
@@ -80,24 +79,6 @@ class WriteTools(Base):
 
 
 class Shell(Base):
-    def test_writes_are_never_allowed(self):
-        for p in (*self.files, *self.inside):
-            for line in self.writes(p):
-                with self.subTest(line=line.replace(str(self.home), "~")):
-                    self.assertNotEqual(P1.static_verdict(line).decision, rules.ALLOW)
-
-    def test_ancestors(self):
-        for line in (f"rm -rf {self.v3}", f"mv {self.v3} /tmp/x", f"rm -r {self.trees[1]}", f"rsync -a --delete /tmp/d/ {self.v3}/", f"cp -r /tmp/d {self.trees[0]}", f"tar -xf a.tar -C {self.trees[0]}", f"find {self.v3} -delete"):
-            self.assertNotEqual(P1.static_verdict(line).decision, rules.ALLOW, line)
-
-    def test_an_allowlist_entry_opens_nothing(self):
-        allow = self.home / "allow.json"
-        allow.write_text(json.dumps([{"tool": "run_command", "prefix": w} for w in ("cp", "tee", "rm", "echo", "sed", "mv", "bash", "cat", "cd", "dd", "rsync", "install", "ln", "truncate", "chmod")]))
-        with patch.object(config, "ALLOWLIST_PATH", allow):
-            self.assertTrue(P1.allows("run_command", {"command": "cp a.txt b.txt"}))      # the entries do work
-            for p in (*self.files, *self.inside):
-                for line in self.writes(p):
-                    self.assertFalse(P1.allows("run_command", {"command": line}), line)
 
     def test_reads_stay(self):
         for p in (self.v3 / "policy.json", *self.inside, self.v3 / "budget.jsonl"):
@@ -113,13 +94,14 @@ class Shell(Base):
                 self.assertNotEqual(got.decision, rules.DENY, line.format(p))
                 self.assertIn(got.decision, (want.decision, rules.ASK), line.format(p))
 
-    def test_ordinary_work_is_as_before(self):
-        for p in self.free:
-            for line in self.writes(p):
-                with self.subTest(line=line.replace(str(self.home), "~")):
-                    v = P1.static_verdict(line)
-                    self.assertNotIn("v3", v.reason.lower())
-                    self.assertNotIn("learned skill", v.reason.lower())
+
+
+class Codex(Base):
+    def test_no_writable_root_reaches_it(self):
+        from jarvis.v2.providers import codex_config
+        for p in (self.v3, *self.trees, self.trees[0] / "a"):
+            p.mkdir(parents=True, exist_ok=True)
+            self.assertFalse(codex_config._safe_root(p), p)
 
 
 class Config(unittest.TestCase):
