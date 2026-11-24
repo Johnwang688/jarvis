@@ -45,6 +45,7 @@ Research inputs: a read of Hermes Agent at commit `0f602c5` (docs + `agent/`,
 | H7 | **Retire Discord** as a Jarvis surface. | Covers the bot, per-project channels and per-task threads. |
 | H8 | **Keep Jarvis's phone surface for the agentic interface** (voice, PC control, memory, cron, Jarvis status). T3's mobile app handles chats. | The phone's thread and chat views retire. The passkey, the 1 h unlock and the loopback-behind-Tailscale rules stay for what remains. |
 | H9 | **The background reviewer runs on the Claude subscription** (`claude -p`, Haiku tier), not OpenRouter. | It spends Claude limits, so it needs a budget (§6.3). |
+| H10 | **No Jarvis gate hooks on T3 sessions** (owner, 2026-11-24). They run under T3's permission modes and the CLIs' own safeguards. | Drops Track G, S2 and OG5 (§5 is kept as the record of what was planned). Jarvis's own actions stay ask-first. |
 
 Earlier decisions still in force: the fast path stays Jarvis's own loop (no
 framework, D2). Skills and memory stay plain markdown files. The memory ladder
@@ -139,6 +140,8 @@ untrusted pages in the Browser.
 ---
 
 ## 5. Moving the gate (the go/no-go)
+
+> **Superseded by H10 (owner, 2026-11-24): not built.**
 
 Today Claude's gate is a `PreToolUse` hook that Jarvis puts into each session
 it spawns (`v2/providers/claude.py` ~L1100). Codex's gate is the config
