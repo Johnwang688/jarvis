@@ -34,3 +34,7 @@ logs/
 # `cd hud && npm ci --ignore-scripts && npm run build` and served by the v2 daemon.
 hud/dist/
 hud/node_modules/
+
+# HUD v3 build output (Vite), installed by `jarvis agent install`.
+hud3/dist/
+hud3/node_modules/
