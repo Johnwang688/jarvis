@@ -3289,8 +3289,17 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                           "default_env", "_run_systemctl", "_systemctl", "_change", "_stop_and_disable",
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
     "jarvis.v3.cli": (("agent", "start"),
-                      ("run_daemon", "start", "stop", "restart", "install", "main")),
+                      ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands")),
 }
+
+
+def _owner_module_file(module: str) -> tuple[str, str]:
+    """(the folder its file must be in, or "" for any; the file's name). v3's
+    `cli.py` and `switch.py` are names any project has, so they count only in a
+    `v3` folder: a refusal cannot be approved, and a false one blocks everyone
+    (`python cli.py`, Opus review 2026-11-23)."""
+    parent, _, last = module.rpartition(".")
+    return ("v3" if parent == "jarvis.v3" else ""), last + ".py"
 
 # The protected systemd units can also be changed directly. On 2026-10-11,
 # `systemctl --user restart jarvis-daemon2` was ALLOW in `rules.decide`
@@ -4989,7 +4998,9 @@ def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
             return OWNER_OPS[path]
         if re.search(r"\brun_module\s*\(\s*['\"]" + re.escape(module) + r"['\"]", source):
             return OWNER_OPS[path]
-        if re.search(r"\brun_path\s*\([^)]*" + re.escape(last) + r"\.py", source):
+        folder, name = _owner_module_file(module)
+        where = re.escape(folder) + r"[\\/]+" if folder else ""
+        if re.search(r"\brun_path\s*\([^)]*" + where + re.escape(name), source):
             return OWNER_OPS[path]
     # The CLI itself, with an owner path's words: `runpy.run_module("jarvis")`
     # with `sys.argv` set, `jarvis.__main__.main([...])`, `cmd_hud(…install…)`.
@@ -5119,7 +5130,8 @@ def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str
         script = _owner_word(what or "", state, environ=False)
         stem_of = rules._basename(script)
         for module, (path, _) in OWNER_OP_MODULES.items():
-            if stem_of == module.rpartition(".")[2] + ".py":
+            folder, name = _owner_module_file(module)
+            if stem_of == name and folder in ("", rules._basename(os.path.dirname(script))):
                 return OWNER_OPS[path]
         # The CLI run as a script: its console-script launcher
         # (`python3 ~/.local/bin/jarvis restart`) or the package itself.
@@ -5486,7 +5498,8 @@ def _could_be_owner_op(command: str) -> bool:
     # "too complex", which would hide a refusal later on the line.
     if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS if path[0] != "agent")
             or ("agent" in flat and ("jarvis" in flat or _WILD.search(flat)))
-            or any(module.rpartition(".")[2] in flat for module in OWNER_OP_MODULES)
+            or any(module.rpartition(".")[2] in flat and _owner_module_file(module)[0] in flat
+                   for module in OWNER_OP_MODULES)
             or any(word in flat for word in _DAEMON_WORDS)
             or any(word in flat for word in _KILL_WORDS)):
         return True
