@@ -490,7 +490,9 @@ class _Operation:
         except (OSError, ValueError):
             return False
         # A large body can end mid-character in the bounded read.
-        return metadata(text.decode(errors="surrogateescape")).get("name", "").casefold() == folded
+        declared = metadata(text.decode(errors="surrogateescape")).get("name", "")
+        # A YAML comment after the name is not part of it.
+        return re.split(r"\s+#", declared, maxsplit=1)[0].strip().strip("\"'").casefold() == folded
 
     def require_unowned(self, name):
         if self.owner(name) is not None:
@@ -613,13 +615,14 @@ class _Operation:
             return False
         return True
 
-    def _sync_links(self, name, *, live):
+    def _sync_links(self, name, *, live, make=True):
+        """`make`: create a consumer folder that is not there (a write does; a read does not)."""
         if live and not self._linkable(name):
             return " Consumer links need attention."
         errors = False
         for path in self.links:
             try:
-                with open_directory(path, create=live) as fd:
+                with open_directory(path, create=live and make) as fd:
                     _verify_directory(self.root, self.root_fd)
                     _verify_directory(path, fd)
                     existing = _stat(fd, name)
@@ -654,24 +657,29 @@ class _Operation:
         # directory doesn't qualify as a live skill, and only exact links
         # count as ours when removing entries from a consumer.
         live = {name for name in os.listdir(self.root_fd) if self._linkable(name)}
-        missing = set()
-        stale = set()
+        missing, stale, held = set(), set(), set()
         for path in self.links:
             try:
                 with open_directory(path) as fd:
                     entries = set(os.listdir(fd))
                     missing.update(live - entries)
+                    held.update(live & entries)
                     stale.update(name for name in entries - live
                                  if _SLUG.fullmatch(name) and self._ours(fd, name))
             except FileNotFoundError:
                 missing.update(live)
             except OSError:
-                continue
+                continue        # an unreadable consumer is left alone; a read never fails for it
         for name in sorted(stale):
             self._sync_links(name, live=False)
         for name in sorted(missing):
-            if self.owner(name) is None:
-                self._sync_links(name, live=True)
+            try:
+                owned = self.owner(name) is not None
+            except OSError:
+                owned = True    # cannot tell whose name it is: link nothing
+            if not owned:
+                # No consumer has it: the create was interrupted. Otherwise a missing folder was removed on purpose.
+                self._sync_links(name, live=True, make=name not in held)
 
     def _quarantine(self, stack, row, parts, data):
         pending = _directory(stack, self.root_fd, ".pending", create=True)
