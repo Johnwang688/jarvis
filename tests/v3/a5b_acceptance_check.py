@@ -31,8 +31,8 @@ from jarvis.v2 import hud_install, permissions
 from jarvis.v3 import cli, daemon, imports, switch
 
 REPO = Path(__file__).resolve().parents[2]
-INDEX = b'<!doctype html><title>J.A.R.V.I.S. Agent</title><script type="module" src="/assets/index-abc.js"></script>'
-FILES = {"index.html": INDEX, "assets/index-abc.js": b"console.log(1)", "assets/index-abc.css": b"body{}",
+INDEX = b'<!doctype html><title>J.A.R.V.I.S. Agent</title><script type="module" src="/assets/index-Ab3xY9_z.js"></script>'
+FILES = {"index.html": INDEX, "assets/index-Ab3xY9_z.js": b"console.log(1)", "assets/index-Ab3xY9_z.css": b"body{}",
          "assets/font-x.woff2": b"wOF2", "icons/orb-16.png": b"\x89PNG", "manifest.webmanifest": b"{}",
          "build-manifest.json": b"{}", "odd.exe": b"MZ", "notes.txt": b"hi"}
 
@@ -88,7 +88,7 @@ class Serving(Base):
         status, headers, body = self.get(d, "/")
         self.assertEqual((status, body), (200, INDEX))
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
-        for path, kind in (("/assets/index-abc.js", "text/javascript"), ("/assets/index-abc.css", "text/css"),
+        for path, kind in (("/assets/index-Ab3xY9_z.js", "text/javascript"), ("/assets/index-Ab3xY9_z.css", "text/css"),
                            ("/assets/font-x.woff2", "font/woff2"), ("/icons/orb-16.png", "image/png"),
                            ("/manifest.webmanifest", "application/manifest+json")):
             status, headers, body = self.get(d, path)
@@ -98,7 +98,7 @@ class Serving(Base):
     def test_every_response_refuses_framing_and_other_origins_code(self):
         self.install()
         d = self.start()
-        for path in ("/", "/assets/index-abc.js", "/v3/status", "/nope"):
+        for path in ("/", "/assets/index-Ab3xY9_z.js", "/v3/status", "/nope"):
             _, headers, _ = self.get(d, path)
             self.assertEqual(headers.get_all("X-Frame-Options"), ["DENY"], path)
             self.assertEqual(headers.get_all("X-Content-Type-Options"), ["nosniff"], path)
@@ -133,9 +133,9 @@ class Serving(Base):
         build = next(p for p in self.root.iterdir() if p.is_dir())
         for path in ("/index.html/", "/manifest.json", "/build-manifest.json", "/odd.exe", "/notes.txt", "/assets/", "/assets",
                      "/assets/missing.js", "/../secret.txt", "/assets/../../../secret.txt", "/%2e%2e/secret.txt",
-                     "/assets/%2e%2e/index.html", "/assets%2findex-abc.js", "//index.html", "/./index.html", "/assets//index-abc.js",
+                     "/assets/%2e%2e/index.html", "/assets%2findex-Ab3xY9_z.js", "//index.html", "/./index.html", "/assets//index-Ab3xY9_z.js",
                      "/assets/..\\index.html", f"/{build.name}/index.html", "/index.html%00", "/v3", "/v3/", "/v3/status/", "/anything",
-                     "/assets/index-abc.js/", "/ASSETS/index-abc.js"):
+                     "/assets/index-Ab3xY9_z.js/", "/ASSETS/index-Ab3xY9_z.js"):
             status, _, body = self.get(d, path)
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"planted-text", body, path)
@@ -145,7 +145,7 @@ class Serving(Base):
         self.install()
         d = self.start()
         self.assertEqual(self.get(d, "/?x=../../secret")[0::2], (200, INDEX))
-        self.assertEqual(self.get(d, "/assets/index-abc.js?v=1")[0], 200)
+        self.assertEqual(self.get(d, "/assets/index-Ab3xY9_z.js?v=1")[0], 200)
 
     def test_status_still_answers_exactly(self):
         self.install()
@@ -157,7 +157,7 @@ class Serving(Base):
         self.install()
         d = self.start()
         build = next(p for p in self.root.iterdir() if p.is_dir())
-        for rel in ("assets/index-abc.js", "index.html"):
+        for rel in ("assets/index-Ab3xY9_z.js", "index.html"):
             path = build / rel
             path.parent.chmod(0o755)
             path.chmod(0o644)
@@ -174,7 +174,7 @@ class Serving(Base):
         d.start()
         self.addCleanup(d.stop)
         self.assertEqual(self.get(d, "/")[0], 503)
-        self.assertEqual(self.get(d, "/assets/index-abc.js")[0], 404)
+        self.assertEqual(self.get(d, "/assets/index-Ab3xY9_z.js")[0], 404)
 
     def test_no_install_says_how_and_status_still_works(self):
         d = self.start()
@@ -182,7 +182,7 @@ class Serving(Base):
         self.assertEqual(status, 503)
         self.assertIn("jarvis agent install", json.loads(body)["error"])
         self.assertEqual(self.get(d, "/v3/status")[0], 200)
-        self.assertEqual(self.get(d, "/assets/index-abc.js")[0], 404)
+        self.assertEqual(self.get(d, "/assets/index-Ab3xY9_z.js")[0], 404)
 
     def test_an_install_shows_without_a_restart_and_old_chunks_still_load(self):
         self.install()
@@ -190,14 +190,14 @@ class Serving(Base):
         newer = put(self.home / "dist2", {"index.html": b"<!doctype html>new", "assets/index-new.js": b"2"})
         self.install(newer)
         self.assertEqual(self.get(d, "/")[2], b"<!doctype html>new")
-        self.assertEqual(self.get(d, "/assets/index-abc.js")[0], 200)
+        self.assertEqual(self.get(d, "/assets/index-Ab3xY9_z.js")[0], 200)
         self.assertEqual(self.get(d, "/icons/orb-16.png")[0], 404)     # only hashed assets outlive their build
 
     def test_host_and_origin_still_guard_the_window(self):
         self.install()
         d = self.start()
         self.assertEqual(self.get(d, "/", headers={"Host": "evil.example"})[0], 421)
-        self.assertEqual(self.get(d, "/assets/index-abc.js", headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.get(d, "/assets/index-Ab3xY9_z.js", headers={"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.get(d, "/", "POST")[0], 405)
 
     def test_the_default_root_is_read_when_the_daemon_starts(self):
@@ -362,6 +362,7 @@ class Install(Base):
                 (hud3 / "node_modules").mkdir(exist_ok=True)
                 (hud3 / "node_modules" / ".package-lock.json").write_text("{}")
             if "build" in args:
+                self.built.mkdir(exist_ok=True)
                 (self.built / "index.html").write_bytes(INDEX)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch.object(config, "REPO_ROOT", repo), patch.object(hud_install, "npm_path", return_value="/usr/bin/npm"), \

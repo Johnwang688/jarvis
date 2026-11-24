@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 from jarvis import config
@@ -38,8 +39,10 @@ _CONTENT_TYPES = {
 MISSING_HUD = "No intact v3 HUD is installed. Run `jarvis agent install`."
 
 
-# A name Vite gave a content hash (`index-Ab3x.js`): the same name is the same bytes in any build.
-_HASHED = re.compile(r"assets/[A-Za-z0-9_.-]+-[A-Za-z0-9_-]+\.[a-z0-9]+")
+# A name Vite gave a content hash (`index-Ab3xY9_z.js`): the same name is the same bytes in any build.
+# The digit or capital tells the eight-character hash from a word (`panel-settings.json`).
+_HASHED = re.compile(r"assets/[A-Za-z0-9_.-]*-(?=[a-z_-]*[A-Z0-9])[A-Za-z0-9_-]{8}\.[a-z0-9]+")
+_NAME_CAP = 200         # what the installer admits in one name
 
 
 def root_refusal(root: Path) -> str | None:
@@ -74,7 +77,7 @@ def _target(path: str) -> tuple[str, str] | None:
         return "index.html", "text/html; charset=utf-8"
     if path == "/manifest.webmanifest":
         return path[1:], "application/manifest+json"
-    if len(parts) == 3 and parts[0] == "" and parts[1] in ("assets", "icons"):
+    if len(parts) == 3 and parts[0] == "" and parts[1] in ("assets", "icons") and len(parts[2]) <= _NAME_CAP:
         kind = _CONTENT_TYPES.get(Path(parts[2]).suffix)
         return (path[1:], kind) if kind is not None else None
     return None
@@ -95,7 +98,8 @@ def static_file(root: Path, path: str) -> tuple[str, bytes] | None:
             data = _asset_from_older_build(root, built, name)
         if data is not None:
             return kind, data
-        if built.path.exists():
+        current = hud_install.newest(root)
+        if current is None or current.id == built.id:
             return None
     return None
 
@@ -135,12 +139,15 @@ def npm_build() -> None:
     if _dependencies_stale(source):
         # The flag outranks any .npmrc: packages never run code at install time (owner, 2026-10-15).
         _npm(npm, source, "ci", "--ignore-scripts", timeout=hud_install.NPM_BUILD_TIMEOUT)
-    # A build that writes nothing must not publish the previous one's files.
-    index = Path(config.HUD3_BUILD) / "index.html"
+    # Only what this build writes is installed: nothing a previous one left behind.
+    dist = Path(config.HUD3_BUILD)
+    if dist.is_symlink():
+        raise hud_install.InstallRefused(f"{dist} is a symbolic link; the build is never read through one.")
     try:
-        index.unlink(missing_ok=True)
+        if dist.exists():
+            shutil.rmtree(dist)
         _npm(npm, source, "run", "build", timeout=hud_install.NPM_BUILD_TIMEOUT)
-        built = index.is_file()
+        built = (dist / "index.html").is_file()
     except OSError as exc:
         raise hud_install.InstallRefused(f"Could not build hud3/: {exc}") from None
     if not built:
@@ -198,7 +205,7 @@ def open_window(out) -> int:
     """Open the v3 window after a successful daemon switch."""
     from jarvis.face import server
 
-    if hud_install.newest(config.HUD3_DIR) is None:
+    if root_refusal(config.HUD3_DIR) is not None or hud_install.newest(config.HUD3_DIR) is None:
         out(MISSING_HUD)
     try:
         server.launch_window(f"http://localhost:{config.V3_API_PORT}/")
