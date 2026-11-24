@@ -1,0 +1,7337 @@
+{
+"fuser -k 8400-8409/tcp": [
+"deny",
+"fc7924fc02b9",
+false
+],
+"fuser -k 8402/tcp": [
+"deny",
+"fc7924fc02b9",
+false
+],
+"fuser -k 8403/tcp": [
+"deny",
+"fc7924fc02b9",
+false
+],
+"fuser -k 8405/tcp": [
+"deny",
+"fc7924fc02b9",
+false
+],
+"fuser -k 8408/tcp": [
+"deny",
+"fc7924fc02b9",
+false
+],
+"kill $(lsof -t -i:8400-8409)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(lsof -t -i:8402)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(lsof -t -i:8403)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(lsof -t -i:8405)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(lsof -t -i:8408)": [
+"deny",
+"fce1908637d8",
+false
+],
+"kill $(pgrep -f '(.*)*daemo[n]2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*daemo[n]2')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '(.*)*daemon.$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*daemon.')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '(.*)*daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*daemon2')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '(.*)*jarvis d$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*jarvis d')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '(.*)*jarvis daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*jarvis daemon2')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '(.*)*n2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '(.*)*n2')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.*daemo[n]2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*daemo[n]2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*daemon.$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*daemon.')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*jarvis d$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*jarvis d')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*jarvis daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*jarvis daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*n2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.*n2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,0}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,10}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,11}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,12}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,13}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,16}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,1}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,20}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,21}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,22}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,30}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}daemon2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,4}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,39}n2.{0,8}')": [
+"ask",
+"c45ef4c9cf97",
+true
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,5}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,8}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,0}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,2}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,4}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}8405.{0,8}')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}daemon2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,0}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,0}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,2}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,2}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,4}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,4}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,8}$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*.{0,9}n2.{0,8}')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemo[n]2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemo[n]2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemon.$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemon.')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*jarvis d$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*jarvis d')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*jarvis daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*jarvis daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*n2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '.*n2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^daemo[n]2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^daemo[n]2')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '^daemon.$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^daemon.')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '^daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^daemon2')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f '^jarvis d$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^jarvis d')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^jarvis daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^jarvis daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^n2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f '^n2')": [
+"ask",
+"520397b6f489",
+false
+],
+"kill $(pgrep -f 'daemo[n]2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'daemo[n]2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'daemon.$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'daemon.')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'jarvis d$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'jarvis d')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'jarvis daemon2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'jarvis daemon2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'n2$')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"kill $(pgrep -f 'n2')": [
+"deny",
+"75e31ced7d99",
+false
+],
+"killall -r '(.*)*daemo[n]2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*daemo[n]2'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '(.*)*daemon.$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*daemon.'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '(.*)*daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*daemon2'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '(.*)*jarvis d$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*jarvis d'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '(.*)*jarvis daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*jarvis daemon2'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '(.*)*n2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '(.*)*n2'": [
+"ask",
+"dc5c8ba49606",
+true
+],
+"killall -r '.*.*daemo[n]2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*daemo[n]2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*daemon.$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*daemon.'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*jarvis d$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*jarvis d'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*jarvis daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*jarvis daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*n2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*.*n2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemo[n]2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemo[n]2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemon.$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemon.'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*jarvis d$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*jarvis d'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*jarvis daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*jarvis daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*n2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '.*n2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^daemo[n]2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^daemo[n]2'": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"killall -r '^daemon.$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^daemon.'": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"killall -r '^daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^daemon2'": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"killall -r '^jarvis d$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^jarvis d'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^jarvis daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^jarvis daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^n2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r '^n2'": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"killall -r 'daemo[n]2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'daemo[n]2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'daemon.$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'daemon.'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'jarvis d$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'jarvis d'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'jarvis daemon2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'jarvis daemon2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'n2$'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"killall -r 'n2'": [
+"deny",
+"b8e133db2eb8",
+false
+],
+"lsof -i:8400-8409": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"lsof -i:8402": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"lsof -i:8403": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"lsof -i:8405": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"lsof -i:8408": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '(.*)*daemo[n]2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*daemo[n]2'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '(.*)*daemon.$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*daemon.'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '(.*)*daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*daemon2'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '(.*)*jarvis d$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*jarvis d'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '(.*)*jarvis daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*jarvis daemon2'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '(.*)*n2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '(.*)*n2'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.*daemo[n]2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*daemo[n]2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*daemon.$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*daemon.'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*jarvis d$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*jarvis d'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*jarvis daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*jarvis daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*n2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.*n2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,0}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,10}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,11}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,11}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,12}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,12}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,12}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,13}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,13}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,13}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,16}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,16}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,16}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,1}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,1}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,20}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,20}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,21}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,21}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,21}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,21}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,21}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,22}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,22}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,22}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,22}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,22}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,30}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,30}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,30}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,30}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,30}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,39}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,39}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}daemon2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,39}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,4}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,39}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,39}n2.{0,8}'": [
+"ask",
+"cf01a81d5538",
+true
+],
+"pkill -f '.*.{0,5}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,5}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,8}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,0}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,2}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,4}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}8405.{0,8}'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}daemon2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,0}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,0}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,2}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,2}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,4}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,4}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,8}$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*.{0,9}n2.{0,8}'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemo[n]2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemo[n]2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemon.$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemon.'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*jarvis d$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*jarvis d'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*jarvis daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*jarvis daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*n2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '.*n2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^daemo[n]2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^daemo[n]2'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '^daemon.$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^daemon.'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '^daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^daemon2'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f '^jarvis d$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^jarvis d'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^jarvis daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^jarvis daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^n2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f '^n2'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"pkill -f 'daemo[n]2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'daemo[n]2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'daemon.$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'daemon.'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'jarvis d$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'jarvis d'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'jarvis daemon2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'jarvis daemon2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'n2$'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"pkill -f 'n2'": [
+"deny",
+"d9a5eb9fda2f",
+false
+],
+"ps aux | grep -E '(.*)*daemo[n]2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*daemo[n]2' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*daemon.$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*daemon.' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*daemon2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*daemon2' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*jarvis d$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*jarvis d' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*jarvis daemon2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*jarvis daemon2' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*n2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '(.*)*n2' | awk '{print $2}' | xargs kill": [
+"ask",
+"0d055c9b613d",
+true
+],
+"ps aux | grep -E '.*.*daemo[n]2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*daemo[n]2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*daemon.$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*daemon.' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*jarvis d$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*jarvis d' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*jarvis daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*jarvis daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*n2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*.*n2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemo[n]2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemo[n]2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemon.$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemon.' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*jarvis d$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*jarvis d' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*jarvis daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*jarvis daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*n2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '.*n2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '^daemo[n]2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^daemo[n]2' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^daemon.$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^daemon.' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^daemon2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^daemon2' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^jarvis d$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '^jarvis d' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '^jarvis daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '^jarvis daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E '^n2$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E '^n2' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ps aux | grep -E 'daemo[n]2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'daemo[n]2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'daemon.$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'daemon.' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'jarvis d$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'jarvis d' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'jarvis daemon2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'jarvis daemon2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'n2$' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ps aux | grep -E 'n2' | awk '{print $2}' | xargs kill": [
+"deny",
+"19266c55bb8e",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemo[n]2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemo[n]2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemon.$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemon.' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '(.*)*jarvis d$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*jarvis d' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '(.*)*jarvis daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*jarvis daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '(.*)*n2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '(.*)*n2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*daemo[n]2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*daemo[n]2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*daemon.$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*daemon.' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*jarvis d$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*jarvis d' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*jarvis daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*jarvis daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.*n2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.*n2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,0}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,10}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,10}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,11}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,11}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,12}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,12}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,13}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,13}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,16}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,16}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,1}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,20}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,20}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,21}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,21}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,22}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,30}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,39}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,5}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,8}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,8}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,0}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,0}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,2}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,2}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,4}$' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,4}' | awk '{print $2}' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,9}8405.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"54944d7b871f",
+true
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}daemon2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,0}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,0}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,2}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,2}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,4}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,4}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,8}$' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*.{0,9}n2.{0,8}' | awk '{print $2}' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*daemo[n]2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*daemo[n]2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*daemon.$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*daemon.' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*jarvis d$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*jarvis d' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*jarvis daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*jarvis daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '.*n2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '.*n2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^daemo[n]2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^daemo[n]2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^daemon.$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^daemon.' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^jarvis d$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^jarvis d' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^jarvis daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^jarvis daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E '^n2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E '^n2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'daemo[n]2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'daemo[n]2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'daemon.$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'daemon.' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'jarvis d$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'jarvis d' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'jarvis daemon2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'jarvis daemon2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"ss -ltnp | grep -E 'n2$' | xargs kill": [
+"deny",
+"4b051acd65db",
+false
+],
+"ss -ltnp | grep -E 'n2' | xargs kill": [
+"ask",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat '*daemon*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat 'jarvis-*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat app.slice": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat jarvis-daemon2": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat jarvis-daemon2.service": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user cat pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user disable --now '*daemon*'": [
+"deny",
+"140b1e3efa76",
+false
+],
+"systemctl --user disable --now 'jarvis-*'": [
+"deny",
+"8e762af26bcf",
+false
+],
+"systemctl --user disable --now app.slice": [
+"deny",
+"f4d7ac67265c",
+false
+],
+"systemctl --user disable --now jarvis-daemon2": [
+"deny",
+"e17947b3dc57",
+false
+],
+"systemctl --user disable --now jarvis-daemon2.service": [
+"deny",
+"e17947b3dc57",
+false
+],
+"systemctl --user disable --now pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user enable --now '*daemon*'": [
+"deny",
+"5e529e242c34",
+false
+],
+"systemctl --user enable --now 'jarvis-*'": [
+"deny",
+"b9dd89e1aeac",
+false
+],
+"systemctl --user enable --now app.slice": [
+"deny",
+"ec477595d759",
+false
+],
+"systemctl --user enable --now jarvis-daemon2": [
+"deny",
+"684da0516598",
+false
+],
+"systemctl --user enable --now jarvis-daemon2.service": [
+"deny",
+"684da0516598",
+false
+],
+"systemctl --user enable --now pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active '*daemon*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active 'jarvis-*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active app.slice": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active jarvis-daemon2": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active jarvis-daemon2.service": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user is-active pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user kill '*daemon*'": [
+"deny",
+"175b41c29b12",
+false
+],
+"systemctl --user kill 'jarvis-*'": [
+"deny",
+"f34d40f50d8e",
+false
+],
+"systemctl --user kill app.slice": [
+"deny",
+"a77465189e03",
+false
+],
+"systemctl --user kill jarvis-daemon2": [
+"deny",
+"0f11f67d187c",
+false
+],
+"systemctl --user kill jarvis-daemon2.service": [
+"deny",
+"0f11f67d187c",
+false
+],
+"systemctl --user kill pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user mask '*daemon*'": [
+"deny",
+"94524a222784",
+false
+],
+"systemctl --user mask 'jarvis-*'": [
+"deny",
+"8bb4d03b025d",
+false
+],
+"systemctl --user mask app.slice": [
+"deny",
+"363c986f5615",
+false
+],
+"systemctl --user mask jarvis-daemon2": [
+"deny",
+"badb3e6474ed",
+false
+],
+"systemctl --user mask jarvis-daemon2.service": [
+"deny",
+"badb3e6474ed",
+false
+],
+"systemctl --user mask pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed '*daemon*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed 'jarvis-*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed app.slice": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed jarvis-daemon2": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed jarvis-daemon2.service": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user reset-failed pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user restart '*daemon*'": [
+"deny",
+"ec5309c5b486",
+false
+],
+"systemctl --user restart 'jarvis-*'": [
+"deny",
+"77bbc7b00923",
+false
+],
+"systemctl --user restart app.slice": [
+"deny",
+"2e3f24ef6eb3",
+false
+],
+"systemctl --user restart jarvis-daemon2": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"systemctl --user restart jarvis-daemon2.service": [
+"deny",
+"1cc6d80d8e25",
+false
+],
+"systemctl --user restart pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID '*daemon*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID 'jarvis-*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID app.slice": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID jarvis-daemon2": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID jarvis-daemon2.service": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user show -p MainPID pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user start '*daemon*'": [
+"deny",
+"022b5a1ac755",
+false
+],
+"systemctl --user start 'jarvis-*'": [
+"deny",
+"353a370d9a00",
+false
+],
+"systemctl --user start app.slice": [
+"deny",
+"104ca6870bf8",
+false
+],
+"systemctl --user start jarvis-daemon2": [
+"deny",
+"879d64ad1990",
+false
+],
+"systemctl --user start jarvis-daemon2.service": [
+"deny",
+"879d64ad1990",
+false
+],
+"systemctl --user start pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status '*daemon*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status 'jarvis-*'": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status app.slice": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status jarvis-daemon2": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status jarvis-daemon2.service": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user status pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+],
+"systemctl --user stop '*daemon*'": [
+"deny",
+"60913f4ecfcf",
+false
+],
+"systemctl --user stop 'jarvis-*'": [
+"deny",
+"ea1df12a1c3e",
+false
+],
+"systemctl --user stop app.slice": [
+"deny",
+"ec3a12b61267",
+false
+],
+"systemctl --user stop jarvis-daemon2": [
+"deny",
+"d0badc4ebef3",
+false
+],
+"systemctl --user stop jarvis-daemon2.service": [
+"deny",
+"d0badc4ebef3",
+false
+],
+"systemctl --user stop pipewire": [
+"allow",
+"e3b0c44298fc",
+false
+]
+}
