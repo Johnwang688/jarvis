@@ -42,7 +42,7 @@ after the spikes.
 
 | Gate | Decides | Blocks |
 |---|---|---|
-| **OG1** | Go / no-go on the T3 switch, from the S1–S6 findings, and which display option (S1) | T2+, R1 |
+| **OG1** | Go / no-go on the T3 switch, from the S1 and S3–S6 findings, and which display option (S1) | T2+, R1 |
 | **OG2** | §13 decision-rights matrix, line by line | I1 merge |
 | **OG3** | Which Claude tier runs the planner and nightly consolidation (the reviewer is Haiku, per H9) | P1, I3 merge |
 | **OG4** | Calendar auth: the owner re-runs `jarvis auth google` after C1 merges (human step) | C1 live use, C3 calendar ingester |
@@ -204,7 +204,7 @@ One file per item, `<ts>-<rand>.json`:
 
 ```
 A1 ─▶ A2 ─▶ A3 ─▶ A4, A5, A6    (wave 0: every jarvis/v3 PR builds on A2/A3)
-S1 S2 S3 S4 S5 S6 ─────────────────────────────▶ OG1
+S1 S3 S4 S5 S6 ────────────────────────────────▶ OG1
 K1 ─┬─▶ M2 ─┬─▶ M4 ─▶ L1 ─▶ L2 ─▶ L3
     │       ├─▶ P1 ─▶ P2           ▲
     ├─▶ M5 ─┴─▶ M6                 │
@@ -225,7 +225,7 @@ R1 (cutover) needs T3 + T4 + T5 + A6 + OG6;  R2 last
 | 0 | A1, A2, then A3; then A4, A5 (A6a–A6f run beside waves 2–5) |
 | 1 | S1–S6 (one agent, sequential), K1, K2 |
 | 2 | M2, M3, K3, M5, C1, B1, T1 |
-| 3 | M4, M6, L1, C2, B2 |
+| 3 | M4, M6, K4, L1, C2, B2 |
 | 4 | L2, C3, B3, P1, (OG1) T2 |
 | 5 | L3, P2, B4, (OG2) I1, I2, T3 |
 | 6 | P3, I3, T4, T5 |
@@ -479,7 +479,7 @@ gate hook, so there is nothing to measure.
     against the live install).
 
 ### S5: Global MCP server and Stop hook loading under T3
-- **Spec:** with S2's temp HOME, register a stub MCP server globally (Claude
+- **Spec:** in a throwaway HOME, register a stub MCP server globally (Claude
   user scope; Codex `config.toml`) plus a stub `Stop` hook. Check whether
   T3-started sessions see the server despite T3's
   `--allowedTools=mcp__t3-code__*`, and whether the Stop and turn-complete
@@ -495,6 +495,9 @@ gate hook, so there is nothing to measure.
   views, diff quick review, approval summaries, PR merge flow, chat_git,
   running cost, titles, Discord), find T3's equivalent.
 - **Acceptance:**
+  - [ ] A list of what T3 does itself, outside the CLIs (git operations,
+    worktree creation, PR actions, previews), each marked acceptable or a gap
+    (moved here from S2).
   - [ ] A table with each feature marked native / close / lost, with the T3
     doc reference.
   - [ ] "Lost" items each get a proposed fate: rebuild as a Jarvis panel,
@@ -593,6 +596,26 @@ S1–S6. It is the owner's decision.
 
 ---
 
+### K4: Protected state for v3's data ⚑ boundary
+(G2, kept for Jarvis's own agents.)
+- **Scope:** `jarvis/protected_state.py` and its v2 parity users; tests.
+- **Spec:** for v1 and v2 agents, add as protected: `POLICY_FILE`,
+  `SKILL_LEDGER_DIR`, `LEARNED_SKILLS_DIR` (writes only through
+  `skill_manage`; generic Write/Edit/shell asks, or is denied for the ledger),
+  `REVIEW_QUEUE_DIR`, `BUDGET_LEDGER`, and the global MCP and hook sections
+  `jarvis brain install` writes. Keep the indirect, ancestor and symlink
+  checks, and v1/v2 parity.
+- **Acceptance:**
+  - [ ] Every new path is denied or asked through redirect, `tee`, `sed -i`,
+    `cp`/`mv`, symlink and ancestor routes (the existing matrix style).
+  - [ ] "Permission state cannot authorize its replacement" holds: an
+    allowlist entry can't open these paths.
+  - [ ] A before/after comparison against main: 0 decisions weaker.
+  - [ ] Mutation evidence.
+- **Depends:** M5. **Size:** M.
+
+---
+
 ## 5. Track M: Brain
 
 ### M2: Vault store + memory tools v2
@@ -680,9 +703,8 @@ S1–S6. It is the owner's decision.
     P4's drafting.
   - Bound toolset per invariant 10: dispatch refuses anything outside the
     profile.
-  - Approval hook: dangerous tools ask through the existing `_approver` path
-    until G-track hooks exist; afterwards `mcp__jarvis-brain__*` calls are
-    enforced in the MCP server's own process (Track G is dropped).
+  - Dangerous tools ask through the existing `_approver` path, enforced in the
+    MCP server's own process whoever calls it (H10).
   - `install` writes the user-scope MCP registration for Claude and Codex.
     It backs up the prior file, is idempotent, and prints exactly what it
     changed.
@@ -844,6 +866,8 @@ CLIs' own safeguards. What follows from it:
 - **Jarvis's own actions stay ask-first** (Track I). I1 still computes levels,
   but L0/L1 is never executed without an owner tap, and I5's promotions are
   recorded, not acted on, until the owner decides otherwise.
+- **K4 replaces G2** (Track K): v3's data becomes protected state for Jarvis's
+  own v1/v2 agents, which keep their gate.
 - **Jarvis's own surfaces keep their gates**: the brain MCP enforces its bound
   toolset, path checks and scanner in its own process, whoever calls it; v2 is
   unchanged.
@@ -1031,8 +1055,8 @@ CLIs' own safeguards. What follows from it:
     - everything else → batched for B4.
   - Actions: approve, edit, other (free text), not_now, plus feedback taps.
     Approve with a `proposal_id` calls I4.
-  - Expiry: a decision past `default.at` executes its default (if the
-    default is a no-op or L0/L1) or expires.
+  - Expiry: a decision past `default.at` runs its default only if the default
+    is a no-op; anything else expires (H10).
   - Agents can create briefs only through a typed `brief_post` tool (the
     `owner_post` pattern) and can never read or answer them, matching
     today's inbox rule.
@@ -1168,7 +1192,7 @@ CLIs' own safeguards. What follows from it:
     and kind.
   - The planner's own tools are read-only (memory read, session_search,
     calendar_list/free). **It holds no outward tools.**
-  - L2 proposals become briefs (B1). L0/L1 go to I4.
+  - Every proposal becomes a brief (B1); L0/L1 ones are one-tap (H10).
 - **Acceptance:**
   - [ ] Golden tests: each signal kind → the expected proposal shapes from
     a recorded fake response.
@@ -1360,15 +1384,15 @@ never includes them. So this track has no deletions.
 ## 14. Definition of done for v3
 
 - [ ] An agent started anywhere (T3, a terminal `claude`, Codex) has memory,
-  session search and skills through jarvis-brain, and is judged by the
-  global gate in enforce mode.
+  session search and skills through jarvis-brain, and runs under
+  T3's and its CLI's own permission model (H10).
 - [ ] After a real multi-step task, a skill is created or patched
   automatically, appears in the evening digest, and can be rolled back in
   one tap.
 - [ ] The morning brief starts from the real calendar and lists due
   schoolwork, open decisions and commitments, in ≤ 8 lines.
 - [ ] A new Canvas assignment results, with no prompt from John, in
-  calendar work blocks (L0/L1) and an L2 brief offering a T3 thread to
+  one-tap briefs for calendar work blocks and one offering a T3 thread to
   start it.
 - [ ] An email asking to meet results in a brief with a draft in John's
   voice and two free slots. One tap sends it, and an edit before sending
