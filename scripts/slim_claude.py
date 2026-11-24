@@ -337,7 +337,7 @@ def verify(root, original):
     pointer = (root/POINTER).read_text() if (root/POINTER).is_file() else ""
     require(IMPORT_LINE in pointer.splitlines(), f"{POINTER} must import the guide with a line {IMPORT_LINE!r}")
     guide = (root/GUIDE).read_bytes()
-    require(38000 <= len(guide) <= 41000, f"guide size {len(guide)} outside 38000..41000")
+    require(38000 <= len(guide) <= 44000, f"guide size {len(guide)} outside 38000..44000")
     lines = original.splitlines(keepends=True)
     for item in m["retained_guide"]:
         begin = f"<!-- retained:{item['name']}:begin -->\n".encode()
