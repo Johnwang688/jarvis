@@ -28,6 +28,7 @@ export function Status() {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     let active: AbortController | undefined;
+    let recheck = false;
 
     async function poll() {
       const request = new AbortController();
@@ -44,12 +45,29 @@ export function Status() {
       active = undefined;
       if (stopped) return;
       setStatus(result);
-      timer = setTimeout(poll, POLL_MS);
+      if (recheck) {
+        recheck = false;
+        void poll();
+      } else {
+        timer = setTimeout(poll, POLL_MS);
+      }
     }
 
+    function onVisibilityChange() {
+      if (document.hidden) return;
+      if (active) {
+        recheck = true;
+      } else {
+        clearTimeout(timer);
+        void poll();
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
     void poll();
     return () => {
       stopped = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       clearTimeout(timer);
       active?.abort();
     };

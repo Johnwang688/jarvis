@@ -2,7 +2,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import ts from "typescript";
-import type { Plugin } from "vite";
+import type { Plugin, ResolvedConfig } from "vite";
 
 const sharedDirs = new Set(["components", "lib", "aurora", "syntax"]);
 const mockMethods = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
@@ -64,15 +64,15 @@ function isRequireOrMock(callee: ts.Expression): boolean {
     || ((receiver === "vi" || receiver === "jest") && mockMethods.has(member));
 }
 
-function inspectCode(file: string, content: string, report: Report, problem: Report) {
+function inspectCode(file: string, content: string, report: Report, problem: Report, asset = report) {
   const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
   // createSourceFile records syntactic diagnostics alongside its recovery AST.
   const { parseDiagnostics } = source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] };
   for (const diagnostic of parseDiagnostics) problem("<syntax error>", diagnostic.start ?? 0);
   for (const reference of source.referencedFiles) report(reference.fileName, reference.pos);
 
-  const check = (node: ts.Node | undefined, owner: ts.Node) => {
-    if (node && ts.isStringLiteralLike(node)) report(node.text, node.getStart(source));
+  const check = (node: ts.Node | undefined, owner: ts.Node, found = report) => {
+    if (node && ts.isStringLiteralLike(node)) found(node.text, node.getStart(source));
     else problem("<computed specifier>", (node ?? owner).getStart(source));
   };
 
@@ -95,7 +95,7 @@ function inspectCode(file: string, content: string, report: Report, problem: Rep
       }
     } else if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "URL"
       && isImportMetaMember(node.arguments?.[1], "url")) {
-      check(node.arguments?.[0], node);
+      check(node.arguments?.[0], node, asset);
     }
     ts.forEachChild(node, visit);
   };
@@ -103,7 +103,7 @@ function inspectCode(file: string, content: string, report: Report, problem: Rep
 }
 
 // CSS and HTML resource syntax, separate from the TypeScript import walker.
-function inspectResources(file: string, content: string, report: Report) {
+function inspectResources(file: string, content: string, report: Report, problem: Report) {
   const blank = (comment: string) => comment.replace(/[^\n]/g, " ");
   if (file.endsWith(".css")) {
     const css = content.replace(/\/\*[\s\S]*?\*\//g, blank);
@@ -115,6 +115,17 @@ function inspectResources(file: string, content: string, report: Report) {
     for (const match of html.matchAll(/<(?:script|link)\b[^>]*?\s(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi)) {
       const spec = match[1] ?? match[2] ?? match[3];
       report(spec, match.index, true);
+    }
+    for (const match of html.matchAll(/<script(?=[\s/>])((?:"[^"]*"|'[^']*'|[^>"'])*)>([\s\S]*?)<\/script\s*>/gi)) {
+      const [, attrs, code] = match;
+      const attributes = [...attrs.matchAll(/([^\s=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+)))?/g)];
+      const type = attributes.find((attribute) => attribute[1].toLowerCase() === "type");
+      if (!type || (type[2] ?? type[3] ?? type[4])?.toLowerCase() !== "module"
+        || attributes.some((attribute) => attribute[1].toLowerCase() === "src")) continue;
+      const start = match.index + "<script".length + attrs.length + 1;
+      inspectCode(`${file}.js`, code,
+        (spec, offset) => report(spec, start + offset),
+        (spec, offset) => problem(spec, start + offset));
     }
   }
 }
@@ -150,21 +161,23 @@ export function violations(repoRoot: string): Violation[] {
         result.push({ file: name, line, spec, rule });
       };
       const report: Report = (spec, offset, resource) => {
-        const target = targetPath(repoRoot, file, spec, resource ? tree : undefined);
+        const rootRelative = spec.startsWith("/src/");
+        const target = targetPath(repoRoot, file, spec, resource || rootRelative ? tree : undefined);
         if (!target) return;
-        if (v3 && !sharedAllowed(repoRoot, target)) {
+        if (v3 && ((!resource && !rootRelative && isAbsolute(spec)) || !sharedAllowed(repoRoot, target))) {
           add(spec, offset, "hud3 may import only shared HUD files");
         } else if (!v3 && (repoPath(repoRoot, target).startsWith("hud3/")
           || repoPath(physicalRoot, canonical(target)).startsWith("hud3/"))) {
           add(spec, offset, "hud may not import hud3");
         }
       };
+      const problem: Report = (spec, offset) => {
+        if (v3) add(spec, offset, "Cannot check import");
+      };
       if (codeFile.test(file)) {
-        inspectCode(file, content, report, (spec, offset) => {
-          if (v3) add(spec, offset, "Cannot check import");
-        });
+        inspectCode(file, content, report, problem);
       } else {
-        inspectResources(file, content, report);
+        inspectResources(file, content, report, problem);
       }
     }
   }
@@ -172,6 +185,8 @@ export function violations(repoRoot: string): Violation[] {
 }
 
 export function bundleGuard(repoRoot: string): Plugin {
+  let root: string;
+  let resolveAsset: ReturnType<ResolvedConfig["createResolver"]>;
   const disallowed = (id: string) => {
     const file = id.split(/[?#]/, 1)[0];
     return isAbsolute(file) && !sharedAllowed(repoRoot, file) ? repoPath(repoRoot, file) : null;
@@ -181,18 +196,58 @@ export function bundleGuard(repoRoot: string): Plugin {
     name: "hud3-import-boundary",
     apply: "build",
     enforce: "pre",
+    configResolved(config) {
+      root = config.root;
+      resolveAsset = config.createResolver({ preferRelative: true, tryIndex: false });
+      const css = config.plugins.find((plugin) => plugin.name === "vite:css");
+      const transform = css?.transform;
+      if (!css || !transform) throw new Error("Cannot locate Vite's CSS transform for the HUD boundary");
+      const handler = typeof transform === "function" ? transform : transform.handler;
+      // Vite reports inlined CSS URLs through addWatchFile. Check the CSS
+      // transform's own calls, since the global list includes package metadata.
+      const guarded: typeof handler = function (code, id, options) {
+        const context = Object.create(this) as typeof this;
+        context.addWatchFile = (watched) => {
+          const file = disallowed(watched);
+          if (file !== null) this.error(`hud3 bundle reached outside the shared HUD: ${file}`);
+          this.addWatchFile(watched);
+        };
+        return handler.call(context, code, id, options);
+      };
+      css.transform = typeof transform === "function" ? guarded : { ...transform, handler: guarded };
+    },
     load(id) {
       const file = disallowed(id);
       if (file !== null) this.error(`hud3 bundle reached outside the shared HUD: ${file}`);
       return null;
     },
-    buildEnd(error) {
-      if (error) return;
-      // Vite inlines stylesheet imports and reports them as watched files.
-      for (const id of this.getWatchFiles()) {
-        if (!id.endsWith(".css")) continue;
-        const file = disallowed(id);
-        if (file !== null) this.error(`hud3 bundle reached outside the shared HUD: ${file}`);
+    async transform(code, id) {
+      const importer = id.split(/[?#]/, 1)[0];
+      if (!isAbsolute(importer) || !(codeFile.test(importer) || id.includes("?html-proxy"))
+        || !code.includes("import.meta")) return;
+      // Vite's new URL transform can inline assets without a load or watch event.
+      const specs = new Set<string>();
+      const ignore: Report = () => {};
+      inspectCode(codeFile.test(importer) ? importer : `${importer}.js`, code, ignore, ignore, (spec) => {
+        if (!/^(?:[\w+.-]+:|\/\/)/.test(spec)) specs.add(spec);
+      });
+      for (const spec of specs) {
+        const resolved = await resolveAsset(spec, importer);
+        const candidate = spec.startsWith("/") ? resolve(root, `.${spec}`) : resolve(dirname(importer), spec);
+        const path = resolved ?? candidate;
+        const file = disallowed(path);
+        if (file !== null && existsSync(path.split(/[?#]/, 1)[0])) {
+          this.error(`hud3 bundle reached outside the shared HUD: ${file}`);
+        }
+      }
+    },
+    generateBundle(_options, bundle) {
+      for (const output of Object.values(bundle)) {
+        if (output.type !== "asset") continue;
+        for (const original of output.originalFileNames) {
+          const file = disallowed(resolve(root, original));
+          if (file !== null) this.error(`hud3 bundle reached outside the shared HUD: ${file}`);
+        }
       }
     },
   };

@@ -1,19 +1,37 @@
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { bundleGuard } from "./boundary";
 
 const root = import.meta.dirname;
 const repoRoot = resolve(root, "..");
 const hudRoot = resolve(repoRoot, "hud/src");
+const modules = resolve(root, "node_modules") + "/";
+const hud3Importer = resolve(root, "index.html");
+
+function sharedPackages(): Plugin {
+  return {
+    name: "hud3-shared-packages",
+    enforce: "pre",
+    async resolveId(id, importer, options) {
+      if (!importer?.startsWith(hudRoot + "/") || !/^[\w@][^:]*$/.test(id)) return;
+      const result = await this.resolve(id, hud3Importer, { ...options, skipSelf: true });
+      if (!result?.id.startsWith(modules)) {
+        this.error(`Shared HUD package ${id} must resolve from hud3/node_modules`);
+      }
+      return result;
+    },
+  };
+}
 
 export default defineConfig({
   root,
   base: "/",
-  plugins: [bundleGuard(repoRoot), react()],
+  plugins: [bundleGuard(repoRoot), sharedPackages(), react()],
   resolve: {
     alias: { "@hud": hudRoot },
-    // Resolve bare React imports in shared files from hud3, including JSX runtimes.
+    // Keep one React instance across the app and its dependencies.
     dedupe: ["react", "react-dom"],
   },
   server: {
@@ -30,7 +48,7 @@ export default defineConfig({
       },
     },
   },
-  worker: { plugins: () => [bundleGuard(repoRoot)] },
+  worker: { plugins: () => [bundleGuard(repoRoot), sharedPackages()] },
   test: {
     environment: "jsdom",
     include: ["tests/**/*.test.ts"],
