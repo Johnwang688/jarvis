@@ -2,7 +2,7 @@
 
 Orchestrator-owned. The fixture holds, for each command, the decision, a hash
 of the reason and `kill_unsure`, recorded from 9e63b514 (live main before v3). It covers patterns around the regex cost threshold and anchored with
-`$`: at a9a0641b, 584 of 3,267 such vectors were weakened and no suite noticed.
+`$`: an earlier revision weakened 584 of 3,267 such vectors and no suite noticed.
 
 Nothing is executed: every check judges a string in process. Re-record only
 for a deliberate, owner-approved change:
