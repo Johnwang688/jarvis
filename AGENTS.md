@@ -125,6 +125,10 @@ See [PR map A1](docs/plans/2026-11-22-jarvis-v3-pr-map.md#a1-tag-v2-final-and-fr
 
 ## Working on v2
 
+The gate refuses agents the v3 daemon's owner operations exactly as daemon2's
+(`jarvis agent start|install|restart|stop`, `jarvis hud`, unit `jarvis-agent`, kills at
+`agentd`).
+
 Codex chats hold no GitHub login (CG-0): push/PRs use Codex-only `chat_git`
 tools, each asked; escalated push/gh is declined (supersedes the note
 above; [plan](docs/plans/2026-10-15-codex-git-credentials.md)).
