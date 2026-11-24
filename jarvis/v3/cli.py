@@ -5,6 +5,7 @@ from http.client import HTTPConnection, HTTPException
 import json
 from pathlib import Path
 import signal
+import sys
 import time
 
 from jarvis import config
@@ -95,6 +96,30 @@ def install(args) -> int:
     )
 
 
+def learned(args) -> int:
+    from .skill_store import SkillStore, StoreError
+
+    store = SkillStore()
+    try:
+        if args.action == "ledger":
+            for row in store.records(with_status=True):
+                print(json.dumps(row))
+            return 0
+        if args.action == "rollback":
+            result = store.rollback(args.id)
+        else:
+            flag = store.pin if args.action in ("pin", "unpin") else store.lock
+            result = flag(args.name, args.action in ("pin", "lock"))
+    except StoreError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError):
+        print("Error: The learned skill store could not complete the operation safely.", file=sys.stderr)
+        return 1
+    print(result)
+    return 0
+
+
 def vault_import(_args) -> int:
     from .vault import Vault
 
@@ -124,6 +149,14 @@ def add_commands(sub):
     agent_install = agent_sub.add_parser("install", help="install the v3 HUD and systemd user unit")
     agent_install.add_argument("--allow-dirty", action="store_true", help="install with uncommitted frontend changes")
     agent_install.set_defaults(func=install)
+
+    skills = sub.add_parser("learned", help="owner controls for learned skills")
+    skills.set_defaults(func=learned)
+    commands = skills.add_subparsers(dest="action", required=True)
+    commands.add_parser("ledger", help="show the learned skill ledger as JSON lines")
+    commands.add_parser("rollback", help="undo an applied ledger change").add_argument("id")
+    for action in ("pin", "unpin", "lock", "unlock"):
+        commands.add_parser(action, help=f"{action} a learned skill").add_argument("name")
 
     vault = sub.add_parser("vault", help="owner memory vault commands")
     vault_sub = vault.add_subparsers(dest="action", required=True)
