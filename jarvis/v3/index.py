@@ -1,4 +1,4 @@
-"""Private, rebuildable SQLite index for session transcripts."""
+"""Private, rebuildable SQLite index for transcripts and ingested documents."""
 
 from __future__ import annotations
 
@@ -198,7 +198,7 @@ class Index:
                     raise RuntimeError("The index requires SQLite WAL mode.")
             if version != SCHEMA_VERSION:
                 db.execute("BEGIN IMMEDIATE")
-                for table in ("chunks_trigram", "chunks_fts", "chunks", "docs", "cursors"):
+                for table in ("chunks_trigram", "chunks_fts", "chunks", "docs", "cursors", "ingest_cursors"):
                     db.execute(f"DROP TABLE IF EXISTS {table}")
                 for statement in _SCHEMA:
                     db.execute(statement)
@@ -211,6 +211,11 @@ class Index:
                     END""")
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 db.commit()
+            # An additive table can be created on existing v1 indexes in place.
+            db.execute("""CREATE TABLE IF NOT EXISTS ingest_cursors (
+                name TEXT PRIMARY KEY, revision INTEGER NOT NULL, cursor_json TEXT NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS docs_source_date ON docs(source, ts, id)")
             return db
         except BaseException:
             db.close()
@@ -243,6 +248,46 @@ class Index:
         doc_id = _document_id(source, ref)
         with self._transaction(write=True) as db:
             return self._append(db, doc_id, source, ref, title, ts, messages, meta)
+
+    def write_transaction(self):
+        """Open a write transaction for a batch of document and cursor changes."""
+        return self._transaction(write=True)
+
+    def replace(self, db, source, ref, *, title, ts, messages, meta=None) -> int:
+        """Replace a document and its indexed chunks in the caller's transaction."""
+        self.remove(db, source, ref)
+        return self._append(db, _document_id(source, ref), source, ref, title, ts, messages, meta)
+
+    @staticmethod
+    def remove(db, source, ref) -> None:
+        """Remove a document and its indexed chunks in the caller's transaction."""
+        doc_id = _document_id(source, ref)
+        db.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+        db.execute("DELETE FROM docs WHERE id=?", (doc_id,))
+
+    def get_ingest_cursor(self, name):
+        """Read the revision and JSON cursor together, including inside a batch."""
+        with self._lock:
+            row = self._db.execute("SELECT revision, cursor_json FROM ingest_cursors WHERE name=?", (name,)).fetchone()
+        return (0, None) if row is None else (row["revision"], json.loads(row["cursor_json"]))
+
+    def ingest_refs(self, source, *, after, limit):
+        """Page through a source's indexed refs in (timestamp, ID) order."""
+        position = (-math.inf, "") if after is None else after
+        with self._lock:
+            return self._db.execute(
+                """SELECT ref, ts, id FROM docs
+                   WHERE source=? AND (ts, id)>(?, ?)
+                   ORDER BY ts, id LIMIT ?""",
+                (source, *position, limit),
+            ).fetchall()
+
+    @staticmethod
+    def save_ingest_cursor(db, name, cursor) -> None:
+        """Advance an ingester's opaque checkpoint in the caller's transaction."""
+        db.execute("""INSERT INTO ingest_cursors VALUES (?, 1, ?)
+                      ON CONFLICT(name) DO UPDATE SET revision=revision+1, cursor_json=excluded.cursor_json""",
+                   (name, json.dumps(cursor, allow_nan=False)))
 
     @staticmethod
     def _append(db, doc_id, source, ref, title, ts, messages, meta=None) -> int:
