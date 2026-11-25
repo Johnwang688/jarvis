@@ -1,4 +1,4 @@
-import { useId, type FormEvent, type KeyboardEvent } from "react";
+import { useId, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
 import type { Brief, FeedWrite } from "./feedApi";
 
 const kindLabels = { decision: "Decision", news: "News", digest: "Digest" };
@@ -14,13 +14,16 @@ const dateFormat = new Intl.DateTimeFormat(undefined, {
   month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
 });
 
+// A closed row has room for the day only; the open brief shows the full time.
+const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+
 function display(text: string) {
   return text.replace(/\p{Bidi_Control}/gu, "");
 }
 
-function timeLabel(value: string) {
+function timeLabel(value: string, format = dateFormat) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? display(value) : dateFormat.format(date);
+  return Number.isNaN(date.getTime()) ? display(value) : format.format(date);
 }
 
 function httpsRef(ref: string): string | undefined {
@@ -83,14 +86,27 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
   const editor = draft?.action;
   const text = draft?.text ?? "";
   const headingId = useId();
+  const moreId = useId();
+  const answersId = useId();
   const open = !missing && brief.state === "open";
   const decision = brief.kind === "decision";
   const urgent = open && brief.rank <= 2;
+  // A brief is a two-line row until the owner opens it. An urgent decision
+  // starts open, and a brief with an answer being written stays open.
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const expanded = !!draft || (chosen ?? (urgent && decision));
   const Heading = open ? "h3" : "h4";
   const { id } = brief;
 
   async function answer(body: Extract<FeedWrite, { route: "answer" }>["body"]) {
     if (open && await write({ route: "answer", body })) setDraft(id, null);
+  }
+
+  // The second press of a double-click is not an answer: the first may have
+  // only just opened the row.
+  function pressed(event: MouseEvent<HTMLElement>, body: Extract<FeedWrite, { route: "answer" }>["body"]) {
+    if (event.detail > 1) return;
+    void answer(body);
   }
 
   function startEditor(action: BriefDraft["action"]) {
@@ -103,8 +119,17 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
     void answer({ id, action: editor, text });
   }
 
+  // A press anywhere on a closed row opens it; only the title closes it again.
+  function onRowClick(event: MouseEvent<HTMLElement>) {
+    if (expanded || event.defaultPrevented) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("button, a, input, textarea, select, summary")) return;
+    setChosen(true);
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLElement>) {
-    if (!open || !decision || busy || event.defaultPrevented || event.repeat || event.nativeEvent.isComposing
+    // A closed row shows no answers, so its keys give none.
+    if (!open || !decision || !expanded || busy || event.defaultPrevented || event.repeat || event.nativeEvent.isComposing
       || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
     const target = event.target;
     if (!(target instanceof HTMLElement) || target !== document.activeElement
@@ -122,17 +147,31 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
 
   return (
     <article className={`feed-card${urgent ? " feed-priority" : ""}`} tabIndex={open && decision ? 0 : undefined}
-      aria-labelledby={headingId} onKeyDown={onKeyDown}>
+      aria-labelledby={headingId} data-collapsed={!expanded || undefined} onKeyDown={onKeyDown} onClick={onRowClick}>
+      <header className="feed-ask">
+        <Heading id={headingId}>
+          <button type="button" className="feed-toggle" aria-expanded={expanded} aria-controls={open && decision ? `${answersId} ${moreId}` : moreId}
+            onClick={() => setChosen(!expanded)}><bdi>{display(brief.ask)}</bdi></button>
+        </Heading>
+        <div className="feed-chips">
+          <span>{kindLabels[brief.kind]}</span>
+          {brief.due !== null && <span>Due <bdi>{timeLabel(brief.due, expanded ? dateFormat : dayFormat)}</bdi></span>}
+          <span className={urgent && decision ? "feed-rank feed-waiting" : "feed-rank"}>Rank {brief.rank}</span>
+          {brief.state !== "open" && (
+            <span>{brief.state === "dismissed" && decision ? "Not now" : resolutionLabels[brief.state]}</span>
+          )}
+        </div>
+      </header>
       {open && (
-        <div className="feed-actions">
+        <div className="feed-actions" id={answersId} hidden={decision && !expanded}>
           {decision ? (
             <>
-              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy} onClick={() => void answer({ id, action: "approve" })}>Approve</button>
+              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy} onClick={(event) => pressed(event, { id, action: "approve" })}>Approve</button>
               <button type="button" aria-keyshortcuts="E" aria-expanded={editor === "edit"} disabled={busy} onClick={() => startEditor("edit")}>Edit</button>
               <button type="button" aria-expanded={editor === "other"} disabled={busy} onClick={() => startEditor("other")}>Other…</button>
-              <button type="button" aria-keyshortcuts="N" disabled={busy} onClick={() => void answer({ id, action: "not_now" })}>Not now</button>
+              <button type="button" aria-keyshortcuts="N" disabled={busy} onClick={(event) => pressed(event, { id, action: "not_now" })}>Not now</button>
             </>
-          ) : <button type="button" disabled={busy} onClick={() => void answer({ id, action: "not_now" })}>Got it</button>}
+          ) : <button type="button" disabled={busy} onClick={(event) => pressed(event, { id, action: "not_now" })}>Got it</button>}
         </div>
       )}
       {draft && (
@@ -153,18 +192,8 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
         </form>
       )}
       {error && <p className="feed-error" role="status">{error}</p>}
-      <header className="feed-ask">
-        <Heading id={headingId}><bdi>{display(brief.ask)}</bdi></Heading>
-        <div className="feed-chips">
-          <span>{kindLabels[brief.kind]}</span>
-          {brief.due !== null && <span>Due <bdi>{timeLabel(brief.due)}</bdi></span>}
-          <span className={urgent && decision ? "feed-waiting" : undefined}>Rank {brief.rank}</span>
-          {brief.state !== "open" && (
-            <span>{brief.state === "dismissed" && decision ? "Not now" : resolutionLabels[brief.state]}</span>
-          )}
-        </div>
-      </header>
-      {brief.why_now && <p><strong>Why now</strong> <bdi>{display(brief.why_now)}</bdi></p>}
+      {brief.why_now && <p className="feed-why"><strong>Why now</strong> <bdi>{display(brief.why_now)}</bdi></p>}
+      <div className="feed-more" id={moreId} hidden={!expanded}>
       {brief.recommend && (
         <p><strong>Recommend</strong> <bdi>{display(brief.recommend.label)}</bdi> — because <bdi>{display(brief.recommend.because)}</bdi></p>
       )}
@@ -183,6 +212,7 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
             aria-pressed={brief.feedback.includes(tag)}
             onClick={() => void write({ route: "feedback", body: { id, tag } })}>{label}</button>
         ))}
+      </div>
       </div>
     </article>
   );

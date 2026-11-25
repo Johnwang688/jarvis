@@ -434,6 +434,9 @@ class Window(unittest.TestCase):
         decision_card = open_list.get_by_role("article", name=decision)
         self.expect(decision_card.get_by_text("The fixture is ready.", exact=True)).to_be_visible()
 
+        # A brief is a closed row until it is opened: no answer is offered before then.
+        self.expect(decision_card.get_by_role("button", name="Approve")).to_have_count(0)
+        decision_card.get_by_role("button", name=decision).click()
         decision_card.get_by_role("button", name="Approve").click()
         self.expect(open_list.get_by_role("heading")).to_have_text([news], timeout=WAIT_MS)
         recent = self.feed_panel.get_by_role("region", name="Recent")
@@ -454,6 +457,7 @@ class Window(unittest.TestCase):
 
         brief = self.feed_panel.get_by_role("article", name="Fixture markup sample")
         self.expect(brief.get_by_text(HOSTILE_TEXT, exact=True)).to_be_visible(timeout=WAIT_MS)
+        brief.get_by_role("button", name="Fixture markup sample").click()
         brief.get_by_text("Context", exact=True).click()
         self.expect(brief.get_by_text(HOSTILE_REF, exact=True)).to_be_visible()
         self.expect(brief.locator("img, a")).to_have_count(0)

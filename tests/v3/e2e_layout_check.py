@@ -95,6 +95,44 @@ class Layout(window.Window):
                 self.assertGreater(chat[2] - chat[0], feed[2] - feed[0])
                 self.assertLessEqual(seen["orb"][3] - seen["orb"][1], 64)
 
+    def test_briefs_are_short_rows_until_opened(self):
+        for n in range(14):
+            self.feed.post({
+                "kind": "news", "rank": 5, "ask": f"Fixture brief {n}: a line of fixture text for the feed.",
+                "why_now": "The fixture feed is deliberately longer than the window. " * 3,
+            })
+        self.feed.post({
+            "kind": "decision", "rank": 4, "ask": "Schedule the fixture review?", "why_now": "The fixture is ready.",
+            "default": {"action": "none", "at": None},
+        })
+        self.start_daemon()
+        self.open_window()
+        rows = self.feed_panel.get_by_role("article")
+        self.expect(rows).to_have_count(15, timeout=window.WAIT_MS)
+        self.measure(1280, 720, "rows")
+        boxes = self.page.evaluate("""() => {
+          const feed = document.querySelector('[data-panel="feed"]').getBoundingClientRect();
+          return [...document.querySelectorAll('[data-panel="feed"] article')].map((row) => {
+            const r = row.getBoundingClientRect();
+            return [r.height, r.top >= feed.top && r.bottom <= feed.bottom, row.scrollWidth <= row.clientWidth + 1];
+          });
+        }""")
+        self.assertTrue(all(height <= 64 for height, _, _ in boxes), boxes)
+        self.assertTrue(all(fits for _, _, fits in boxes), "a row's text spills sideways")
+        self.assertGreaterEqual(sum(inside for _, inside, _ in boxes), 8, "a 720 px window should show eight rows")
+
+        decision = rows.filter(has_text="Schedule the fixture review?")
+        self.expect(decision.get_by_role("button", name="Approve")).to_have_count(0)
+        decision.get_by_role("button", name="Schedule the fixture review?").click()
+        self.expect(decision.get_by_role("button", name="Approve")).to_be_visible()
+        self.expect(decision.get_by_text("If you ignore it")).to_be_visible()
+        seen = self.measure(1280, 720, "row-open")
+        self.assert_one_screen(seen, inside=("chat", "feed", "status"))
+
+        first = rows.filter(has_text="Fixture brief 0:")
+        first.get_by_role("button", name="Got it").click()
+        self.expect(self.feed_panel.locator(":scope > .feed-list").get_by_role("article")).to_have_count(14)
+
     def test_an_empty_window_fills_the_screen(self):
         self.start_daemon()
         self.open_window()
