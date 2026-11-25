@@ -2,6 +2,7 @@
 
 from collections import deque
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 import math
 import os
@@ -161,9 +162,12 @@ class ChatService:
         self._selected = False
         self._seq = 0
         self._events = deque(maxlen=EVENT_LIMIT)
+        self._finished_turns = deque(maxlen=EVENT_LIMIT)
+        self._prompt = None
+        self._delivered = []
         self._inbox = []
         self._taken = 0
-        self._pending_followup = 0
+        self._pending_followup = []
         self._draft = ""
         self._last_error = None
         self._last_activity = None
@@ -249,20 +253,47 @@ class ChatService:
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
                     "draft": self._draft, "tools": available_tools(gated=self.approvals is not None),
                     "history": history, "last_error": self._last_error,
+                    "replay": self._replay(len(history)),
                     "approvals": self._approval_count()}
+
+    def _replay(self, history_size):
+        # Replay complete buffered turns over the corresponding suffix of
+        # saved messages. An unfinished turn has no messages on disk yet.
+        events = []
+        first = self._events[0]["seq"] if self._events else self._seq + 1
+        start = self._prompt["seq"] if self._prompt is not None else self._seq + 1
+        for turn_start, saved in reversed(self._finished_turns):
+            if turn_start < first or saved > history_size:
+                break
+            start = turn_start
+            history_size -= saved
+        if self._prompt is not None and self._prompt["seq"] < first:
+            events.append(deepcopy(self._prompt))
+        events.extend(deepcopy(row) for row in self._events if row["seq"] >= start)
+        for row in events:
+            if row["kind"] == "reply":
+                row["text"] = row["text"][:HISTORY_MESSAGE_LIMIT]
+        return {"history_prefix": history_size, "events": events}
 
     def _approval_count(self):
         return 0 if self.approvals is None else len(self.approvals.pending())
 
-    def _emit(self, kind, **fields):
+    def approval_snapshot(self):
+        with self._lock:
+            return {"session_id": self._session_id,
+                    "approvals": [] if self.approvals is None else self.approvals.pending()}
+
+    def _emit(self, kind, *, stamp=None, **fields):
         self._seq += 1
-        self._events.append({"seq": self._seq, "t": self._clock(), "kind": kind, **fields})
+        row = {"seq": self._seq, "t": self._clock() if stamp is None else stamp, "kind": kind, **fields}
+        self._events.append(row)
+        return row
 
     def events(self, after):
         with self._lock:
-            return {"state": self._state, "seq": self._seq,
+            return {"state": self._state, "seq": self._seq, "session_id": self._session_id,
                     "gap": bool(self._events and after < self._events[0]["seq"] - 1),
-                    "events": [row.copy() for row in self._events if row["seq"] > after],
+                    "events": [deepcopy(row) for row in self._events if row["seq"] > after],
                     "approvals": self._approval_count()}
 
     def send(self, text):
@@ -274,17 +305,16 @@ class ChatService:
                 raise ChatBusy("Chat is stopping or closed.")
             self._last_activity = self._clock()
             if self._state == "running":
-                if len(self._inbox) + self._pending_followup >= MAX_INBOX:
+                if len(self._inbox) + len(self._pending_followup) >= MAX_INBOX:
                     raise ChatInboxFull("The chat steering queue is full.")
-                self._inbox.append(text)
-                self._emit("steer", text=text)
+                self._inbox.append(self._emit("steer", text=text))
                 return {"state": "running", "steered": True}
 
             with self._directory(create=True) as root_fd:
                 self._select(root_fd)
                 sid = self._session_id or self._new_session(root_fd)
             inputs = [text]
-            self._begin(inputs, waiting=0)
+            self._begin(inputs, waiting=[])
             self._worker = threading.Thread(target=self._run, args=(sid, inputs),
                                             name="jarvis-v3-chat", daemon=True)
             try:
@@ -299,24 +329,32 @@ class ChatService:
         self._stop.clear()
         self._turn_id = uuid4().hex if self.approvals is not None else None
         self._taken = 0
+        self._delivered = []
         self._pending_followup = waiting
         self._draft = ""
         self._last_error = None
         self._state = "running"
-        self._emit("user", text="\n\n".join(inputs))
+        fields = {"inputs": [{key: row[key] for key in ("seq", "text")} for row in waiting]} if waiting else {}
+        self._prompt = self._emit("user", text="\n\n".join(inputs), **fields)
 
-    def _error(self):
+    def _complete_turn(self, saved):
+        if self._prompt is not None:
+            self._finished_turns.append((self._prompt["seq"], saved))
+            self._prompt = None
+
+    def _error(self, saved=0):
         self._state = "error"
         self._draft = ""
         self._last_error = ERROR_MESSAGE
-        self._emit("error", message=self._last_error, dropped=self._discard_steers())
+        self._emit("error", message=self._last_error, **self._discard_steers())
+        self._complete_turn(saved)
 
     def _take_steering(self):
         with self._lock:
             if self._stop.is_set():
                 return []
             self._taken = len(self._inbox)
-            return self._inbox.copy()
+            return [row["text"] for row in self._inbox]
 
     def _admit_completion(self):
         with self._lock:
@@ -325,8 +363,9 @@ class ChatService:
             delivered = self._inbox[:self._taken]
             del self._inbox[:self._taken]
             self._taken = 0
-            self._pending_followup = 0
-            return delivered
+            self._pending_followup = []
+            self._delivered.extend(delivered)
+            return [row["text"] for row in delivered]
 
     def _on_event(self, kind, **fields):
         with self._lock:
@@ -343,16 +382,17 @@ class ChatService:
             yield not self._closed.is_set() and (allow_stopped or not self._stop.is_set())
 
     def _discard_steers(self):
-        dropped = len(self._inbox) + self._pending_followup
+        discarded = [row["seq"] for row in (*self._pending_followup, *self._inbox)]
         self._inbox.clear()
         self._taken = 0
-        self._pending_followup = 0
-        return dropped
+        self._pending_followup = []
+        return {"dropped": len(discarded), "discarded": discarded}
 
-    def _finish_stopped(self):
+    def _finish_stopped(self, saved=0):
         self._draft = ""
         self._state = "idle"
-        self._emit("stopped", dropped=self._discard_steers())
+        self._emit("stopped", **self._discard_steers())
+        self._complete_turn(saved)
 
     def _run(self, sid, inputs):
         while True:
@@ -378,21 +418,27 @@ class ChatService:
                         stopped = self._stop.is_set() or (turn is not None and turn.cancelled)
                         # Failed or stopped follow-ups may never have reached the provider.
                         unfinished = stopped or turn is None
-                        recorded = inputs[self._pending_followup:] if unfinished else inputs
+                        recorded = inputs[len(self._pending_followup):] if unfinished else inputs
+                        saved = 0
+                        reply_stamp = self._clock()
                         if recorded:
-                            session.save(recorded, stopped=stopped)
+                            saved = session.save(recorded, stopped=stopped, prompt_stamp=self._prompt["t"],
+                                                 steer_stamps=[row["t"] for row in self._delivered],
+                                                 reply_stamp=reply_stamp)
                         if stopped:
-                            self._finish_stopped()
+                            self._finish_stopped(saved)
                             return
                         if turn is None:
-                            self._error()
+                            self._error(saved)
                             return
-                        self._emit("reply", text=turn.text)
+                        self._emit("reply", stamp=reply_stamp, text=turn.text)
+                        self._complete_turn(saved)
                         if not self._inbox:
                             self._state = "idle"
                             return
-                        inputs, self._inbox = self._inbox, []
-                        self._begin(inputs, waiting=len(inputs))
+                        waiting, self._inbox = self._inbox, []
+                        inputs = [row["text"] for row in waiting]
+                        self._begin(inputs, waiting=waiting)
             except BaseException:
                 # This worker is the exception boundary for the turn. A
                 # provider failure never escapes in a thread traceback.
@@ -400,6 +446,9 @@ class ChatService:
                     if self._closed.is_set():
                         return
                     self._last_activity = self._clock()
+                    # A storage failure can leave a partial append. Fall back
+                    # to disk rather than overlaying turns at an unknown seam.
+                    self._finished_turns.clear()
                     if self._stop.is_set():
                         self._finish_stopped()
                     else:
@@ -430,6 +479,8 @@ class ChatService:
             with self._directory(create=True) as root_fd:
                 sid = self._new_session(root_fd)
             self._inbox.clear()
+            self._events.clear()
+            self._finished_turns.clear()
             return {"session_id": sid}
 
     def idle_seconds(self):

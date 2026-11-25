@@ -576,7 +576,7 @@ class _TurnSession:
     def record(self, text, turn, messages):
         self.messages = messages
 
-    def save(self, inputs, *, stopped):
+    def save(self, inputs, *, stopped, prompt_stamp, steer_stamps, reply_stamp):
         session = self.session
         turn = self.turn
         if turn is None or (stopped and not turn.cancelled) or self.messages is None:
@@ -586,18 +586,20 @@ class _TurnSession:
         else:
             messages = [row for row in self.messages if id(row) not in self.unsent]
         session.save_messages(messages)
-        rows = [("you", text) for text in (*inputs, *self.steering)]
+        rows = [("you", text, prompt_stamp) for text in inputs]
+        rows.extend(("you", text, stamp) for text, stamp in zip(self.steering, steer_stamps, strict=True))
         if turn is not None and not stopped and turn.text.strip():
-            rows.append(("jarvis", turn.text))
+            rows.append(("jarvis", turn.text, reply_stamp))
         with session._log_path.open("a", encoding="utf-8") as log:
-            for role, text in rows:
-                log.write(json.dumps({"t": self.clock(), "role": role, "text": text}, ensure_ascii=False) + "\n")
+            for role, text, stamp in rows:
+                log.write(json.dumps({"t": stamp, "role": role, "text": text}, ensure_ascii=False) + "\n")
         session.meta.update(
             turns=session.turns + 1, updated=self.clock(),
             cost_usd=round(session.meta["cost_usd"] + (turn.cost_usd if turn is not None else 0), 6),
             title=session.meta["title"] or sessions._fallback_title(inputs[0]),
         )
         session.save_meta()
+        return len(rows)
 
 
 def _summarize_with(completion, transcript):

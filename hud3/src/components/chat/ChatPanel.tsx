@@ -12,6 +12,7 @@ function Message({ message, draft = false }: { message: ChatMessage; draft?: boo
       <div className="chat-byline">
         {message.role === "user" ? "You" : "Jarvis"}
         {message.steered && <span> · Added to this turn</span>}
+        {message.discarded && <span> · Discarded before delivery</span>}
         {draft && <span> · Draft</span>}
       </div>
       <p className="chat-text" dir="auto">{message.text}</p>
@@ -102,7 +103,8 @@ export function ChatPanel() {
           {(chat.state === "error" || chat.notice === "error") &&
             <p className="chat-error" role="status">The turn failed. Try sending a message again.</p>}
           {chat.notice === "stopped" && <p role="status">Turn stopped.</p>}
-          <ApprovalPanel key={chat.session_id} count={chat.approvals} stopping={pending === "stop"} />
+          <ApprovalPanel key={chat.session_id} sessionId={chat.session_id}
+            count={chat.approvals} stopping={pending === "stop"} />
           <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
             <textarea aria-label="Message" aria-describedby={showHint ? "chat-length" : undefined}
               aria-invalid={count > TEXT_LIMIT || undefined} dir="auto" rows={3}

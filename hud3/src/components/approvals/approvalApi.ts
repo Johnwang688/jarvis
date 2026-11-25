@@ -44,13 +44,14 @@ function parseApproval(value: unknown): ListedApproval {
   return { id, digest, tool: typeof tool === "string" ? tool : "", card: display, level, why, asked_at, expires_in };
 }
 
-export async function readApprovals(signal: AbortSignal): Promise<ListedApproval[]> {
+export async function readApprovals(signal: AbortSignal, sessionId?: string | null): Promise<ListedApproval[]> {
   const response = await fetch(path, { ...readOptions, signal });
   if (!response.ok) throw new Error("Approval list unavailable");
   const value: unknown = await response.json();
   if (!record(value) || !Array.isArray(value.approvals)) {
     throw new Error("Invalid approval list");
   }
+  if (sessionId !== undefined && value.session_id !== undefined && value.session_id !== sessionId) return [];
   return value.approvals.map(parseApproval);
 }
 

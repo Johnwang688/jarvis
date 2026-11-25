@@ -39,7 +39,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const snapshot = (state: string, seq: number, history: object[] = [], tools: object[] = []) =>
+const snapshot = (state: string, seq: number, history: object[] = [], tools: (string | object)[] = []) =>
   json({ state, session_id: "sample", seq, history, tools, draft: "" });
 const batch = (state: string, seq: number, events: object[], gap = false) =>
   json({ state, seq, events, gap });
@@ -64,6 +64,47 @@ it("MED keeps the tool result before the reply when the turn finishes", async ()
   await mount();
   await advance();
   expect(rows()).toEqual(["Look up the sample.", "sample_lookup · OK · Found two rows", "Two rows."]);
+});
+
+it("keeps the first turn's tool when the daemon assigns the session ID", async () => {
+  const events = [user(1, first.text), start, end, reply(4, answer.text)];
+  const settled = {
+    state: "idle", session_id: "sample", seq: 4, draft: "", history: [first, answer], tools: [start.name],
+    replay: { history_prefix: 0, events },
+  };
+  fetchMock.mockResolvedValueOnce(json({ state: "idle", session_id: null, seq: 0, history: [], tools: [], draft: "" }))
+    .mockResolvedValueOnce(json({ state: "running", steered: false }, 202))
+    .mockResolvedValueOnce(json({ state: "idle", seq: 4, events, gap: false, session_id: "sample" }))
+    .mockResolvedValueOnce(json(settled))
+    .mockResolvedValueOnce(json(settled));
+  await mount();
+  type(first.text);
+  await act(async () => button("Send").click());
+  await advance();
+  const expected = [first.text, "sample_lookup · OK · Found two rows", answer.text];
+  expect(rows()).toEqual(expected);
+  await advance(5_000);
+  expect(rows()).toEqual(expected);
+});
+
+it("rebuilds from a different session's snapshot with the same cursor", async () => {
+  fetchMock
+    .mockResolvedValueOnce(snapshot("idle", 4, [first, answer]))
+    .mockResolvedValueOnce(json({
+      state: "idle", session_id: "another", seq: 4, draft: "", tools: [],
+      history: [{ role: "user", text: "Another chat." }],
+    }));
+  await mount();
+  expect(rows()).toEqual([first.text, answer.text]);
+  await advance(5_000);
+  expect(rows()).toEqual(["Another chat."]);
+});
+
+it("does not render available tool names as running calls in a live snapshot", async () => {
+  fetchMock.mockResolvedValueOnce(snapshot("running", 2, [], ["vault_list", "vault_add"]));
+  await mount();
+  expect(button("Stop").disabled).toBe(false);
+  expect(rows()).toEqual([]);
 });
 
 it("MED keeps the first turn's finished tool when the next turn starts", async () => {

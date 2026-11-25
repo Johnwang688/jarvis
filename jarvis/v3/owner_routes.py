@@ -119,7 +119,7 @@ def _chat_new(body, chat):
 
 
 def _approvals_list(body, chat):
-    return 200, {"approvals": [] if chat is None or chat.approvals is None else chat.approvals.pending()}
+    return 200, {"approvals": []} if chat is None else chat.approval_snapshot()
 
 
 def _approvals_answer(body, chat):

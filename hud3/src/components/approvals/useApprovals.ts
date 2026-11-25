@@ -13,7 +13,7 @@ export interface ShownApproval {
 
 const identity = ({ id, digest }: ListedApproval) => JSON.stringify([id, digest]);
 
-export function useApprovals(count: number) {
+export function useApprovals(count: number, sessionId?: string | null) {
   const [shown, setShown] = useState<ShownApproval>();
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -59,7 +59,7 @@ export function useApprovals(count: number) {
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]);
       const started = performance.now();
       try {
-        const list = await readApprovals(signal);
+        const list = await readApprovals(signal, sessionId);
         if (controller.signal.aborted || refresh) return;
         if (signal.aborted) throw new Error("Approval list timed out");
         // Keep a completed card out even if this read began before its answer.
@@ -150,7 +150,7 @@ export function useApprovals(count: number) {
       read?.abort();
       write?.abort();
     };
-  }, []);
+  }, [sessionId]);
 
   useLayoutEffect(() => observe.current?.(count), [count]);
 
