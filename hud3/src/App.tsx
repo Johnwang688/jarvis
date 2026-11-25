@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Orb } from "./Orb";
-import { Status } from "./Status";
+import { Jobs, StatusView, useDaemonStatus } from "./Status";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { FeedPanel } from "./components/feed/FeedPanel";
 
@@ -13,22 +13,36 @@ function Panel({ id, title, children }: { id: string; title: string; children: R
   );
 }
 
+// One screen, no page scroll: a top bar, then the feed, the chat and a rail.
+// Each panel scrolls inside itself.
 export default function App() {
+  const status = useDaemonStatus();
   return (
     <main className="agent-window">
-      <h1>J.A.R.V.I.S. Agent</h1>
-      <div className="agent-grid">
+      <header className="agent-top">
         <Orb />
-        <div className="agent-column">
-          <Panel id="t3" title="T3"><p>T3 threads will appear here.</p></Panel>
-          <ChatPanel />
-          <FeedPanel />
-          <Panel id="vault" title="Vault"><p>Saved memories will appear here.</p></Panel>
-        </div>
-        <div className="agent-column">
-          <Panel id="skills" title="Skills"><p>Skills and their digest will appear here.</p></Panel>
-          <Panel id="cron" title="Cron"><p>Scheduled jobs will appear here.</p></Panel>
-          <Panel id="status" title="Status"><Status /></Panel>
+        <h1>J.A.R.V.I.S. Agent</h1>
+        <section className="agent-statusbar" data-panel="status" aria-labelledby="panel-status">
+          <h2 id="panel-status">Status</h2>
+          <StatusView status={status} />
+        </section>
+      </header>
+      <div className="agent-grid">
+        <FeedPanel />
+        <ChatPanel />
+        <div className="agent-rail">
+          <Panel id="cron" title="Cron">
+            <Jobs status={status} />
+          </Panel>
+          <Panel id="t3" title="T3">
+            <p>T3 threads will appear here.</p>
+          </Panel>
+          <Panel id="vault" title="Vault">
+            <p>Saved memories will appear here.</p>
+          </Panel>
+          <Panel id="skills" title="Skills">
+            <p>Skills and their digest will appear here.</p>
+          </Panel>
         </div>
       </div>
     </main>
