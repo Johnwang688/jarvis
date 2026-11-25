@@ -158,7 +158,9 @@ class Bodies(Base):
 
 class Table(Base):
     def test_the_table_is_the_whole_surface(self):
-        self.assertLessEqual({("GET", "/v3/owner/whoami"), ("POST", "/v3/owner/ping")}, set(ROUTES))
+        self.assertLessEqual({
+            ("GET", "/v3/owner/whoami"), ("POST", "/v3/owner/ping"), ("POST", "/v3/owner/proposal"),
+        }, set(ROUTES))
         self.assertTrue(all(method in ("GET", "POST") and path.startswith("/v3/owner/") for method, path in ROUTES))   # later PRs add routes; all stay under /v3/owner/
         self.assertEqual(owner_routes.PUBLIC, frozenset())
         self.assertTrue(all(route.owner for route in ROUTES.values()))

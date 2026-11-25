@@ -1,0 +1,4 @@
+.feed-proposal > :not(summary) { margin-top: 6px; }
+.feed-card .feed-proposal-taint, .feed-proposal-rows dt { color: var(--text-muted); }
+.feed-proposal-rows { display: grid; gap: 6px; }
+.feed-proposal-rows dd { margin: 0; white-space: pre-wrap; }

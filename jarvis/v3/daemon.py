@@ -43,6 +43,7 @@ class _PhoneServices:
     chat: ChatService | None
     data_dir: Path
     work: Callable
+    proposals: Callable
     status: Callable
 
 
@@ -98,7 +99,7 @@ def _decode_route_body(data: bytes) -> dict:
 
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
-                    chat: ChatService | None = None, *, work=None,
+                    chat: ChatService | None = None, *, work=None, proposals=None,
                     phone_status=None, get_feed=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
@@ -122,6 +123,13 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
     if get_feed is None:
         get_feed = default_feed
 
+    def default_proposals():
+        from .proposals import ProposalStore
+
+        return ProposalStore(data_dir / "proposals")
+
+    get_proposals = default_proposals if proposals is None else proposals
+
     def status():
         return {
             "service": SERVICE_NAME,
@@ -136,7 +144,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
-        phone_services = _PhoneServices(get_feed, chat, data_dir, get_work, status)
+        phone_services = _PhoneServices(get_feed, chat, data_dir, get_work, get_proposals, status)
 
         def log_message(self, *args):
             pass
@@ -229,7 +237,8 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
         def _run_route(self, body):
             try:
-                status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir, get_work=get_work)
+                status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir, get_work=get_work,
+                                                  get_proposals=get_proposals)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:
@@ -343,7 +352,7 @@ def _prepare_data_dir(path: Path) -> None:
 
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
-                 hud_dir: Path | None = None, *, jobs=None, chat=None, work=None,
+                 hud_dir: Path | None = None, *, jobs=None, chat=None, work=None, proposals=None,
                  phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._phone_host = config.remote_host() if phone_host is _CONFIGURED_PHONE_HOST else phone_host
@@ -351,6 +360,7 @@ class Daemon:
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._work = work
+        self._proposals = proposals
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
@@ -505,7 +515,7 @@ class Daemon:
             if self._chat is None:
                 self._chat = self._new_chat()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
-                                      work=self._work, phone_status=self._phone_status,
+                                      work=self._work, proposals=self._proposals, phone_status=self._phone_status,
                                       get_feed=self._get_feed)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)

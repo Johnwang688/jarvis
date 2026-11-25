@@ -3,6 +3,7 @@ const paths = {
   feed: ["/v3/owner/feed", "/m/api/feed"],
   feedAnswer: ["/v3/owner/feed/answer", "/m/api/feed/answer"],
   feedFeedback: ["/v3/owner/feed/feedback", "/m/api/feed/feedback"],
+  proposal: ["/v3/owner/proposal", "/m/api/proposal"],
   chat: ["/v3/owner/chat", "/m/api/chat"],
   chatEvents: ["/v3/owner/chat/events", "/m/api/chat/events"],
   chatSend: ["/v3/owner/chat/send", "/m/api/chat/send"],
@@ -61,7 +62,7 @@ export async function apiFetch(name: ApiName, options: RequestInit): Promise<Res
   const response = await fetch(apiPath(name), options);
   if (observers.length && !options.signal?.aborted) {
     let notice: PhoneNotice | undefined;
-    const write = options.method === "POST" && name !== "chatEvents";
+    const write = options.method === "POST" && name !== "chatEvents" && name !== "proposal";
     if (write && response.status === 423) {
       const body = await response.clone().json().catch(() => null);
       if (body?.error === "locked" && body.unlock === true) notice = "locked";

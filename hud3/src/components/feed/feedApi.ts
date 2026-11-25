@@ -1,4 +1,5 @@
 import { apiFetch } from "../../api";
+import type { ApprovalRow } from "../approvals/approvalApi";
 
 export type BriefKind = "decision" | "news" | "digest";
 export type FeedbackTag = "too_long" | "missing_context";
@@ -16,6 +17,7 @@ export interface Brief {
   options: { label: string }[];
   default: { action: string; at: string | null } | null;
   context: { label: string; ref: string }[];
+  proposal_id?: string | null;
   state: typeof states[number];
   feedback: FeedbackTag[];
 }
@@ -40,7 +42,7 @@ function textOrNull(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isBrief(value: unknown): value is Brief {
+export function isBrief(value: unknown): value is Brief {
   if (!record(value)) return false;
   const { id, kind, rank, due, ask, why_now, recommend, options, default: fallback, context, state, feedback } = value;
   return typeof id === "string"
@@ -51,6 +53,7 @@ function isBrief(value: unknown): value is Brief {
     && Array.isArray(options) && options.every((item) => record(item) && typeof item.label === "string")
     && (fallback === null ? kind !== "decision" : record(fallback) && typeof fallback.action === "string" && textOrNull(fallback.at))
     && Array.isArray(context) && context.every((item) => record(item) && typeof item.label === "string" && typeof item.ref === "string")
+    && (value.proposal_id === undefined || textOrNull(value.proposal_id))
     && states.some((allowed) => allowed === state)
     && Array.isArray(feedback) && feedback.every((tag) => tag === "too_long" || tag === "missing_context");
 }
@@ -70,10 +73,52 @@ export function feedError(error: unknown, writing = false) {
   return writing ? "Could not confirm the change. Try again shortly." : "Feed unavailable. Retrying…";
 }
 
-async function request(name: "feed" | "feedAnswer" | "feedFeedback", options: RequestInit): Promise<unknown> {
+async function request(name: "feed" | "feedAnswer" | "feedFeedback" | "proposal", options: RequestInit): Promise<unknown> {
   const response = await apiFetch(name, { cache: "no-store", redirect: "error", ...options });
   if (!response.ok) throw new FeedHttpError(response.status);
   return response.json();
+}
+
+export interface ProposalDetails {
+  kind: string;
+  level: string;
+  why: string;
+  tainted: boolean;
+  basis: { type: string; id: string }[];
+  state: string;
+  action: { tool: string; card: { title: string; rows: ApprovalRow[] } } | null;
+}
+
+function isProposalAction(value: unknown): value is ProposalDetails["action"] {
+  if (value === null) return true;
+  if (!record(value) || typeof value.tool !== "string" || !record(value.card)) return false;
+  const { title, rows } = value.card;
+  return typeof title === "string" && Array.isArray(rows) && rows.length > 0
+    && rows.every((row) => record(row) && typeof row.label === "string" && typeof row.value === "string");
+}
+
+function isProposal(value: unknown): value is ProposalDetails {
+  if (!record(value)) return false;
+  const { kind, level, why, tainted, basis, state, action } = value;
+  return typeof kind === "string" && typeof level === "string" && typeof why === "string"
+    && typeof tainted === "boolean" && typeof state === "string" && Array.isArray(basis)
+    && basis.every((ref) => record(ref) && typeof ref.type === "string" && typeof ref.id === "string")
+    && isProposalAction(action);
+}
+
+export function proposalConflict(error: unknown) {
+  return error instanceof FeedHttpError && error.status === 409;
+}
+
+export async function readProposal(id: string): Promise<ProposalDetails> {
+  const value = await request("proposal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!record(value) || !isProposal(value.proposal)) throw new Error("Invalid proposal details");
+  return value.proposal;
 }
 
 export async function readFeed(signal: AbortSignal): Promise<FeedSnapshot> {

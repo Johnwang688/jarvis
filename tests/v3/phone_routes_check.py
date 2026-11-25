@@ -24,13 +24,13 @@ from jarvis.v3.work import Ledger, Registry, WorkError
 
 
 DATA_ROUTES = (
-    ("GET", "status"), ("GET", "feed"), ("POST", "feed/answer"), ("POST", "feed/feedback"),
+    ("GET", "status"), ("GET", "feed"), ("POST", "feed/answer"), ("POST", "feed/feedback"), ("POST", "proposal"),
     ("GET", "chat"), ("POST", "chat/events"), ("POST", "chat/send"), ("POST", "chat/stop"),
     ("POST", "chat/new"), ("GET", "approvals"), ("POST", "approvals/answer"), ("GET", "work"),
 )
 BRIEF_FIELDS = {
     "id", "kind", "rank", "due", "ask", "why_now", "recommend", "options", "default", "context",
-    "state", "feedback",
+    "state", "feedback", "proposal_id",
 }
 STATUS_FIELDS = {"service", "version", "pid", "uptime_s", "jobs"}
 LOCKED = (423, {"error": "locked", "unlock": True})
@@ -56,7 +56,7 @@ class PhoneRoutesCheck(unittest.TestCase):
         self.enterContext(patch.object(sessions, "AUTO_TITLE", False))
         self.enterContext(patch.object(llm, "chat", side_effect=AssertionError("Real model call")))
 
-    def start(self, model=None):
+    def start(self, model=None, *, proposals=None):
         self.broker = ApprovalBroker(clock=lambda: 1000, log=self.data / "approvals.jsonl")
         self.addCleanup(self.broker.shutdown)
         self.chat = ChatService(self.data / "chats", completion=Model() if model is None else model,
@@ -64,7 +64,8 @@ class PhoneRoutesCheck(unittest.TestCase):
         self.registry = Registry(self.data / "work/projects.json")
         self.ledger = Ledger(self.data / "work/threads.jsonl")
         self.daemon = Daemon(port=0, phone_host=HOST, data_dir=self.data, hud_dir=self.root / "hud",
-                             jobs=(), chat=self.chat, work=lambda: (self.registry, self.ledger))
+                             jobs=(), chat=self.chat, work=lambda: (self.registry, self.ledger),
+                             proposals=proposals)
         self.daemon.start()
         self.addCleanup(self.daemon.stop)
         self.server = self.daemon._phone_server

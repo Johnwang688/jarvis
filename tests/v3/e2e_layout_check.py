@@ -142,6 +142,38 @@ class Layout(window.Window):
             left, top, right, bottom = seen["panels"][name]
             self.assertGreater(bottom - top, 600, f"{name} should take the height of the window")
 
+    def test_work_proposal_details_fit_in_the_window(self):
+        from jarvis.v3.proposals import ProposalStore
+        from proposal_route_check import AGENT, ASK, BRIEF, FOLDER, PROJECT, TAINT, TITLE, work_draft
+
+        store = ProposalStore(self.data / "proposals")
+        proposal = store.add(work_draft())
+        store.brief(proposal["id"], self.feed)
+        self.start_daemon()
+        self.open_window()
+        row = self.feed_panel.get_by_role("article", name=ASK)
+        row.get_by_role("button", name=ASK).click()
+        self.expect(row.get_by_role("button", name="Read the details first")).to_be_disabled()
+        details = row.locator(".feed-proposal")
+        details.get_by_text("Details", exact=True).click()
+        self.expect(details.locator("summary + p")).to_have_text(TAINT)
+        for value in (PROJECT, FOLDER, AGENT, TITLE):
+            self.expect(details.get_by_text(value, exact=True)).to_be_visible()
+        full_brief = details.locator("dd").last
+        self.expect(full_brief).to_be_visible()
+        self.assertEqual(full_brief.inner_text(), BRIEF)
+        self.expect(row.get_by_role("button", name="Approve")).to_be_enabled()
+        seen = self.measure(1280, 720, "proposal")
+        self.assert_one_screen(seen, inside=("chat", "feed", "status"))
+        summary = details.get_by_text("Details", exact=True)
+        summary.press("Enter")
+        self.expect(full_brief).to_be_hidden()
+        self.expect(row.get_by_role("button", name="Read the details first")).to_be_disabled()
+        summary.press("Space")
+        self.expect(full_brief).to_be_visible()
+        row.get_by_role("button", name="Approve").click()
+        self.expect(row.get_by_text("Approved", exact=True)).to_be_visible()
+
     def test_a_full_work_list_scrolls_inside_its_panel(self):
         self.start_daemon()
         self.open_window()
