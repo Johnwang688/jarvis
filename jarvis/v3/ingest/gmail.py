@@ -1,4 +1,4 @@
-"""Read-only Gmail ingestion. Daemon job wiring is deferred.
+"""Read-only Gmail ingestion.
 
 MIME traversal has a depth limit but can scan thousands of inline siblings.
 """

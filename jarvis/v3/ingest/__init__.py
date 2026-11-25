@@ -1,4 +1,4 @@
-"""Polling support for index ingesters. Daemon job wiring is deferred."""
+"""Polling support for index ingesters."""
 
 from __future__ import annotations
 

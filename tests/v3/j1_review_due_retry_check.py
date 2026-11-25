@@ -26,12 +26,13 @@ class DueRetryCheck(unittest.TestCase):
         now += 59
         self.assertEqual(resumed.tick(), [])
         now += 1
-        self.assertEqual([row["outcome"] for row in resumed.tick()], ["ok"])
-        self.assertEqual(resumed.status()["weekly"]["failures"], 0)
-        now += WEEK_S - 1
+        self.assertEqual(resumed.tick(), [])
+        self.assertEqual(resumed.status()["weekly"]["failures"], 1)
+        now += WEEK_S - 61
         self.assertEqual(resumed.tick(), [])
         now += 1
         self.assertEqual([row["outcome"] for row in resumed.tick()], ["ok"])
+        self.assertEqual(resumed.status()["weekly"]["failures"], 0)
 
 
 if __name__ == "__main__":

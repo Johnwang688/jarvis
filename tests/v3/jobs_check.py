@@ -211,7 +211,8 @@ assert time.monotonic() - started < 2
             "jarvis.v3.skill_store": SimpleNamespace(SkillStore=store),
         }
         with patch.dict(sys.modules, modules):
-            s = self.scheduler(*jobs.default_jobs(), idle=lambda: 7200)
+            entries = [job for job in jobs.default_jobs() if job.name in {"feed", "skill-curator"}]
+            s = self.scheduler(*entries, idle=lambda: 7200)
             self.assertEqual([r["job"] for r in s.tick()], ["feed"])
             due.assert_called_once_with(self.now, last_run=None, idle_s=7200)
             store.assert_not_called()
@@ -226,7 +227,8 @@ assert time.monotonic() - started < 2
 
     def test_failed_default_imports_stay_inside_jobs(self):
         with patch.dict(sys.modules, {"jarvis.v3.feed": None, "jarvis.v3.skill_curator": None}):
-            s = self.scheduler(*jobs.default_jobs(), idle=lambda: 7200)
+            entries = [job for job in jobs.default_jobs() if job.name in {"feed", "skill-curator"}]
+            s = self.scheduler(*entries, idle=lambda: 7200)
             self.assertEqual({r["job"]: r["outcome"] for r in s.tick()},
                              {"feed": "error", "skill-curator": "error"})
 
@@ -278,7 +280,7 @@ def checked_start(self):
         connection.request("GET", "/v3/status")
         response = connection.getresponse()
         assert response.status == 200
-        assert set(json.load(response)["jobs"]) == {"feed", "skill-curator"}
+        assert set(json.load(response)["jobs"]) == {"feed", "skill-curator", "transcripts", "gmail", "consolidate"}
     assert not forbidden.intersection(sys.modules)
     signal.raise_signal(signal.SIGTERM)
 
