@@ -413,6 +413,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
     gmail_runner = None
     reviewer_runner = None
     calendar_runner = None
+    work_watcher = None
     budget = None
     lookup = _find_cli if find_cli is None else find_cli
 
@@ -567,6 +568,25 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         Triggers(sources=sources, index=shared, signals_dir=signals_dir,
                  post=get_feed().post, busy=None).tick()
 
+    def watch_work():
+        nonlocal work_watcher
+        path = Path(config.V3_DIR) / "work" / "threads.jsonl"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            # Let the ledger handle unreadable paths.
+            pass
+        if work_watcher is None:
+            from .t3_client import T3
+            from .work import Ledger
+            from .work_watch import Watcher
+
+            work_watcher = Watcher(ledger=Ledger(path), t3=T3(timeout=15), feed=get_feed())
+        if work_watcher.run().outcome == "error":
+            raise RuntimeError("Work watch failed.")
+
     def consolidate_due(now, last_run):
         from .consolidate import due
 
@@ -641,6 +661,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             cli_job("schoolwork", "sw", 900),
             cli_job("github", "gh", 600),
             Job("triggers", run_triggers, every_s=300),
+            Job("work-watch", watch_work, every_s=120),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
             Job("learning-digest", post_learning, due=learning_due),
