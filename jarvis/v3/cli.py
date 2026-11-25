@@ -5,6 +5,7 @@ from http.client import HTTPConnection, HTTPException
 import json
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import time
 
@@ -151,6 +152,26 @@ def brain_registration(args) -> int:
             "uninstall": brain_install.uninstall}[args.action]()
 
 
+def consolidate_vault(args) -> int:
+    from . import consolidate
+    from .budget import Budget
+    from .claude_usage import read_windows
+    from .index import Index
+
+    try:
+        with Index() as index:
+            if args.dry_run:
+                count, size = consolidate.preview(index)
+                print(f"Selected {count} documents. Prompt size {size} characters.")
+                return 0
+            result = consolidate.run(index=index, budget=Budget(usage=read_windows))
+    except (OSError, ValueError, sqlite3.Error, OverflowError, RuntimeError):
+        print("Error: Consolidation could not complete safely.", file=sys.stderr)
+        return 1
+    print(f"{result.outcome} ({result.docs} documents)." + (f" {result.note}" if result.note else ""))
+    return int(result.outcome == "error")
+
+
 def add_commands(sub):
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
@@ -182,6 +203,10 @@ def add_commands(sub):
     vault = sub.add_parser("vault", help="owner memory vault commands")
     vault_sub = vault.add_subparsers(dest="action", required=True)
     vault_sub.add_parser("import", help="copy legacy repo memory into the vault").set_defaults(func=vault_import)
+
+    consolidation = sub.add_parser("consolidate", help="consolidate new documents into the owner vault")
+    consolidation.add_argument("--dry-run", action="store_true", help="show selection and prompt size")
+    consolidation.set_defaults(func=consolidate_vault)
 
     brain = sub.add_parser("brain", help="serve or register the v3 brain MCP")
     brain_sub = brain.add_subparsers(dest="action", required=True)

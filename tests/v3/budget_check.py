@@ -49,6 +49,7 @@ class Usage(unittest.TestCase):
         self.enterContext(patch.multiple(claude_usage, _cached=None, _retry_at=0.0))
         self.now = 1000
         self.enterContext(patch.object(claude_usage.time, "monotonic", lambda: self.now))
+        self.enterContext(patch.object(claude_usage.time, "time", return_value=datetime.fromisoformat(RESET).timestamp() - 3600))
         self.requests = []
         self.status = 200
         self.body = json.dumps(BODY).encode()
