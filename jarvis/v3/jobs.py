@@ -601,6 +601,17 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             budget = Budget(usage=read_windows)
         return budget
 
+    def run_planner():
+        from .planner import run
+        from .proposals import ProposalStore
+        from .t3_client import T3
+        from .work import WorkService
+
+        work = WorkService(t3=T3(timeout=15))
+        result = run(store=ProposalStore(), feed=get_feed(), budget=get_budget, work=work)
+        if result.outcome == "error":
+            raise RuntimeError("Planner failed.")
+
     def consolidate():
         from .consolidate import run
 
@@ -662,6 +673,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             cli_job("github", "gh", 600),
             Job("triggers", run_triggers, every_s=300),
             Job("work-watch", watch_work, every_s=120),
+            Job("planner", run_planner, every_s=300),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
             Job("learning-digest", post_learning, due=learning_due),
