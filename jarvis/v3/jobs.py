@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 import fcntl
+from functools import partial
 import json
 import math
 import os
@@ -24,6 +25,10 @@ _STATE_LIMIT = 1024 * 1024
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _GOOGLE_GRANT_LIMIT = 64 * 1024
 _GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
+_CALENDAR_SCOPES = frozenset(f"https://www.googleapis.com/auth/{scope}" for scope in (
+    "calendar", "calendar.readonly", "calendar.events", "calendar.events.readonly",
+    "calendar.events.owned", "calendar.events.owned.readonly",
+))
 
 
 def _finite(value):
@@ -66,6 +71,10 @@ class _Run:
 _NEVER_RUN = _Run()
 
 
+class _JobNotStarted(Exception):
+    """Apply failure backoff without advancing the job's schedule."""
+
+
 def _regular_private(info):
     return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
 
@@ -76,9 +85,9 @@ def _decode_run(value):
     last = value.get("last_run")
     outcome = value.get("last_outcome")
     failures = value.get("failures")
-    if not _finite(last) or type(failures) is not int:
+    if (last is not None and not _finite(last)) or type(failures) is not int:
         return None
-    if outcome == "ok" and failures == 0:
+    if outcome == "ok" and failures == 0 and last is not None:
         return _Run(last, outcome)
     if outcome == "error" and failures > 0:
         retry_from = value.get("retry_from", last)
@@ -225,12 +234,11 @@ class Scheduler:
                 break
             now = self._clock()
             row = self._rows.get(name, _NEVER_RUN)
-            if row.last_run is not None:
-                last_run = min(row.last_run, now)
-                retry_from = min(row.retry_from, now) if row.retry_from is not None else None
-                if (last_run, retry_from) != (row.last_run, row.retry_from):
-                    row = replace(row, last_run=last_run, retry_from=retry_from)
-                    self._record(directory, name, row)
+            last_run = min(row.last_run, now) if row.last_run is not None else None
+            retry_from = min(row.retry_from, now) if row.retry_from is not None else None
+            if (last_run, retry_from) != (row.last_run, row.retry_from):
+                row = replace(row, last_run=last_run, retry_from=retry_from)
+                self._record(directory, name, row)
 
             started = time.monotonic()
             retry_run = False
@@ -248,6 +256,8 @@ class Scheduler:
                     break
                 retry_run = True
                 job.run()
+            except _JobNotStarted:
+                result = _Run(row.last_run, "error", row.failures + 1, self._clock(), retry_run)
             except BaseException:
                 # Job code must never terminate the worker or publish its exception.
                 result = _Run(now, "error", row.failures + 1, self._clock(), retry_run)
@@ -349,7 +359,8 @@ def idle_seconds(roots=None, *, now=None):
     return 1e12 if newest == -math.inf else max(0.0, now - newest)
 
 
-def _has_gmail_grant(path: Path) -> bool:
+def _google_scopes(path: Path, *, require_oauth_fields=False) -> set[str]:
+    """Read the saved grant scopes without returning OAuth credentials."""
     try:
         with open_directory(path.parent) as directory:
             fd = os.open(path.name, os.O_RDONLY | _FILE_FLAGS, dir_fd=directory)
@@ -357,20 +368,25 @@ def _has_gmail_grant(path: Path) -> bool:
                 info = os.fstat(stream.fileno())
                 if (not _regular_private(info) or info.st_mode & 0o077
                         or not info.st_mode & stat.S_IRUSR or info.st_size > _GOOGLE_GRANT_LIMIT):
-                    return False
+                    return set()
                 data = stream.read(_GOOGLE_GRANT_LIMIT + 1)
                 if len(data) > _GOOGLE_GRANT_LIMIT:
-                    return False
+                    return set()
                 bundle = json.loads(data)
     except (OSError, ValueError, RecursionError):
-        return False
+        return set()
     if not isinstance(bundle, dict):
-        return False
-    fields = (bundle.get(key) for key in ("client_id", "client_secret", "refresh_token"))
+        return set()
+    if require_oauth_fields:
+        fields = (bundle.get(key) for key in ("client_id", "client_secret", "refresh_token"))
+        if not all(isinstance(value, str) and value for value in fields):
+            return set()
     scopes = bundle.get("scopes")
-    return (all(isinstance(value, str) and value for value in fields)
-            and isinstance(scopes, list) and all(isinstance(scope, str) for scope in scopes)
-            and _GMAIL_READONLY in scopes)
+    return set(scopes) if isinstance(scopes, list) and all(isinstance(scope, str) for scope in scopes) else set()
+
+
+def _has_gmail_grant(path: Path) -> bool:
+    return _GMAIL_READONLY in _google_scopes(path, require_oauth_fields=True)
 
 
 def default_jobs(*, feed_root=None, index_path=None, google_token=None):
@@ -384,14 +400,18 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None):
     feed = None
     index = None
     gmail_runner = None
+    budget = None
 
-    def feed_tick():
+    def get_feed():
         nonlocal feed
         if feed is None:
             from .feed import Feed
 
             feed = Feed() if feed_root is None else Feed(feed_root)
-        feed.tick()
+        return feed
+
+    def feed_tick():
+        get_feed().tick()
 
     idle_required = 2 * 3600
 
@@ -446,17 +466,52 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None):
 
         return due(now, last_run=last_run)
 
+    def get_budget():
+        nonlocal budget
+        if budget is None:
+            from .budget import Budget
+            from .claude_usage import read_windows
+
+            budget = Budget(usage=read_windows)
+        return budget
+
     def consolidate():
-        from .budget import Budget
-        from .claude_usage import read_windows
         from .consolidate import run
 
-        result = run(index=get_index(), budget=Budget(usage=read_windows))
+        result = run(index=get_index(), budget=get_budget())
         if result is not None and result.outcome == "error":
             raise RuntimeError("Consolidation failed.")
+
+    def brief_due(which, now, last_run):
+        from .daily_briefs import due, schedule_from_env
+
+        morning, evening = schedule_from_env(os.environ)
+        return due(now, last_run=last_run, which=which, morning=morning, evening=evening)
+
+    def post_brief(which):
+        from .daily_briefs import read_calendar, read_mail, run
+
+        def mail(since, until):
+            return read_mail(get_index(), since, until)
+
+        try:
+            path = Path(config.GOOGLE_TOKEN_PATH if google_token is None else google_token)
+            scopes = _google_scopes(path)
+            calendar = partial(read_calendar, grant_path=path) if scopes & _CALENDAR_SCOPES else None
+            feed, brief_budget = get_feed(), get_budget()
+        except Exception as exc:
+            raise _JobNotStarted from exc
+
+        result = run(which, feed=feed, budget=brief_budget, calendar=calendar, mail=mail)
+        if result.outcome == "error":
+            if result.retryable:
+                raise _JobNotStarted
+            raise RuntimeError("Daily brief failed.")
 
     return [Job("feed", feed_tick, every_s=60),
             Job("skill-curator", curate, due=curator_due, needs_idle_s=idle_required),
             Job("transcripts", ingest_transcripts, every_s=300),
             Job("gmail", ingest_gmail, every_s=300),
-            Job("consolidate", consolidate, due=consolidate_due)]
+            Job("consolidate", consolidate, due=consolidate_due),
+            Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
+            Job("evening-wrap", partial(post_brief, "evening"), due=partial(brief_due, "evening"))]
