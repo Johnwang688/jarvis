@@ -1,4 +1,7 @@
-"""Scan stored agent content. An accident guard, not an adversarial boundary.
+"""Scan stored agent content.
+
+The consolidation directive rule is an accident guard, not an adversarial boundary.
+Planted orders are harmless only when every reader treats vault text as data.
 
 `denied-shell` is the gate's *lexical* judge (`rules._judge_segment`): destructive
 commands. It is pure, so the refusals that resolve paths or know this machine
@@ -14,13 +17,14 @@ from ipaddress import ip_address
 import re
 import shlex
 from typing import Iterator, Literal
+from unicodedata import category, normalize
 from urllib.parse import urlsplit
 
 from jarvis import credential_patterns, rules, untrusted
 from jarvis.protected_state import _copier_split, _strip_comment
 from jarvis.v2 import redact
 
-Purpose = Literal["skill", "memory", "brief"]
+Purpose = Literal["skill", "memory", "brief", "consolidation-memory"]
 Severity = Literal["block", "flag"]
 Span = tuple[int, int]
 
@@ -62,6 +66,46 @@ _IMPERATIVE = re.compile(
     r"(always\b|never\b|do[ \t]+not\b|you[ \t]+(?:should|must|need[ \t]+to)\b)",
     re.IGNORECASE,
 )
+_DIRECTIVE_START = r"(?:\A|[.!?;:\r\n\u2028\u2029])[ \t>+*#_`\"'\[(-]*"
+_DIRECTIVE_TEXT = r"[\s>+*#_`\"'\[(-]*"
+_ADDRESSEE = (
+    r"(?:(?:dear|hey|hello|attention|to|as)\s+)?(?:the\s+|an\s+)?"
+    # Include common lookalikes of the name without folding unrelated prose.
+    r"(?:[jј][aа]rv[iі][sѕ]|(?:(?:ai|digital|virtual|personal|chat)\s+)?"
+    r"(?:assistant|helper|agent)|chatbot|reader|you)"
+)
+_REQUEST_HEAD = (
+    r"(?:always|never|please|ignore|disregard|do\s+not|don't|"
+    r"from\s+now\s+on|going\s+forward|henceforth|remember|memori[sz]e|keep\s+in\s+mind|"
+    r"(?:make|take)\s+(?:a\s+)?note\s+of|note\s+down|summari[sz]e|recap|paraphrase)\b"
+)
+_ASSISTANT_DIRECTIVE = re.compile(
+    r"\byou\s+(?:must|should|shall|will|always|never|can(?:not)?|may|don't|"
+    r"need\s+to|have\s+to|do\s+not|better)\b"
+    r"|\byou(?:\s+are|'re)\s+(?:to|expected\s+to|required\s+to)\b"
+    r"|\b(?:can|could|would|will)\s+you\b"
+    r"|\byour\s+(?:task|job|instructions?|orders?|role)\s+(?:is|are)\b"
+    r"|\bfrom\s+now\s+on\s*[,:-]\s*\w"
+    rf"|{_DIRECTIVE_START}(?:{_REQUEST_HEAD}|{_ADDRESSEE}(?:"
+    # Require direct address, with Markdown layout allowed before the request.
+    rf"[\])\"']?[ \t]*[,:;!?\r\n\u2028\u2029-]{_DIRECTIVE_TEXT}"
+    r"(?!(?:a|an|the|who|which|whose)\b|\w+\s+by\b)\w"
+    r"|[ \t]+please\b))",
+    re.IGNORECASE,
+)
+_DIRECTIVE_PUNCTUATION = str.maketrans("‘’“”∶꞉、−", "''\"\"::,-")
+
+
+def _directive_hits(text: str) -> Iterator[Hit]:
+    # Normalize punctuation and full-width letters while preserving source offsets.
+    parts, offsets = [], []
+    for offset, char in enumerate(text):
+        part = "-" if category(char) == "Pd" else normalize("NFKC", char).translate(_DIRECTIVE_PUNCTUATION)
+        parts.append(part)
+        offsets.extend([offset] * len(part))
+    for match in _ASSISTANT_DIRECTIVE.finditer("".join(parts)):
+        start, end = match.span()
+        yield Hit("agent-override", (offsets[start], offsets[end - 1] + 1), "block")
 _URL = re.compile(r"""https?://[^\s<>"'`]+""", re.IGNORECASE)
 _URL_OR_BLOB = re.compile(
     rf"{_URL.pattern}|(?P<blob>(?-i:(?<![A-Za-z0-9+/])[A-Za-z0-9+/]+={{0,2}}))",
@@ -439,7 +483,7 @@ def scan(text: str, *, purpose: Purpose) -> Verdict:
     """Return only named rules, severities and source character offsets."""
     if not isinstance(text, str):
         raise TypeError("text must be a string")
-    if purpose not in ("skill", "memory", "brief"):
+    if purpose not in ("skill", "memory", "brief", "consolidation-memory"):
         raise ValueError("unknown scan purpose")
     if len(text) > _MAX_TEXT:
         return Verdict((Hit("unscannable", (_MAX_TEXT, len(text)), "block"),))
@@ -449,6 +493,8 @@ def scan(text: str, *, purpose: Purpose) -> Verdict:
     hits.extend(Hit("agent-override", m.span(), "block") for m in _OVERRIDE.finditer(text))
     hits.extend(Hit("exfiltration", span, "block") for span in _embedded_exfiltration(text))
     hits.extend(_fenced_hits(text))
-    if purpose == "memory":
+    if purpose == "consolidation-memory":
+        hits.extend(_directive_hits(text))
+    if purpose in ("memory", "consolidation-memory"):
         hits.extend(Hit("imperative", m.span(1), "flag") for m in _IMPERATIVE.finditer(text))
     return Verdict(tuple(sorted(hits, key=lambda hit: (hit.span, hit.rule))))

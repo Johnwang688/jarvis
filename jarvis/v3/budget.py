@@ -42,6 +42,7 @@ class _Hold:
     job: str
     when: datetime
     admission: Admission
+    started: bool
 
 
 def _open_data_dir(path: Path) -> int:
@@ -89,7 +90,14 @@ def _read_spend(fd: int, day) -> Counter:
                 break
             try:
                 row = json.loads(line)
-                if not isinstance(row, dict) or row.get("outcome") not in ("ok", "error"):
+                if not isinstance(row, dict):
+                    continue
+                outcome = row.get("outcome")
+                # An outcome with a start ticket supplies totals for a slot already counted.
+                if outcome == "started":
+                    if not isinstance(row.get("start_ticket"), str):
+                        continue
+                elif outcome not in ("ok", "error") or "start_ticket" in row:
                     continue
                 job = row.get("job")
                 if not isinstance(job, str) or job not in CAPS:
@@ -102,7 +110,7 @@ def _read_spend(fd: int, day) -> Counter:
     return counts
 
 
-def _append(fd: int, row: dict) -> None:
+def _append(fd: int, row: dict, *, durable: bool = False) -> None:
     line = (json.dumps(row, allow_nan=False) + "\n").encode("utf-8")
     end = os.lseek(fd, 0, os.SEEK_END)
     cursor = end
@@ -118,8 +126,15 @@ def _append(fd: int, row: dict) -> None:
         cursor = start
     if cursor < end:
         os.ftruncate(fd, cursor)
-    if os.write(fd, line) != len(line):
-        raise OSError(_LEDGER_ERROR)
+    try:
+        if os.write(fd, line) != len(line):
+            raise OSError(_LEDGER_ERROR)
+        if durable:
+            os.fsync(fd)
+    except OSError:
+        if durable:
+            os.ftruncate(fd, cursor)
+        raise
 
 
 def _peak(reading, now: float) -> float | None:
@@ -154,10 +169,9 @@ class Budget:
     """Share one instance for admission within a daemon.
 
     The lock file serializes ledger access across processes, and recorded
-    jobs are visible to every reader. Stated limit: a held slot lives in this
-    instance only (v3 runs one daemon at a time), so a daemon that dies
-    mid-job, or a second process, can pass a cap by the jobs in flight. The
-    usage limit does not depend on it.
+    jobs are visible to every reader. Ordinary holds are local to this instance.
+    A caller ready to start can record its spend at admission, then append the
+    outcome and token totals against that ticket when the runner returns.
     """
 
     def __init__(self, path=None, *, usage, now=time.time, caps=None, daily_cap=None):
@@ -185,14 +199,16 @@ class Budget:
         if not isinstance(job, str) or job not in CAPS:
             raise ValueError("unknown Claude budget job")
 
-    def admit(self, job: str) -> Admission:
+    def admit(self, job: str, *, start_model: str | None = None) -> Admission:
         self._check_job(job)
         with self._lock:
             try:
                 # The ledger is not locked during the usage request, so the caps are judged again after it:
                 # another process may have spent, and the day may have turned.
-                if (refused := self._over_cap(job)[0]) is not None:
-                    return refused
+                with self._ledger() as ledger:
+                    when = datetime.fromtimestamp(self._now(), _CHICAGO)
+                    if (refused := self._over_cap(ledger, job, when)) is not None:
+                        return refused
                 try:
                     pct = _peak(self._usage(), self._now())
                 except Exception:
@@ -201,27 +217,33 @@ class Budget:
                     return Admission(False, "Claude usage is unknown.", "skipped-usage", None, None)
                 if pct >= USAGE_LIMIT:
                     return Admission(False, f"Claude usage is {pct:g}%.", "skipped-usage", pct, None)
-                refused, when = self._over_cap(job)
-                if refused is not None:
-                    return refused
+                with self._ledger() as ledger:
+                    when = datetime.fromtimestamp(self._now(), _CHICAGO)
+                    if (refused := self._over_cap(ledger, job, when)) is not None:
+                        return refused
+                    ticket = uuid4().hex
+                    admission = Admission(True, "", "ok", pct, ticket)
+                    if start_model is not None:
+                        row = _row(when, job, start_model, 0, 0, pct, "started")
+                        _append(ledger, {**row, "start_ticket": ticket}, durable=True)
             except (OSError, RuntimeError):
+                if start_model is not None:
+                    raise
                 return Admission(False, _LEDGER_ERROR, "skipped-budget", None, None)
-            ticket = uuid4().hex
-            admission = Admission(True, "", "ok", pct, ticket)
-            self._held[ticket] = _Hold(job, when, admission)
+            self._held[ticket] = _Hold(job, when, admission, started=start_model is not None)
             return admission
 
-    def _over_cap(self, job: str) -> tuple[Admission | None, datetime]:
-        with self._ledger() as ledger:
-            when = datetime.fromtimestamp(self._now(), _CHICAGO)
-            counts = _read_spend(ledger, when.date())
-        counts.update(hold.job for hold in self._held.values() if hold.when.date() == when.date())
-        reason = None
+    def _over_cap(self, ledger: int, job: str, when: datetime) -> Admission | None:
+        counts = _read_spend(ledger, when.date())
+        counts.update(hold.job for hold in self._held.values()
+                      if not hold.started and hold.when.date() == when.date())
         if counts[job] >= self._caps[job]:
             reason = f"The daily {job} cap was reached."
         elif counts.total() >= self._daily_cap:
             reason = "The daily Claude job cap was reached."
-        return (None if reason is None else Admission(False, reason, "skipped-budget", None, None)), when
+        else:
+            return None
+        return Admission(False, reason, "skipped-budget", None, None)
 
     def record(self, admission: Admission, result: JobResult) -> None:
         self._check_job(result.name)
@@ -231,6 +253,8 @@ class Budget:
                 raise ValueError("invalid Claude budget ticket or job")
             row = _row(hold.when, hold.job, result.model, result.input_tokens, result.output_tokens,
                        admission.usage_pct, "ok" if result.ok else "error")
+            if hold.started:
+                row["start_ticket"] = admission.ticket
             with self._ledger() as ledger:
                 _append(ledger, row)
             del self._held[admission.ticket]

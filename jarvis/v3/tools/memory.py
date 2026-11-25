@@ -4,6 +4,7 @@ from functools import wraps
 from threading import RLock
 from typing import Annotated
 
+from jarvis.v3.content_scan import Purpose
 from jarvis.v3.vault import Vault, VaultError, entry_summary
 
 
@@ -28,8 +29,9 @@ def _tool(method):
 class MemoryTools:
     """Bind one instance per session. The optional index is reserved for vault FTS."""
 
-    def __init__(self, vault: Vault, *, index=None):
+    def __init__(self, vault: Vault, *, index=None, write_purpose: Purpose = "memory"):
         self._vault = vault
+        self._write_purpose = write_purpose
         self._reads = {}
         self._flags = []
         self._lock = RLock()
@@ -62,7 +64,7 @@ class MemoryTools:
         source: Annotated[str, "Where the information came from."],
     ) -> str:
         """Add a new memory entry with its provenance."""
-        entry, flags = self._vault.add(folder, name, description, body, source)
+        entry, flags = self._vault.add(folder, name, description, body, source, purpose=self._write_purpose)
         self._flags.extend(flags)
         return f"Added {entry.location.ref}."
 
@@ -74,7 +76,7 @@ class MemoryTools:
         new: Annotated[str, "Text to replace that substring with."],
     ) -> str:
         """Replace one unique substring in a memory body read in this session."""
-        entry, flags = self._vault.patch(name, old, new, self._reads)
+        entry, flags = self._vault.patch(name, old, new, self._reads, purpose=self._write_purpose)
         self._reads[entry.location] = entry.revision
         self._flags.extend(flags)
         return f"Patched {entry.location.ref}."

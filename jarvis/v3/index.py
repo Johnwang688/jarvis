@@ -20,7 +20,7 @@ from jarvis.v2 import redact
 from ._paths import open_directory
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CHUNK_CHARS = 4_000
 PAGE_CHUNKS = 5
 MAX_RESULTS = 20
@@ -48,6 +48,18 @@ _SCHEMA = (
     """CREATE VIRTUAL TABLE chunks_trigram USING fts5(
         text, content='chunks', content_rowid='id', tokenize='trigram'
     )""",
+)
+_ARRIVAL_SCHEMA = (
+    "CREATE TABLE index_generation (id TEXT NOT NULL)",
+    "INSERT INTO index_generation VALUES (lower(hex(randomblob(16))))",
+    """CREATE TABLE doc_updates (
+        position INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL UNIQUE REFERENCES docs(id)
+    )""",
+    "INSERT INTO doc_updates(doc_id) SELECT id FROM docs ORDER BY rowid",
+    """CREATE TRIGGER doc_updates_delete AFTER DELETE ON docs BEGIN
+        DELETE FROM doc_updates WHERE doc_id = old.id;
+    END""",
 )
 
 _SPACE = re.compile(r"\s")
@@ -178,20 +190,25 @@ class Index:
                     raise RuntimeError("The index requires SQLite WAL mode.")
             if version != SCHEMA_VERSION:
                 db.execute("BEGIN IMMEDIATE")
-                for table in ("chunks_trigram", "chunks_fts", "chunks", "docs", "cursors", "ingest_cursors"):
-                    db.execute(f"DROP TABLE IF EXISTS {table}")
-                for statement in _SCHEMA:
+                # Version 1 already has compatible transcript and Gmail rows.
+                if (version, SCHEMA_VERSION) != (1, 2):
+                    for table in ("doc_updates", "index_generation", "chunks_trigram", "chunks_fts",
+                                  "chunks", "docs", "cursors", "ingest_cursors"):
+                        db.execute(f"DROP TABLE IF EXISTS {table}")
+                    for statement in _SCHEMA:
+                        db.execute(statement)
+                    for table in ("chunks_fts", "chunks_trigram"):
+                        db.execute(f"""CREATE TRIGGER {table}_insert AFTER INSERT ON chunks BEGIN
+                            INSERT INTO {table}(rowid, text) VALUES (new.id, new.text);
+                        END""")
+                        db.execute(f"""CREATE TRIGGER {table}_delete AFTER DELETE ON chunks BEGIN
+                            INSERT INTO {table}({table}, rowid, text) VALUES ('delete', old.id, old.text);
+                        END""")
+                for statement in _ARRIVAL_SCHEMA:
                     db.execute(statement)
-                for table in ("chunks_fts", "chunks_trigram"):
-                    db.execute(f"""CREATE TRIGGER {table}_insert AFTER INSERT ON chunks BEGIN
-                        INSERT INTO {table}(rowid, text) VALUES (new.id, new.text);
-                    END""")
-                    db.execute(f"""CREATE TRIGGER {table}_delete AFTER DELETE ON chunks BEGIN
-                        INSERT INTO {table}({table}, rowid, text) VALUES ('delete', old.id, old.text);
-                    END""")
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 db.commit()
-            # An additive table can be created on existing v1 indexes in place.
+            # Add Gmail support to existing P1 indexes without resetting their positions.
             db.execute("""CREATE TABLE IF NOT EXISTS ingest_cursors (
                 name TEXT PRIMARY KEY, revision INTEGER NOT NULL, cursor_json TEXT NOT NULL
             )""")
@@ -301,6 +318,10 @@ class Index:
                         ts=max(docs.ts, excluded.ts), meta_json=coalesce(excluded.meta_json, docs.meta_json)""",
                    (doc_id, safe_source or "", safe_ref or "", safe_title or "", _timestamp(ts), safe_meta))
         db.executemany("INSERT INTO chunks(doc_id, seq, part, role, text, ts) VALUES (?, ?, ?, ?, ?, ?)", rows())
+        if count:
+            db.execute("INSERT OR REPLACE INTO doc_updates(doc_id) VALUES (?)", (doc_id,))
+        else:
+            db.execute("INSERT INTO doc_updates(doc_id) VALUES (?) ON CONFLICT(doc_id) DO NOTHING", (doc_id,))
         return count
 
     @staticmethod
@@ -385,3 +406,23 @@ class Index:
         limit = min(MAX_RESULTS, max(1, int(limit)))
         with self._transaction() as db:
             return [dict(row) for row in db.execute("SELECT * FROM docs ORDER BY ts DESC, id LIMIT ?", (limit,))]
+
+    def documents_between(self, *, since: float, until: float) -> list[dict]:
+        """Return document headers in (since, until], newest first."""
+        with self._transaction() as db:
+            rows = db.execute("SELECT * FROM docs WHERE ts > ? AND ts <= ? ORDER BY ts DESC, id", (since, until))
+            return [dict(row) for row in rows]
+
+    def document_updates(self, *, generation, position, pending, initial_since=None):
+        """Return this index's generation, high-water position and due document headers."""
+        with self._transaction() as db:
+            current = db.execute("SELECT id FROM index_generation").fetchone()[0]
+            latest = db.execute("SELECT seq FROM sqlite_sequence WHERE name='doc_updates'").fetchone()
+            if generation != current:
+                position, pending = 0, ()
+            rows = db.execute("""SELECT docs.* FROM doc_updates JOIN docs ON docs.id = doc_updates.doc_id
+                                 WHERE (position > ? OR doc_id IN (SELECT value FROM json_each(?)))
+                                 AND (? IS NULL OR ts > ?)
+                                 ORDER BY ts DESC, docs.id""",
+                              (position, json.dumps(pending), initial_since, initial_since))
+            return current, latest[0] if latest else 0, [dict(row) for row in rows]

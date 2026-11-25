@@ -104,12 +104,12 @@ class Entry:
         lines.extend(f"{key}: {_written(key, value)}{self.newline}" for key, value in fields.items())
         return "".join([*lines, self.closing or "---" + self.newline, self.body])
 
-    def scan_markdown(self, text: str) -> tuple[str, ...]:
-        rules = _scan(text)
+    def scan_markdown(self, text: str, *, purpose: content_scan.Purpose = "memory") -> tuple[str, ...]:
+        rules = _scan(text, purpose=purpose)
         for value in (self.description, self.source):
-            if _scalar(value) not in (value, f'"{value}"'):
-                # JSON escapes can change what the scanner sees in the stored text.
-                rules += _scan(value)
+            if purpose == "consolidation-memory" or _scalar(value) not in (value, f'"{value}"'):
+                # Scan standalone directives and values altered by JSON escaping.
+                rules += _scan(value, purpose=purpose)
         return tuple(dict.fromkeys(rules))
 
 
@@ -213,8 +213,8 @@ def _revision(raw: bytes) -> bytes:
     return hashlib.sha256(raw).digest()
 
 
-def _scan(text: str) -> tuple[str, ...]:
-    verdict = content_scan.scan(text, purpose="memory")
+def _scan(text: str, *, purpose: content_scan.Purpose = "memory") -> tuple[str, ...]:
+    verdict = content_scan.scan(text, purpose=purpose)
     if not verdict.ok:
         rules = ", ".join(sorted({hit.rule for hit in verdict.hits if hit.severity == "block"}))
         raise VaultError(f"Memory scanner blocked content ({rules}).")
@@ -513,7 +513,8 @@ class Vault:
         _atomic_replace(directory, location.filename, raw, expected)
         return replace(entry, revision=_revision(raw)), flags
 
-    def add(self, folder: str, name: str, description: str, body: str, source: str):
+    def add(self, folder: str, name: str, description: str, body: str, source: str, *,
+            purpose: content_scan.Purpose = "memory"):
         if not isinstance(folder, str) or folder not in FOLDERS or not _slug(name):
             raise VaultError("Use a known folder and a short kebab-case memory name.")
         _metadata("description", description)
@@ -521,16 +522,17 @@ class Vault:
         _body(body)
         entry = Entry(Location(folder, name), description, source, body, date.today().isoformat())
         with self._locked(write=True) as root:
-            return self._add(root, entry)
+            return self._add(root, entry, purpose=purpose)
 
-    def _add(self, root: int, entry: Entry, *, importing: bool = False):
+    def _add(self, root: int, entry: Entry, *, importing: bool = False,
+             purpose: content_scan.Purpose = "memory"):
         location = entry.location
         existing = self._load(root, location, write=True)
         if existing is not None and (existing.status == "active" or importing):
             raise VaultError(f"Memory entry {safe_summary(location.ref)} already exists.")
         self._check_caps(root, entry, adding=True)
         text = entry.markdown()
-        rules = entry.scan_markdown(text)
+        rules = entry.scan_markdown(text, purpose=purpose)
         with self._folder(root, location.folder, create=True) as directory:
             if importing and self._was_archived(directory, location):
                 raise VaultError("Memory entry was previously archived.")
@@ -538,7 +540,8 @@ class Vault:
                 entry = replace(entry, revision=existing.revision)
             return self._save(root, directory, entry, text.encode("utf-8"), rules, existing is not None)
 
-    def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None]):
+    def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None], *,
+              purpose: content_scan.Purpose = "memory"):
         if not isinstance(old, str) or not isinstance(new, str):
             raise VaultError("Patch values must be text.")
         with self._locked(write=True) as root:
@@ -561,7 +564,7 @@ class Vault:
             entry = replace(entry, body=body, updated=date.today().isoformat())
             self._check_caps(root, entry, adding=False)
             text = entry.markdown()
-            rules = entry.scan_markdown(text)
+            rules = entry.scan_markdown(text, purpose=purpose)
             with self._folder(root, location.folder) as directory:
                 return self._save(root, directory, entry, text.encode("utf-8"), rules)
 

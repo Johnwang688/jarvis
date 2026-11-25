@@ -19,10 +19,13 @@ from .tools.skills import SkillTools
 from .vault import Vault
 
 
-PROFILE = (
-    "memory_add", "memory_archive", "memory_list", "memory_patch", "memory_read",
-    "memory_search", "session_search", "skill_manage", "skill_view",
+CONSOLIDATE_TOOLS = (
+    "memory_list", "memory_read", "memory_add", "memory_patch", "memory_archive",
+    "memory_search", "session_search",
 )
+PROFILE = (*sorted(CONSOLIDATE_TOOLS), "skill_manage", "skill_view")
+PROFILE_ENV = "JARVIS_BRAIN_PROFILE"
+_PROFILES = {None: PROFILE, "consolidate": CONSOLIDATE_TOOLS}
 PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2024-11-05"})
 _MAX_LINE = 1024 * 1024
@@ -80,8 +83,11 @@ def _valid(arguments, schema):
 
 
 class Brain:
-    def __init__(self, *, vault=None, index=None, store=None, session=None):
-        self._memory = MemoryTools(Vault() if vault is None else vault)
+    def __init__(self, *, vault=None, index=None, store=None, session=None, profile=None):
+        self._tools = _PROFILES[profile]
+        self._read_only_search = profile == "consolidate"
+        self._memory = MemoryTools(Vault() if vault is None else vault,
+                                   write_purpose="consolidation-memory" if profile == "consolidate" else "memory")
         self._index = index
         self._store = store
         self._session = uuid4().hex if session is None else session
@@ -102,17 +108,24 @@ class Brain:
             return session_search(index=opened, **arguments)
 
     def list_tools(self):
-        return {"tools": [
-            {"name": name, "description": getdoc(_METHODS[name]),
-             "inputSchema": deepcopy(_SCHEMAS[name])}
-            for name in PROFILE
-        ]}
+        tools = []
+        for name in self._tools:
+            schema = deepcopy(_SCHEMAS[name])
+            description = getdoc(_METHODS[name])
+            if self._read_only_search and name == "session_search":
+                schema["properties"]["mode"].update(enum=["read"], description='Use "read".')
+                schema["required"].append("mode")
+                description = "Read one page of an indexed document by ID."
+            tools.append({"name": name, "description": description, "inputSchema": schema})
+        return {"tools": tools}
 
     def call(self, name, arguments):
-        if name not in PROFILE:
+        if name not in self._tools:
             return _result("Error: Tool is outside the brain profile.", error=True)
         if not _valid(arguments, _SCHEMAS[name]):
             return _result("Error: Arguments do not match the tool schema.", error=True)
+        if self._read_only_search and name == "session_search" and arguments.get("mode") != "read":
+            return _result('Error: This brain profile requires session_search mode "read".', error=True)
         try:
             if name == "session_search":
                 text = self._search(**arguments)
@@ -218,6 +231,10 @@ def _drain_chatter(read_fd, diagnostic_fd):
 
 
 def main():
+    profile = os.environ.get(PROFILE_ENV)
+    if profile not in _PROFILES:
+        print("Error: Unknown brain profile.", file=sys.stderr)
+        return 1
     stdout_fd, stderr_fd = sys.stdout.fileno(), sys.stderr.fileno()
     sys.stdout.flush()
     sys.stderr.flush()
@@ -233,7 +250,7 @@ def main():
             finally:
                 os.close(write_fd)
             try:
-                serve(sys.stdin.buffer, protocol, Brain())
+                serve(sys.stdin.buffer, protocol, Brain(profile=profile))
             finally:
                 try:
                     sys.stdout.flush()
