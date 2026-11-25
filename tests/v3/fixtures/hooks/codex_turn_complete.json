@@ -1,0 +1,11 @@
+{
+ "type": "agent-turn-complete",
+ "thread-id": "00000000-0000-7000-8000-000000000003",
+ "turn-id": "00000000-0000-7000-8000-000000000004",
+ "cwd": "/home/user/project",
+ "client": "T3 Code",
+ "input-messages": [
+  "Reply with one word."
+ ],
+ "last-assistant-message": "pong"
+}

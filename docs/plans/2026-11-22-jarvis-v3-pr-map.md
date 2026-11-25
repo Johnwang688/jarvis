@@ -43,7 +43,7 @@ after the spikes.
 | Gate | Decides | Blocks |
 |---|---|---|
 | **OG1** | Go / no-go on the T3 switch, from the S1 and S3–S6 findings, and which display option (S1) | T2+, R1 |
-| **OG2** | §13 decision-rights matrix, line by line | I1 merge |
+| **OG2** | §13 decision-rights matrix, line by line. **Answered 2026-11-24:** approved as proposed; sending mail is Ask and drafting is Do, both kept as explicit policy lines | I1 merge |
 | **OG3** | Which Claude tier runs the planner and nightly consolidation (the reviewer is Haiku, per H9) | P1, I3 merge |
 | **OG4** | Calendar auth: the owner re-runs `jarvis auth google` after C1 merges (human step) | C1 live use, C3 calendar ingester |
 | **OG6** | Parity checklist sign-off: what v3 has versus v2 (S6, updated after T5) | R1 (cutover) |
@@ -472,6 +472,7 @@ T3 sessions run under T3's and the CLIs' own permission models; Jarvis adds no
 gate hook, so there is nothing to measure.
 
 ### S3: Driving T3 from the daemon
+- **Done 2026-11-24** against the running server (owner's choice), by polling; the event stream was not probed. Findings: `docs/plans/2026-11-24-v3-spike-findings.md`.
 - **Spec:**
   - Using the documented `t3` CLI (resolve the binary first; it is not on PATH), script `thread start`,
     `send`, `show` and `list` with `--json` and `--wait`.
@@ -497,6 +498,7 @@ gate hook, so there is nothing to measure.
     against the live install).
 
 ### S5: Global MCP server and Stop hook loading under T3
+- **Hooks done 2026-11-24** (both fire under T3; payload fixtures saved). The jarvis-brain visibility check waits for the owner's `jarvis brain install`. Findings: `docs/plans/2026-11-24-v3-spike-findings.md`.
 - **Spec:** in a throwaway HOME, register a stub MCP server globally (Claude
   user scope; Codex `config.toml`) plus a stub `Stop` hook. Check whether
   T3-started sessions see the server despite T3's

@@ -1,0 +1,114 @@
+{
+ "exit_codes": {
+  "failed_or_bad_arguments": 1,
+  "finished": 0,
+  "waiting_for_an_answer": 2
+ },
+ "note": "Shapes only (key names and value types) of `t3 thread ... --json` answers, recorded by scripts/spikes/v3/s3_drive_t3.py. Identical for the Claude and Codex providers.",
+ "statuses_seen": [
+  "running",
+  "completed",
+  "waiting"
+ ],
+ "thread_list": [
+  {
+   "blockedOnThreadWait": "bool",
+   "createdAt": "str",
+   "createdBy": "str",
+   "creationSource": "str",
+   "interactionMode": "str",
+   "itemCount": "int",
+   "latestRunId": "str",
+   "link": "str",
+   "linkedPullRequest": "null",
+   "model": "str",
+   "openPullRequestCount": "int",
+   "parentThreadId": "null",
+   "pendingBackgroundTasks": [],
+   "pinned": "bool",
+   "projectId": "str",
+   "providerInstanceId": "str",
+   "pullRequestCount": "int",
+   "pullRequests": [],
+   "relationshipToParent": "null",
+   "runtimeMode": "str",
+   "settled": "bool",
+   "settledAt": "null",
+   "snoozed": "bool",
+   "snoozedUntil": "null",
+   "status": "str",
+   "threadId": "str",
+   "title": "str",
+   "updatedAt": "str"
+  }
+ ],
+ "thread_send": {
+  "delivery": "str",
+  "link": "str",
+  "messageId": "str",
+  "runId": "str",
+  "status": "str",
+  "threadId": "str"
+ },
+ "thread_send_wait": {
+  "error": "null",
+  "reply": "str",
+  "runId": "str",
+  "status": "str",
+  "threadId": "str"
+ },
+ "thread_show": {
+  "messages": [
+   {
+    "role": "str",
+    "runId": "str",
+    "text": "str"
+   }
+  ],
+  "thread": {
+   "activeRunId": "null",
+   "archived": "bool",
+   "blockedOnThreadWait": "bool",
+   "branch": "null",
+   "createdAt": "str",
+   "createdBy": "str",
+   "creationSource": "str",
+   "interactionMode": "str",
+   "itemCount": "int",
+   "lastTitleRegeneration": "null",
+   "latestRunId": "str",
+   "link": "str",
+   "linkedPullRequest": "null",
+   "model": "str",
+   "openPullRequestCount": "int",
+   "parentThreadId": "null",
+   "pendingBackgroundTasks": [],
+   "pendingRequestCount": "int",
+   "pinned": "bool",
+   "projectId": "str",
+   "providerInstanceId": "str",
+   "pullRequestCount": "int",
+   "pullRequests": [],
+   "relationshipToParent": "null",
+   "runCount": "int",
+   "runtimeMode": "str",
+   "settled": "bool",
+   "settledAt": "null",
+   "snoozed": "bool",
+   "snoozedUntil": "null",
+   "status": "str",
+   "threadId": "str",
+   "title": "str",
+   "titleRegeneration": "null",
+   "updatedAt": "str",
+   "worktreePath": "null"
+  }
+ },
+ "thread_start_wait": {
+  "error": "null",
+  "reply": "str",
+  "runId": "str",
+  "status": "str",
+  "threadId": "str"
+ }
+}
