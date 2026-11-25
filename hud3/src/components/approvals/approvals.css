@@ -1,8 +1,16 @@
-.agent-grid:has(.approval-card) { align-content: start; }
-.agent-column:has(.approval-card) { align-self: start; }
+/* The card shares the chat column with the transcript: it may shrink and
+   scroll inside itself, with its buttons first, so it never leaves the window. */
+.agent-chat > .approval-card {
+  flex: 0 1 auto;
+  min-height: 7rem;
+  max-height: 62%;
+  overflow-y: auto;
+}
 
 .approval-card {
   display: grid;
+  align-content: start;
+  grid-auto-rows: max-content;
   gap: 8px;
   min-width: 0;
   padding: 10px;

@@ -1,56 +1,100 @@
+/* The window is one screen. The page never scrolls: a top bar, then the feed,
+   the chat and a rail side by side, each scrolling inside itself. */
 .agent-window {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  padding: clamp(18px, 4vw, 56px);
+  overflow: hidden;
+  padding: clamp(10px, 1.2vw, 18px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: clamp(8px, 1vw, 14px);
+}
+
+.agent-top {
+  min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: clamp(18px, 3vw, 40px);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
 }
 
 .agent-window h1 {
-  font-size: clamp(20px, 2.3vw, 30px);
+  font-size: 17px;
   font-weight: 700;
-  text-align: center;
-}
-
-.agent-grid {
-  flex: 1;
-  width: 100%;
-  max-width: 1240px;
-  margin-inline: auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr) minmax(0, 1fr);
-  grid-template-areas: "left orb right";
-  align-items: center;
-  gap: clamp(12px, 2vw, 30px);
+  white-space: nowrap;
 }
 
 .agent-orb {
-  grid-area: orb;
-  place-self: center;
-  width: 100%;
-  max-width: 520px;
+  flex: none;
+  width: 40px;
   aspect-ratio: 1;
   display: block;
   pointer-events: none;
   background: radial-gradient(circle, var(--accent-soft), transparent 66%);
 }
 
-.agent-column {
-  grid-area: left;
+.agent-statusbar {
   min-width: 0;
-  align-self: center;
-  display: grid;
-  gap: clamp(10px, 1.5vw, 22px);
+  margin-inline-start: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--rim);
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-pane);
+  font-size: 12px;
 }
 
-.agent-column:last-child { grid-area: right; }
+.agent-statusbar h2 {
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-statusbar p { color: var(--text-muted); }
+.agent-statusbar .agent-running { color: var(--accent-hi); font-weight: 600; }
+.agent-statusbar .agent-down { color: var(--red); font-weight: 600; }
+
+.agent-status {
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+.agent-status div { display: flex; flex-wrap: wrap; gap: 4px; }
+.agent-status dd { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+.agent-grid {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 0.85fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "feed chat rail";
+  gap: clamp(8px, 1vw, 14px);
+}
+
+.agent-feed { grid-area: feed; }
+.agent-chat { grid-area: chat; }
+
+.agent-rail {
+  grid-area: rail;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(8px, 1vw, 14px);
+  overflow-y: auto;
+}
 
 .agent-panel {
   min-width: 0;
-  min-height: 120px;
-  padding: clamp(14px, 1.75vw, 25px);
+  min-height: 0;
+  padding: clamp(10px, 1.1vw, 16px);
   border: 1px solid var(--rim);
   border-radius: var(--radius);
   background: var(--glass-sheen), var(--glass-pane);
@@ -58,38 +102,106 @@
   overflow-wrap: anywhere;
 }
 
-.agent-panel h2 { font-size: 15px; margin-bottom: 8px; }
-.agent-panel p, .agent-status { color: var(--text-muted); line-height: 1.5; }
+.agent-panel h2 { font-size: 14px; margin-bottom: 8px; }
+.agent-panel p { color: var(--text-muted); line-height: 1.5; }
 .agent-panel .agent-running { color: var(--accent-hi); font-weight: 600; }
 
-.agent-status {
-  margin-top: 6px;
-  font-size: 12px;
+.agent-rail .agent-panel { flex: none; }
+.agent-rail .agent-panel p { font-size: 12px; }
+
+/* A slot with nothing to show yet is one quiet line. */
+.agent-rail .agent-panel:not([data-panel="cron"]) {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  align-items: baseline;
+  gap: 2px 10px;
+  padding-block: 10px;
 }
 
-.agent-status div { display: flex; flex-wrap: wrap; gap: 4px; }
-.agent-status dd { color: var(--text-2); font-family: var(--mono); }
+.agent-rail .agent-panel:not([data-panel="cron"]) h2 { margin-bottom: 0; }
 
-@media (max-width: 680px) {
+/* The job list takes what the rail has left and scrolls inside its panel. */
+.agent-rail [data-panel="cron"] {
+  flex: 1 1 0;
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-jobs {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  display: grid;
+  align-content: start;
+  font-size: 12px;
+}
+
+.agent-jobs li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 0 10px;
+  padding: 5px 2px;
+  border-top: 1px solid var(--rim);
+}
+
+.agent-jobs li:first-child { border-top: 0; }
+
+.agent-job-name {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-job-when {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agent-job-state { min-width: 1.6em; color: var(--text-muted); text-align: end; white-space: nowrap; }
+.agent-jobs li[data-state="ok"] .agent-job-state { color: var(--accent-hi); }
+.agent-jobs li[data-state="failed"] .agent-job-state { color: var(--red); }
+
+/* A narrower window drops the rail under the feed; the page still does not scroll. */
+@media (max-width: 1040px) {
   .agent-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-areas: "orb orb" "left right";
-    align-items: start;
-    align-content: start;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+    grid-template-rows: minmax(0, 1.4fr) minmax(0, 1fr);
+    grid-template-areas: "feed chat" "rail chat";
+  }
+}
+
+/* Phone width is the one place the page scrolls: one column, the chat first. */
+@media (max-width: 680px) {
+  .agent-window { overflow-y: auto; grid-template-rows: auto auto; }
+
+  .agent-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas: "chat" "feed" "rail";
   }
 
-  .agent-orb { max-width: 260px; }
-  .agent-column { align-self: start; }
+  .agent-chat { height: 520px; }
+  .agent-feed { max-height: 520px; }
+  .agent-rail { overflow-y: visible; }
+  .agent-rail [data-panel="cron"] { flex: none; }
+  .agent-jobs { overflow-y: visible; }
 }
 
-/* Feed cards sit on the pane with their controls above the brief text. */
+/* Feed cards sit on the pane with their controls above the brief text. The
+   whole panel is the scroller, so a long feed never pushes the window. */
 .agent-feed {
   display: grid;
   align-content: start;
   gap: 12px;
+  overflow-y: auto;
 }
 
 .agent-feed h2 { margin-bottom: 0; }
@@ -177,18 +289,17 @@
 .feed-feedback button { color: var(--text-muted); background: transparent; font-size: 11px; }
 .feed-feedback button[aria-pressed="true"] { opacity: 1; color: var(--accent-hi); border-color: var(--accent-line); }
 
-@media (max-width: 540px) {
-  .agent-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "orb" "left" "right";
-  }
+/* The chat fills its column: the transcript takes the room and scrolls, the
+   composer stays at the bottom. */
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Last resort for a very short window: the panel scrolls, never the page. */
+  overflow-y: auto;
 }
 
-.agent-chat {
-  display: grid;
-  gap: 10px;
-  align-content: start;
-}
+.agent-chat > * { flex: none; }
 
 .chat-header, .chat-working, .chat-composer-actions {
   display: flex;
@@ -205,13 +316,13 @@
   padding-inline: 8px;
 }
 
-.chat-log {
+.agent-chat > .chat-log {
   display: grid;
   align-content: start;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 0;
   min-height: 64px;
-  max-height: min(45vh, 420px);
   overflow-y: auto;
   padding: 8px;
   border: 1px solid var(--rim);
@@ -223,12 +334,14 @@
 
 .chat-message {
   min-width: 0;
+  max-width: min(100%, 78ch);
   padding: 7px 9px;
   border: 1px solid var(--rim);
   border-radius: var(--radius);
 }
 
 .chat-message[data-role="user"] {
+  justify-self: end;
   background: var(--accent-soft);
   border-color: var(--accent-line);
 }
@@ -238,7 +351,8 @@
 
 .agent-chat .chat-text {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   unicode-bidi: plaintext;
@@ -258,8 +372,11 @@
 .chat-working, .chat-composer-actions, .agent-chat > p { font-size: 12px; }
 .agent-chat .chat-error, .chat-tool-failed { color: var(--red); background: var(--glass-float); }
 
-.chat-composer { display: grid; min-width: 0; gap: 6px; }
-.chat-composer textarea { width: 100%; min-width: 0; max-width: 100%; resize: vertical; }
+/* A composer the owner dragged taller gives the height back when the column
+   runs short, so Send stays on screen. */
+.agent-chat > .chat-composer { flex: 0 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 5rem; gap: 6px; }
+.chat-composer > * { flex: none; }
+.chat-composer textarea { flex: 0 1 auto; width: 100%; min-width: 0; max-width: 100%; min-height: 2.6rem; max-height: 12rem; resize: vertical; }
 .chat-composer-actions { color: var(--text-muted); }
 .chat-send { margin-inline-start: auto; }
 

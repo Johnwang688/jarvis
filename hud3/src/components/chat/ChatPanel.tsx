@@ -1,10 +1,12 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApprovalPanel } from "../approvals/ApprovalPanel";
 import { isActive, useChat, type ChatRow } from "./useChat";
 import type { ChatMessage } from "./chatApi";
 
 const TEXT_LIMIT = 16_000;
 const HINT_AT = 15_000;
+// How long after the owner's input a scroll still counts as theirs.
+const OWNER_SCROLL_MS = 400;
 
 function Message({ message, draft = false }: { message: ChatMessage; draft?: boolean }) {
   return (
@@ -49,6 +51,9 @@ export function ChatPanel() {
   const composing = useRef(false);
   const log = useRef<HTMLDivElement>(null);
   const follows = useRef(true);
+  const box = useRef("");
+  const touched = useRef(-Infinity);
+  const touch = () => { touched.current = performance.now(); };
   const session = useRef<string | null>();
   const count = Array.from(text).length;
   const showHint = count >= HINT_AT;
@@ -62,6 +67,21 @@ export function ChatPanel() {
     }
     if (log.current && follows.current) log.current.scrollTop = log.current.scrollHeight;
   }, [chat]);
+
+  // The transcript's height follows the window and whatever shares its column
+  // (an approval card, a taller composer). While it follows the end, a change
+  // of height keeps the newest message in view.
+  const shown = !!chat;
+  useEffect(() => {
+    const el = log.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      box.current = `${el.clientWidth}x${el.clientHeight}`;
+      if (follows.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [shown]);
 
   async function send() {
     if (!canSend || composing.current) return;
@@ -83,8 +103,14 @@ export function ChatPanel() {
       {!chat && !pollError && <p role="status">Loading chat…</p>}
       {chat && (
         <>
-          <div className="chat-log" ref={log} aria-label="Chat transcript" role="region" onScroll={(event) => {
+          <div className="chat-log" ref={log} aria-label="Chat transcript" role="region"
+            onWheel={touch} onTouchMove={touch} onPointerDown={touch} onKeyDown={touch} onScroll={(event) => {
             const el = event.currentTarget;
+            // A scroll that comes with a change of size is the layout moving
+            // the text, not the owner reading back: it does not stop following,
+            // unless the owner's own wheel, touch or key came just before it.
+            if (box.current && box.current !== `${el.clientWidth}x${el.clientHeight}`
+              && performance.now() - touched.current > OWNER_SCROLL_MS) return;
             follows.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 24;
           }}>
             {!chat.rows.length && !(active && chat.draft) && <p className="chat-empty">No messages yet.</p>}
