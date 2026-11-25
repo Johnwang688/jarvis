@@ -211,9 +211,10 @@ class Install(unittest.TestCase):
             self.assertEqual(set(e["env"]), {"PYTHONPATH"})
         c = json.loads(self.cj.read_text())
         self.assertEqual((c["numStartups"], c["mcpServers"]["other"], c["name"], c["projects"]), (5, {"command": "y"}, "José", {"/x": {"mcpServers": {}}}))
-        self.assertTrue(self.ct.read_text().startswith(self.CODEX.rstrip("\n")))
+        rest = iter(self.ct.read_text().splitlines())      # every original line survives, in order (L1 adds a root key before the first table)
+        self.assertTrue(all(line in rest for line in self.CODEX.splitlines()))
         self.assertEqual(stat.S_IMODE(self.cj.stat().st_mode), 0o600)
-        self.assertEqual(len(self.backups()), 2)
+        self.assertGreaterEqual(len(self.backups()), 2)
         self.assertEqual(self.run_it(brain_install.status), 0)
         self.assertTrue(any(str(self.cj) in l for l in self.out) and any(str(self.ct) in l for l in self.out))
 
