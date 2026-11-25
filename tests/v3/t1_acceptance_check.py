@@ -14,7 +14,10 @@ and tests/v3/fixtures/t3/thread_cli_shapes.json. Only the CLI: never T3's WebSoc
                                                                      messages: list of (role, text)
       list(project) -> list[State]                                   messages empty
       wait(thread_id, *, timeout, poll_s=2.0, sleep=time.sleep, clock=time.monotonic) -> State
-                                                                     polls show() until the status is not a running one;
+                                                                     polls show() while the status is a running one and returns on a
+                                                                     settled one (SETTLED = idle, waiting, completed, interrupted, failed,
+                                                                     cancelled, rolled_back); a status in neither set is T3Error("shape"):
+                                                                     an unknown status never reads as finished.
                                                                      a waiting thread returns with waiting_on_owner True; timeout -> T3Error("timeout")
     Every call: `<t3> thread <verb> --json ...`, no shell, the message on stdin as `-` (never in argv), a minimal environment
     (PATH, HOME, T3CODE_HOME and LANG only), a timeout. Exit 0 and exit 2 are answers (2 = waiting on the owner); anything else is

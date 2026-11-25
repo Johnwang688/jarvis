@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 RUNNING = frozenset({"queued", "preparing", "starting", "running"})
+SETTLED = frozenset({
+    "idle", "waiting", "completed", "interrupted", "failed", "cancelled", "rolled_back", "exported",
+})
 _STDOUT_CAP = 8 * 1024 * 1024
 _IO_CHUNK = 64 * 1024
 _ENV_KEEP = ("PATH", "HOME", "T3CODE_HOME", "LANG")
@@ -52,8 +55,9 @@ class State:
 
 
 def _executable(path: Path) -> os.stat_result:
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK):
+    info = path.stat(follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or not os.access(path, os.X_OK)):
         raise T3Error("missing")
     return info
 
@@ -84,7 +88,7 @@ def _resolve(home, env) -> tuple[Path, os.stat_result]:
 
 
 def resolve(*, home=None, env=None) -> Path:
-    """Find the override or newest executable in the WSL runtime directory."""
+    """Find the override or newest user-owned regular executable in the WSL runtime."""
     return _resolve(home, os.environ if env is None else env)[0]
 
 
@@ -103,7 +107,9 @@ def _message(value: str) -> bytes:
     try:
         return value.encode("utf-8")
     except UnicodeEncodeError:
-        raise T3Error("arguments") from None
+        pass
+    # The encoding error retains the prompt. Raise after leaving its handler.
+    raise T3Error("arguments")
 
 
 def _project(value) -> str:
@@ -131,11 +137,12 @@ def _launch(path: Path, expected: os.stat_result, argv: list[str], env: dict[str
     # On WSL/Linux, pin the selected executable through exec even if an update
     # swaps the name. O_PATH also avoids blocking on a replacement FIFO.
     try:
-        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
             actual = os.fstat(fd)
             executable = f"/proc/self/fd/{fd}"
-            if (not stat.S_ISREG(actual.st_mode) or not os.path.samestat(expected, actual)
+            if (not stat.S_ISREG(actual.st_mode) or actual.st_uid != os.geteuid()
+                    or not os.path.samestat(expected, actual)
                     or not os.access(executable, os.X_OK)):
                 raise T3Error("missing")
             _left(deadline)
@@ -257,9 +264,12 @@ class T3:
         try:
             return json.loads(output.decode("utf-8")), code == 2
         except (ValueError, RecursionError):
-            raise T3Error("shape") from None
+            pass
+        # Decode errors can retain the raw response in their payload.
+        raise T3Error("shape")
 
     def start(self, project, message, *, provider, model, title=None, worktree=None, branch=None) -> Run:
+        """Start a thread. The title is visible in the process list, so omit private text."""
         args = ["--provider", _arg(provider), "--model", _arg(model)]
         for flag, value in (("--title", title), ("--worktree", worktree), ("--branch", branch)):
             if value is not None:
@@ -304,6 +314,8 @@ class T3:
             left = min(poll_deadline - clock(), _left(deadline))
             if left <= 0:
                 raise T3Error("timeout")
-            if state.waiting_on_owner or state.status not in RUNNING:
+            if state.status in SETTLED:
                 return state
+            if state.status not in RUNNING:
+                raise T3Error("shape")
             sleep(min(left, poll_s))
