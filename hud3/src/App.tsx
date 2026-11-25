@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Orb } from "./Orb";
 import { Status } from "./Status";
+import { ChatPanel } from "./components/chat/ChatPanel";
 import { FeedPanel } from "./components/feed/FeedPanel";
 
 function Panel({ id, title, children }: { id: string; title: string; children: ReactNode }) {
@@ -20,6 +21,7 @@ export default function App() {
         <Orb />
         <div className="agent-column">
           <Panel id="t3" title="T3"><p>T3 threads will appear here.</p></Panel>
+          <ChatPanel />
           <FeedPanel />
           <Panel id="vault" title="Vault"><p>Saved memories will appear here.</p></Panel>
         </div>

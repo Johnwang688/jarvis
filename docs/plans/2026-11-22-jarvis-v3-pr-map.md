@@ -462,7 +462,10 @@ it runs beside the later waves, in this order:
   from `v2/providers/fastpath.py`; no import of `jarvis.v2.daemon`.
   **Depends:** A6a. **Size:** M.
   - [x] A6b-1 backend with owner chat routes, private transcripts and a fixed read/post toolset.
-  - [ ] A6b-2 chat panel in hud3 (next chat PR).
+  - [x] A6b-2 chat panel in hud3 with transcript, streaming draft, tools and composer.
+    Mocked component and browser checks. Screenshots
+    [with a conversation](../screens/v3-chat-panel-conversation.png) and
+    [empty](../screens/v3-chat-panel-empty.png).
 - **A6c: approvals in v3** ⚑ boundary. A broker, the approval card panel
   (hud3 reuses v2's card), and the fast path's gated tools. Agents never reach
   it (control-plane rules). **Depends:** A6b. **Size:** M.
