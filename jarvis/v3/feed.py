@@ -69,6 +69,10 @@ class FeedBusy(FeedError):
     """The feed lock could not be acquired before the deadline."""
 
 
+def _redact_text(value):
+    return redact.for_display(_ENCODED_URL_PASSWORD.sub(r"\1***", value))
+
+
 def _text(value, limit, *, empty=False):
     def valid(text):
         return (isinstance(text, str) and len(text) <= limit and (empty or text.strip())
@@ -76,8 +80,7 @@ def _text(value, limit, *, empty=False):
 
     if not valid(value):
         raise FeedError("A brief text field is invalid or too long.")
-    clean = _ENCODED_URL_PASSWORD.sub(r"\1***", value)
-    clean = redact.for_display(clean)
+    clean = _redact_text(value)
     if not valid(clean):
         raise FeedError("A brief text field is invalid or too long after redaction.")
     return clean
