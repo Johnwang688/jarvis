@@ -178,7 +178,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
         def _run_route(self, body):
             try:
-                status, payload = self._route.run(body, get_feed, chat)
+                status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:

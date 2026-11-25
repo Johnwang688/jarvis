@@ -1,8 +1,9 @@
 """Assemble and post one digest per kind per Chicago day.
 
-The morning-briefing skill, voice reading, L3 learning digest, P2 commitments,
-I4 activity, C3 due-soon items and closing old digests are outside B4. Agents
-cannot read the feed through the skill. This job answers no brief.
+The evening wrap-up can link to the day's learning digest. The
+morning-briefing skill, voice reading, P2 commitments, I4 activity, C3
+due-soon items and closing old digests are outside B4. Agents cannot read
+the feed through the skill. This job answers no brief.
 """
 
 from base64 import b64decode, b64encode
@@ -25,7 +26,7 @@ from jarvis.v2.quiet import parse_hhmm
 
 from . import claude_jobs
 from ._paths import open_directory
-from .feed import FeedError, _redact_text, _text, _unique_keys
+from .feed import FeedError, _redact_text, _shape, _text, _unique_keys
 
 JOB = "brief"
 MODEL = "haiku"
@@ -202,7 +203,8 @@ def _activity_line(activity):
     return [{"label": _label(", ".join(parts)), "ref": "jarvis:activity"}] if parts else []
 
 
-def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, activity=None) -> Digest:
+def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, activity=None,
+             learning=None) -> Digest:
     """Select display lines and count items before the display cap."""
     _check_which(which)
     local = datetime.fromtimestamp(now, _CHICAGO)
@@ -231,7 +233,17 @@ def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, ac
         lines = decisions + commitment_lines + calendar_lines + _items("gmail", headlines[:3]) + other
     else:
         counts = _read(activity, (today, local), "Activity", notes, expected=dict)
-        lines = _activity_line(counts) + decisions + calendar_lines + commitment_lines + other
+        lines = _activity_line(counts)
+        if learning is not None:
+            try:
+                learning_line = learning()
+                if learning_line is not None:
+                    _shape(learning_line, ("label", "ref"))
+                    lines.append({"label": _text(learning_line["label"], 120),
+                                  "ref": _text(learning_line["ref"], 2048)})
+            except Exception:
+                notes.append({"label": "Learning unavailable", "ref": "jarvis:learning"})
+        lines += decisions + calendar_lines + commitment_lines + other
     count = len(lines)
     ask = f"{_HEADINGS[which]} · {count} {'item' if count == 1 else 'items'}"
     visible = lines[:MAX_LINES - len(notes)] + notes
@@ -377,7 +389,7 @@ def _post(directory, path, which, now, feed, budget, run_job, sources, check_win
 
 
 def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitments=None,
-        mail=None, activity=None, run_job=_DEFAULT_RUN_JOB) -> Result:
+        mail=None, activity=None, learning=None, run_job=_DEFAULT_RUN_JOB) -> Result:
     """Claim the day before assembling the digest. Keep the claim on failure.
 
     A digest that reaches quiet hours or crosses into another day after the
@@ -396,7 +408,8 @@ def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitm
             raise _DigestWindowClosed
 
     path = Path(config.V3_DIR / "daily-briefs" if state_dir is None else state_dir).absolute()
-    sources = {"calendar": calendar, "commitments": commitments, "mail": mail, "activity": activity}
+    sources = {"calendar": calendar, "commitments": commitments, "mail": mail, "activity": activity,
+               "learning": learning}
     try:
         with open_directory(path, create=True) as directory:
             _check_directory(directory)

@@ -979,20 +979,30 @@ S1–S6. It is the owner's decision.
 - **Depends:** L1, K2, K3, M5. **Size:** M.
 
 ### L3: Learning digest
-- **Scope:** `jarvis/v3/learning_digest.py`; posts to the feed (B1).
+- **Scope:** `jarvis/v3/learning_digest.py`, the evening wrap-up link and
+  owner-only POST actions at `/v3/owner/learned/{rollback,pin,lock}`.
 - **Spec:**
   - A daily `digest` brief listing:
-    - new and changed skills, tainted first, each with a one-line summary
-      and buttons (view diff, roll back, pin, lock);
+    - new and changed skills with tainted changes first and one metadata
+      line per change, keyed by its skill ledger ID;
     - memory adds and archives;
     - quarantined `.pending` items;
     - curator actions;
     - reviewer spend.
-  - Included in the evening wrap-up (B4).
+  - Included in the evening wrap-up (B4). An unavailable or invalid
+    learning line adds a source note and the wrap-up still posts.
+  - Checkpoints keep display-safe memory refs and use digests for withheld
+    refs. Sidecar offsets are bound to the source file identity. Replaced
+    or truncated sidecars are read from the start.
+  - Owner actions share a two-second skill-store lock deadline per
+    request. A lock timeout returns 503.
+  - The roll back, pin and lock buttons follow in the hud3 skills panel.
+    Viewing a diff requires a separate blob-reading route.
 - **Acceptance:**
-  - [ ] Roll back from the digest calls M5 rollback and the brief updates.
-  - [ ] Tainted items are listed first.
-  - [ ] An empty day gives no brief.
+  - [x] The owner route calls M5 rollback. Briefs are immutable, so the next
+    digest reports the owner's rollback on its own line.
+  - [x] Tainted items are listed first.
+  - [x] An empty day gives no brief.
 - **Depends:** B1, M5, M6, L2. **Size:** S.
 
 ---

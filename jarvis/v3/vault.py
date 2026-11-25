@@ -42,6 +42,8 @@ _YAML_WORDS = {"y", "yes", "n", "no", "on", "off", "true", "false", "null"}
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _MAX_FILE_BYTES = 4 * 64 * 1024
+_REF_SCAN_LIMIT = 16_000
+_REF_HEADER_LIMIT = 8 * 1024
 
 
 class VaultError(ValueError):
@@ -206,6 +208,27 @@ def _is_archived(raw: bytes) -> bool:
             with suppress(UnicodeError, VaultError):
                 if _field_value(line[8:].decode("utf-8")) == "archived":
                     return True
+    return False
+
+
+def _archived_header(directory, filename):
+    """Check only the status in a bounded frontmatter scan."""
+    with _regular_file(directory, filename, private=False) as fd:
+        # Read through the frontmatter delimiter without prefetching the body.
+        with os.fdopen(fd, "rb", buffering=0, closefd=False) as stream:
+            opening = stream.readline(5)
+            if opening not in (b"---\n", b"---\r\n"):
+                return False
+            remaining = _REF_HEADER_LIMIT - len(opening)
+            while remaining:
+                line = stream.readline(remaining)
+                if not line or line.rstrip(b"\r\n") == b"---":
+                    break
+                remaining -= len(line)
+                if line.startswith(b"status: "):
+                    with suppress(UnicodeError, VaultError):
+                        if _field_value(line[8:].rstrip(b"\r\n").decode("utf-8")) == "archived":
+                            return True
     return False
 
 
@@ -423,18 +446,27 @@ class Vault:
             raise VaultError(f"Ambiguous memory name. Choose from {refs}.")
         return matches[0]
 
-    def _rows(self, root: int, folder: str):
+    def _rows(self, root: int, folder: str, *, refs_only=False):
+        budget = iter(range(_REF_SCAN_LIMIT))
+
+        def list_refs(directory):
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if next(budget, None) is None:
+                        raise OverflowError("The vault exceeds its inventory scan limit.")
+                    yield entry.name
+
         if not folder:
             for name in _ROOT_ENTRIES:
                 location = Location("", name)
-                yield from self._row(root, location)
+                yield from self._row(root, location, refs_only=refs_only)
         for parent in (folder,) if folder else FOLDERS:
             try:
                 with self._folder(root, parent) as directory:
-                    for filename in sorted(os.listdir(directory)):
+                    for filename in sorted(list_refs(directory) if refs_only else os.listdir(directory)):
                         name = filename.removesuffix(".md")
                         if name != filename and _slug(name):
-                            yield from self._row(directory, Location(parent, name))
+                            yield from self._row(directory, Location(parent, name), refs_only=refs_only)
             except FileNotFoundError:
                 continue
             except _DirectoryModeError:
@@ -444,14 +476,21 @@ class Vault:
             except (OSError, VaultError):
                 if folder:
                     raise
+                if refs_only:
+                    yield Location(parent, ""), None
 
     @staticmethod
-    def _row(directory: int, location: Location):
+    def _row(directory: int, location: Location, *, refs_only=False):
         try:
-            raw = _read_file(directory, location.filename, private=False, allow_prefix=True)
-            if _is_archived(raw):
-                return
-            entry = _parse(location, raw)
+            if refs_only:
+                if _archived_header(directory, location.filename):
+                    return
+                entry = None
+            else:
+                raw = _read_file(directory, location.filename, private=False, allow_prefix=True)
+                if _is_archived(raw):
+                    return
+                entry = _parse(location, raw)
         except FileNotFoundError:
             return
         except (OSError, UnicodeError, VaultError):
@@ -459,13 +498,16 @@ class Vault:
         else:
             yield location, entry
 
-    def entries(self, folder: str = "") -> list[tuple[Location, Entry | None]]:
-        """Return active entries and locations of unreadable entries or wrong-mode folders."""
+    def entries(self, folder: str = "", *, refs_only=False) -> list[tuple[Location, Entry | None]]:
+        """Return active entries and locations of unreadable entries or wrong-mode folders.
+
+        With refs_only, inspect only frontmatter status and leave each Entry unset.
+        """
         if folder != "" and (not isinstance(folder, str) or folder not in FOLDERS):
             raise VaultError("Unknown memory folder.")
         try:
             with self._locked() as root:
-                return list(self._rows(root, folder))
+                return list(self._rows(root, folder, refs_only=refs_only))
         except FileNotFoundError:
             return []
 
