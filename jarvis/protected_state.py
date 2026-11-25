@@ -44,6 +44,7 @@ This module is SELF_PROTECTED (tools/files.py): it decides what never runs.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -3118,7 +3119,11 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
             base = None  # a relative cwd is relative to nothing we know
     with rules.work_scope():
         rules._WORK.get().cache[("line",)] = (command, str(base))
-        return _analyse(command, _State(base), protected, _identities(protected)).touches
+        touches = _analyse(command, _State(base), protected, _identities(protected)).touches
+    if not touches and (why := _policy_set_op(command)):
+        # The writer may reach the protected file without a path on the line.
+        return [Touch(config.V3_POLICY_FILE, False, why)]
+    return touches
 
 
 def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
@@ -3255,6 +3260,11 @@ _AGENT_OP_WHY = (
     "this runs `jarvis agent {verb}`, an owner operation for the v3 daemon "
     "(`jarvis agentd`, unit `jarvis-agent`). Only the owner switches daemons, "
     "from their own terminal (decision A-2); Jarvis never does, asked or not")
+_POLICY_SET_PATH = ("policy", "set")
+_POLICY_CLI_WRITER = "policy_set"
+_POLICY_SET_WHY = (
+    "this runs the owner-only policy writer (`jarvis policy set`), which changes "
+    "Jarvis's decision-rights policy (v3 decision rights, §13)")
 OWNER_OPS: dict[tuple[str, ...], str] = {
     ("hud", "install"): (
         "this runs `jarvis hud install`, which writes the installed HUD — the code the "
@@ -3273,7 +3283,9 @@ OWNER_OPS: dict[tuple[str, ...], str] = {
     ("daemon2", "restart"): _RESTART_WHY,
     **{("agent", verb): _AGENT_OP_WHY.format(verb=verb)
        for verb in ("start", "install", "restart", "stop")},
+    _POLICY_SET_PATH: _POLICY_SET_WHY,
 }
+_LEGACY_OWNER_OPS = {path: why for path, why in OWNER_OPS.items() if path != _POLICY_SET_PATH}
 # A module that implements an owner op: (the op's path, the functions whose
 # call performs it). Running the module, or calling one of those from inline
 # source, is the op.
@@ -3289,8 +3301,19 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                           "default_env", "_run_systemctl", "_systemctl", "_change", "_stop_and_disable",
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
     "jarvis.v3.cli": (("agent", "start"),
-                      ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands")),
+                      ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands",
+                       _POLICY_CLI_WRITER)),
     "jarvis.v3.hud": (("agent", "install"), ("main", "install_hud", "npm_build", "_npm", "open_window")),
+    "jarvis.v3.policy": (_POLICY_SET_PATH, ("set_rule",)),
+}
+
+# The policy module has no script entry point. The CLI module already has
+# owner operations of its own, so its policy writer has a separate entry.
+_POLICY_WRITERS = {f"{module}.{writer}" for module, (path, writers) in OWNER_OP_MODULES.items()
+                   for writer in writers if path == _POLICY_SET_PATH or writer == _POLICY_CLI_WRITER}
+_LEGACY_OWNER_MODULES = {
+    module: (path, tuple(writer for writer in writers if writer != _POLICY_CLI_WRITER))
+    for module, (path, writers) in OWNER_OP_MODULES.items() if path != _POLICY_SET_PATH
 }
 
 
@@ -4721,10 +4744,11 @@ class _Owner:
     budget: list[int] = field(default_factory=lambda: [_OWNER_BUDGET])
     filtered: bool = True          # the per-segment cheap test (off only to test it)
     kills: _Kills = field(default_factory=_Kills)
+    policy_only: bool = False
 
     def child(self) -> "_Owner":
         return _Owner(dict(self.variables), set(self.launchers), budget=self.budget,
-                      filtered=self.filtered, kills=self.kills)
+                      filtered=self.filtered, kills=self.kills, policy_only=self.policy_only)
 
 
 def _owner_substitutions(text: str) -> list[str]:
@@ -4796,13 +4820,20 @@ def _could_spell(words: list[str], path: tuple[str, ...], open_ended: bool) -> b
     return head == path[0] and _could_spell(rest, path[1:], open_ended)
 
 
-def _owner_path(argv: list[str], open_ended: bool) -> str | None:
+def _owner_path(argv: list[str], open_ended: bool, state: _Owner) -> str | None:
     """The refusal for a jarvis argv that is, or may become, an owner op —
     fed more words by xargs, or once the shell expands a word only known at
     run time (review of PR #44 at 75f14c2: `python3 -m jarvis hud $E install`
     with `$E` unset, `h${UNSET}ud`, `h?d`, `{hud,install}` all ran)."""
+    if state.policy_only:
+        # These parsers take no options before their arguments. Help exits
+        # without calling the policy writer.
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        if any(word in ("-h", "--h", "--he", "--hel", "--help") for word in options):
+            return None
+        return OWNER_OPS[_POLICY_SET_PATH] if _could_spell(argv, _POLICY_SET_PATH, open_ended) else None
     words = [t for t in argv if not t.startswith("-")]
-    for path, why in OWNER_OPS.items():
+    for path, why in _LEGACY_OWNER_OPS.items():
         if tuple(words[:len(path)]) == path:
             return why
         if _could_spell(words, path, open_ended):
@@ -4956,12 +4987,118 @@ _STR_LIST = re.compile(r"[\[(]\s*(?:[rbuRBU]?(?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*)+
                        r"[rbuRBU]?(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*[\])]")
 
 
+def _policy_source_invokes(source: str, state: _Owner, depth: int) -> str | None:
+    """Find policy writer calls without interpreting comments or strings as code."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    imports = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                imports[alias.asname or root] = alias.name if alias.asname else root
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            for alias in node.names:
+                if alias.name == "*":
+                    for writer in _POLICY_WRITERS:
+                        module, _, name = writer.rpartition(".")
+                        if module == node.module:
+                            imports[name] = writer
+                else:
+                    imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    modules: dict[str, str] = {}
+
+    def imported_module(node: ast.Call) -> str:
+        if not node.args:
+            return ""
+        module = node.args[0]
+        if not isinstance(module, ast.Constant) or type(module.value) is not str:
+            return ""
+        importer = qualified(node.func)
+        if importer == "importlib.import_module" and len(node.args) == 1:
+            return module.value
+        if importer in ("__import__", "builtins.__import__"):
+            fromlist = (node.args[3] if len(node.args) > 3
+                        else next((kw.value for kw in node.keywords if kw.arg == "fromlist"), None))
+            if isinstance(fromlist, (ast.List, ast.Tuple)) and fromlist.elts:
+                return module.value
+            return module.value.split(".")[0]
+        return ""
+
+    def qualified(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return imports.get(node.id, modules.get(node.id, node.id))
+        if isinstance(node, ast.Attribute):
+            return f"{qualified(node.value)}.{node.attr}"
+        if isinstance(node, ast.Call):
+            return imported_module(node)
+        return ""
+
+    def literal_argv(node: ast.AST) -> list[str] | None:
+        if isinstance(node, (ast.List, ast.Tuple)) and all(
+            isinstance(word, ast.Constant) and type(word.value) is str for word in node.elts
+        ):
+            return [word.value for word in node.elts]
+        return None
+
+    # Require calls and assignments in source rather than looking for CLI
+    # words anywhere in a string, comment, or list passed to an unrelated call.
+    argv = None
+    operations = (node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.Call)))
+    for node in sorted(operations, key=lambda node: (node.lineno, node.col_offset)):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    if isinstance(node.value, ast.Call) and (module := imported_module(node.value)):
+                        modules[target.id] = module
+                    else:
+                        modules.pop(target.id, None)
+                elif isinstance(target, ast.Attribute) and qualified(target) == "sys.argv":
+                    argv = literal_argv(node.value)
+            continue
+        name = qualified(node.func)
+        if name in _POLICY_WRITERS:
+            return OWNER_OPS[_POLICY_SET_PATH]
+        if argv and tuple(argv[1:3]) == _POLICY_SET_PATH:
+            module_arg = node.args[0] if node.args else None
+            runs_cli = name == "jarvis.__main__.main" or (
+                name == "runpy.run_module" and isinstance(module_arg, ast.Constant)
+                and type(module_arg.value) is str and module_arg.value in _CLI_MODULES
+            )
+            if runs_cli and (why := _owner_path(argv[1:], False, state)):
+                return why
+        if depth >= _OWNER_DEPTH or not node.args:
+            continue
+        module, _, function = name.rpartition(".")
+        arg = node.args[0]
+        if module in ("os", "subprocess") and function in _CALL_SITES:
+            uses_shell = ((module == "os" and function in ("system", "popen"))
+                          or function in ("getoutput", "getstatusoutput")
+                          or any(kw.arg == "shell" and isinstance(kw.value, ast.Constant)
+                                 and kw.value.value is True for kw in node.keywords))
+            if uses_shell:
+                text = arg.elts[0] if isinstance(arg, (ast.List, ast.Tuple)) and arg.elts else arg
+                if isinstance(text, ast.Constant) and type(text.value) is str and (
+                    why := _owner_line(text.value, state.child(), depth + 1)
+                ):
+                    return why
+            elif (words := literal_argv(arg)) is not None:
+                if why := _owner_command(words, "", state.child(), depth + 1):
+                    return why
+    return None
+
+
 def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
     """Python source that performs an owner op — not one that only names or
     reads from the module (review of PR #44 at 62db94f)."""
     if not source:
         return None
-    for module, (path, writers) in OWNER_OP_MODULES.items():
+    if state.policy_only:
+        return _policy_source_invokes(source, state, depth)
+    for module, (path, writers) in _LEGACY_OWNER_MODULES.items():
         parent, _, last = module.rpartition(".")
         dotted = re.escape(module).replace(r"\.", r"\s*\.\s*")
         names = {dotted}
@@ -5008,7 +5145,7 @@ def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
     cli = re.search(r"\brun_module\s*\(\s*['\"]jarvis(?:\.__main__)?['\"]"
                     r"|\b(?:from\s+jarvis(?:\s*\.\s*__main__)?\s+import|import\s+jarvis\s*\.\s*__main__)"
                     r"|\bjarvis\s*\.\s*__main__\s*\.", source)
-    for path, why in OWNER_OPS.items():
+    for path, why in _LEGACY_OWNER_OPS.items():
         literals = r"\s*,\s*".join(r"['\"]" + re.escape(word) + r"['\"]" for word in path)
         if cli and re.search(literals, source):
             return why
@@ -5123,22 +5260,23 @@ def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str
     if kind == "module":
         what = _owner_word(what or "", state, environ=False)
         if what in _CLI_MODULES:
-            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
-        if what in OWNER_OP_MODULES:
-            return OWNER_OPS[OWNER_OP_MODULES[what][0]]
+            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends, state)
+        if not state.policy_only and what in _LEGACY_OWNER_MODULES:
+            return OWNER_OPS[_LEGACY_OWNER_MODULES[what][0]]
         return None
     if kind == "script":
         script = _owner_word(what or "", state, environ=False)
         stem_of = rules._basename(script)
-        for module, (path, _) in OWNER_OP_MODULES.items():
-            folder, name = _owner_module_file(module)
-            if stem_of == name and folder in ("", rules._basename(os.path.dirname(script))):
-                return OWNER_OPS[path]
+        if not state.policy_only:
+            for module, (path, _) in _LEGACY_OWNER_MODULES.items():
+                folder, name = _owner_module_file(module)
+                if stem_of == name and folder in ("", rules._basename(os.path.dirname(script))):
+                    return OWNER_OPS[path]
         # The CLI run as a script: its console-script launcher
         # (`python3 ~/.local/bin/jarvis restart`) or the package itself.
         if (stem_of in _LAUNCHERS or script in state.launchers
                 or (stem_of == "__main__.py" and rules._basename(os.path.dirname(script)) == "jarvis")):
-            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
+            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends, state)
         return None
     source = what if kind == "source" else ""
     if kind == "stdin":
@@ -5150,7 +5288,7 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int,
                    appends: bool = False) -> str | None:
     for words, more, joined, behind in _peel_runner(tokens, state, appends):
         why = _owner_reading_of(words, more, joined, segment, state, depth, behind)
-        if why:
+        if why and (not state.policy_only or why == _POLICY_SET_WHY):
             return why
     return None
 
@@ -5231,7 +5369,7 @@ def _owner_reading_of(tokens: list[str], appends: bool, joined: bool, segment: s
             return None
     stem = rules._basename(tokens[0])
     if _is_launcher(tokens[0], state):
-        return _owner_path([_owner_word(t, state, environ=False) for t in tokens[1:]], appends)
+        return _owner_path([_owner_word(t, state, environ=False) for t in tokens[1:]], appends, state)
     if stem == "ln":
         # `ln -s …/jarvis /tmp/jv && /tmp/jv hud install`: the link is a launcher.
         operands = [t for t in tokens[1:] if not t.startswith("-")]
@@ -5386,7 +5524,7 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
         why = _owner_command(raw, segment, state, depth)
         if why:
             return why
-    if depth == 0 and state.kills.kill:
+    if depth == 0 and not state.policy_only and state.kills.kill:
         # A `kill` fed PIDs, on this line, by a source that yields the
         # daemon's: `kill $(pgrep -f daemon2)`, `pgrep -f daemon2 | xargs
         # kill`, `lsof -ti :8405 | xargs kill`. The sources are judged only
@@ -5497,10 +5635,10 @@ def _could_be_owner_op(command: str) -> bool:
     # `agent` is an ordinary word, so it counts only where the CLI is named, or
     # could be by a word known only at run time: parsing a segment can end in
     # "too complex", which would hide a refusal later on the line.
-    if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS if path[0] != "agent")
+    if ("xargs" in flat or any(path[0] in flat for path in _LEGACY_OWNER_OPS if path[0] != "agent")
             or ("agent" in flat and ("jarvis" in flat or _WILD.search(flat)))
             or any(module.rpartition(".")[2] in flat and _owner_module_file(module)[0] in flat
-                   for module in OWNER_OP_MODULES)
+                   for module in _LEGACY_OWNER_MODULES)
             or any(word in flat for word in _DAEMON_WORDS)
             or any(word in flat for word in _KILL_WORDS)):
         return True
@@ -5513,6 +5651,21 @@ def _could_be_owner_op(command: str) -> bool:
                                      flat) is not None
 
 
+def _policy_set_op(command: str, *, prefilter: bool = True) -> str | None:
+    if prefilter:
+        flat = rules.join_continuations(command).translate(_UNQUOTE)
+        if not ("policy" in flat and ("set" in flat or "xargs" in flat or _WILD.search(flat))
+                or "$'" in command or ("$" in flat and "=" in flat)):
+            return None
+    # Give policy recognition its own budget. A policy mention must not use
+    # up the legacy parser's work or change the verdict it would return.
+    try:
+        with rules.work_scope(fresh=True):
+            return _owner_line(command, _Owner(filtered=prefilter, policy_only=True), 0)
+    except (RecursionError, rules.TooComplex):
+        return None
+
+
 def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, str | None]:
     """(why this line runs an owner-only operation — a refusal, never an ask —
     or None; and, when it does not, why it must be asked whatever stands: a
@@ -5522,6 +5675,14 @@ def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, 
     that holds them to the full parse."""
     if not command or not command.strip():
         return None, None
+    why, unsure = _legacy_owner_reading(command, prefilter=prefilter)
+    if why:
+        return why, None
+    why = _policy_set_op(command, prefilter=prefilter)
+    return why, None if why else unsure
+
+
+def _legacy_owner_reading(command: str, *, prefilter: bool) -> tuple[str | None, str | None]:
     if prefilter and not _could_be_owner_op(command):
         return None, None
     flat = command.replace("\\\n", "")
