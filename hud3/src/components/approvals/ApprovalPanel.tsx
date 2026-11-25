@@ -22,8 +22,15 @@ const actions = new Map([
   ["calendar_create", { title: "Create a calendar event", target: "Title" }],
   ["calendar_update", { title: "Update a calendar event", target: "Event" }],
   ["calendar_delete", { title: "Delete a calendar event", target: "Event" }],
+  ["work_start", { title: "Start a coding thread", target: "Project", required: ["Folder", "Agent", "Runs in"] }],
+  ["work_send", { title: "Send to a coding thread", target: "Thread", required: ["Thread id", "In project"] }],
 ]);
-const identityLabels = new Set(["entry", "event", "title", "target", "tool", "action"]);
+const identityLabels = new Set(["entry", "event", "title", "target", "tool", "action", "project", "thread"]);
+
+function safeIdentity(value: string) {
+  const text = comparableText(value);
+  return !!text && value === visibleText(value) && !redactedTarget.test(text);
+}
 
 function preview(text: string) {
   const flat = visibleText(text).replace(/\s+/gu, " ").trim();
@@ -157,13 +164,15 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   const action = actions.get(tool);
   const targets = rows.filter((row) => identityLabels.has(labelKey(row.label)));
   const target = targets.length === 1 && targets[0].label === action?.target ? targets[0] : undefined;
-  const targetText = target ? comparableText(target.value) : "";
   const policy = [
     { label: "Policy level", value: request.level },
     { label: "Why asked", value: request.why },
   ];
-  const safe = !!target && card?.title === action?.title && !!targetText
-    && target.value === visibleText(target.value) && !redactedTarget.test(targetText)
+  const safe = !!target && card?.title === action?.title && safeIdentity(target.value)
+    && (action?.required ?? []).every((label) => {
+      const matches = rows.filter((row) => labelKey(row.label) === labelKey(label));
+      return matches.length === 1 && matches[0].label === label && safeIdentity(matches[0].value);
+    })
     && !conflictingLabels([...rows, ...policy]);
   const title = card?.title ?? "";
 

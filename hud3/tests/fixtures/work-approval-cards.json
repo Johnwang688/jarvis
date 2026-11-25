@@ -1,0 +1,52 @@
+{
+  "work_start": {
+    "title": "Start a coding thread",
+    "rows": [
+      {
+        "label": "Project",
+        "value": "sample-app"
+      },
+      {
+        "label": "Folder",
+        "value": "/srv/example/sample-app"
+      },
+      {
+        "label": "Agent",
+        "value": "codex / example-model-1"
+      },
+      {
+        "label": "Runs in",
+        "value": "A new worktree from main on branch jarvis/fix-the-login-page-0001"
+      },
+      {
+        "label": "Thread title",
+        "value": "Fix the login page"
+      },
+      {
+        "label": "Brief",
+        "value": "Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. Update the example login page and run the focused tests. \nSummarize the test results in the thread."
+      }
+    ]
+  },
+  "work_send": {
+    "title": "Send to a coding thread",
+    "rows": [
+      {
+        "label": "Thread",
+        "value": "Add a retry to the sync job"
+      },
+      {
+        "label": "Thread id",
+        "value": "t-known"
+      },
+      {
+        "label": "In project",
+        "value": "sample-app"
+      },
+      {
+        "label": "Message",
+        "value": "Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. Add a test for the retry after a temporary error. \nInclude the command used to run it."
+      }
+    ]
+  }
+}

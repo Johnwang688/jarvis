@@ -128,6 +128,33 @@ class Work(unittest.TestCase):
         with patch.object(Path, "resolve", side_effect=(self.folder, self.other)), self.assertRaises(WorkError):
             self.add()
 
+    def test_invisible_project_paths_are_refused_at_each_entry_point(self):
+        project = self.add()
+        plan = self.service.plan_start(project.name, "Example", "Example brief")
+        good = self.registry_path.read_bytes()
+        for char in ("\u200b", "\u202e", "\n", "\u034f", "\u2065", "\u2800", "\ufe0f", "\U00013441"):
+            with self.subTest(char=ascii(char)):
+                folder = self.folder.with_name(f"ex{char}ample")
+                folder.mkdir()
+                link = folder.with_name(f"link-{ord(char)}")
+                link.symlink_to(folder)
+                hidden_link = folder.with_name(f"link{char}example")
+                hidden_link.symlink_to(self.folder)
+                for path in (folder, link, hidden_link):
+                    with self.assertRaises(WorkError):
+                        self.add("unsafe", path=path)
+                legacy = json.loads(good)
+                legacy["projects"][project.name]["path"] = str(folder)
+                self.registry_path.write_text(json.dumps(legacy))
+                try:
+                    with self.assertRaises(WorkError):
+                        self.service.plan_start(project.name, "Example", "Example brief")
+                    with self.assertRaises(WorkError):
+                        self.service.start(dict(plan, path=str(folder)))
+                finally:
+                    self.registry_path.write_bytes(good)
+        self.assertEqual(self.t3.mock_calls, [])
+
     def test_refused_project_fields(self):
         for value in ("", "-bad", "bad\x01name", "a" * 33, "Upper", "under_score"):
             with self.subTest(field="name", value=value), self.assertRaises(WorkError):
@@ -306,6 +333,53 @@ class Work(unittest.TestCase):
             call.show("thread-1", messages=13),
             call.send("thread-1", "  Example\nmessage  "),
         ])
+
+    def test_send_records_running_only_after_t3_accepts(self):
+        for status, waiting in (("waiting", True), ("completed", False)):
+            with self.subTest(status=status):
+                thread_id = f"thread-{status}"
+                self.record(thread_id, "demo", 1)
+                self.ledger.record_status(thread_id, status=status, waiting_on_owner=waiting, at=2)
+                before = self.ledger_path.read_bytes()
+                run = t3_client.Run(thread_id, "run-followup", "queued")
+                message = "Example follow-up"
+
+                def send(target, text):
+                    self.assertEqual((target, text), (thread_id, message))
+                    self.assertEqual(self.ledger_path.read_bytes(), before)
+                    return run
+
+                self.t3.send.side_effect = t3_client.T3Error("failed")
+                with self.assertRaises(WorkError):
+                    self.service.send(thread_id, message)
+                self.assertEqual(self.ledger_path.read_bytes(), before)
+
+                self.t3.send.side_effect = send
+                self.assertIs(self.service.send(thread_id, message), run)
+                lines = self.ledger_path.read_bytes().removeprefix(before).splitlines()
+                self.assertEqual([json.loads(line) for line in lines], [
+                    dict(v=1, kind="status", thread_id=thread_id, status="running",
+                         waiting_on_owner=False, at=12.5),
+                ])
+                thread = self.ledger.get(thread_id)
+                self.assertEqual((thread.status, thread.waiting_on_owner, thread.updated_at),
+                                 ("running", False, 12.5))
+
+    def test_show_and_send_reject_a_response_for_a_different_thread(self):
+        self.record("thread-1", "demo", 1)
+        before = self.ledger_path.read_bytes()
+        self.t3.show.return_value = t3_client.State(
+            "thread-other", "completed", False, 0, "Other thread", "codex", "demo-model",
+            [("assistant", "Other thread text")],
+        )
+        self.t3.send.return_value = t3_client.Run("thread-other", "run-2", "queued")
+        for method, args in ((self.service.show, ()), (self.service.send, ("Example",))):
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(WorkError) as caught:
+                    method("thread-1", *args)
+                self.assertEqual(str(caught.exception), "T3 returned a different thread than requested.")
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        self.assertEqual(self.t3.mock_calls, [call.show("thread-1", messages=4), call.send("thread-1", "Example")])
 
     def test_ledger_folding_order_filter_and_bad_lines(self):
         with self.assertRaises(WorkError):
