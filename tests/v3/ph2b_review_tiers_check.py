@@ -1,5 +1,6 @@
 """Review probes for the phone's data routes: tiers, sessions, methods and pass-through."""
 
+from dataclasses import replace
 import json
 import unittest
 from unittest.mock import patch
@@ -178,10 +179,7 @@ class PhoneRoutesReview(unittest.TestCase):
             (APPROVAL_ANSWER, "POST", {**card, "decision": "approve"},
              patch.object(self.broker, "answer", side_effect=RuntimeError(secret))),
             ("status", "GET", None, patch.object(self.server, "services",
-                                                 self.server.services.__class__(
-                                                     self.server.services.feed, self.server.services.chat,
-                                                     self.server.services.data_dir, self.server.services.work,
-                                                     lambda: {"service": "x"}))),
+                                                 replace(self.server.services, status=lambda: {"service": "x"}))),
             ("chat/send", "POST", {"text": "Fixture"},
              patch.object(self.chat, "send", side_effect=OSError(secret))),
         )

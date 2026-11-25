@@ -19,7 +19,7 @@ _STATUS_FIELDS = ("service", "version", "pid", "uptime_s", "jobs")
 # Match the fields validated by hud3's feedApi.ts isBrief.
 _BRIEF_FIELDS = (
     "id", "kind", "rank", "due", "ask", "why_now", "recommend", "options",
-    "default", "context", "state", "feedback",
+    "default", "context", "state", "feedback", "proposal_id",
 )
 _CHAT_SEND = ("POST", "/v3/owner/chat/send")
 
@@ -78,6 +78,7 @@ PHONE_ROUTES = {
     ("GET", "/m/api/feed"): _owner("GET", "feed", _read, _feed),
     ("POST", "/m/api/feed/answer"): _owner("POST", "feed/answer", _feed_answer, _brief_result),
     ("POST", "/m/api/feed/feedback"): _owner("POST", "feed/feedback", _session, _brief_result),
+    ("POST", "/m/api/proposal"): _owner("POST", "proposal", _read),
     ("GET", "/m/api/chat"): _owner("GET", "chat", _read),
     ("POST", "/m/api/chat/events"): _owner("POST", "chat/events", _read),
     ("POST", "/m/api/chat/send"): _owner("POST", "chat/send", _session),
@@ -124,7 +125,7 @@ def data_route(handler, method: str, path: str, body: bytes) -> tuple[int, dict,
             # Reuse the window's send validation and response mapping.
             chat = SimpleNamespace(send=partial(chat.send, steer=False))
         status, payload = route.run(value, services.feed, chat, data_dir=services.data_dir,
-                                    get_work=services.work)
+                                    get_work=services.work, get_proposals=services.proposals)
     if 200 <= status < 300 and entry.project is not None:
         payload = entry.project(payload)
     return status, payload, []

@@ -1,7 +1,8 @@
 import { useId, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { surface } from "../../api";
 import { useUnlock } from "../UnlockContext";
-import type { Brief, FeedWrite } from "./feedApi";
+import { proposalConflict, readProposal, type Brief, type FeedWrite, type ProposalDetails } from "./feedApi";
+import "./proposal.css";
 
 const kindLabels = { decision: "Decision", news: "News", digest: "Digest" };
 const resolutionLabels = {
@@ -21,6 +22,40 @@ const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "num
 
 function display(text: string) {
   return text.replace(/\p{Bidi_Control}/gu, "");
+}
+
+type ProposalLoad = { reference: string } & (
+  { state: "loading" | "error" | "conflict" } | { state: "ready"; proposal: ProposalDetails }
+);
+
+function ProposalRows({ proposal }: { proposal: ProposalDetails }) {
+  const card = proposal.action?.card;
+  const rows = [
+    { label: "Policy level", value: proposal.level },
+    { label: "Why asked", value: proposal.why },
+    ...(card?.rows ?? []),
+  ];
+  return (
+    <>
+      {proposal.tainted && <p className="feed-proposal-taint">Based on untrusted text</p>}
+      {proposal.basis.length > 0 && (
+        <ul aria-label="Proposal basis">
+          {proposal.basis.map(({ type, id }, index) => (
+            <li key={index}><bdi>{display(type)}</bdi><bdi>{display(id)}</bdi></li>
+          ))}
+        </ul>
+      )}
+      {card && <p><strong><bdi>{display(card.title)}</bdi></strong></p>}
+      <dl className="feed-proposal-rows">
+        {rows.map(({ label, value }, index) => (
+          <div key={index}>
+            <dt><bdi>{display(label)}</bdi></dt>
+            <dd><bdi>{display(value)}</bdi></dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  );
 }
 
 function timeLabel(value: string, format = dateFormat) {
@@ -99,13 +134,39 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
   const [chosen, setChosen] = useState<boolean | null>(null);
   const expanded = !!draft || (chosen ?? (urgent && decision));
   const Heading = open ? "h3" : "h4";
-  const { id } = brief;
+  const { id, proposal_id: proposalId } = brief;
+  const [openProposal, setOpenProposal] = useState<string>();
+  const [proposalLoad, setProposalLoad] = useState<ProposalLoad>();
+  const detailsOpen = open && expanded && !!proposalId && openProposal === proposalId;
+  const details = proposalLoad?.reference === proposalId ? proposalLoad : undefined;
+  const needsDetails = decision && !!proposalId && (!detailsOpen || details?.state !== "ready");
+
+  async function toggleDetails(event: MouseEvent<HTMLElement>) {
+    // Update visibility and action readiness together on summary activation.
+    event.preventDefault();
+    if (!proposalId) return;
+    setOpenProposal(detailsOpen ? undefined : proposalId);
+    if (detailsOpen || (details && details.state !== "error")) return;
+    const loading = { reference: proposalId, state: "loading" } as const;
+    setProposalLoad(loading);
+    try {
+      const proposal = await readProposal(id);
+      if (decision && proposal.action === null) throw new Error("Decision proposal has no action card");
+      setProposalLoad((current) => current === loading ? { ...loading, state: "ready", proposal } : current);
+    } catch (failure) {
+      const state = proposalConflict(failure) ? "conflict" : "error";
+      setProposalLoad((current) => current === loading ? { ...loading, state } : current);
+    }
+  }
 
   async function answer(body: Extract<FeedWrite, { route: "answer" }>["body"]) {
     if (!open) return;
-    if (locked && (body.action === "approve" || body.action === "edit")) {
-      unlock();
-      return;
+    if (body.action === "approve" || body.action === "edit") {
+      if (needsDetails) return;
+      if (locked) {
+        unlock();
+        return;
+      }
     }
     if (await write({ route: "answer", body })) setDraft(id, null);
   }
@@ -119,9 +180,12 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
 
   function startEditor(action: BriefDraft["action"]) {
     if (!open) return;
-    if (locked && action === "edit") {
-      unlock();
-      return;
+    if (action === "edit") {
+      if (needsDetails) return;
+      if (locked) {
+        unlock();
+        return;
+      }
     }
     if (action !== editor) setDraft(id, { action, text: "", brief });
   }
@@ -164,7 +228,10 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
       <header className="feed-ask">
         <Heading id={headingId}>
           <button type="button" className="feed-toggle" aria-expanded={expanded} aria-controls={open && decision ? `${answersId} ${moreId}` : moreId}
-            onClick={() => setChosen(!expanded)}><bdi>{display(brief.ask)}</bdi></button>
+            onClick={() => {
+              setChosen(!expanded);
+              if (expanded && !draft) setOpenProposal(undefined);
+            }}><bdi>{display(brief.ask)}</bdi></button>
         </Heading>
         <div className="feed-chips">
           <span>{kindLabels[brief.kind]}</span>
@@ -179,9 +246,11 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
         <div className="feed-actions" id={answersId} hidden={decision && !expanded}>
           {decision ? (
             <>
-              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy || unlocking}
-                onClick={(event) => pressed(event, { id, action: "approve" })}>{locked ? "Unlock to approve" : "Approve"}</button>
-              <button type="button" aria-keyshortcuts="E" aria-expanded={editor === "edit"} disabled={busy || unlocking}
+              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy || unlocking || needsDetails}
+                onClick={(event) => pressed(event, { id, action: "approve" })}>
+                {locked ? "Unlock to approve" : needsDetails ? "Read the details first" : "Approve"}
+              </button>
+              <button type="button" aria-keyshortcuts="E" aria-expanded={editor === "edit"} disabled={busy || unlocking || needsDetails}
                 onClick={(event) => { if (surface() === "window" || event.detail <= 1) startEditor("edit"); }}>
                 {locked ? "Unlock to edit" : "Edit"}
               </button>
@@ -200,7 +269,7 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
           </label>
           {!open && <p role="status">This brief is closed.</p>}
           <div className="feed-actions">
-            <button type="submit" className="feed-primary" disabled={!open || busy || !text.trim() || (editor === "edit" && unlocking)}
+            <button type="submit" className="feed-primary" disabled={!open || busy || !text.trim() || (editor === "edit" && (unlocking || needsDetails))}
               onClick={(event) => { if (surface() === "phone" && editor === "edit" && event.detail > 1) event.preventDefault(); }}>
               {locked && editor === "edit" ? "Unlock to edit" : "Submit"}
             </button>
@@ -224,6 +293,15 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
       )}
       {brief.default && (
         <p><strong>If you ignore it</strong> <DefaultOutcome fallback={brief.default} kind={brief.kind} /></p>
+      )}
+      {open && expanded && proposalId && (
+        <details key={proposalId} className="feed-context feed-proposal" open={detailsOpen}>
+          <summary onClick={toggleDetails}>Details</summary>
+          {details?.state === "loading" && <p role="status">Loading proposal details…</p>}
+          {details?.state === "error" && <p role="status">Could not load proposal details.</p>}
+          {details?.state === "conflict" && <p role="status">This proposal changed. It cannot be approved.</p>}
+          {details?.state === "ready" && <ProposalRows proposal={details.proposal} />}
+        </details>
       )}
       <BriefContext sources={brief.context} />
       <div className="feed-feedback" role="group" aria-label="Brief feedback">

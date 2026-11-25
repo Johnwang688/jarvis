@@ -20,6 +20,7 @@ from .chat import ChatBusy, ChatInboxFull
 if TYPE_CHECKING:
     from .chat import ChatService
     from .feed import Feed
+    from .proposals import ProposalStore
     from .work import Ledger, Registry
 
 
@@ -43,10 +44,12 @@ class Route:
     with_chat: bool = field(default=False, kw_only=True)
     with_data_dir: bool = field(default=False, kw_only=True)
     with_work: bool = field(default=False, kw_only=True)
+    with_proposals: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
             chat: ChatService | None = None, *, data_dir: Path | None = None,
-            get_work: Callable[[], tuple[Registry, Ledger]] | None = None) -> tuple[int, object]:
+            get_work: Callable[[], tuple[Registry, Ledger]] | None = None,
+            get_proposals: Callable[[], ProposalStore] | None = None) -> tuple[int, object]:
         if self.with_work:
             return self.handler(body, get_work)
         if self.with_data_dir:
@@ -63,6 +66,8 @@ class Route:
         from .feed import BriefNotFound, FeedBusy, FeedError
 
         try:
+            if self.with_proposals:
+                return self.handler(body, get_feed(), get_proposals)
             return self.handler(body, get_feed())
         except FeedBusy:
             return 503, {"error": "Feed is busy."}
@@ -74,6 +79,48 @@ class Route:
 
 def _feed_snapshot(body, feed):
     return 200, feed.snapshot()
+
+
+def _proposal_details(body, feed, get_proposals):
+    from .approval_card import build_card
+    from .proposals import ProposalError, action_sha256
+    from .work import WorkError
+
+    if body.keys() != {"id"} or not isinstance(body["id"], str):
+        return 400, {"error": "Expected a brief ID."}
+    bid = body["id"]
+    reference = feed.get(bid)["proposal_id"]
+    if reference is None:
+        return 404, {"error": "Proposal not found."}
+
+    conflict = 409, {"error": "Proposal changed."}
+    pid, separator, digest = reference.partition(":")
+    if not separator:
+        return conflict
+    try:
+        proposal = get_proposals().get(pid)
+    except ProposalError:
+        return 503, {"error": "Proposal store unavailable."}
+    if proposal is None:
+        return 404, {"error": "Proposal not found."}
+    try:
+        if proposal["brief_id"] != bid or action_sha256(proposal) != digest:
+            return conflict
+    except ProposalError:
+        return conflict
+
+    result = {key: proposal[key] for key in ("kind", "level", "why", "tainted", "state")}
+    result["basis"] = [{"type": ref["type"], "id": ref["id"]} for ref in proposal["basis"]]
+    result["action"] = None
+    action = proposal["action"]
+    if action is not None:
+        tool = action["tool"]
+        try:
+            card = build_card(tool, action["args"], action["preview"])
+        except (AttributeError, KeyError, TypeError, ValueError, WorkError):
+            return 422, {"error": "Proposal details unavailable."}
+        result["action"] = {"tool": tool, "card": card}
+    return 200, {"proposal": result}
 
 
 def _work_snapshot(body, get_work):
@@ -256,6 +303,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),
     ("POST", "/v3/owner/feed/feedback"): Route(_feed_feedback, with_feed=True),
+    ("POST", "/v3/owner/proposal"): Route(_proposal_details, with_feed=True, with_proposals=True),
     ("GET", "/v3/owner/chat"): Route(_chat_snapshot, with_chat=True),
     ("POST", "/v3/owner/chat/send"): Route(_chat_send, with_chat=True),
     ("POST", "/v3/owner/chat/stop"): Route(_chat_stop, with_chat=True),

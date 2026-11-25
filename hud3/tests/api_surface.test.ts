@@ -10,6 +10,7 @@ const routes = {
   feed: ["/v3/owner/feed", "/m/api/feed"],
   feedAnswer: ["/v3/owner/feed/answer", "/m/api/feed/answer"],
   feedFeedback: ["/v3/owner/feed/feedback", "/m/api/feed/feedback"],
+  proposal: ["/v3/owner/proposal", "/m/api/proposal"],
   chat: ["/v3/owner/chat", "/m/api/chat"],
   chatEvents: ["/v3/owner/chat/events", "/m/api/chat/events"],
   chatSend: ["/v3/owner/chat/send", "/m/api/chat/send"],
