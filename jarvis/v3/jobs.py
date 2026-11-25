@@ -545,6 +545,28 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
 
         return Job(name, poll, every_s=interval)
 
+    def run_triggers():
+        from .triggers import Triggers
+
+        path = Path(config.GOOGLE_TOKEN_PATH if google_token is None else google_token)
+        sources = []
+        if _google_scopes(path, require_oauth_fields=True) & _CALENDAR_INGEST_SCOPES:
+            sources.append("calendar")
+        for source, executable in (("schoolwork", "sw"), ("github", "gh")):
+            if lookup(executable) is not None:
+                sources.append(source)
+        sources.append("commitments")
+        shared = None
+        if _has_gmail_grant(path):
+            sources.append("mail")
+            try:
+                shared = get_index()
+            except Exception:
+                # An unavailable index blocks mail while the other sources run.
+                pass
+        Triggers(sources=sources, index=shared, signals_dir=signals_dir,
+                 post=get_feed().post, busy=None).tick()
+
     def consolidate_due(now, last_run):
         from .consolidate import due
 
@@ -618,6 +640,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             Job("calendar", ingest_calendar, every_s=300),
             cli_job("schoolwork", "sw", 900),
             cli_job("github", "gh", 600),
+            Job("triggers", run_triggers, every_s=300),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
             Job("learning-digest", post_learning, due=learning_due),

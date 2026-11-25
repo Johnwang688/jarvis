@@ -101,12 +101,27 @@ New `config` constants and their environment overrides where available.
 | `FEED_DIR` | `V3_DIR/feed` | — |
 | `PROPOSALS_DIR` | `V3_DIR/proposals` | — |
 | `V3_SIGNALS_DIR` | `V3_DIR/signals` (trigger snapshots) | — |
+| `TRIGGERS_DIR` (`config.V3_TRIGGERS_DIR`) | `V3_DIR/triggers` (`signals.jsonl`, `state.json`, `previous/`, transient `pending.json`) | — |
 | `POLICY_FILE` | `V3_DIR/policy.json` (**protected state**) | — |
 | `BUDGET_LEDGER` | `V3_DIR/budget.jsonl` | — |
 
 Signal snapshots live at `V3_SIGNALS_DIR/<source>.json` with the layout
 `{"version": 1, "source": "<source>", ..., "items": [...]}`. The intervening
 fields are source-specific. Items have unique string IDs and are sorted by ID.
+
+I2 appends one JSON object per line to `TRIGGERS_DIR/signals.jsonl`.
+
+```json
+{"seq": 1, "id": "32 lowercase hex characters", "kind": "calendar.changed",
+ "source": "calendar", "source_ref": "calendar:example-id",
+ "summary_fields": {}, "dedupe_key": "calendar.changed:example-id:0123456789abcdef",
+ "tainted": true, "created": "2027-01-15T08:00:00Z"}
+```
+
+`seq` increases across ticks and log compaction. I3 reads records in sequence
+order with `triggers.read_signals(after=...)`. Summaries contain bounded
+structured fields and, where applicable, a redacted `untrusted_title` capped
+at 120 characters on one line. Every record is tainted.
 
 ### 1.2 Vault entry
 
@@ -1174,8 +1189,9 @@ CLIs' own safeguards. What follows from it:
     `owner-owes` or `owed-to-owner`. State is `open`, `done`, or `dropped`.
     Due dates use `YYYY-MM-DD`, with `-` for an undated row. Cells contain
     plain text. Markup, hidden text, and embedded line breaks make a block malformed.
-  - I2 reads the block through `commitments.load()` and owns the
-    `SIGNALS_DIR/commitments.json` snapshot.
+  - I2 reads the block through `commitments.load()` and writes
+    `V3_DIR/signals/commitments.json`. I2 also writes `V3_DIR/signals/mail.json`
+    from indexed Gmail headers.
 - **Acceptance:**
   - [x] Parser round-trip tests.
   - [x] The owner-text-only rule is tested (a received email saying "John
@@ -1343,34 +1359,56 @@ CLIs' own safeguards. What follows from it:
 - **Depends:** OG2. **Size:** S–M.
 
 ### I2: Triggers
-- **Scope:** `jarvis/v3/triggers.py`, `tests/v3/triggers_check.py`.
+- **Scope:** `jarvis/v3/triggers.py`, `tests/v3/triggers_check.py`, and the
+  five-minute daemon job after GitHub ingestion.
 - **Spec:**
-  - Each trigger compares the previous and current snapshot in
-    `V3_SIGNALS_DIR` and emits signal records `{id, kind, source_ref,
-    summary_fields, dedupe_key}`.
+  - Each trigger evaluates the current snapshot in `V3_SIGNALS_DIR` against
+    its previous copy in `TRIGGERS_DIR/previous/` and appends §1.1 records.
   - C3 snapshots use the §1.1 envelope and the following source fields.
     - Calendar items have `id`, `title`, `start`, `end`, `all_day`,
       `attendees`, `owner_event`, `jarvis`, `status` and `recurring`.
-    - Schoolwork has a top-level `needs_sign_in`. Items have `id`,
+    - Schoolwork requires a boolean `needs_sign_in`. Items have `id`,
       `title`, `course`, `due`, `state`, `done` and `locked`.
     - GitHub items have `id`, `repo`, `number`, `title`, `draft`,
       `checks`, `authored`, `review_requested` and `review_decision`.
-  - Kinds:
-    - `mail.needs_reply`: a heuristic flags candidate messages, the planner
-      confirms;
-    - `calendar.changed`, `calendar.idle_block_tomorrow`;
-    - `school.assignment_new`, `school.due_within_72h`;
-    - `gh.review_requested`, `gh.ci_failed`;
-    - `commitment.due_soon`;
-    - `project.stale` (no activity N days and open next actions).
-  - No model.
-  - Pre-flight: a trigger whose source is unauthorized or stale is marked
-    `blocked_config` and surfaced once as a news brief.
+  - Kinds and dedupe keys
+    - `mail.needs_reply:<message-id>` flags a candidate that the planner confirms.
+    - `calendar.changed:<event-id>:<change-digest>` uses a 16-character hex digest.
+    - `calendar.idle_block_tomorrow:<date>` is dormant in the daemon until a
+      free/busy adapter uses the calendar tools with `singleEvents=true`.
+      C3's masters and exceptions do not expand recurring instances, and
+      the backfill window can omit older masters.
+    - `school.assignment_new:<assignment-id>` and
+      `school.due_within_72h:<assignment-id>:<due>`.
+    - `gh.review_requested:<pr-id>` and `gh.ci_failed:<pr-id>`.
+    - `commitment.due_soon:<commitment-id>:<due>`.
+    - `project.stale` is deferred because there is no projects snapshot or
+      activity data.
+  - Display text in signal summaries and the mail and commitments snapshots
+    has normalized whitespace and passes shared credential redaction before
+    length limits. URL userinfo is masked even in incomplete URLs. Values
+    that still resemble labelled credentials are withheld in full.
+  - A private pending checkpoint pairs the tick's snapshots with its signal
+    sequence numbers and dedupe state. The checkpoint and previous snapshots
+    carry digests for free text. The tick makes the log durable first and
+    then atomically replaces the state and previous snapshots. Restart
+    skips already appended records and completes the checkpoint before
+    reading current snapshots. Removals and replayed records missing from
+    the log use an empty title.
+  - Edge keys are held for 30 days. Level keys can also be released when a
+    successful evaluation no longer finds the condition. Blocked evaluations
+    retain their previous copy and held keys. At the state size cap, active
+    keys are retained and inactive edge history is evicted oldest first.
+    A tick reports `held_back` when it defers candidates for lack of space.
+    Deferred edges keep their previous item baseline so they can be retried.
+  - Triggers run without a model. Preflight reports a blocked source as
+    `blocked_config` and posts one fixed rank-4 news brief per episode.
+    The schoolwork ingester posts its own sign-in brief.
 - **Acceptance:**
-  - [ ] Per-kind snapshot-diff tests.
-  - [ ] A quiet day (identical snapshots) emits zero signals.
-  - [ ] Dedupe across runs.
-  - [ ] `blocked_config` surfaces once, not every tick.
+  - [x] Per-kind snapshot-diff tests.
+  - [x] A quiet day (identical snapshots) emits zero signals after the baseline tick.
+  - [x] Dedupe across runs.
+  - [x] `blocked_config` surfaces once per episode.
 - **Depends:** C3, P2 (for commitments). **Size:** M.
 
 ### I3: Planner → proposals

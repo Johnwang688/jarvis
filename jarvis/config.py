@@ -516,6 +516,7 @@ V3_SKILLS_DIR = Path(os.environ.get("JARVIS_LEARNED_SKILLS") or V3_DIR / "skills
 V3_SKILL_LEDGER_DIR = V3_DIR / "skill-ledger"
 V3_REVIEW_QUEUE_DIR = V3_DIR / "review-queue"
 V3_SIGNALS_DIR = V3_DIR / "signals"
+V3_TRIGGERS_DIR = V3_DIR / "triggers"
 V3_BUDGET_LEDGER = V3_DIR / "budget.jsonl"
 V3_INDEX_DB = Path(os.environ.get("JARVIS_INDEX_DB") or V3_DIR / "index.sqlite").expanduser()
 
