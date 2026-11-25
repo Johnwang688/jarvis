@@ -1,4 +1,6 @@
 import { useId, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
+import { surface } from "../../api";
+import { useUnlock } from "../UnlockContext";
 import type { Brief, FeedWrite } from "./feedApi";
 
 const kindLabels = { decision: "Decision", news: "News", digest: "Digest" };
@@ -43,7 +45,7 @@ function BriefContext({ sources }: { sources: Brief["context"] }) {
       {sources.length ? (
         <ul>
           {sources.map(({ label, ref }, index) => {
-            const href = httpsRef(ref);
+            const href = surface() === "window" ? httpsRef(ref) : undefined;
             return (
               <li key={index}>
                 <bdi>{display(label)}</bdi>
@@ -83,6 +85,7 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
   setDraft: (id: string, draft: BriefDraft | null) => void;
   missing: boolean;
 }) {
+  const { locked, busy: unlocking, unlock } = useUnlock();
   const editor = draft?.action;
   const text = draft?.text ?? "";
   const headingId = useId();
@@ -99,7 +102,12 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
   const { id } = brief;
 
   async function answer(body: Extract<FeedWrite, { route: "answer" }>["body"]) {
-    if (open && await write({ route: "answer", body })) setDraft(id, null);
+    if (!open) return;
+    if (locked && (body.action === "approve" || body.action === "edit")) {
+      unlock();
+      return;
+    }
+    if (await write({ route: "answer", body })) setDraft(id, null);
   }
 
   // The second press of a double-click is not an answer: the first may have
@@ -110,7 +118,12 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
   }
 
   function startEditor(action: BriefDraft["action"]) {
-    if (open && action !== editor) setDraft(id, { action, text: "", brief });
+    if (!open) return;
+    if (locked && action === "edit") {
+      unlock();
+      return;
+    }
+    if (action !== editor) setDraft(id, { action, text: "", brief });
   }
 
   function submit(event: FormEvent) {
@@ -166,8 +179,12 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
         <div className="feed-actions" id={answersId} hidden={decision && !expanded}>
           {decision ? (
             <>
-              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy} onClick={(event) => pressed(event, { id, action: "approve" })}>Approve</button>
-              <button type="button" aria-keyshortcuts="E" aria-expanded={editor === "edit"} disabled={busy} onClick={() => startEditor("edit")}>Edit</button>
+              <button type="button" className="feed-primary" aria-keyshortcuts="A" disabled={busy || unlocking}
+                onClick={(event) => pressed(event, { id, action: "approve" })}>{locked ? "Unlock to approve" : "Approve"}</button>
+              <button type="button" aria-keyshortcuts="E" aria-expanded={editor === "edit"} disabled={busy || unlocking}
+                onClick={(event) => { if (surface() === "window" || event.detail <= 1) startEditor("edit"); }}>
+                {locked ? "Unlock to edit" : "Edit"}
+              </button>
               <button type="button" aria-expanded={editor === "other"} disabled={busy} onClick={() => startEditor("other")}>Other…</button>
               <button type="button" aria-keyshortcuts="N" disabled={busy} onClick={(event) => pressed(event, { id, action: "not_now" })}>Not now</button>
             </>
@@ -183,7 +200,10 @@ export function BriefCard({ brief, busy, error, write, draft, setDraft, missing 
           </label>
           {!open && <p role="status">This brief is closed.</p>}
           <div className="feed-actions">
-            <button type="submit" className="feed-primary" disabled={!open || busy || !text.trim()}>Submit</button>
+            <button type="submit" className="feed-primary" disabled={!open || busy || !text.trim() || (editor === "edit" && unlocking)}
+              onClick={(event) => { if (surface() === "phone" && editor === "edit" && event.detail > 1) event.preventDefault(); }}>
+              {locked && editor === "edit" ? "Unlock to edit" : "Submit"}
+            </button>
             <button type="button" disabled={busy} onClick={(event) => {
               event.currentTarget.closest("article")?.focus();
               setDraft(id, null);

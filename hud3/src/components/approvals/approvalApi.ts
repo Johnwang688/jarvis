@@ -1,3 +1,5 @@
+import { apiFetch } from "../../api";
+
 export interface ApprovalRow {
   label: string;
   value: string;
@@ -21,7 +23,6 @@ export type ListedApproval = Omit<ApprovalRequest, "card"> & {
 
 export type Decision = "approve" | "deny";
 
-const path = "/v3/owner/approvals";
 const readOptions = { cache: "no-store", redirect: "error" } as const;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -45,7 +46,7 @@ function parseApproval(value: unknown): ListedApproval {
 }
 
 export async function readApprovals(signal: AbortSignal, sessionId?: string | null): Promise<ListedApproval[]> {
-  const response = await fetch(path, { ...readOptions, signal });
+  const response = await apiFetch("approvals", { ...readOptions, signal });
   if (!response.ok) throw new Error("Approval list unavailable");
   const value: unknown = await response.json();
   if (!record(value) || !Array.isArray(value.approvals)) {
@@ -57,7 +58,7 @@ export async function readApprovals(signal: AbortSignal, sessionId?: string | nu
 
 export async function answerApproval({ id, digest }: Pick<ApprovalRequest, "id" | "digest">,
   decision: Decision, signal: AbortSignal) {
-  const response = await fetch(`${path}/answer`, {
+  const response = await apiFetch("approvalsAnswer", {
     ...readOptions, method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, digest, decision }), signal,
   });

@@ -57,7 +57,8 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
         break;
       }
       case "steer":
-        rows.push({ kind: "message", role: "user", text: event.text, t: event.t, steered: true, steerSeq: event.seq });
+        rows.push({ kind: "message", role: "user", text: event.text, t: event.t,
+          steered: !event.queued, queued: event.queued, steerSeq: event.seq });
         break;
       case "reply":
         next.draft = "";
@@ -81,7 +82,7 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
         rows = closeTools(rows);
         const discarded = new Set(event.discarded);
         rows = rows.map((row) => row.kind === "message" && row.steerSeq !== undefined && discarded.has(row.steerSeq)
-          ? { ...row, steered: false, discarded: true } : row);
+          ? { ...row, steered: false, queued: false, discarded: true } : row);
         break;
       }
     }
@@ -107,7 +108,7 @@ function reconcileSnapshot({ history, tools, replay, ...snapshot }: ChatSnapshot
     let recentAnchor = false;
     const lastReply = history.slice(0, toolsBefore).map((message) => message.role).lastIndexOf("assistant");
     const turnStart = current.rows.reduce((start, row, index) =>
-      row.kind === "message" && row.role === "user" && !row.steered ? index : start, -1);
+      row.kind === "message" && row.role === "user" && !row.steered && !row.queued ? index : start, -1);
     for (const [index, row] of current.rows.entries()) {
       if (row.kind === "message") {
         // Snapshot history is authoritative. Match timestamped messages in order

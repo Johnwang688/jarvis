@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type 
 import { countdownText } from "@hud/lib/approvalCard";
 import { useArmed } from "@hud/lib/armed";
 import { noPointerFocus } from "@hud/lib/talkkey";
+import { useUnlock } from "../UnlockContext";
 import type { ApprovalRow, Decision } from "./approvalApi";
 import { useApprovals, type ShownApproval } from "./useApprovals";
 import "./approvals.css";
@@ -74,7 +75,7 @@ function plainPress(event: KeyboardEvent<HTMLButtonElement>) {
 }
 
 // The parent mounts a fresh button when the displayed approval or list order changes.
-function ApproveButton({ disabled, approve }: { disabled: boolean; approve: () => void }) {
+function ApproveButton({ disabled, approve, label }: { disabled: boolean; approve: () => void; label: string }) {
   const press = useRef<Press>();
   const submittedClick = useRef(false);
   const cancel = () => { press.current = undefined; };
@@ -143,7 +144,7 @@ function ApproveButton({ disabled, approve }: { disabled: boolean; approve: () =
         cancel();
         if (!disabled && started?.kind === "key" && started.key === event.key
           && plainPress(event)) approve();
-      }}>Approve</button>
+      }}>{label}</button>
   );
 }
 
@@ -154,6 +155,7 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   answer: (shown: ShownApproval, decision: Decision) => void;
 }) {
   const { request, key, deadline } = shown;
+  const { locked, busy: unlocking, unlock } = useUnlock();
   const [, tick] = useState(0);
   const armed = useArmed(key);
   const remaining = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
@@ -188,6 +190,10 @@ function ApprovalCard({ shown, ready, busy, answer }: {
 
   function decide(decision: Decision, event?: MouseEvent<HTMLButtonElement>) {
     if (disabled || expired || (decision === "approve" && (!armed || !safe)) || (event && event.detail > 1)) return;
+    if (locked && decision === "approve") {
+      unlock();
+      return;
+    }
     answer(shown, decision);
   }
 
@@ -210,7 +216,8 @@ function ApprovalCard({ shown, ready, busy, answer }: {
           <div className="approval-actions">
             <button type="button" onMouseDown={noPointerFocus} disabled={disabled}
               onClick={(event) => decide("deny", event)}>Deny</button>
-            {safe && <ApproveButton disabled={disabled || !armed} approve={() => decide("approve")} />}
+            {safe && <ApproveButton disabled={disabled || !armed || unlocking}
+              approve={() => decide("approve")} label={locked ? "Unlock to approve" : "Approve"} />}
           </div>
         )}
         {expired ? <p role="status">Approval expired.</p> : (

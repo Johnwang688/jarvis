@@ -1,4 +1,5 @@
 import react from "@vitejs/plugin-react";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
@@ -9,6 +10,7 @@ const repoRoot = resolve(root, "..");
 const hudRoot = resolve(repoRoot, "hud/src");
 const modules = resolve(root, "node_modules") + "/";
 const hud3Importer = resolve(root, "index.html");
+const phoneEntry = resolve(root, "phone.html");
 
 function sharedPackages(): Plugin {
   return {
@@ -28,7 +30,7 @@ function sharedPackages(): Plugin {
 
 export default defineConfig({
   root,
-  base: "/",
+  base: "./",
   plugins: [bundleGuard(repoRoot), sharedPackages(), react()],
   resolve: {
     alias: { "@hud": hudRoot },
@@ -44,6 +46,11 @@ export default defineConfig({
     outDir: "dist",
     manifest: "build-manifest.json",
     rollupOptions: {
+      input: {
+        index: hud3Importer,
+        // Shared-component verifier builds copy this config into a window-only fixture.
+        ...(existsSync(phoneEntry) ? { phone: phoneEntry } : {}),
+      },
       output: {
         sanitizeFileName: (name) => name.replace(/[^A-Za-z0-9._-]/g, "_"),
       },
