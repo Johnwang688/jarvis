@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -142,17 +143,18 @@ class JobWiringCheck(unittest.TestCase):
                          {"transcripts": "ok", "feed": "ok"})
 
     def test_daemon_full_defaults_start_tick_and_stop_offline(self):
-        names = {"feed", "skill-curator", "transcripts", "reviewer", "gmail", "consolidate",
-                 "morning-brief", "evening-wrap"}
+        due_names = {"feed", "transcripts", "reviewer", "gmail", "calendar",
+                     "schoolwork", "github", "consolidate"}
         no_network = AssertionError("unexpected outbound request")
         with (patch.multiple(config, V3_DIR=self.data, V3_INDEX_DB=self.index,
                              GOOGLE_TOKEN_PATH=self.token, SESSIONS_DIR=self.home / "sessions"),
               patch.object(socket, "create_connection", side_effect=no_network) as connect,
               patch.object(httpx, "Client", side_effect=no_network) as http_client,
+              patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected subprocess")) as popen,
               patch.object(google_auth, "access_token", side_effect=no_network) as token):
             server = daemon.Daemon(port=0)
             scheduler = server._scheduler
-            self.assertEqual(set(scheduler.status()), names)
+            self.assertEqual(set(scheduler.status()), due_names | {"skill-curator", "morning-brief", "evening-wrap"})
             self.assertFalse(self.index.exists())
             scheduler._clock = lambda: datetime(2026, 11, 24, 3, 30,
                                                  tzinfo=ZoneInfo("America/Chicago")).timestamp()
@@ -170,7 +172,7 @@ class JobWiringCheck(unittest.TestCase):
                     self.assertNotEqual(server.port, 0)
                     self.assertTrue(finished.wait(5))
                     status = scheduler.status()
-                    for name in ("feed", "transcripts", "reviewer", "gmail", "consolidate"):
+                    for name in due_names:
                         self.assertEqual(status[name]["last_outcome"], "ok", name)
                 finally:
                     server.stop()
@@ -178,6 +180,7 @@ class JobWiringCheck(unittest.TestCase):
             connect.assert_not_called()
             http_client.assert_not_called()
             token.assert_not_called()
+            popen.assert_not_called()
 
 
 if __name__ == "__main__":

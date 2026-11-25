@@ -29,6 +29,8 @@ _CALENDAR_SCOPES = frozenset(f"https://www.googleapis.com/auth/{scope}" for scop
     "calendar", "calendar.readonly", "calendar.events", "calendar.events.readonly",
     "calendar.events.owned", "calendar.events.owned.readonly",
 ))
+_CALENDAR_INGEST_SCOPES = frozenset(("https://www.googleapis.com/auth/calendar.events",
+                                    "https://www.googleapis.com/auth/calendar.readonly"))
 
 
 def _finite(value):
@@ -390,7 +392,15 @@ def _has_gmail_grant(path: Path) -> bool:
     return _GMAIL_READONLY in _google_scopes(path, require_oauth_fields=True)
 
 
-def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None):
+def _find_cli(name):
+    path = Path.home() / ".local" / "bin" / name
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None,
+                 signals_dir=None, find_cli=None):
     """Build the daemon jobs without opening their stores or contacting providers.
 
     The Gmail grant check and OAuth refresh read the file separately.
@@ -402,7 +412,9 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
     index = None
     gmail_runner = None
     reviewer_runner = None
+    calendar_runner = None
     budget = None
+    lookup = _find_cli if find_cli is None else find_cli
 
     def get_feed():
         nonlocal feed
@@ -478,6 +490,61 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         if outcome is not None and outcome["error"] is not None:
             raise RuntimeError("Gmail ingestion failed.")
 
+    def tick_ingester(runner, name):
+        outcome = runner.tick().get(name)
+        if outcome is not None and outcome["error"] is not None:
+            raise RuntimeError(f"{name} ingestion failed.")
+
+    def ingest_calendar():
+        nonlocal calendar_runner
+        configured = Path(config.GOOGLE_TOKEN_PATH)
+        path = configured if google_token is None else Path(google_token)
+        if not (_google_scopes(path, require_oauth_fields=True) & _CALENDAR_INGEST_SCOPES):
+            return
+        if calendar_runner is None:
+            from jarvis.google_auth import access_token
+            from .ingest import Runner
+            from .ingest.calendar import CalendarIngester, HttpCalendar
+
+            def test_grant_token():
+                # A test grant at a different path cannot authorize real OAuth.
+                raise RuntimeError("The Calendar grant is outside the OAuth token path.")
+
+            shared = get_index()
+            token = access_token if path == configured else test_grant_token
+            client = HttpCalendar(token)
+            calendar_runner = Runner(shared, [CalendarIngester(client, signals_dir=signals_dir)])
+        tick_ingester(calendar_runner, "calendar")
+
+    def cli_job(name, executable, interval):
+        runner = path = None
+
+        def run_cli(argv):
+            from .ingest import proc
+
+            return proc.run_bounded([os.fspath(path), *argv[1:]], timeout_s=60, max_bytes=8 * 1024 * 1024)
+
+        def poll():
+            nonlocal runner, path
+            path = lookup(executable)
+            if path is None:
+                return
+            if runner is None:
+                from .ingest import Runner
+
+                if name == "schoolwork":
+                    from .ingest.schoolwork import SchoolworkIngester
+
+                    ingester = SchoolworkIngester(run_cli, post=get_feed().post, signals_dir=signals_dir)
+                else:
+                    from .ingest.github import GitHubIngester
+
+                    ingester = GitHubIngester(run_cli, signals_dir=signals_dir, require_pagination=True)
+                runner = Runner(get_index(), [ingester])
+            tick_ingester(runner, name)
+
+        return Job(name, poll, every_s=interval)
+
     def consolidate_due(now, last_run):
         from .consolidate import due
 
@@ -530,6 +597,9 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             Job("transcripts", ingest_transcripts, every_s=300),
             Job("reviewer", review_sessions, every_s=300),
             Job("gmail", ingest_gmail, every_s=300),
+            Job("calendar", ingest_calendar, every_s=300),
+            cli_job("schoolwork", "sw", 900),
+            cli_job("github", "gh", 600),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
             Job("evening-wrap", partial(post_brief, "evening"), due=partial(brief_due, "evening"))]

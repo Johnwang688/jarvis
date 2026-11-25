@@ -88,8 +88,7 @@ section in the same PR.
 
 ### 1.1 Paths (all owner-only: dirs 0700, files 0600)
 
-New `config` constants, each with an env override as is the pattern in
-`jarvis/config.py`:
+New `config` constants and their environment overrides where available.
 
 | Constant | Default | Env |
 |---|---|---|
@@ -101,9 +100,13 @@ New `config` constants, each with an env override as is the pattern in
 | `REVIEW_QUEUE_DIR` | `V3_DIR/review-queue` | — |
 | `FEED_DIR` | `V3_DIR/feed` | — |
 | `PROPOSALS_DIR` | `V3_DIR/proposals` | — |
-| `SIGNALS_DIR` | `V3_DIR/signals` (trigger snapshots) | — |
+| `V3_SIGNALS_DIR` | `V3_DIR/signals` (trigger snapshots) | — |
 | `POLICY_FILE` | `V3_DIR/policy.json` (**protected state**) | — |
 | `BUDGET_LEDGER` | `V3_DIR/budget.jsonl` | — |
+
+Signal snapshots live at `V3_SIGNALS_DIR/<source>.json` with the layout
+`{"version": 1, "source": "<source>", ..., "items": [...]}`. The intervening
+fields are source-specific. Items have unique string IDs and are sorted by ID.
 
 ### 1.2 Vault entry
 
@@ -1078,20 +1081,31 @@ CLIs' own safeguards. What follows from it:
   calls).
 - **Spec:**
   - Calendar: sync tokens; each event becomes a doc.
+    An expired sync or continuation token restarts a bounded full sync. The
+    completed listing removes events that vanished. During a running
+    ingester's retries, replacement failures leave the expired token retired.
   - Schoolwork: assignments, due dates and grades as docs with structured
     meta (`due`, `course`). The MSA daily-login expiry surfaces as a "needs
-    sign-in" news brief, never a crash.
+    sign-in" news brief once per episode. Partial or unparsable output leaves
+    the index, snapshot and sign-in episode unchanged. Cookie header values
+    are scrubbed before persisting source text.
   - GitHub: the owner's repos' open PRs, review requests and CI status,
-    with meta for I2.
-  - Each ingester also writes a **snapshot** to `SIGNALS_DIR/<source>.json`
-    for I2.
+    with meta for I2. Both searches must finish with consistent totals,
+    distinct results and parseable rows before absence can remove a PR from
+    the index or snapshot. Incomplete searches preserve previously seen PRs.
+  - Each ingester also writes a **snapshot** to `V3_SIGNALS_DIR/<source>.json`
+    for I2. Snapshot titles are scrubbed before the 512-character cap.
 - **Acceptance:**
-  - [ ] Per-source fixture tests.
-  - [ ] Snapshots are deterministic (sorted, stable ids).
+  - [x] Per-source fixture tests.
+  - [x] Snapshots are deterministic (sorted, stable ids).
   - [ ] `gh` commands are read-only, asserted by a test that judges each
     argv through `rules.decide` → ALLOW without a prompt.
-  - [ ] Schoolwork stays read-only; no submission paths exist (standing
+  - [x] Schoolwork stays read-only; no submission paths exist (standing
     decision).
+  - The shared gate still returns ASK for every `gh` line. The daemon runs
+    the fixed read-only query directly, using GraphQL variables for paging.
+  - The CLI jobs use their saved logins. Children receive `PATH`, `HOME`,
+    `LANG` and, for the Windows schoolwork wrapper, `WSL_INTEROP` when present.
 - **Depends:** C2, C1 (calendar part needs OG4). **Size:** M.
 
 ---
@@ -1317,8 +1331,15 @@ CLIs' own safeguards. What follows from it:
 - **Scope:** `jarvis/v3/triggers.py`, `tests/v3/triggers_check.py`.
 - **Spec:**
   - Each trigger compares the previous and current snapshot in
-    `SIGNALS_DIR` and emits signal records `{id, kind, source_ref,
+    `V3_SIGNALS_DIR` and emits signal records `{id, kind, source_ref,
     summary_fields, dedupe_key}`.
+  - C3 snapshots use the §1.1 envelope and the following source fields.
+    - Calendar items have `id`, `title`, `start`, `end`, `all_day`,
+      `attendees`, `owner_event`, `jarvis`, `status` and `recurring`.
+    - Schoolwork has a top-level `needs_sign_in`. Items have `id`,
+      `title`, `course`, `due`, `state`, `done` and `locked`.
+    - GitHub items have `id`, `repo`, `number`, `title`, `draft`,
+      `checks`, `authored`, `review_requested` and `review_decision`.
   - Kinds:
     - `mail.needs_reply`: a heuristic flags candidate messages, the planner
       confirms;
