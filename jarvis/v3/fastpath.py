@@ -2,24 +2,29 @@
 
 from contextlib import closing
 from contextvars import ContextVar
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from functools import cached_property, partial, wraps
+from inspect import signature
 import json
 import os
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Callable
 
-from jarvis import config, llm, models, sessions, tools, untrusted
-from jarvis.agent import Agent, BRIEFER_PREFACE, COMPACTION_PROMPT, STEERING_PREFIX, Turn
+from jarvis import config, llm, models, runtime, sessions, tools, untrusted
+from jarvis.agent import Agent, BRIEFER_PREFACE, COMPACTION_PROMPT, STEERING_PREFIX, Turn, _call_args, _call_name
 from jarvis.context import ContextPolicy
 from jarvis.tools.clock import get_datetime
 
-from .chat import TOOL_NAMES, available_tools, calendar_available
+from . import vault
+from .approval_card import build_card
+from .approvals import digest
+from .chat import CALENDAR_WRITES, GATED_TOOLS, TOOL_NAMES, available_tools, calendar_available
 from .feed import Feed
 from .index import Index
 from .owner_routes import FEED_LOCK_TIMEOUT
+from .policy import Policy
 from .tools.feed import FeedTools
 from .tools.memory import MemoryTools
 from .tools.session_search import session_search
@@ -45,22 +50,42 @@ _CHAT_PROMPT = (
     "owner asks for one. This chat can post to the owner's batch feed."
 )
 _REGISTRATION = Lock()
+_POLICY_KINDS = {
+    "calendar_create": "calendar.block",
+    "calendar_update": "calendar.event_change",
+    "calendar_delete": "calendar.event_delete",
+    "vault_add": "vault.update",
+    "vault_patch": "vault.update",
+    "vault_archive": "vault.update",
+}
+
+
+def _default_calendar(approve=None):
+    from jarvis import google_auth
+    from .tools.calendar import CalendarTools
+
+    # The v1 token refresh may save a rotated token before the request.
+    return CalendarTools(token=google_auth.access_token, approve=approve)
 
 
 @dataclass
 class _TurnTools:
     session_id: str
+    turn_id: str | None
     data_dir: Path
     feed_root: Path
     clock: Callable
     tool_write: Callable
     stop: Callable
     before_request: Callable
+    calendar: Callable
     posts: int = 0
+    grant: "_WriteGrant | None" = None
 
     @cached_property
     def memory(self):
-        return MemoryTools(Vault(os.environ.get("JARVIS_VAULT") or self.data_dir / "vault"))
+        return MemoryTools(Vault(os.environ.get("JARVIS_VAULT") or self.data_dir / "vault"),
+                           write_scope=self.tool_write)
 
     @cached_property
     def store(self):
@@ -85,6 +110,137 @@ _TURN: ContextVar[_TurnTools | None] = ContextVar("jarvis_v3_chat_turn", default
 
 def deny_all(tool, args):
     return False
+
+
+@dataclass(frozen=True)
+class _WriteGrant:
+    id: str
+    digest: str
+    tool: str
+    args: dict
+    supplied: tuple[str, ...]
+    preview: dict
+
+
+def _take_grant(tool, args):
+    turn = _TURN.get()
+    grant, turn.grant = turn.grant, None
+    if grant is None or grant.tool != tool or grant.args != args:
+        return None
+    raw_args = {key: args[key] for key in grant.supplied}
+    if digest(grant.id, turn.session_id, tool, raw_args, grant.preview) == grant.digest:
+        return grant
+    return None
+
+
+@dataclass
+class _CalendarGrant:
+    action: str
+    preview: dict
+    stop: Callable
+    used: bool = False
+
+    def __call__(self, action, details):
+        if self.used or self.stop() or action != self.action:
+            return False
+        if any(details[key] != self.preview[key] for key in ("method", "url", "params", "body")):
+            return False
+        if self.preview.get("etag") is not None:
+            before = details["before"]
+            if before is None or before.get("etag") != self.preview["etag"]:
+                return False
+        self.used = True
+        return True
+
+
+class ChatApprover:
+    def __init__(self, broker, turn):
+        self._broker = broker
+        self._turn = turn
+
+    def __call__(self, tool, args):
+        turn = self._turn
+        try:
+            turn.grant = None
+            if turn.stop():
+                return tools.Refusal("The chat turn is stopping.")
+            name = tool.name
+            bound = signature(_GATED_WRAPPERS[name]).bind(**args)
+            bound.apply_defaults()
+            call_args = bound.arguments
+            facts = {"kind": _POLICY_KINDS[name], "tainted": True}
+            if name in CALENDAR_WRITES:
+                if not calendar_available():
+                    return tools.Refusal("Google Calendar is not connected.")
+                action = name.replace("_", ".", 1)
+                preview = turn.calendar().write_preview(action, **_calendar_args(name, call_args))
+                facts.update(attendees=0, owner_event=False)
+            else:
+                preview = _vault_preview(turn.memory, name, call_args)
+            verdict = Policy().explain(facts)
+            if verdict["level"] == "L3":
+                return tools.Refusal("Policy blocks this action.")
+            if verdict["level"] not in ("L0", "L1", "L2"):
+                return tools.Refusal("Policy could not evaluate this action.")
+            card = build_card(name, call_args, preview)
+            receipt = []
+            allowed = self._broker.ask(
+                name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
+                verdict=verdict, preview=preview, cancelled=turn.stop,
+                on_approved=lambda id, signature: receipt.append((id, signature)),
+            )
+            if allowed is not True or not receipt or turn.stop():
+                return False
+            request_id, approved_digest = receipt[0]
+            turn.grant = _WriteGrant(request_id, approved_digest, name, call_args, tuple(args), preview)
+            return True
+        except vault.VaultError as exc:
+            return tools.Refusal(str(exc))
+        except Exception:
+            return tools.Refusal("The approval request could not be prepared.")
+
+
+def _vault_preview(memory, tool, args):
+    name = args["name"]
+    replacement = ""
+    today = date.today().isoformat()
+    if tool == "vault_add":
+        entry = vault._new_entry(**args)
+        memory._vault.check_add_target(entry.location)
+    else:
+        entry = memory._vault.read(name)
+        if tool == "vault_patch":
+            if entry.location not in memory._reads:
+                raise vault.VaultError("Read the vault entry in this turn before patching.")
+            if memory._reads[entry.location] != entry.revision:
+                raise vault.VaultError("The vault entry changed. Read it again before patching.")
+            old, new = args["old"], args["new"]
+            cap = vault.body_cap(entry.location)
+            for field in ("old", "new"):
+                if len(args[field]) > cap:
+                    raise vault.VaultError(f"Patch {field} text must be at most {cap} characters.")
+            body, _ = vault._patch_body(entry, old, new)
+            vault._body(body, allow_empty=not entry.location.folder)
+            entry = replace(entry, body=body, updated=today)
+        else:
+            if not entry.location.folder:
+                raise vault.VaultError("This fixed vault entry cannot be archived.")
+            ref = args["replaced_by"]
+            if not isinstance(ref, str):
+                raise vault.VaultError("Invalid replacement name.")
+            if ref:
+                location = memory._vault.read(ref).location
+                if location == entry.location:
+                    raise vault.VaultError("Choose a different active replacement.")
+                replacement = location.ref
+                ref = location.name
+            entry = replace(entry, status="archived", replaced_by=ref, updated=today)
+    cap = vault.body_cap(entry.location)
+    if len(entry.body) > cap:
+        raise vault.VaultError(f"Memory body must be at most {cap} characters.")
+    flags = entry.scan_markdown(entry.markdown(), purpose="memory")
+    return {"ref": entry.location.ref, "revision": entry.revision.hex() if entry.revision else "absent",
+            "replacement": replacement, "flags": flags}
 
 
 def _bound(fn):
@@ -120,6 +276,52 @@ def vault_read(name: Annotated[str, "Entry name or folder/name reference."]) -> 
 def vault_search(query: Annotated[str, "Nonempty substring to find."]) -> str:
     """Search across active vault entries."""
     return _reference(_TURN.get().memory.memory_search(query), "the memory vault")
+
+
+def _vault_write(tool, method, **args):
+    turn = _TURN.get()
+    grant = _take_grant(tool, args)
+    if grant is None:
+        return "Error: Vault write requires approval."
+    ref, revision = (grant.preview[key] for key in ("ref", "revision"))
+    folder, slash, name = ref.partition("/")
+    location = vault.Location(folder, name) if slash else vault.Location("", ref)
+    if tool == "vault_archive":
+        args["replaced_by"] = grant.preview["replacement"]
+    with turn.memory.expect_revision(location, None if revision == "absent" else bytes.fromhex(revision)):
+        return method(turn.memory, **args)
+
+
+@_bound
+def vault_add(
+    folder: Annotated[str, "Vault folder for the new entry."],
+    name: Annotated[str, "Short kebab-case entry name."],
+    description: Annotated[str, "One-line description."],
+    body: Annotated[str, "Markdown body to save."],
+    source: Annotated[str, "Where the information came from."],
+) -> str:
+    """Add a memory entry with owner approval."""
+    return _vault_write("vault_add", MemoryTools.memory_add, folder=folder, name=name,
+                        description=description, body=body, source=source)
+
+
+@_bound
+def vault_patch(
+    name: Annotated[str, "Reference to a vault entry read in this turn."],
+    old: Annotated[str, "Text that occurs exactly once."],
+    new: Annotated[str, "Replacement text."],
+) -> str:
+    """Replace one substring in a vault entry with owner approval."""
+    return _vault_write("vault_patch", MemoryTools.memory_patch, name=name, old=old, new=new)
+
+
+@_bound
+def vault_archive(
+    name: Annotated[str, "Entry name or folder/name reference."],
+    replaced_by: Annotated[str, "Optional reference to an active replacement."] = "",
+) -> str:
+    """Archive a vault entry with owner approval."""
+    return _vault_write("vault_archive", MemoryTools.memory_archive, name=name, replaced_by=replaced_by)
 
 
 @_bound
@@ -159,12 +361,7 @@ def skill_names() -> str:
 def _calendar_read(method, *args):
     if not calendar_available():
         return "Error: Google Calendar is not connected."
-    from jarvis import google_auth
-    from .tools.calendar import CalendarTools
-
-    # The token refresh is v1's own (it saves a rotated token before use): this
-    # chat never guards or skips that write, so it may complete after close().
-    return method(CalendarTools(token=google_auth.access_token), *args)
+    return method(_TURN.get().calendar(), *args)
 
 
 @_bound
@@ -185,6 +382,56 @@ def calendar_free(
 ) -> str:
     """Find free time on the primary calendar."""
     return _calendar_read(lambda client, *args: client.calendar_free(*args), start, end, min_minutes)
+
+
+def _calendar_args(tool, args):
+    if tool == "calendar_create" and args["reminders"] is None:
+        return {**args, "reminders": ()}
+    return args
+
+
+def _calendar_write(tool, **args):
+    turn = _TURN.get()
+    grant = _take_grant(tool, args)
+    if not calendar_available():
+        return "Error: Google Calendar is not connected."
+    if grant is None:
+        return "Error: Calendar write requires approval."
+    approve = _CalendarGrant(tool.replace("_", ".", 1), grant.preview, turn.stop)
+    client = turn.calendar(approve=approve)
+    return getattr(client, tool)(**_calendar_args(tool, args), cancelled=turn.stop)
+
+
+@_bound
+def calendar_create(
+    title: Annotated[str, "Event title."],
+    start: Annotated[str, "Start as an ISO 8601 datetime."],
+    end: Annotated[str, "End as an ISO 8601 datetime."],
+    description: Annotated[str, "Event description."] = "",
+    reminders: Annotated[list[int] | None, "Up to five popup reminders in minutes before the event."] = None,
+) -> str:
+    """Create a primary calendar event with owner approval."""
+    return _calendar_write("calendar_create", title=title, start=start, end=end,
+                           description=description, reminders=reminders)
+
+
+@_bound
+def calendar_update(
+    event_id: Annotated[str, "ID of the Jarvis-owned event."],
+    title: Annotated[str | None, "New title."] = None,
+    start: Annotated[str | None, "New start as an ISO 8601 datetime."] = None,
+    end: Annotated[str | None, "New end as an ISO 8601 datetime."] = None,
+    description: Annotated[str | None, "New description."] = None,
+) -> str:
+    """Update a Jarvis-owned event with owner approval."""
+    return _calendar_write("calendar_update", event_id=event_id, title=title,
+                           start=start, end=end, description=description)
+
+
+@_bound
+def calendar_delete(event_id: Annotated[str, "ID of the Jarvis-owned event."]) -> str:
+    """Delete a Jarvis-owned event with owner approval."""
+    return _calendar_write("calendar_delete", event_id=event_id)
 
 
 @_bound
@@ -210,13 +457,19 @@ _WRAPPERS = {fn.__name__: fn for fn in (
     vault_list, vault_read, vault_search, index_search, skill_view, skill_names,
     calendar_list, calendar_free, brief_post,
 )}
+_GATED_WRAPPERS = {fn.__name__: fn for fn in (
+    vault_add, vault_patch, vault_archive, calendar_create, calendar_update, calendar_delete,
+)}
 
 
 def _validate_toolset():
     if V3_TOOLS != _WRAPPERS.keys() | {"get_datetime"} or any(
-        name.startswith(FORBIDDEN_PREFIXES) for name in V3_TOOLS
+        name.startswith(FORBIDDEN_PREFIXES) for name in V3_TOOLS | GATED_TOOLS
     ):
         raise RuntimeError("The v3 chat toolset differs from its read and post tools.")
+    if (GATED_TOOLS != _GATED_WRAPPERS.keys() or GATED_TOOLS != _POLICY_KINDS.keys()
+            or GATED_TOOLS & (V3_TOOLS | tools.PARALLEL_SAFE)):
+        raise RuntimeError("The v3 chat gated toolset is invalid.")
     clock_tool = tools.REGISTRY.get("get_datetime")
     if clock_tool is None or clock_tool.dangerous or clock_tool.func is not get_datetime:
         raise RuntimeError("The v3 chat clock tool is missing or unsafe.")
@@ -225,19 +478,81 @@ def _validate_toolset():
 _validate_toolset()
 
 
-def register_tools():
+def register_tools(*, include_gated=True):
     with _REGISTRATION:
         _validate_toolset()
-        for name, fn in _WRAPPERS.items():
+        wrappers = _WRAPPERS | _GATED_WRAPPERS if include_gated else _WRAPPERS
+        for name, fn in wrappers.items():
             registered = tools.REGISTRY.get(name)
-            if registered is not None and (registered.func is not fn or registered.dangerous):
+            if registered is not None and (
+                registered.func is not fn or registered.dangerous != (name in GATED_TOOLS)
+            ):
                 raise RuntimeError(f"The v3 chat tool name {name} is already registered.")
         # Mark names before registering so a concurrent default_names() never
         # sees a new wrapper as part of the legacy default toolset.
-        tools.EXPLICIT_ONLY.update(_WRAPPERS)
-        for name, fn in _WRAPPERS.items():
+        tools.EXPLICIT_ONLY.update(wrappers)
+        for name, fn in wrappers.items():
             if name not in tools.REGISTRY:
-                tools.tool(fn)
+                tools.tool(fn, dangerous=name in GATED_TOOLS)
+
+
+_ARG_TYPES = {"string": str, "integer": int, "array": list}
+
+
+def _valid_argument(value, schema):
+    if type(value) is not _ARG_TYPES[schema["type"]]:
+        return False
+    if isinstance(value, list):
+        return all(_valid_argument(item, schema["items"]) for item in value)
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            return False
+    return True
+
+
+def _argument_error(raw, entry):
+    if not isinstance(raw, str):
+        return "Error: arguments must be a JSON string."
+    try:
+        args = json.loads(raw)
+    except (ValueError, RecursionError):
+        return "Error: arguments were not valid JSON."
+    if not isinstance(args, dict):
+        return "Error: arguments must be a JSON object."
+    schema = entry.schema
+    missing = [field for field in schema["required"] if field not in args]
+    if missing:
+        return f"Error: missing required argument(s): {', '.join(missing)}."
+    fields = schema["properties"]
+    if args.keys() - fields.keys():
+        return "Error: arguments contain an unknown field."
+    params = signature(entry.func).parameters
+    for field, value in args.items():
+        if value is None and params[field].default is None:
+            continue
+        if not _valid_argument(value, fields[field]):
+            return f"Error: invalid value for argument {field}."
+    return None
+
+
+class _ChatAgent(Agent):
+    def _dispatch_one(self, call):
+        name = _call_name(call)
+        if name not in (runtime.current_tools() or ()):
+            return super()._dispatch_one(call)
+        turn = _TURN.get()
+        if name in GATED_TOOLS:
+            turn.grant = None
+        try:
+            error = _argument_error(_call_args(call), tools.REGISTRY[name])
+            if error is not None:
+                return tools.ToolResult(error)
+            return super()._dispatch_one(call)
+        finally:
+            if name in GATED_TOOLS:
+                turn.grant = None
 
 
 class _TurnSession:
@@ -319,10 +634,11 @@ def _enable_request_guard():
 
 
 def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
-             completion, stop, take_steering, admit_completion, emit, tool_write):
-    register_tools()
+             completion, stop, take_steering, admit_completion, emit, tool_write,
+             turn_id=None, approvals=None, calendar=None):
+    register_tools(include_gated=approvals is not None)
     session = _TurnSession(sessions.Session(session_id, path, meta), clock)
-    names = available_tools(V3_TOOLS)
+    names = available_tools(V3_TOOLS, gated=approvals is not None)
     real_transport = completion is None
     if real_transport:
         _enable_request_guard()
@@ -352,7 +668,8 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
             session.unsent.add(id(agent.messages[-1]))
         elif kind in ("tool_start", "tool_end"):
             name, detail = data
-            shown_name = name if name in V3_TOOLS else "unknown"
+            known = V3_TOOLS | GATED_TOOLS if approvals is not None else V3_TOOLS
+            shown_name = name if name in known else "unknown"
             if kind == "tool_start":
                 emit(kind, name=shown_name)
             else:
@@ -363,17 +680,20 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                     summary = "Only two briefs may be posted per turn."
                 emit(kind, name=shown_name, ok=ok, summary=summary)
 
-    agent = Agent(
+    turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
+                      _default_calendar if calendar is None else calendar)
+    agent = _ChatAgent(
         model=models.tier("orchestrator"), system=config.SYSTEM_PROMPT + _CHAT_PROMPT,
         tool_names=names, max_steps=config.FAST_STEPS,
-        approve=deny_all, on_event=on_event, should_stop=stop, session=session,
+        approve=deny_all if approvals is None else ChatApprover(approvals, turn),
+        on_event=on_event, should_stop=stop, session=session,
         policy=ContextPolicy(spill_dir=_NO_SPILL),
     )
     agent.completion = complete
     agent._summarize = partial(_summarize_with, complete)
     agent.take_steering = take_steering
 
-    token = _TURN.set(_TurnTools(session_id, data_dir, feed_root, clock, tool_write, stop, before_request))
+    token = _TURN.set(turn)
     try:
         if stop():
             session.turn = Turn(cancelled=True)
@@ -388,3 +708,5 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
         return session
     finally:
         _TURN.reset(token)
+        if approvals is not None:
+            approvals.cancel(turn_id)

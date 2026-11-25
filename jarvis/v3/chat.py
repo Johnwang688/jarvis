@@ -24,6 +24,8 @@ HISTORY_LIMIT = 50
 HISTORY_MESSAGE_LIMIT = 64_000
 ERROR_MESSAGE = "The chat turn could not complete."
 CALENDAR_TOOLS = frozenset({"calendar_list", "calendar_free"})
+CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_delete"})
+GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
 TOOL_NAMES = frozenset({
     "get_datetime", "vault_list", "vault_read", "vault_search", "index_search",
     "skill_view", "skill_names", "brief_post", *CALENDAR_TOOLS,
@@ -49,8 +51,10 @@ def calendar_available():
     return Path(config.GOOGLE_TOKEN_PATH).is_file()
 
 
-def available_tools(names=TOOL_NAMES):
-    return sorted(names if calendar_available() else names - CALENDAR_TOOLS)
+def available_tools(names=TOOL_NAMES, *, gated=False):
+    if gated:
+        names = names | GATED_TOOLS
+    return sorted(names if calendar_available() else names - (CALENDAR_TOOLS | CALENDAR_WRITES))
 
 
 def is_private_chat_directory(fd):
@@ -139,17 +143,21 @@ _BAD_SESSION = (ChatStorageError, OSError, ValueError, TypeError, KeyError, Recu
 
 
 class ChatService:
-    def __init__(self, root, *, completion=None, clock=time.time, feed_root=None):
+    def __init__(self, root, *, completion=None, clock=time.time, feed_root=None,
+                 approvals=None, calendar=None):
         self.root = Path(root).expanduser().absolute()
         self._feed_root = self.root.parent / "feed" if feed_root is None else Path(feed_root)
         self._completion = completion
         self._clock = clock
+        self.approvals = approvals
+        self._calendar = calendar
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._stop = threading.Event()
         self._worker = None
         self._state = "idle"
         self._session_id = None
+        self._turn_id = None
         self._selected = False
         self._seq = 0
         self._events = deque(maxlen=EVENT_LIMIT)
@@ -239,8 +247,12 @@ class ChatService:
                 if self._session_id is not None:
                     raise ChatStorageError("Chat session is unavailable.") from None
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
-                    "draft": self._draft, "tools": available_tools(), "history": history,
-                    "last_error": self._last_error}
+                    "draft": self._draft, "tools": available_tools(gated=self.approvals is not None),
+                    "history": history, "last_error": self._last_error,
+                    "approvals": self._approval_count()}
+
+    def _approval_count(self):
+        return 0 if self.approvals is None else len(self.approvals.pending())
 
     def _emit(self, kind, **fields):
         self._seq += 1
@@ -250,7 +262,8 @@ class ChatService:
         with self._lock:
             return {"state": self._state, "seq": self._seq,
                     "gap": bool(self._events and after < self._events[0]["seq"] - 1),
-                    "events": [row.copy() for row in self._events if row["seq"] > after]}
+                    "events": [row.copy() for row in self._events if row["seq"] > after],
+                    "approvals": self._approval_count()}
 
     def send(self, text):
         if (not isinstance(text, str) or len(text) > MAX_TEXT or not text.strip()
@@ -284,6 +297,7 @@ class ChatService:
 
     def _begin(self, inputs, *, waiting):
         self._stop.clear()
+        self._turn_id = uuid4().hex if self.approvals is not None else None
         self._taken = 0
         self._pending_followup = waiting
         self._draft = ""
@@ -349,9 +363,11 @@ class ChatService:
                     session = run_turn(
                         sid, path, _read_meta(path, sid), text="\n\n".join(inputs), data_dir=self.root.parent,
                         feed_root=self._feed_root, clock=self._clock, completion=self._completion,
-                        stop=self._stop.is_set, take_steering=self._take_steering,
+                        stop=lambda: self._stop.is_set() or self._closed.is_set(),
+                        take_steering=self._take_steering,
                         admit_completion=self._admit_completion, emit=self._on_event,
-                        tool_write=self._tool_write,
+                        tool_write=self._tool_write, turn_id=self._turn_id,
+                        approvals=self.approvals, calendar=self._calendar,
                     )
                     with self._lock:
                         if self._closed.is_set():
@@ -404,6 +420,8 @@ class ChatService:
         if self._state == "running":
             self._state = "stopping"
             self._stop.set()
+            if self.approvals is not None:
+                self.approvals.cancel(self._turn_id)
 
     def new_session(self):
         with self._lock:

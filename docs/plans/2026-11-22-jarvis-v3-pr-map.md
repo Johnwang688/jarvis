@@ -473,6 +473,9 @@ it runs beside the later waves, in this order:
 - **A6c: approvals in v3** ⚑ boundary. A broker, the approval card panel
   (hud3 reuses v2's card), and the fast path's gated tools. Agents never reach
   it (control-plane rules). **Depends:** A6b. **Size:** M.
+  - [x] A6c-1 approval broker, owner approval routes and six gated chat tools.
+  - [ ] A6c-2 hud3 approval card with the `approvals` count read by `chatApi`.
+  - [ ] A6c-3 `run_command`, `write_file` and `edit_file` in a pinned folder.
 - **A6d: speech.** `/stt` and `/say` on the v3 daemon from the v1 voice modules
   (`voice`, `stt_local`, `stt_settings`, `speaker` import nothing from v2);
   push-to-talk and the wake word in hud3 from `hud/src/lib`. Local voice stays

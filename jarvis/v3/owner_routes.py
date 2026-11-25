@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from jarvis import config
 
+from .approvals import ApprovalConflict
 from .chat import ChatBusy, ChatInboxFull
 
 if TYPE_CHECKING:
@@ -117,6 +118,26 @@ def _chat_new(body, chat):
     return 200, chat.new_session()
 
 
+def _approvals_list(body, chat):
+    return 200, {"approvals": [] if chat is None or chat.approvals is None else chat.approvals.pending()}
+
+
+def _approvals_answer(body, chat):
+    if (body.keys() != {"id", "digest", "decision"}
+            or not all(isinstance(value, str) for value in body.values())
+            or body["decision"] not in ("approve", "deny")):
+        return 400, {"error": "Expected an approval ID, digest and decision."}
+    if chat is None or chat.approvals is None:
+        return 404, {"error": "Approval not found."}
+    try:
+        state = chat.approvals.answer(body["id"], body["digest"], body["decision"])
+    except KeyError:
+        return 404, {"error": "Approval not found."}
+    except ApprovalConflict:
+        return 409, {"error": "Approval conflicts with the pending request."}
+    return 200, {"id": body["id"], "state": state}
+
+
 def _learned_target(store, rid, *, rollback, nonblocking=False):
     with store._operation(initialize=False, nonblocking_read=nonblocking) as op:
         rows = op.records()
@@ -198,6 +219,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v3/owner/chat/stop"): Route(_chat_stop, with_chat=True),
     ("POST", "/v3/owner/chat/events"): Route(_chat_events, with_chat=True),
     ("POST", "/v3/owner/chat/new"): Route(_chat_new, with_chat=True),
+    ("GET", "/v3/owner/approvals"): Route(_approvals_list, with_chat=True),
+    ("POST", "/v3/owner/approvals/answer"): Route(_approvals_answer, with_chat=True),
     ("POST", "/v3/owner/learned/rollback"): Route(partial(_learned, action="rollback"), with_data_dir=True),
     ("POST", "/v3/owner/learned/pin"): Route(partial(_learned, action="pin"), with_data_dir=True),
     ("POST", "/v3/owner/learned/lock"): Route(partial(_learned, action="lock"), with_data_dir=True),

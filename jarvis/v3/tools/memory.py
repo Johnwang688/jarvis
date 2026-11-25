@@ -1,5 +1,6 @@
 """Session-local memory tools for v3 agents."""
 
+from contextlib import contextmanager
 from functools import wraps
 from threading import RLock
 from typing import Annotated
@@ -29,13 +30,26 @@ def _tool(method):
 class MemoryTools:
     """Bind one instance per session. The optional index is reserved for vault FTS."""
 
-    def __init__(self, vault: Vault, *, index=None, write_purpose: Purpose = "memory", review_patch: bool = False):
+    def __init__(self, vault: Vault, *, index=None, write_purpose: Purpose = "memory",
+                 review_patch: bool = False, write_scope=None):
         self._vault = vault
         self._write_purpose = write_purpose
         self._review_patch = review_patch
+        self._write_scope = write_scope
+        self._expected = None
         self._reads = {}
         self._flags = []
         self._lock = RLock()
+
+    @contextmanager
+    def expect_revision(self, location, revision):
+        """Apply a pinned revision to the chat's next memory operation."""
+        with self._lock:
+            previous, self._expected = self._expected, (location, revision)
+            try:
+                yield
+            finally:
+                self._expected = previous
 
     def flags(self) -> list[dict[str, str]]:
         with self._lock:
@@ -65,7 +79,9 @@ class MemoryTools:
         source: Annotated[str, "Where the information came from."],
     ) -> str:
         """Add a new memory entry with its provenance."""
-        entry, flags = self._vault.add(folder, name, description, body, source, purpose=self._write_purpose)
+        entry, flags = self._vault.add(folder, name, description, body, source, purpose=self._write_purpose,
+                                      require_absent=self._expected is not None,
+                                      write_scope=self._write_scope)
         self._flags.extend(flags)
         return f"Added {entry.location.ref}."
 
@@ -78,7 +94,8 @@ class MemoryTools:
     ) -> str:
         """Replace one unique substring in a memory body read in this session."""
         entry, flags = self._vault.patch(name, old, new, self._reads, purpose=self._write_purpose,
-                                        review_patch=self._review_patch)
+                                        review_patch=self._review_patch, expected=self._expected,
+                                        write_scope=self._write_scope)
         self._reads[entry.location] = entry.revision
         self._flags.extend(flags)
         return f"Patched {entry.location.ref}."
@@ -90,7 +107,8 @@ class MemoryTools:
         replaced_by: Annotated[str, "Reference to the replacement entry, if any."] = "",
     ) -> str:
         """Archive a memory entry and optionally identify its replacement."""
-        entry, flags = self._vault.archive(name, replaced_by)
+        entry, flags = self._vault.archive(name, replaced_by, expected=self._expected,
+                                           write_scope=self._write_scope)
         self._reads.pop(entry.location, None)
         self._flags.extend(flags)
         return f"Archived {entry.location.ref}."

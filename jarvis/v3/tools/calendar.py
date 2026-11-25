@@ -36,10 +36,20 @@ _REQUEST_SECONDS = 30
 _READ_SECONDS = 10
 _MAX_WINDOW = timedelta(days=366)
 _MAX_EVENT = timedelta(days=7)
+DESCRIPTION_LIMIT = 8000
 
 
 class _CalendarError(Exception):
     """An error message safe to return to the caller."""
+
+
+class _CalendarStopped(_CalendarError):
+    """A write was stopped before contacting Calendar."""
+
+
+def _check_write_cancelled(cancelled):
+    if cancelled is not None and cancelled():
+        raise _CalendarStopped("The chat turn is stopping.")
 
 
 def _text_result(method):
@@ -231,7 +241,7 @@ class CalendarTools:
         self._transport = transport
         self._token = token
 
-    def _default_request(self, method, url, *, params, json, _if_match=None):
+    def _default_request(self, method, url, *, params, json, _if_match=None, cancelled=None):
         deadline = time.monotonic() + _REQUEST_SECONDS
         headers = {"Accept-Encoding": "identity"}
         if _if_match is not None:
@@ -241,8 +251,10 @@ class CalendarTools:
                 _remaining(deadline)
                 token = (self._token or google_auth.access_token)()
                 headers["Authorization"] = f"Bearer {token}"
+                timeout = min(_READ_SECONDS, _remaining(deadline))
+                _check_write_cancelled(cancelled)
                 with client.stream(
-                    method, url, params=params, json=json, headers=headers, timeout=min(_READ_SECONDS, _remaining(deadline))
+                    method, url, params=params, json=json, headers=headers, timeout=timeout
                 ) as response:
                     status = response.status_code
                     _remaining(deadline)
@@ -250,16 +262,20 @@ class CalendarTools:
                         return status, _read_response(response, deadline) if 200 <= status < 300 else {}
                 google_auth.invalidate()
 
-    def _call(self, method, url, *, params=None, body=None, etag=None):
+    def _call(self, method, url, *, params=None, body=None, etag=None, cancelled=None):
         write = method != "GET"
         uncertain = " The Calendar write may have taken effect." if write else ""
         try:
+            _check_write_cancelled(cancelled)
             if self._request is None:
-                status, event = self._default_request(method, url, params=params, json=body, _if_match=etag)
+                status, event = self._default_request(method, url, params=params, json=body, _if_match=etag,
+                                                      cancelled=cancelled)
             else:
                 status, event = self._request(method, url, params=params, json=body)
         except google_auth.AuthError:
             raise _CalendarError("Google authorization failed. The owner can run `jarvis auth google`.") from None
+        except _CalendarStopped:
+            raise
         except _CalendarError as exc:
             raise _CalendarError(str(exc) + uncertain) from None
         except Exception:
@@ -421,7 +437,7 @@ class CalendarTools:
 
     def _new_event(self, title, start, end, description):
         title = _validate_text(title, "title", 300)
-        description = _validate_text(description, "description", 8000, multiline=True)
+        description = _validate_text(description, "description", DESCRIPTION_LIMIT, multiline=True)
         first, last = _instant(start), _instant(end)
         self._duration(first, last)
         self._future(first)
@@ -438,9 +454,7 @@ class CalendarTools:
         if answer is not True:
             raise _CalendarError("Calendar write requires approval.")
 
-    @_text_result
-    def calendar_create(self, title, start, end, description="", reminders=()):
-        """Create a tagged, timed event on primary with no attendees."""
+    def _prepare_create(self, title, start, end, description="", reminders=()):
         body = self._new_event(title, start, end, description)
         if (
             not isinstance(reminders, (tuple, list)) or len(reminders) > 5
@@ -453,16 +467,21 @@ class CalendarTools:
                 "overrides": [{"method": "popup", "minutes": minutes} for minutes in reminders],
             }
         body["extendedProperties"] = {"private": {"jarvis": "1"}}
-        params = {"sendUpdates": "none"}
-        self._authorize("calendar.create", "POST", _PRIMARY, params, body)
-        result = self._call("POST", _PRIMARY, params=params, body=body)
+        return {"method": "POST", "url": _PRIMARY, "params": {"sendUpdates": "none"}, "body": body}
+
+    @_text_result
+    def calendar_create(self, title, start, end, description="", reminders=(), *, cancelled=None):
+        """Create a tagged, timed event on primary with no attendees."""
+        details = self._prepare_create(title, start, end, description, reminders)
+        self._authorize("calendar.create", **details)
+        result = self._call(**details, cancelled=cancelled)
         try:
             event_id = _event_id(result.get("id"))
         except _CalendarError:
             raise _CalendarError("Google Calendar returned no valid event ID. The event may have been created.") from None
         return f"Created event {event_id}."
 
-    def _change(self, action, method, event_id, body, *, start=None, end=None):
+    def _prepare_change(self, method, event_id, body, *, start=None, end=None):
         url = f"{_PRIMARY}/{_event_id(event_id)}"
         before = self._call("GET", url)
         etag = _owned_etag(before, event_id)
@@ -482,33 +501,58 @@ class CalendarTools:
                 self._future(last)
                 body["end"] = _wire_time(last)
             self._duration(first, last)
-        params = {"sendUpdates": "none"}
-        self._authorize(action, method, url, params, body, before=before, etag=etag)
-        current = self._call("GET", url)
+        return {"method": method, "url": url, "params": {"sendUpdates": "none"}, "body": body,
+                "before": before, "etag": etag}
+
+    def _change(self, action, event_id, *, before, etag, cancelled, **details):
+        self._authorize(action, before=before, etag=etag, **details)
+        current = self._call("GET", details["url"])
         if _owned_etag(current, event_id) != etag:
             raise _CalendarError("Calendar event changed after approval. Review it before trying again.")
-        result = self._call(method, url, params=params, body=body, etag=etag)
-        if method == "PATCH" and result.get("id") != event_id:
+        result = self._call(etag=etag, **details, cancelled=cancelled)
+        if details["method"] == "PATCH" and result.get("id") != event_id:
             raise _CalendarError("Google Calendar did not confirm the change. The event may have been updated.")
 
-    @_text_result
-    def calendar_update(self, event_id, *, title=None, start=None, end=None, description=None):
-        """Patch the supplied fields of a Jarvis-owned event on primary."""
+    def _prepare_update(self, event_id, *, title=None, start=None, end=None, description=None):
         body = {}
         if title is not None:
             body["summary"] = _validate_text(title, "title", 300)
         if description is not None:
-            body["description"] = _validate_text(description, "description", 8000, multiline=True)
+            body["description"] = _validate_text(description, "description", DESCRIPTION_LIMIT, multiline=True)
         if not body and start is None and end is None:
             raise _CalendarError("Supply at least one field to update.")
-        self._change("calendar.update", "PATCH", event_id, body, start=start, end=end)
+        return self._prepare_change("PATCH", event_id, body, start=start, end=end)
+
+    @_text_result
+    def calendar_update(self, event_id, *, title=None, start=None, end=None, description=None, cancelled=None):
+        """Patch the supplied fields of a Jarvis-owned event on primary."""
+        details = self._prepare_update(event_id, title=title, start=start, end=end, description=description)
+        self._change("calendar.update", event_id, **details, cancelled=cancelled)
         return f"Updated event {event_id}."
 
     @_text_result
-    def calendar_delete(self, event_id):
+    def calendar_delete(self, event_id, *, cancelled=None):
         """Delete a Jarvis-owned event on primary."""
-        self._change("calendar.delete", "DELETE", event_id, None)
+        self._change("calendar.delete", event_id, **self._prepare_change("DELETE", event_id, None),
+                     cancelled=cancelled)
         return f"Deleted event {event_id}."
+
+    def write_preview(self, action, **args):
+        """Prepare the write and read the eligible current event without mutating it."""
+        if action == "calendar.create":
+            return self._prepare_create(**args)
+        if action == "calendar.update":
+            details = self._prepare_update(**args)
+        elif action == "calendar.delete":
+            details = self._prepare_change("DELETE", body=None, **args)
+        else:
+            raise _CalendarError("Unknown Calendar write.")
+        before = details["before"]
+        first, last, dates = _event_times(before, _CHICAGO)
+        display = {key: before[key] for key in ("id", "etag", "summary", "description") if key in before}
+        display["start"] = {"date": dates[0]} if dates else _wire_time(first)
+        display["end"] = {"date": dates[1]} if dates else _wire_time(last)
+        return {**details, "before": display}
 
     @_text_result
     def calendar_invite_propose(self, title, start, end, attendees, description=""):
