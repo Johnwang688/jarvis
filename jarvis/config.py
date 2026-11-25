@@ -515,6 +515,7 @@ V3_POLICY_FILE = Path(os.environ.get("JARVIS_POLICY_FILE") or V3_DIR / "policy.j
 V3_SKILLS_DIR = Path(os.environ.get("JARVIS_LEARNED_SKILLS") or V3_DIR / "skills").expanduser()
 V3_SKILL_LEDGER_DIR = V3_DIR / "skill-ledger"
 V3_REVIEW_QUEUE_DIR = V3_DIR / "review-queue"
+V3_SIGNALS_DIR = V3_DIR / "signals"
 V3_BUDGET_LEDGER = V3_DIR / "budget.jsonl"
 V3_INDEX_DB = Path(os.environ.get("JARVIS_INDEX_DB") or V3_DIR / "index.sqlite").expanduser()
 

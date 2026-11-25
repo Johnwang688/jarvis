@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -522,16 +523,23 @@ class Feed:
                 pass
 
     def post(self, fields, *, actor="jarvis", session=None):
+        bid = None
+        if actor == "jarvis" and isinstance(fields, dict) and "idempotency_key" in fields:
+            fields = fields.copy()
+            key = _ref(fields.pop("idempotency_key"))
+            bid = hashlib.sha256(f"jarvis-feed-post:{key}".encode()).hexdigest()[:32]
         values = _fields(fields)
         session = _provenance(values, actor, session)
         payload = None
         with self._locked() as (directory, log, state):
+            if bid in state.rows:
+                return deepcopy(state.rows[bid].brief)
             now = self._clock()
             instant = _instant(now)
             if actor == "agent":
                 self._check_agent_caps(state, session, instant)
             route = _route(values, now, system_local=self._system_local)
-            bid = uuid4().hex
+            bid = bid or uuid4().hex
             values.update(created=now.isoformat(), actor=actor, session=session, route=route)
             self._record(directory, log, [{"event": "post", "id": bid, "brief": values,
                                            "pending": route == "push"}])

@@ -336,8 +336,8 @@ class Wiring(unittest.TestCase):
             with patch.object(briefs.time, "time", return_value=NOW.timestamp()):
                 daemon.start()
                 self.assertEqual(set(scheduler.status()), {
-                    "feed", "skill-curator", "transcripts", "reviewer", "gmail", "consolidate",
-                    "morning-brief", "evening-wrap",
+                    "feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
+                    "schoolwork", "github", "consolidate", "morning-brief", "evening-wrap",
                 })
                 outcomes = {entry["job"]: entry["outcome"] for entry in scheduler.tick()}
             self.assertEqual(outcomes["morning-brief"], "ok")
