@@ -241,7 +241,7 @@ class T3:
         self._binary = binary
         self._timeout = _seconds(timeout)
 
-    def _call(self, verb, *args, message=None, deadline=None):
+    def _invoke(self, argv, *, message=None, deadline=None):
         command_deadline = time.monotonic() + self._timeout
         deadline = command_deadline if deadline is None else min(deadline, command_deadline)
         _left(deadline)
@@ -255,10 +255,13 @@ class T3:
             raise T3Error("missing") from None
         env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
         try:
-            proc = _launch(path, info, ["thread", verb, "--json", *args], env, message, deadline)
-            code, output = _capture(proc, message, deadline)
+            proc = _launch(path, info, argv, env, message, deadline)
+            return _capture(proc, message, deadline)
         except (OSError, ValueError):
             raise T3Error("failed") from None
+
+    def _call(self, verb, *args, message=None, deadline=None):
+        code, output = self._invoke(["thread", verb, "--json", *args], message=message, deadline=deadline)
         if code not in (0, 2):
             raise T3Error("failed")
         try:
@@ -267,6 +270,14 @@ class T3:
             pass
         # Decode errors can retain the raw response in their payload.
         raise T3Error("shape")
+
+    def project_add(self, path, *, title=None) -> None:
+        args = ["project", "add"]
+        if title is not None:
+            args.extend(("--title", _arg(title)))
+        code, _ = self._invoke([*args, _project(path)])
+        if code != 0:
+            raise T3Error("failed")
 
     def start(self, project, message, *, provider, model, title=None, worktree=None, branch=None) -> Run:
         """Start a thread. The title is visible in the process list, so omit private text."""
