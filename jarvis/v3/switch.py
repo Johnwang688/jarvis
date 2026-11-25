@@ -8,6 +8,8 @@ import json
 from math import inf
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import socket
 from subprocess import CompletedProcess, DEVNULL, TimeoutExpired, run
@@ -489,7 +491,72 @@ def restart_v3(env: Env, *, wait: float = WAIT) -> int:
         return _report_failure(env, exc)
 
 
-def _unit_text(python: str, repo: Path) -> bytes:
+_PHONE_HOST_ENV = "JARVIS_REMOTE_HOST"
+
+
+def _phone_environment(data: bytes, host: str | None) -> str | None:
+    service = False
+    continued = ""
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith(("#", ";")):
+            continue
+        if line.endswith("\\"):
+            continued += line[:-1] + " "
+            continue
+        line, continued = continued + line, ""
+        if line.startswith("[") and line.endswith("]"):
+            service = line == "[Service]"
+        if not service:
+            continue
+        key, sep, value = line.partition("=")
+        if not sep or key.rstrip() != "Environment":
+            continue
+        if not value.strip():
+            host = None
+            continue
+        try:
+            assignments = shlex.split(value)
+        except ValueError:
+            continue
+        for assignment in assignments:
+            name, sep, value = assignment.partition("=")
+            if name == _PHONE_HOST_ENV and sep:
+                # A hostname needs no systemd quoting, escapes or specifiers.
+                host = value if re.fullmatch(r"[A-Za-z0-9.-]{0,253}", value) else None
+    return host
+
+
+def _phone_drop_ins(path: Path, host: str | None) -> str | None:
+    directory = path.with_name(path.name + ".d")
+    for drop_in in sorted(directory.glob("*.conf")):
+        try:
+            host = _phone_environment(drop_in.read_bytes(), host)
+        except FileNotFoundError:
+            continue
+    return host
+
+
+def _phone_unit_environment(path: Path, existing: bytes | None, out) -> str:
+    v3_host = _phone_environment(existing or b"", None)
+    v3_effective = _phone_drop_ins(path, v3_host)
+    if v3_effective is None and v3_host is None:
+        v2_path = path.with_name(f"{V2_UNIT}.service")
+        try:
+            v2_host = _phone_environment(v2_path.read_bytes(), None)
+        except FileNotFoundError:
+            v2_host = None
+        v3_host = _phone_drop_ins(v2_path, v2_host)
+        v3_effective = _phone_drop_ins(path, v3_host)
+        if v3_effective:
+            out("The phone host was carried over.")
+    if not v3_effective:
+        out("No phone host is set. Add Environment=JARVIS_REMOTE_HOST=<tailnet host> "
+            "to the v3 unit's [Service] section or a drop-in.")
+    return "" if v3_host is None else f"Environment={_PHONE_HOST_ENV}={v3_host}\n"
+
+
+def _unit_text(python: str, repo: Path, *, phone_environment: str = "") -> bytes:
     python, directory = str(python), str(repo)
     for path in (python, directory):
         if not Path(path).is_absolute() or any(char in path for char in "\n\r\0"):
@@ -505,7 +572,7 @@ def _unit_text(python: str, repo: Path) -> bytes:
     return (
         "[Unit]\nDescription=Jarvis v3 daemon\n\n"
         f"[Service]\nExecStart={executable} -m jarvis agentd\n"
-        f"WorkingDirectory={directory}\nRestart=on-failure\nRestartSec=5\n\n"
+        f"WorkingDirectory={directory}\n{phone_environment}Restart=on-failure\nRestartSec=5\n\n"
         "[Install]\nWantedBy=default.target\n"
     ).encode()
 
@@ -528,13 +595,17 @@ def install_unit(env: Env, *, unit_path: Path, python: str, repo: Path) -> int:
         if unit_path.is_symlink():
             env.out(f"Refusing to install {unit_path}: the unit path is a symlink.")
             return 1
-        data = _unit_text(python, repo)
         try:
             existing = unit_path.read_bytes()
         except FileNotFoundError:
             existing = None
+        messages = []
+        phone_environment = _phone_unit_environment(unit_path, existing, messages.append)
+        data = _unit_text(python, repo, phone_environment=phone_environment)
         if existing == data:
             env.out(f"{unit_path} unchanged.")
+            for message in messages:
+                env.out(message)
             return 0
         created_parents = []
         parent = unit_path.parent
@@ -569,6 +640,8 @@ def install_unit(env: Env, *, unit_path: Path, python: str, repo: Path) -> int:
         if backup is not None:
             env.out(f"Backed up {unit_path} to {backup}.")
         env.out(f"Installed {unit_path}.")
+        for message in messages:
+            env.out(message)
         return 0
     except (OSError, ValueError) as exc:
         env.out(f"Could not install {unit_path}: {exc}")
