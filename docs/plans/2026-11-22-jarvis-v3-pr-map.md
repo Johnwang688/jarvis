@@ -1278,9 +1278,9 @@ CLIs' own safeguards. What follows from it:
   - **Only documented surfaces**: the CLI, plus optionally the `/mcp`
     events from S3. Never the WebSocket RPC or `statev2.sqlite`.
 - **Acceptance:**
-  - [ ] Fixture tests for every call and error.
-  - [ ] An unknown JSON shape → a typed error, no crash.
-  - [ ] Binary resolution tested with multiple runtime dirs.
+  - [x] Fixture tests for every call and error.
+  - [x] An unknown JSON shape → a typed error, no crash.
+  - [x] Binary resolution tested with multiple runtime dirs.
 - **Depends:** S3 (may merge before OG1; it's harmless). **Size:** S.
 
 ### T2: T3 with the v3 HUD (per S1)
