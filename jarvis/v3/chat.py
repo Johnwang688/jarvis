@@ -44,7 +44,7 @@ class ChatBusy(RuntimeError):
 
 
 class ChatInboxFull(ChatBusy):
-    """The turn already has the maximum number of waiting steers."""
+    """The turn already has the maximum number of waiting messages."""
 
 
 class ChatStorageError(RuntimeError):
@@ -186,6 +186,7 @@ class ChatService:
         self._prompt = None
         self._delivered = []
         self._inbox = []
+        self._queued = []
         self._taken = 0
         self._pending_followup = []
         self._draft = ""
@@ -316,7 +317,7 @@ class ChatService:
                     "events": [deepcopy(row) for row in self._events if row["seq"] > after],
                     "approvals": self._approval_count()}
 
-    def send(self, text):
+    def send(self, text, *, steer=True) -> dict:
         if (not isinstance(text, str) or len(text) > MAX_TEXT or not text.strip()
                 or "\0" in text or re.search(r"[\ud800-\udfff]", text)):
             raise ValueError("Invalid chat message.")
@@ -325,10 +326,13 @@ class ChatService:
                 raise ChatBusy("Chat is stopping or closed.")
             self._last_activity = self._clock()
             if self._state == "running":
-                if len(self._inbox) + len(self._pending_followup) >= MAX_INBOX:
+                if len(self._inbox) + len(self._queued) + len(self._pending_followup) >= MAX_INBOX:
                     raise ChatInboxFull("The chat steering queue is full.")
-                self._inbox.append(self._emit("steer", text=text))
-                return {"state": "running", "steered": True}
+                if steer:
+                    self._inbox.append(self._emit("steer", text=text))
+                    return {"state": "running", "steered": True}
+                self._queued.append(self._emit("steer", text=text, queued=True))
+                return {"state": "running", "steered": False}
 
             with self._directory(create=True) as root_fd:
                 self._select(root_fd)
@@ -401,9 +405,14 @@ class ChatService:
         with self._lock:
             yield not self._closed.is_set() and (allow_stopped or not self._stop.is_set())
 
-    def _discard_steers(self):
-        discarded = [row["seq"] for row in (*self._pending_followup, *self._inbox)]
+    def _drain_waiting(self):
+        waiting = sorted((*self._inbox, *self._queued), key=lambda row: row["seq"])
         self._inbox.clear()
+        self._queued.clear()
+        return waiting
+
+    def _discard_steers(self):
+        discarded = [row["seq"] for row in (*self._pending_followup, *self._drain_waiting())]
         self._taken = 0
         self._pending_followup = []
         return {"dropped": len(discarded), "discarded": discarded}
@@ -453,10 +462,10 @@ class ChatService:
                             return
                         self._emit("reply", stamp=reply_stamp, text=turn.text)
                         self._complete_turn(saved)
-                        if not self._inbox:
+                        waiting = self._drain_waiting()
+                        if not waiting:
                             self._state = "idle"
                             return
-                        waiting, self._inbox = self._inbox, []
                         inputs = [row["text"] for row in waiting]
                         self._begin(inputs, waiting=waiting)
             except BaseException:
@@ -499,6 +508,7 @@ class ChatService:
             with self._directory(create=True) as root_fd:
                 sid = self._new_session(root_fd)
             self._inbox.clear()
+            self._queued.clear()
             self._events.clear()
             self._finished_turns.clear()
             return {"session_id": sid}
