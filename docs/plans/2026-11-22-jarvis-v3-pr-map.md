@@ -682,9 +682,14 @@ S1–S6. It is the owner's decision.
 
 - **Spec:** The v3 daemon starts a serial scheduler after binding. It saves
   each job outcome to private state, applies retry backoff and idle checks,
-  and reports job status at `/v3/status`. The feed and curator load lazily.
-  Ingest, consolidation and the review queue join through their own PRs or
-  a follow-up.
+  and reports job status at `/v3/status`. The feed runs every minute and the
+  curator uses its own schedule with a two-hour idle requirement. J2 adds
+  transcript and Gmail ingestion every five minutes and nightly consolidation
+  at 03:30 Chicago without an idle requirement. The three jobs share a lazily
+  opened index. Gmail polls only with a valid saved grant for Gmail read access.
+  Consolidation uses the Claude budget and reports failures to the scheduler.
+  Jobs with a due predicate must satisfy it after backoff. The review queue
+  consumer joins in L2, when its reviews have a reader.
 - **Acceptance:**
   - [x] Ordered ticks, persisted outcomes, backoff and idle checks.
   - [x] Bounded idle scan and shutdown, including a stalled job.
@@ -1019,6 +1024,8 @@ CLIs' own safeguards. What follows from it:
   - Redaction before insert.
   - A first backfill bounded to the last 180 days (configurable).
 - **Acceptance:**
+  - [x] Daemon schedule: J2 ticks the Gmail runner every five minutes when
+    the owner-only bundle has valid OAuth refresh fields and lists `gmail.readonly`.
   - [ ] Fake Gmail API fixtures cover history-id continuation, deleted
     messages and quoted-reply stripping.
   - [ ] Sent mail tagged `from_owner=1` (used by P3).
@@ -1070,6 +1077,9 @@ CLIs' own safeguards. What follows from it:
     `consolidation-memory` purpose blocks directives on consolidation adds
     and patches. Other writes and all reads keep their existing scan rules.
 - **Acceptance:**
+  - [x] Daemon schedule: J2 uses P1's `due()` and passes the Claude usage
+    reader to the budget. An error counts as a failed attempt and the next
+    retry must satisfy both backoff and the nightly schedule.
   - [x] Golden test with a recorded fake response: the expected vault
     writes, over-cap handling, and archive with `replaced_by`.
   - [x] Budget refusal → skip and log the outcome for the next digest.

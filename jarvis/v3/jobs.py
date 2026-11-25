@@ -22,6 +22,8 @@ _IDLE_SCAN_ENTRIES = 4096
 _IDLE_SCAN_DEPTH = 32
 _STATE_LIMIT = 1024 * 1024
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
+_GOOGLE_GRANT_LIMIT = 64 * 1024
+_GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 
 
 def _finite(value):
@@ -203,7 +205,7 @@ class Scheduler:
             delay = min(3600, 60 * 2 ** min(row.failures - 1, 6))
             if now - row.retry_from < delay:
                 return False
-            if row.retry_run:
+            if row.retry_run and job.due is None:
                 return True
         if job.due is not None:
             return job.due(now, row.last_run)
@@ -347,8 +349,41 @@ def idle_seconds(roots=None, *, now=None):
     return 1e12 if newest == -math.inf else max(0.0, now - newest)
 
 
-def default_jobs(*, feed_root=None):
+def _has_gmail_grant(path: Path) -> bool:
+    try:
+        with open_directory(path.parent) as directory:
+            fd = os.open(path.name, os.O_RDONLY | _FILE_FLAGS, dir_fd=directory)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not _regular_private(info) or info.st_mode & 0o077
+                        or not info.st_mode & stat.S_IRUSR or info.st_size > _GOOGLE_GRANT_LIMIT):
+                    return False
+                data = stream.read(_GOOGLE_GRANT_LIMIT + 1)
+                if len(data) > _GOOGLE_GRANT_LIMIT:
+                    return False
+                bundle = json.loads(data)
+    except (OSError, ValueError, RecursionError):
+        return False
+    if not isinstance(bundle, dict):
+        return False
+    fields = (bundle.get(key) for key in ("client_id", "client_secret", "refresh_token"))
+    scopes = bundle.get("scopes")
+    return (all(isinstance(value, str) and value for value in fields)
+            and isinstance(scopes, list) and all(isinstance(scope, str) for scope in scopes)
+            and _GMAIL_READONLY in scopes)
+
+
+def default_jobs(*, feed_root=None, index_path=None, google_token=None):
+    """Build the daemon jobs without opening their stores or contacting providers.
+
+    The Gmail grant check and OAuth refresh read the file separately.
+    A test grant at a different path can exercise wiring with a fake client.
+    The transcript ingest's `budget_s` bounds the scan. The index opens first.
+    The review queue consumer is deferred to L2, when its reviews have a reader.
+    """
     feed = None
+    index = None
+    gmail_runner = None
 
     def feed_tick():
         nonlocal feed
@@ -372,5 +407,56 @@ def default_jobs(*, feed_root=None):
 
         Curator(SkillStore()).run()
 
+    def get_index():
+        nonlocal index
+        if index is None:
+            from .index import Index
+
+            index = Index(config.V3_INDEX_DB if index_path is None else index_path)
+        return index
+
+    def ingest_transcripts():
+        from .ingest.transcripts import ingest
+
+        ingest(get_index(), budget_s=20)
+
+    def ingest_gmail():
+        nonlocal gmail_runner
+        configured = Path(config.GOOGLE_TOKEN_PATH)
+        path = configured if google_token is None else Path(google_token)
+        if not _has_gmail_grant(path):
+            return
+        if gmail_runner is None:
+            from jarvis.google_auth import access_token
+            from .ingest import Runner
+            from .ingest.gmail import GmailIngester, HttpGmail
+
+            def test_grant_token():
+                # A test grant at a different path cannot authorize real OAuth.
+                raise RuntimeError("The Gmail grant is outside the OAuth token path.")
+
+            token = access_token if path == configured else test_grant_token
+            gmail_runner = Runner(get_index(), [GmailIngester(HttpGmail(token))])
+        outcome = gmail_runner.tick().get("gmail")
+        if outcome is not None and outcome["error"] is not None:
+            raise RuntimeError("Gmail ingestion failed.")
+
+    def consolidate_due(now, last_run):
+        from .consolidate import due
+
+        return due(now, last_run=last_run)
+
+    def consolidate():
+        from .budget import Budget
+        from .claude_usage import read_windows
+        from .consolidate import run
+
+        result = run(index=get_index(), budget=Budget(usage=read_windows))
+        if result is not None and result.outcome == "error":
+            raise RuntimeError("Consolidation failed.")
+
     return [Job("feed", feed_tick, every_s=60),
-            Job("skill-curator", curate, due=curator_due, needs_idle_s=idle_required)]
+            Job("skill-curator", curate, due=curator_due, needs_idle_s=idle_required),
+            Job("transcripts", ingest_transcripts, every_s=300),
+            Job("gmail", ingest_gmail, every_s=300),
+            Job("consolidate", consolidate, due=consolidate_due)]
