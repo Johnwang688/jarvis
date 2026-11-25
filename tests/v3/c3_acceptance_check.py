@@ -460,7 +460,16 @@ class GitHub(Base):
                                                "url": "https://example.invalid/example-org/demo/pull/7", "updated": "2027-01-14T10:00:00Z"})
         self.sub(metas["example-org/tools#3"], {"draft": 1, "checks": "none", "authored": 1, "review_requested": 0})
         self.sub(metas["other-org/site#12"], {"checks": "pending", "authored": 0, "review_requested": 1, "review_decision": "review_required"})
-        self.assertTrue(set(self.gh.calls) <= set(github.GH_ARGV))
+        base = github.GH_ARGV[0]                                   # every call is the exported read-only query plus only its own variables
+        for call in self.gh.calls:
+            self.assertEqual(call[:len(base)], base)
+            extra = list(call[len(base):])
+            self.assertEqual(len(extra) % 2, 0, extra)
+            pairs = list(zip(extra[::2], extra[1::2]))
+            for flag, value in pairs:
+                self.assertRegex(f"{flag} {value}", r"^(-F fetch(Authored|Review)=(true|false)|-f (authored|review)After=[A-Za-z0-9_+/=-]{1,4096})$")
+            sent = {value.split("=")[0] for _, value in pairs}       # GitHub rejects the query unless both non-null switches are sent
+            self.assertLessEqual({"fetchAuthored", "fetchReview"}, sent)
         items = self.items("github")
         self.assertEqual(list(items), ["example-org/demo#7", "example-org/tools#3", "other-org/site#12"])
         self.sub(items["other-org/site#12"], {"repo": "other-org/site", "number": 12, "title": "Docs heron", "draft": 0, "checks": "pending",

@@ -115,9 +115,10 @@ class GitHubIngester:
     def _search(self, pending):
         argv = GH_ARGV[0]
         for alias in _SEARCHES:
-            if alias not in pending:
-                argv += ("-F", f"fetch{alias.capitalize()}=false")
-            elif pending[alias] is not None:
+            # Both switches are non-null in the query: GitHub rejects a request
+            # that leaves either one out, so each is always sent.
+            argv += ("-F", f"fetch{alias.capitalize()}={'true' if alias in pending else 'false'}")
+            if pending.get(alias) is not None:
                 argv += ("-f", f"{alias}After={pending[alias]}")
         try:
             status, text = self._run(argv)
