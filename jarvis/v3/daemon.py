@@ -25,6 +25,7 @@ from jarvis import config
 from . import hud, owner_routes
 from .approvals import ApprovalBroker
 from .chat import ChatService
+from .executor import Executor, Worker as ExecutorWorker
 from .jobs import Scheduler, default_jobs, idle_seconds
 from .work import WorkService
 
@@ -32,6 +33,7 @@ from .work import WorkService
 SERVICE_NAME = "jarvis-agentd"
 _MAX_JSON_DEPTH = 128
 _CONFIGURED_PHONE_HOST = object()
+_EXECUTOR_STOP_GRACE_S = 3.0
 LOG = logging.getLogger(__name__)
 
 
@@ -97,7 +99,7 @@ def _decode_route_body(data: bytes) -> dict:
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None,
-                    phone_status=None) -> type[BaseHTTPRequestHandler]:
+                    phone_status=None, get_feed=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -105,7 +107,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
     hud_root = config.HUD3_DIR if hud_dir is None else hud_dir
 
     @cache
-    def get_feed():
+    def default_feed():
         from .feed import Feed
 
         return Feed(data_dir / "feed", lock_timeout=owner_routes.FEED_LOCK_TIMEOUT)
@@ -117,6 +119,8 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
         return Registry(root / "projects.json"), Ledger(root / "threads.jsonl")
 
     get_work = default_work if work is None else work
+    if get_feed is None:
+        get_feed = default_feed
 
     def status():
         return {
@@ -350,9 +354,18 @@ class Daemon:
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
+        self._executor = None
+        self._executor_lock = threading.Lock()
+        self._executor_stop = threading.Event()
+        self._executor_stop.set()
+        self._executor_worker = ExecutorWorker(self._sweep_executor, stop=self._executor_stop)
+        self._executor_thread = None
+        self._executor_condition = threading.Condition()
+        self._executor_sweep = None
         if jobs is None:
             jobs = default_jobs(feed_root=self._data_dir / "feed", chats_root=self._chats_root,
-                                index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite")
+                                index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite",
+                                executor=self._sweep_executor)
         self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json",
                                     idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
@@ -399,6 +412,77 @@ class Daemon:
         chat_idle = self._chat.idle_seconds()
         return min(chat_idle, idle_seconds(chats_root=self._chats_root)) if chat_idle else 0.0
 
+    def _initiative(self):
+        from .feed import Feed
+        from .policy import Policy
+        from .proposals import ProposalStore
+        from .work import Ledger, Registry
+
+        with self._executor_lock:
+            if self._executor is None:
+                feed = Feed(self._data_dir / "feed", lock_timeout=owner_routes.FEED_LOCK_TIMEOUT,
+                            execute=self._executor_worker.wake)
+                if self._work is None:
+                    root = self._data_dir / "work"
+                    registry, ledger = Registry(root / "projects.json"), Ledger(root / "threads.jsonl")
+                else:
+                    registry, ledger = self._work()
+                work = WorkService(registry=registry, ledger=ledger)
+                self._executor = (feed, Executor(ProposalStore(self._data_dir / "proposals"),
+                                                 feed, work, Policy(), stop=self._executor_stop))
+            return self._executor
+
+    def _get_feed(self):
+        return self._initiative()[0]
+
+    def _sweep_executor(self):
+        finished = failed = False
+
+        def run():
+            nonlocal finished, failed
+            try:
+                # A fresh data directory needs no optional proposal modules.
+                if (self._data_dir / "proposals" / "proposals.jsonl").exists():
+                    self._initiative()[1].sweep()
+            except Exception:
+                failed = True
+            finally:
+                with self._executor_condition:
+                    finished = True
+                    self._executor_condition.notify_all()
+
+        with self._executor_condition:
+            previous = self._executor_sweep
+            if self._executor_stop.is_set() or (previous is not None and previous.is_alive()):
+                return
+            # A slow action may outlast the shutdown grace. This thread owns
+            # its durable result and can finish even after both triggers exit.
+            active = threading.Thread(target=run, name="jarvis-v3-proposal-sweep", daemon=False)
+            self._executor_sweep = active
+            try:
+                active.start()
+            except RuntimeError:
+                self._executor_sweep = None
+                raise
+            self._executor_condition.wait_for(lambda: self._executor_stop.is_set() or finished)
+        if finished:
+            active.join()
+        if failed:
+            raise RuntimeError("Proposal sweep could not finish.")
+
+    def _stop_jobs(self):
+        self._executor_stop.set()
+        with self._executor_condition:
+            active = self._executor_sweep
+            self._executor_condition.notify_all()
+        self._executor_worker.wake()
+        self._scheduler.stop()
+        if active is not None:
+            active.join(_EXECUTOR_STOP_GRACE_S)
+        if self._executor_thread is not None:
+            self._executor_thread.join()
+            self._executor_thread = None
+
     def _new_chat(self):
         # The chat and the work route read the same registry and ledger: this daemon's data folder.
         from .work import Ledger, Registry
@@ -412,11 +496,17 @@ class Daemon:
         with self._lock:
             if self._server is not None:
                 return
+            with self._executor_condition:
+                active = self._executor_sweep
+                if active is not None and active.is_alive():
+                    # A restart must never clear a stop that an older sweep still uses.
+                    raise RuntimeError("The previous proposal sweep is still finishing.")
             _prepare_data_dir(self._data_dir)
             if self._chat is None:
                 self._chat = self._new_chat()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
-                                      work=self._work, phone_status=self._phone_status)
+                                      work=self._work, phone_status=self._phone_status,
+                                      get_feed=self._get_feed)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
@@ -430,8 +520,14 @@ class Daemon:
                 server.server_close()
                 raise
             try:
+                self._executor_stop.clear()
+                worker = threading.Thread(target=self._executor_worker.run,
+                                          name="jarvis-v3-executor", daemon=True)
+                worker.start()
+                self._executor_thread = worker
                 self._scheduler.start()
             except RuntimeError:
+                self._stop_jobs()
                 server.shutdown()
                 server.server_close()
                 raise
@@ -443,6 +539,7 @@ class Daemon:
         with self._lock:
             if self._server is None:
                 return
+            self._stop_jobs()
             if self._phone_server is not None:
                 phone = self._phone_server
                 phone.shutdown()
@@ -458,7 +555,6 @@ class Daemon:
             self._chat.close()
             if self._owns_chat:
                 self._chat.approvals.shutdown()
-            self._scheduler.stop()
             self._server.shutdown()
             self._server.server_close()
             self._server = None

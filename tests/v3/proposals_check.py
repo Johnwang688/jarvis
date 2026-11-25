@@ -352,6 +352,20 @@ class ProposalChecks(unittest.TestCase):
         for transition in transitions:
             self.assertEqual(set(transition), {"id", "state", "at", "brief_id", "result"})
 
+    def test_last_transition_time_is_durable(self):
+        proposal = self.store.add(self._draft())
+        pid = proposal["id"]
+        self.assertIsNone(self.store.transition_at(pid))
+        self.assertIsNone(self.store.transition_at("0" * 32))
+        self.store.brief(pid, self.feed)
+        self.instant += timedelta(hours=1)
+        self.store.mark(pid, "approved")
+        reopened = ProposalStore(self.store.root)
+        self.assertEqual(reopened.transition_at(pid), self.instant)
+        self.instant += timedelta(hours=2)
+        self.assertTrue(self.store.claim(pid))
+        self.assertEqual(reopened.transition_at(pid), self.instant)
+
     def test_every_state_transition(self):
         def transition(pid, state, *, result=None):
             if state == "briefed":

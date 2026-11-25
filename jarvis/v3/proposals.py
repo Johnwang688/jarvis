@@ -41,7 +41,7 @@ _TRANSITIONS = {
     "new": ("briefed",),
     "briefed": ("approved", "dismissed", "edited", "expired"),
     "approved": ("running",),
-    "running": ("done", "failed", "unknown"),
+    "running": ("done", "failed", "unknown", "approved"),
 }
 
 
@@ -193,7 +193,9 @@ def _draft_record(draft, run, created, decision):
 @dataclass
 class _Snapshot:
     rows: dict[str, Proposal] = field(default_factory=dict)
+    transitioned_at: dict[str, datetime] = field(default_factory=dict)
     briefed_at: dict[str, datetime] = field(default_factory=dict)
+    approved_at: dict[str, datetime] = field(default_factory=dict)
     dismissed_at: dict[str, datetime] = field(default_factory=dict)
 
     def row(self, pid):
@@ -234,6 +236,12 @@ class _Snapshot:
         if state == "dismissed":
             key = row["dedupe_key"]
             self.dismissed_at[key] = max(at, self.dismissed_at.get(key, at))
+        if state == "approved":
+            if row["state"] == "briefed":
+                self.approved_at[pid] = at
+            elif at != self.approved_at[pid] or record["result"] is not None:
+                raise ProposalError("Invalid released proposal claim.")
+        self.transitioned_at[pid] = at
         row.update(state=state, result=record["result"])
 
     def briefs_today(self, now):
@@ -400,12 +408,32 @@ class ProposalStore:
         except OSError:
             raise ProposalError("The proposal claim could not be recorded safely.") from None
 
+    def release_claim(self, pid) -> None:
+        """Restore approval for a claim the executor has yet to act on.
+
+        The caller must still hold the executor's sweep lock and know the
+        action never started. Preserve the original approval's age.
+        """
+        try:
+            with self._locked(write=True) as (directory, fd, snapshot):
+                row = snapshot.row(pid)
+                if row["state"] != "running":
+                    raise ProposalError("Only a running proposal claim can be released.")
+                self._transition(directory, fd, row, "approved", snapshot.approved_at[pid])
+        except FileNotFoundError:
+            raise ProposalError("Proposal not found.") from None
+        except OSError:
+            raise ProposalError("The proposal claim could not be released safely.") from None
+
     def mark(self, pid, state, *, result=None) -> None:
         if state in ("briefed", "running"):
             raise ProposalError("Use brief or claim for this proposal state.")
         try:
             with self._locked(write=True) as (directory, fd, snapshot):
-                self._transition(directory, fd, snapshot.row(pid), state, self._now(), result=result)
+                row = snapshot.row(pid)
+                if row["state"] == "running" and state == "approved":
+                    raise ProposalError("Use release_claim for a running proposal.")
+                self._transition(directory, fd, row, state, self._now(), result=result)
         except FileNotFoundError:
             raise ProposalError("Proposal not found.") from None
         except OSError:
@@ -413,6 +441,10 @@ class ProposalStore:
 
     def get(self, pid) -> Proposal | None:
         return self._snapshot().rows.get(pid) if _valid_id(pid) else None
+
+    def transition_at(self, pid) -> datetime | None:
+        """Return the last recorded transition, if the proposal has one."""
+        return self._snapshot().transitioned_at.get(pid) if _valid_id(pid) else None
 
     def briefs_today(self) -> int:
         return self._snapshot().briefs_today(self._now())
