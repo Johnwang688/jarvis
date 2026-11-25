@@ -1174,15 +1174,16 @@ CLIs' own safeguards. What follows from it:
     first with the reason, other options, "if you ignore it", collapsed
     context with source links, buttons on top (as in the approval-summary
     decision).
-  - The draft editor for `attachment.type=draft`, with diff capture for P4.
+  - The draft editor for `attachment.type=draft` and diff capture are deferred to P4.
   - Feedback taps.
   - Filters: decisions / news / digests.
 - **Acceptance:**
-  - [ ] Component tests for every brief kind, plus the empty state.
-  - [ ] Keyboard: approve/edit/not-now shortcuts only while the panel has
+  - [x] Component tests for every brief kind, plus the empty state.
+  - [x] Keyboard: approve/edit/not-now shortcuts only while the panel has
     focus.
-  - [ ] Browser-tested against a mock daemon (isolated server, never live).
-  - [ ] Screenshots in the PR.
+  - [x] Browser-tested against an isolated mock server with the HUD CSP.
+  - [x] Screenshots in the checkout: [with briefs](../screens/v3-feed-panel-briefs.png)
+    and [empty](../screens/v3-feed-panel-empty.png).
 - **Depends:** B1. **Size:** M.
 
 ### B3: Phone feed
