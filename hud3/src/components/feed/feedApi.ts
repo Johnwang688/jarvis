@@ -1,3 +1,5 @@
+import { apiFetch } from "../../api";
+
 export type BriefKind = "decision" | "news" | "digest";
 export type FeedbackTag = "too_long" | "missing_context";
 
@@ -29,8 +31,6 @@ export type FeedWrite =
       | { id: string; action: "edit" | "other"; text: string }
     }
   | { route: "feedback"; body: { id: string; tag: FeedbackTag } };
-
-const feedPath = "/v3/owner/feed";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -70,14 +70,14 @@ export function feedError(error: unknown, writing = false) {
   return writing ? "Could not confirm the change. Try again shortly." : "Feed unavailable. Retrying…";
 }
 
-async function request(path: string, options: RequestInit): Promise<unknown> {
-  const response = await fetch(path, { cache: "no-store", redirect: "error", ...options });
+async function request(name: "feed" | "feedAnswer" | "feedFeedback", options: RequestInit): Promise<unknown> {
+  const response = await apiFetch(name, { cache: "no-store", redirect: "error", ...options });
   if (!response.ok) throw new FeedHttpError(response.status);
   return response.json();
 }
 
 export async function readFeed(signal: AbortSignal): Promise<FeedSnapshot> {
-  const value = await request(feedPath, { signal });
+  const value = await request("feed", { signal });
   if (!record(value) || !Array.isArray(value.briefs) || !Array.isArray(value.recent)
     || !value.briefs.every((brief) => isBrief(brief) && brief.state === "open")
     || !value.recent.every((brief) => isBrief(brief) && brief.state !== "open")) {
@@ -87,7 +87,7 @@ export async function readFeed(signal: AbortSignal): Promise<FeedSnapshot> {
 }
 
 export async function writeFeed({ route, body }: FeedWrite): Promise<Brief> {
-  const value = await request(`${feedPath}/${route}`, {
+  const value = await request(route === "answer" ? "feedAnswer" : "feedFeedback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

@@ -1,3 +1,4 @@
+import { apiFetch } from "./api";
 import { useEffect, useState } from "react";
 
 const POLL_MS = 3_000;
@@ -40,7 +41,7 @@ function readJobs(value: unknown): JobStatus[] {
 }
 
 async function readStatus(signal: AbortSignal): Promise<DaemonStatus | null> {
-  const response = await fetch("/v3/status", { signal, cache: "no-store", redirect: "error" });
+  const response = await apiFetch("status", { signal, cache: "no-store", redirect: "error" });
   if (signal.aborted || !response.ok) return null;
   const data: unknown = await response.json();
   if (!data || typeof data !== "object") return null;

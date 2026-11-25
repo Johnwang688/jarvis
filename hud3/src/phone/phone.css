@@ -1,0 +1,138 @@
+html, body, #root {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.phone-shell {
+  --phone-gap: 8px;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  display: grid;
+  gap: var(--phone-gap);
+  padding: max(var(--phone-gap), env(safe-area-inset-top))
+    max(var(--phone-gap), env(safe-area-inset-right))
+    max(var(--phone-gap), env(safe-area-inset-bottom))
+    max(var(--phone-gap), env(safe-area-inset-left));
+  overflow: hidden;
+}
+
+.phone-gate {
+  align-items: center;
+  justify-items: center;
+  overflow-y: auto;
+}
+
+.phone-gate .agent-panel {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+}
+
+.phone-gate h1 { font-size: 22px; }
+.phone-gate .agent-orb { width: 54px; }
+.phone-primary { color: var(--accent-hi); border-color: var(--accent-line); background: var(--accent-soft); }
+
+.phone-dashboard { grid-template-rows: auto minmax(0, 1fr) auto; }
+
+.phone-top, .phone-tabs {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--rim);
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-pane);
+  box-shadow: var(--glass-shadow);
+}
+
+.phone-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--text-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.phone-top .agent-orb { width: 32px; }
+.phone-top button { padding-inline: 10px; }
+.phone-running { color: var(--accent-hi); }
+.phone-shell .phone-error { color: var(--red); }
+
+.phone-lock {
+  margin-inline-start: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--accent-line);
+  border-radius: 99px;
+  color: var(--accent-hi);
+  background: var(--accent-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.phone-lock[data-locked="true"] {
+  color: var(--text-2);
+  border-color: var(--rim);
+  background: var(--glass-solid);
+}
+
+.phone-notice { width: 100%; padding: 2px 4px; }
+
+.phone-content, .phone-content > [role="tabpanel"] {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.phone-content > [hidden] { display: none; }
+.phone-content :is(.agent-feed, .agent-chat) { height: 100%; }
+.phone-content .agent-feed { max-height: none; }
+.phone-content .agent-chat > .chat-log { min-height: 104px; }
+.phone-content .agent-chat > .approval-card { max-height: 48%; }
+
+.phone-work {
+  display: flex;
+  flex-direction: column;
+  gap: var(--phone-gap);
+  overflow: auto;
+}
+
+.phone-work > .agent-panel { flex: none; }
+
+.phone-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.phone-tabs button {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+}
+
+.phone-tabs button[aria-selected="true"] {
+  color: var(--accent-hi);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.phone-badge {
+  padding: 1px 5px;
+  color: var(--amber);
+  border: 1px solid var(--amber-line);
+  border-radius: 99px;
+  font: 11px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.phone-shell :is(button, textarea, summary),
+.phone-shell .feed-card .feed-toggle,
+.phone-shell .feed-card[data-collapsed] > .feed-actions button { min-height: 44px; }
+.phone-shell textarea { font-size: 16px; }
+.phone-shell summary { align-content: center; }

@@ -1,3 +1,5 @@
+import { apiFetch } from "../../api";
+
 export type ChatState = "idle" | "running" | "stopping" | "error";
 
 export interface ChatMessage {
@@ -5,6 +7,7 @@ export interface ChatMessage {
   text: string;
   t?: number;
   steered?: boolean;
+  queued?: boolean;
   discarded?: boolean;
 }
 
@@ -28,7 +31,8 @@ export interface ChatSnapshot {
 type SteerInput = { seq: number; text: string };
 type ChatEvent = { seq: number; t?: number } & (
   | { kind: "user"; text: string; inputs?: SteerInput[] }
-  | { kind: "steer" | "reply"; text: string }
+  | { kind: "steer"; text: string; queued?: boolean }
+  | { kind: "reply"; text: string }
   | { kind: "tool_start"; name: string }
   | ({ kind: "tool_end"; ok: boolean; summary: string } & ChatTool)
   | { kind: "error" | "stopped"; discarded?: number[] }
@@ -45,7 +49,7 @@ interface ChatEvents {
 
 export type ChatAction = { route: "send"; text: string } | { route: "stop" | "new" };
 
-const path = "/v3/owner/chat";
+const actionRoutes = { send: "chatSend", stop: "chatStop", new: "chatNew" } as const;
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -82,6 +86,7 @@ function isEvent(value: unknown): value is ChatEvent {
         (Array.isArray(value.inputs) && value.inputs.every((input) =>
           record(input) && isSequence(input.seq) && typeof input.text === "string")));
     case "steer":
+      return typeof value.text === "string" && (value.queued === undefined || typeof value.queued === "boolean");
     case "reply":
       return typeof value.text === "string";
     case "tool_start":
@@ -117,14 +122,14 @@ export function actionError(action: ChatAction, failure: unknown): string {
   }
 }
 
-async function request(signal: AbortSignal, route?: string, body?: object): Promise<unknown> {
+async function request(signal: AbortSignal, route?: "chatEvents" | typeof actionRoutes[keyof typeof actionRoutes], body?: object): Promise<unknown> {
   const options: RequestInit = { signal, cache: "no-store", redirect: "error" };
   if (route) {
     options.method = "POST";
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(route ? `${path}/${route}` : path, options);
+  const response = await apiFetch(route ?? "chat", options);
   if (!response.ok) throw new ChatHttpError(response.status);
   return response.json();
 }
@@ -158,7 +163,7 @@ export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
 }
 
 export async function readEvents(after: number, signal: AbortSignal): Promise<ChatEvents> {
-  const value = await request(signal, "events", { after });
+  const value = await request(signal, "chatEvents", { after });
   if (!record(value) || !isState(value.state) || !isSequence(value.seq) || typeof value.gap !== "boolean"
     || (value.session_id != null && typeof value.session_id !== "string")
     || (value.approvals !== undefined && !isSequence(value.approvals))
@@ -172,7 +177,7 @@ export async function readEvents(after: number, signal: AbortSignal): Promise<Ch
 
 export async function writeChat(action: ChatAction, signal: AbortSignal):
   Promise<{ sessionId: string } | { state: ChatState; steered: boolean }> {
-  const value = await request(signal, action.route, action.route === "send" ? { text: action.text } : {});
+  const value = await request(signal, actionRoutes[action.route], action.route === "send" ? { text: action.text } : {});
   if (record(value)) {
     if (action.route === "new" && typeof value.session_id === "string") {
       return { sessionId: value.session_id };

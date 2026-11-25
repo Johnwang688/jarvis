@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { surface } from "../../api";
 import { ApprovalPanel } from "../approvals/ApprovalPanel";
 import { isActive, useChat, type ChatRow } from "./useChat";
 import type { ChatMessage } from "./chatApi";
@@ -14,6 +15,7 @@ function Message({ message, draft = false }: { message: ChatMessage; draft?: boo
       <div className="chat-byline">
         {message.role === "user" ? "You" : "Jarvis"}
         {message.steered && <span> · Added to this turn</span>}
+        {message.queued && <span> · Queued for the next turn</span>}
         {message.discarded && <span> · Discarded before delivery</span>}
         {draft && <span> · Draft</span>}
       </div>
@@ -45,7 +47,7 @@ function Transcript({ rows }: { rows: ChatRow[] }) {
   ) : <Message key={index} message={group} />);
 }
 
-export function ChatPanel() {
+export function ChatPanel({ onApprovalsChange }: { onApprovalsChange?: (count: number) => void } = {}) {
   const { chat, pollError, feedback, pending, submit } = useChat();
   const [text, setText] = useState("");
   const composing = useRef(false);
@@ -59,6 +61,11 @@ export function ChatPanel() {
   const showHint = count >= HINT_AT;
   const active = chat && isActive(chat.state);
   const canSend = chat && chat.state !== "stopping" && !pending && !!text.trim() && count <= TEXT_LIMIT;
+  const approvalCount = chat?.approvals ?? 0;
+
+  useEffect(() => {
+    onApprovalsChange?.(approvalCount);
+  }, [approvalCount, onApprovalsChange]);
 
   useLayoutEffect(() => {
     if (session.current !== chat?.session_id) {
@@ -134,7 +141,8 @@ export function ChatPanel() {
           <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
             <textarea aria-label="Message" aria-describedby={showHint ? "chat-length" : undefined}
               aria-invalid={count > TEXT_LIMIT || undefined} dir="auto" rows={3}
-              placeholder={chat.state === "running" ? "Add to this turn" : "Message Jarvis"}
+              placeholder={chat.state !== "running" ? "Message Jarvis"
+                : surface() === "phone" ? "Queued for the next turn" : "Add to this turn"}
               value={text} onChange={(event) => setText(event.currentTarget.value)}
               onCompositionStart={() => { composing.current = true; }}
               onCompositionEnd={() => { composing.current = false; }}

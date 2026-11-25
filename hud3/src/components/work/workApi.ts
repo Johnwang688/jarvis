@@ -1,3 +1,5 @@
+import { apiFetch } from "../../api";
+
 interface WorkProject {
   name: string;
 }
@@ -55,7 +57,7 @@ function readSnapshot(value: unknown): WorkSnapshot | "unreadable" {
 }
 
 export async function readWork(signal: AbortSignal): Promise<WorkResult> {
-  const response = await fetch("/v3/owner/work", { signal, cache: "no-store", redirect: "error" });
+  const response = await apiFetch("work", { signal, cache: "no-store", redirect: "error" });
   if (!response.ok) return response.status === 503 ? "unreadable" : "unreachable";
   const value: unknown = await response.json().catch(() => null);
   return readSnapshot(value);
