@@ -15,6 +15,7 @@ import time
 
 from jarvis import config
 from jarvis.tools.secrets import is_env_credential, is_protected
+from jarvis.v3.chat import is_private_chat_directory
 from jarvis.v3.index import Index, _document_id, _timestamp, open_directory
 
 
@@ -290,9 +291,12 @@ def _file(index, source, root, relative, directory, stats, stopped):
             return
 
 
-def _walk(index, source, root, relative, directory, stats, stopped):
+def _walk(index, source, root, relative, directory, stats, stopped, *, private=False):
     # Keep the parent fd open during recursion. Every entry is opened against
     # its pinned parent, so a rename cannot redirect the walk through a link.
+    if private and not is_private_chat_directory(directory):
+        stats.skipped += 1
+        return
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -307,7 +311,7 @@ def _walk(index, source, root, relative, directory, stats, stopped):
                             continue
                         child = os.open(name, _DIR_FLAGS, dir_fd=directory)
                         try:
-                            _walk(index, source, root, relative / name, child, stats, stopped)
+                            _walk(index, source, root, relative / name, child, stats, stopped, private=private)
                         finally:
                             os.close(child)
                     elif entry.is_file(follow_symlinks=False):
@@ -323,16 +327,18 @@ def _walk(index, source, root, relative, directory, stats, stopped):
         stats.skipped += 1
 
 
-def ingest(index: Index, *, claude=None, codex=None, jarvis=None, budget_s=None, stop=None) -> Stats:
+def ingest(index: Index, *, claude=None, codex=None, jarvis=None, chats=None,
+           budget_s=None, stop=None) -> Stats:
     """Resume each transcript and atomically commit its chunks and cursor."""
     stopped = _Limit(budget_s, stop)
-    roots = {
-        "claude": Path.home() / ".claude" / "projects" if claude is None else Path(claude),
-        "codex": Path.home() / ".codex" / "sessions" if codex is None else Path(codex),
-        "jarvis": Path(config.SESSIONS_DIR if jarvis is None else jarvis),
-    }
+    roots = (
+        ("claude", Path.home() / ".claude" / "projects" if claude is None else Path(claude), False),
+        ("codex", Path.home() / ".codex" / "sessions" if codex is None else Path(codex), False),
+        ("jarvis", Path(config.SESSIONS_DIR if jarvis is None else jarvis), False),
+        ("jarvis", Path(config.V3_DIR) / "chats" if chats is None else Path(chats), True),
+    )
     stats = Stats()
-    for source, path in roots.items():
+    for source, path, private in roots:
         if stopped():
             break
         root = Path(os.path.abspath(path.expanduser()))
@@ -340,7 +346,7 @@ def ingest(index: Index, *, claude=None, codex=None, jarvis=None, budget_s=None,
             continue
         try:
             with open_directory(root) as directory:
-                _walk(index, source, root, Path(), directory, stats, stopped)
+                _walk(index, source, root, Path(), directory, stats, stopped, private=private)
         except FileNotFoundError:
             continue
         except OSError:

@@ -20,7 +20,8 @@ import time
 
 from jarvis import config
 from . import hud, owner_routes
-from .jobs import Scheduler, default_jobs
+from .chat import ChatService
+from .jobs import Scheduler, default_jobs, idle_seconds
 
 
 SERVICE_NAME = "jarvis-agentd"
@@ -48,6 +49,13 @@ def _reject_json_constant(value):
     raise ValueError(value)
 
 
+def _unique_json_keys(pairs):
+    body = dict(pairs)
+    if len(body) != len(pairs):
+        raise ValueError("Duplicate JSON keys")
+    return body
+
+
 def _check_json_depth(value, depth=1):
     if isinstance(value, dict):
         children = value.values()
@@ -62,7 +70,8 @@ def _check_json_depth(value, depth=1):
 
 
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
-                    scheduler: Scheduler | None = None) -> type[BaseHTTPRequestHandler]:
+                    scheduler: Scheduler | None = None,
+                    chat: ChatService | None = None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -169,7 +178,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
         def _run_route(self, body):
             try:
-                status, payload = self._route.run(body, get_feed)
+                status, payload = self._route.run(body, get_feed, chat)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:
@@ -237,7 +246,8 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             try:
                 if len(data) != length:
                     raise ValueError("incomplete body")
-                body = json.loads(data.decode("utf-8"), parse_constant=_reject_json_constant)
+                body = json.loads(data.decode("utf-8"), parse_constant=_reject_json_constant,
+                                  object_pairs_hook=_unique_json_keys)
                 if not isinstance(body, dict):
                     raise ValueError("expected a JSON object")
                 _check_json_depth(body)
@@ -294,13 +304,18 @@ def _prepare_data_dir(path: Path) -> None:
 
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
-                 hud_dir: Path | None = None, *, jobs=None):
+                 hud_dir: Path | None = None, *, jobs=None, chat=None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
+        self._chats_root = self._data_dir / "chats"
+        self._owns_chat = chat is None
+        self._chat = ChatService(self._chats_root) if chat is None else chat
         if jobs is None:
-            jobs = default_jobs(feed_root=self._data_dir / "feed")
-        self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json")
+            jobs = default_jobs(feed_root=self._data_dir / "feed", chats_root=self._chats_root,
+                                index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite")
+        self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json",
+                                    idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
         self._lock = threading.Lock()
@@ -309,15 +324,21 @@ class Daemon:
     def port(self) -> int:
         return self.address[1]
 
+    def _idle_seconds(self):
+        chat_idle = self._chat.idle_seconds()
+        return min(chat_idle, idle_seconds(chats_root=self._chats_root)) if chat_idle else 0.0
+
     def start(self) -> None:
         with self._lock:
             if self._server is not None:
                 return
             _prepare_data_dir(self._data_dir)
+            if self._chat is None:
+                self._chat = ChatService(self._chats_root)
             try:
                 server = ThreadingHTTPServer(
                     ("127.0.0.1", self._requested_port),
-                    _status_handler(self._data_dir, self._hud_dir, self._scheduler),
+                    _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat),
                 )
             except OSError as exc:
                 raise RuntimeError(
@@ -342,7 +363,10 @@ class Daemon:
         with self._lock:
             if self._server is None:
                 return
+            self._chat.close()
             self._scheduler.stop()
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+            if self._owns_chat:
+                self._chat = None

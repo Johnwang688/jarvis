@@ -313,11 +313,12 @@ class Scheduler:
             worker.join(_STOP_GRACE_S)
 
 
-def idle_seconds(roots=None, *, now=None):
+def idle_seconds(roots=None, *, now=None, chats_root=None):
     """Measure activity using file mtimes and treat incomplete scans as busy."""
     if roots is None:
         home = Path.home()
-        roots = (home / ".claude/projects", home / ".codex/sessions")
+        chats = Path(config.V3_DIR) / "chats" if chats_root is None else chats_root
+        roots = (home / ".claude/projects", home / ".codex/sessions", chats)
     now = time.time() if now is None else now
     remaining = _IDLE_SCAN_ENTRIES
     newest = -math.inf
@@ -389,7 +390,7 @@ def _has_gmail_grant(path: Path) -> bool:
     return _GMAIL_READONLY in _google_scopes(path, require_oauth_fields=True)
 
 
-def default_jobs(*, feed_root=None, index_path=None, google_token=None):
+def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None):
     """Build the daemon jobs without opening their stores or contacting providers.
 
     The Gmail grant check and OAuth refresh read the file separately.
@@ -438,7 +439,10 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None):
     def ingest_transcripts():
         from .ingest.transcripts import ingest
 
-        ingest(get_index(), budget_s=20)
+        if chats_root is None:
+            ingest(get_index(), budget_s=20)
+        else:
+            ingest(get_index(), chats=chats_root, budget_s=20)
 
     def ingest_gmail():
         nonlocal gmail_runner

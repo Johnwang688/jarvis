@@ -461,6 +461,8 @@ it runs beside the later waves, in this order:
   approver; transcripts under `V3_DIR`; a chat panel in hud3. Copy-on-write
   from `v2/providers/fastpath.py`; no import of `jarvis.v2.daemon`.
   **Depends:** A6a. **Size:** M.
+  - [x] A6b-1 backend with owner chat routes, private transcripts and a fixed read/post toolset.
+  - [ ] A6b-2 chat panel in hud3 (next chat PR).
 - **A6c: approvals in v3** ⚑ boundary. A broker, the approval card panel
   (hud3 reuses v2's card), and the fast path's gated tools. Agents never reach
   it (control-plane rules). **Depends:** A6b. **Size:** M.

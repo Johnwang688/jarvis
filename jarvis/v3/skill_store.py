@@ -345,7 +345,8 @@ class SkillStore:
         return Path(os.path.abspath(root))
 
     @contextmanager
-    def _operation(self, *, initialize=True):
+    def _operation(self, *, initialize=True, readonly=False):
+        initialize = initialize and not readonly
         consumers = (Path.home() / ".claude/skills", Path.home() / ".codex/skills")
         root = self._root_path()
         ledger = Path(os.path.abspath(self._ledger if self._ledger is not None else config.V3_DIR / "skill-ledger"))
@@ -353,16 +354,26 @@ class SkillStore:
         owners = (config.REPO_ROOT / "skills", *consumers) if self._owners is None else self._owners
         owners = dict.fromkeys([*(Path(os.path.abspath(p)) for p in owners), *links])
         with ExitStack() as stack:
-            root_fd = stack.enter_context(open_directory(root, create=initialize))
-            if initialize:
-                _private_root(root_fd)
-            else:
-                _private(os.fstat(root_fd))
-            lock_flags = (os.O_CREAT | os.O_RDWR) if initialize else os.O_RDONLY
-            lock_fd = _open_file(root_fd, ".store.lock", lock_flags)
+            try:
+                root_fd = stack.enter_context(open_directory(root, create=initialize))
+                if initialize:
+                    _private_root(root_fd)
+                else:
+                    _private(os.fstat(root_fd))
+                lock_flags = (os.O_CREAT | os.O_RDWR) if initialize else os.O_RDONLY
+                lock_fd = _open_file(root_fd, ".store.lock", lock_flags)
+            except FileNotFoundError:
+                if not readonly:
+                    raise
+                # The owner may have skills before a learned store exists.
+                yield _Operation(root, None, ledger, None, None, links, owners)
+                return
             stack.callback(os.close, lock_fd)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            fcntl.flock(lock_fd, fcntl.LOCK_SH if readonly else fcntl.LOCK_EX)
             _verify(root_fd, ".store.lock", os.fstat(lock_fd))
+            if readonly:
+                yield _Operation(root, root_fd, ledger, None, lock_fd, links, owners)
+                return
             ledger_fd = stack.enter_context(open_directory(ledger, create=initialize))
             if initialize:
                 _private_root(ledger_fd)
@@ -388,9 +399,11 @@ class SkillStore:
                 return [dict(row, status=op.status(row)) for row in rows]
             return rows
 
-    def names(self):
-        with self._operation() as op:
+    def names(self, *, readonly=False):
+        with self._operation(readonly=readonly) as op:
             names = []
+            if op.root_fd is None:
+                return names
             for name in sorted(os.listdir(op.root_fd)):
                 try:
                     _name(name)
@@ -408,10 +421,10 @@ class SkillStore:
         _name(name)
         return self._root_path() / name
 
-    def _view(self, name, path, views):
+    def _view(self, name, path, views, *, readonly=False):
         _leaf(name)
         parts = _path(path)
-        with self._operation() as op, ExitStack() as stack:
+        with self._operation(readonly=readonly) as op, ExitStack() as stack:
             owner = op.owner(name, keep=stack)
             if owner is not None:
                 parent, entry = owner
@@ -431,6 +444,8 @@ class SkillStore:
                 raise StoreError("No such skill file.")
             text = redact.for_model_strict(_read(folder, parts[-1]).decode())
             op.verify_skill(name, skill, revision)
+            if readonly:
+                return text
             previous, seen = views.get(name, (None, set()))
             views[name] = (revision, (seen if previous == revision else set()) | {path})
             if path == _MAIN:
@@ -536,6 +551,8 @@ class _Operation:
 
     def learned(self, stack, name, *, required=False):
         try:
+            if self.root_fd is None:
+                raise FileNotFoundError
             return _directory(stack, self.root_fd, name)
         except FileNotFoundError:
             if required:

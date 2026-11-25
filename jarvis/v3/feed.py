@@ -8,7 +8,7 @@ The push transport must check quiet hours again at send time, after the durable 
 """
 
 from collections import Counter, deque
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -381,7 +381,7 @@ class _Projection:
 
 class Feed:
     def __init__(self, root=None, *, clock=None, quiet=None, push=None, execute=None,
-                 lock_timeout=None):
+                 lock_timeout=None, write_scope=None):
         """Wait up to lock_timeout seconds per acquisition, or indefinitely by default."""
         self.root = Path(FEED_DIR if root is None else root).expanduser().absolute()
         self._system_local = clock is None
@@ -390,7 +390,18 @@ class Feed:
         self._push = push
         self._execute = execute
         self._lock_timeout = lock_timeout
+        self._write_scope = write_scope
         self._projection = _Projection()
+
+    @contextmanager
+    def _writing(self):
+        if self._write_scope is None:
+            yield
+        else:
+            with self._write_scope() as allowed:
+                if not allowed:
+                    raise FeedBusy("Feed writing was cancelled.")
+                yield
 
     def _acquire_lock(self, directory):
         if self._lock_timeout is None:
@@ -411,22 +422,34 @@ class Feed:
     def _locked(self, *, readonly=False):
         # Open a fresh directory description so flock also serializes threads
         # using the same Feed instance. All I/O is relative to this pinned fd.
-        with open_directory(self.root, create=not readonly) as directory:
+        with ExitStack() as stack:
+            try:
+                directory = stack.enter_context(open_directory(self.root))
+            except FileNotFoundError:
+                if readonly:
+                    raise
+                with self._writing():
+                    directory = stack.enter_context(open_directory(self.root, create=True))
             self._acquire_lock(directory)
             info = os.fstat(directory)
             if info.st_uid != os.getuid():
                 raise FeedError("The feed directory must belong to its owner.")
-            if stat.S_IMODE(info.st_mode) != 0o700:
-                if readonly:
+            private = stat.S_IMODE(info.st_mode) == 0o700
+            if readonly:
+                if not private:
                     raise FeedError("The feed directory must be private.")
-                os.fchmod(directory, 0o700)
-            flags = os.O_RDONLY if readonly else os.O_RDWR | os.O_APPEND | os.O_CREAT
-            with _private_file(directory, _LOG, flags, readonly=readonly) as log:
-                state = self._refresh(log)
-                # Check the index before changes, including when it is a link.
-                if not readonly:
-                    self._sync_index(directory, state)
-                yield directory, log, state
+                log = stack.enter_context(_private_file(directory, _LOG, os.O_RDONLY, readonly=True))
+            else:
+                with self._writing():
+                    if not private:
+                        os.fchmod(directory, 0o700)
+                    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT
+                    log = stack.enter_context(_private_file(directory, _LOG, flags))
+            state = self._refresh(log)
+            # Check the index before changes, including when it is a link.
+            if not readonly:
+                self._sync_index(directory, state)
+            yield directory, log, state
 
     def _refresh(self, log):
         info = os.fstat(log)
@@ -454,8 +477,7 @@ class Feed:
         self._projection = state
         return state
 
-    @staticmethod
-    def _sync_index(directory, state):
+    def _sync_index(self, directory, state):
         # The small index is a derived summary. It never authorizes actions:
         # a corrupt or stale index cannot reopen an already answered brief.
         expected = _encode({"version": 1, "log_bytes": state.position,
@@ -468,7 +490,7 @@ class Feed:
             pass
         # The log already owns the state. A failed cache write must not
         # suppress a callback for an action the log has committed.
-        with suppress(OSError):
+        with suppress(OSError), self._writing():
             _replace_index(directory, expected)
 
     def _record(self, directory, log, events):
@@ -478,7 +500,8 @@ class Feed:
         size = os.fstat(log).st_size
         if size and os.pread(log, 1, size - 1) != b"\n":
             raw = b"!\n" + raw
-        _write(log, raw)
+        with self._writing():
+            _write(log, raw)
         os.fsync(log)
         if events[0]["event"] == "answer":
             # An answer appends to the existing brief log. The file sync

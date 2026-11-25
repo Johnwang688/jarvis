@@ -222,12 +222,14 @@ def _readable(value):
 class CalendarTools:
     """Read Calendar and ask for approval before each write to primary."""
 
-    def __init__(self, *, request=None, approve=None, propose=None, now=time.time, transport=None):
+    def __init__(self, *, request=None, approve=None, propose=None, now=time.time, transport=None,
+                 token=None):
         self._request = request
         self._approve = approve
         self._propose = propose
         self._now = now
         self._transport = transport
+        self._token = token
 
     def _default_request(self, method, url, *, params, json, _if_match=None):
         deadline = time.monotonic() + _REQUEST_SECONDS
@@ -237,7 +239,8 @@ class CalendarTools:
         with httpx.Client(transport=self._transport, follow_redirects=False, trust_env=False) as client:
             for attempt in range(2):
                 _remaining(deadline)
-                headers["Authorization"] = f"Bearer {google_auth.access_token()}"
+                token = (self._token or google_auth.access_token)()
+                headers["Authorization"] = f"Bearer {token}"
                 with client.stream(
                     method, url, params=params, json=json, headers=headers, timeout=min(_READ_SECONDS, _remaining(deadline))
                 ) as response:
