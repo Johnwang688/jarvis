@@ -193,6 +193,34 @@ def policy_set(args) -> int:
     return 0
 
 
+def work_registry(args) -> int:
+    from .t3_client import T3, T3Error
+    from .work import Registry, WorkError, WorkService
+
+    registry = Registry(config.V3_DIR / "work" / "projects.json")
+    try:
+        if args.action == "list":
+            service = WorkService(registry=registry)
+            projects = service.projects()
+            count = len(service.threads())
+            for project in projects:
+                print(f"{project.name}  {project.path}  {project.provider}  {project.model}  {project.base or '-'}")
+            print(f"Threads: {count}")
+        elif args.action == "add":
+            project = registry.add(args.name, args.path, provider=args.provider, model=args.model, base=args.base)
+            if not args.no_t3:
+                try:
+                    T3().project_add(project.path, title=project.name)
+                except T3Error as exc:
+                    print(f"Warning: {exc} The project remains registered with Jarvis.", file=sys.stderr)
+        else:
+            registry.remove(args.name)
+    except WorkError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def consolidate_vault(args) -> int:
     from . import consolidate
     from .budget import Budget
@@ -263,6 +291,19 @@ def add_commands(sub):
     setter.add_argument("kind")
     setter.add_argument("level")
     setter.set_defaults(func=policy_set)
+
+    work = sub.add_parser("work", help="owner controls for coding projects")
+    work.set_defaults(func=work_registry)
+    work_sub = work.add_subparsers(dest="action", required=True)
+    work_sub.add_parser("list", help="show registered projects and thread count")
+    add = work_sub.add_parser("add", help="register a project")
+    add.add_argument("name")
+    add.add_argument("path")
+    add.add_argument("--provider", required=True)
+    add.add_argument("--model", required=True)
+    add.add_argument("--base")
+    add.add_argument("--no-t3", action="store_true", help="skip registering the folder with T3")
+    work_sub.add_parser("remove", help="remove a registered project").add_argument("name")
 
 
 def main(argv: list[str]) -> int:
