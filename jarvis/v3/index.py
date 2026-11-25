@@ -17,6 +17,7 @@ import time
 
 from jarvis import config
 from jarvis.v2 import redact
+from ._paths import open_directory
 
 
 SCHEMA_VERSION = 1
@@ -49,30 +50,9 @@ _SCHEMA = (
     )""",
 )
 
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _SPACE = re.compile(r"\s")
 _CODE = re.compile(r"[_/\\()[\]{}.:;=<>+*\x60@$%&|!^~#-]")
 _CORRUPTION = {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
-
-
-@contextmanager
-def open_directory(path: Path, *, create: bool = False):
-    """Pin each component before opening the next one, without following links."""
-    path = Path(os.path.abspath(path))
-    fd = os.open(path.anchor, _DIRECTORY_FLAGS)
-    try:
-        for part in path.parts[1:]:
-            if create:
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
-            child = os.open(part, _DIRECTORY_FLAGS, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        yield fd
-    finally:
-        os.close(fd)
 
 
 def _private_file(directory: int, name: str, *, create: bool = False) -> None:

@@ -634,6 +634,20 @@ S1–S6. It is the owner's decision.
 
 ---
 
+### K5: J1: daemon job loop
+
+- **Spec:** The v3 daemon starts a serial scheduler after binding. It saves
+  each job outcome to private state, applies retry backoff and idle checks,
+  and reports job status at `/v3/status`. The feed and curator load lazily.
+  Ingest, consolidation and the review queue join through their own PRs or
+  a follow-up.
+- **Acceptance:**
+  - [x] Ordered ticks, persisted outcomes, backoff and idle checks.
+  - [x] Bounded idle scan and shutdown, including a stalled job.
+  - [x] Daemon and owner-route regressions, including model-free agentd startup.
+
+---
+
 ## 5. Track M: Brain
 
 ### M2: Vault store + memory tools v2
@@ -786,7 +800,7 @@ S1–S6. It is the owner's decision.
   - Usage tracking: `skill_view` loads increment a counter in
     `LEARNED_SKILLS_DIR/.usage.json`.
   - `due()` requires a week between runs and at least 2 h idle (no active
-    turns). Daemon scheduling will be wired in a later PR.
+    turns). K5 wires it into the daemon scheduler.
   - Agent-created, unpinned skills go stale after 14 d and are archived
     after 30 d, measured from the later of their last use and latest
     applied ledger record.
@@ -1076,7 +1090,8 @@ CLIs' own safeguards. What follows from it:
   - Actions: approve, edit, other (free text), not_now, plus feedback taps.
     Approve with a `proposal_id` calls I4.
   - Expiry: a decision past `default.at` runs its default only if the default
-    is a no-op; anything else expires (H10).
+    is a no-op; anything else expires (H10). K5 wires the daemon to tick
+    the feed every 60 s.
   - Agents can create briefs only through a typed `brief_post` tool (the
     `owner_post` pattern) and can never read or answer them, matching
     today's inbox rule.

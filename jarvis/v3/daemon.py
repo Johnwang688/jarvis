@@ -19,6 +19,7 @@ import time
 
 from jarvis import config
 from . import hud, owner_routes
+from .jobs import Scheduler, default_jobs
 
 
 SERVICE_NAME = "jarvis-agentd"
@@ -59,7 +60,8 @@ def _check_json_depth(value, depth=1):
         _check_json_depth(child, depth + 1)
 
 
-def _status_handler(data_dir: Path, hud_dir: Path | None = None) -> type[BaseHTTPRequestHandler]:
+def _status_handler(data_dir: Path, hud_dir: Path | None = None,
+                    scheduler: Scheduler | None = None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -245,6 +247,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None) -> type[BaseHTT
                     "started_at": started_at,
                     "uptime_s": time.monotonic() - started_tick,
                     "data_dir": directory,
+                    "jobs": {} if scheduler is None else scheduler.status(),
                 })
             elif (asset := hud.static_file(hud_root, path)) is not None:
                 self._reply(200, *asset)
@@ -280,10 +283,12 @@ def _prepare_data_dir(path: Path) -> None:
 
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
-                 hud_dir: Path | None = None):
+                 hud_dir: Path | None = None, *, jobs=None):
         self._requested_port = config.V3_API_PORT if port is None else port
-        self._data_dir = config.V3_DIR if data_dir is None else Path(data_dir)
+        self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
+        self._scheduler = Scheduler(default_jobs() if jobs is None else jobs,
+                                    state=self._data_dir / "jobs/state.json")
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
         self._lock = threading.Lock()
@@ -299,7 +304,8 @@ class Daemon:
             _prepare_data_dir(self._data_dir)
             try:
                 server = ThreadingHTTPServer(
-                    ("127.0.0.1", self._requested_port), _status_handler(self._data_dir, self._hud_dir)
+                    ("127.0.0.1", self._requested_port),
+                    _status_handler(self._data_dir, self._hud_dir, self._scheduler),
                 )
             except OSError as exc:
                 raise RuntimeError(
@@ -311,6 +317,12 @@ class Daemon:
             except RuntimeError:
                 server.server_close()
                 raise
+            try:
+                self._scheduler.start()
+            except RuntimeError:
+                server.shutdown()
+                server.server_close()
+                raise
             self.address = server.server_address
             self._server = server
 
@@ -318,6 +330,7 @@ class Daemon:
         with self._lock:
             if self._server is None:
                 return
+            self._scheduler.stop()
             self._server.shutdown()
             self._server.server_close()
             self._server = None
