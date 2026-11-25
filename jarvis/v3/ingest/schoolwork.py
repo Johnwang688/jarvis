@@ -107,9 +107,11 @@ class SchoolworkIngester:
             if not isinstance(code, str) or not code.strip():
                 raise SchoolworkError("Invalid schoolwork health finding.")
             health.add(code)
-        if "last_sync_failed" in health:
-            raise SchoolworkError("Schoolwork data is stale.")
         needs_sign_in = "needs_login" in health
+        # An expired login also reports a failed sync. That case is the
+        # sign-in episode (one brief, a blocked snapshot), not a job error.
+        if "last_sync_failed" in health and not needs_sign_in:
+            raise SchoolworkError("Schoolwork data is stale.")
         rows = _rows(review, "recentChanges") + _rows(review, "undated") + _rows(prep, "overdue")
         for day in _rows(prep, "days"):
             rows.extend(_rows(day, "due"))

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
 import unittest
 
@@ -319,6 +320,39 @@ class ProcEdges(Base):
             time.sleep(0.01)
         else:
             self.fail("grandchild is still alive")
+
+
+class LiveShapes(unittest.TestCase):
+    """Found on the first live run: shapes the fakes had not modelled."""
+
+    def test_an_expired_login_with_a_failed_sync_is_a_sign_in_episode_not_an_error(self):
+        from jarvis.v3.ingest.schoolwork import SchoolworkIngester
+
+        posts = []
+        prep = {"days": [], "overdue": []}
+        review = {"recentChanges": [], "undated": [],
+                  "health": [{"code": "needs_login"}, {"code": "sync_stale"}, {"code": "last_sync_failed"}]}
+
+        def run(argv):
+            return (0, json.dumps(prep)) if argv[1] == "prep" else (1, json.dumps(review))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ingester = SchoolworkIngester(run, post=posts.append, signals_dir=Path(tmp))
+            docs, cursor = ingester.poll(None)
+            self.assertEqual((docs, cursor["needs_sign_in"]), ([], True))
+            self.assertEqual(len(posts), 1)
+            ingester.poll(cursor)
+            self.assertEqual(len(posts), 1)                       # one brief per episode
+
+    def test_a_failed_sync_without_a_login_problem_is_still_stale(self):
+        from jarvis.v3.ingest.schoolwork import SchoolworkError, SchoolworkIngester
+
+        def run(argv):
+            return (0, json.dumps({"days": [], "overdue": []})) if argv[1] == "prep" else (1, json.dumps({"health": [{"code": "last_sync_failed"}]}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SchoolworkError):
+                SchoolworkIngester(run, post=lambda brief: None, signals_dir=Path(tmp)).poll(None)
 
 
 if __name__ == "__main__":
