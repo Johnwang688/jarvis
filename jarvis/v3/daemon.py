@@ -72,7 +72,7 @@ def _check_json_depth(value, depth=1):
 
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
-                    chat: ChatService | None = None) -> type[BaseHTTPRequestHandler]:
+                    chat: ChatService | None = None, *, work=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -84,6 +84,14 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
         from .feed import Feed
 
         return Feed(data_dir / "feed", lock_timeout=owner_routes.FEED_LOCK_TIMEOUT)
+
+    def default_work():
+        from .work import Ledger, Registry
+
+        root = data_dir / "work"
+        return Registry(root / "projects.json"), Ledger(root / "threads.jsonl")
+
+    get_work = default_work if work is None else work
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
@@ -179,7 +187,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
         def _run_route(self, body):
             try:
-                status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir)
+                status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir, get_work=get_work)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:
@@ -305,10 +313,11 @@ def _prepare_data_dir(path: Path) -> None:
 
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
-                 hud_dir: Path | None = None, *, jobs=None, chat=None):
+                 hud_dir: Path | None = None, *, jobs=None, chat=None, work=None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
+        self._work = work
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
@@ -342,7 +351,7 @@ class Daemon:
             try:
                 server = ThreadingHTTPServer(
                     ("127.0.0.1", self._requested_port),
-                    _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat),
+                    _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat, work=self._work),
                 )
             except OSError as exc:
                 raise RuntimeError(

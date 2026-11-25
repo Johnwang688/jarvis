@@ -3,6 +3,7 @@ import { Orb } from "./Orb";
 import { Jobs, StatusView, useDaemonStatus } from "./Status";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { FeedPanel } from "./components/feed/FeedPanel";
+import { WorkPanel } from "./components/work/WorkPanel";
 
 function Panel({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -34,9 +35,7 @@ export default function App() {
           <Panel id="cron" title="Cron">
             <Jobs status={status} />
           </Panel>
-          <Panel id="t3" title="T3">
-            <p>T3 threads will appear here.</p>
-          </Panel>
+          <WorkPanel />
           <Panel id="vault" title="Vault">
             <p>Saved memories will appear here.</p>
           </Panel>
