@@ -140,9 +140,11 @@ in the digest).
 ```json
 {"ts": "…", "op": "create|patch|write_file|archive|restore|rollback",
  "skill": "name", "path": "SKILL.md", "before": "sha256|null", "after": "sha256|null",
- "actor": "reviewer|foreground|owner", "session": "transcript ref", "tainted": false,
+ "actor": "reviewer|foreground|owner|curator", "session": "transcript ref", "tainted": false,
  "scan": {"ok": true, "hits": []}}
 ```
+
+The `curator` actor is reserved for deterministic curator archives.
 
 ### 1.5 Review queue item (L1)
 
@@ -775,21 +777,23 @@ S1–S6. It is the owner's decision.
 - **Depends:** K1. **Size:** M.
 
 ### M6: Curator (deterministic only)
-- **Scope:** `jarvis/v3/skill_curator.py`, daemon schedule,
+- **Scope:** `jarvis/v3/skill_curator.py`, `jarvis learned curate [--dry-run]`,
   `tests/v3/skill_curator_check.py`.
 - **Spec:**
   - Usage tracking: `skill_view` loads increment a counter in
     `LEARNED_SKILLS_DIR/.usage.json`.
-  - Runs weekly, only after 2 h idle (no active turns).
-  - Agent-created, unpinned skills unused for 14 d → `stale`; at 30 d →
-    archived (ledgered).
+  - `due()` requires a week between runs and at least 2 h idle (no active
+    turns). Daemon scheduling will be wired in a later PR.
+  - Agent-created, unpinned skills go stale after 14 d and are archived
+    after 30 d, measured from the later of their last use and latest
+    applied ledger record.
   - Skills referenced by a schedule or trigger are exempt.
   - **No LLM consolidation.**
   - Emits a digest line per change (consumed by L3).
 - **Acceptance:**
-  - [ ] Fake-clock tests for 14/30 d.
-  - [ ] Pinned, owner and schedule-referenced skills are untouched.
-  - [ ] Archives are restorable through rollback.
+  - [x] Fake-clock tests for 14/30 d.
+  - [x] Pinned, owner and schedule-referenced skills are untouched.
+  - [x] Archives are restorable through rollback.
 - **Depends:** M5. **Size:** S.
 
 ---

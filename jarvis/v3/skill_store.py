@@ -7,10 +7,12 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import stat
+import time
 import unicodedata
 from uuid import uuid4
 
@@ -35,10 +37,13 @@ _PLAIN_DESCRIPTION = re.compile(r"[A-Za-z][A-Za-z0-9 ,.()'!?/-]*\Z")
 _YAML_WORDS = {"y", "yes", "n", "no", "on", "off", "true", "false", "null"}
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _ID = re.compile(r"[a-f0-9]{32}\Z")
-_ACTORS = ("reviewer", "foreground", "owner")
+_ACTORS = ("reviewer", "foreground", "owner", "curator")
 _OPS = ("create", "patch", "write_file", "remove_file", "archive", "restore", "rollback")
 _KEYS = {"id", "ts", "op", "skill", "path", "before", "after", "actor", "session", "tainted", "scan"}
 _FIELDS = {"name", "description", "created_by", "pinned", "locked"}
+_USAGE = ".usage.json"
+_STATE_LIMIT = 1024 * 1024
+_TORN_END = b"\0\n"
 
 
 class StoreError(ValueError):
@@ -120,6 +125,24 @@ def _header(text, name):
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _epoch(value):
+    return (type(value) is int and -(1 << 63) <= value < (1 << 63)
+            or type(value) is float and math.isfinite(value))
+
+
+def _usage(data):
+    rows = json.loads(data)
+    if not isinstance(rows, dict):
+        raise ValueError("Invalid skill usage.")
+    for name, row in rows.items():
+        _name(name)
+        if (not isinstance(row, dict) or row.keys() != {"count", "last_used"}
+                or type(row["count"]) is not int or row["count"] < 1
+                or not _epoch(row["last_used"])):
+            raise ValueError("Invalid skill usage.")
+    return rows
 
 
 def _digest(data):
@@ -242,6 +265,7 @@ def _atomic(parent, name, data):
     temp = ".tmp-" + uuid4().hex
     fd = _open_file(parent, temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     try:
+        os.fchmod(fd, 0o600)
         _write(fd, data)
         os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
@@ -263,6 +287,7 @@ def _valid_record(row):
     if (not isinstance(row, dict) or row.keys() != _KEYS
             or not isinstance(row["id"], str) or not _ID.fullmatch(row["id"])
             or row["op"] not in _OPS or row["actor"] not in _ACTORS
+            or (row["actor"] == "curator" and row["op"] != "archive")
             or not isinstance(row["ts"], str) or not isinstance(row["session"], str)
             or type(row["tainted"]) is not bool):
         return False
@@ -320,7 +345,7 @@ class SkillStore:
         return Path(os.path.abspath(root))
 
     @contextmanager
-    def _operation(self):
+    def _operation(self, *, initialize=True):
         consumers = (Path.home() / ".claude/skills", Path.home() / ".codex/skills")
         root = self._root_path()
         ledger = Path(os.path.abspath(self._ledger if self._ledger is not None else config.V3_DIR / "skill-ledger"))
@@ -328,16 +353,24 @@ class SkillStore:
         owners = (config.REPO_ROOT / "skills", *consumers) if self._owners is None else self._owners
         owners = dict.fromkeys([*(Path(os.path.abspath(p)) for p in owners), *links])
         with ExitStack() as stack:
-            root_fd = stack.enter_context(open_directory(root, create=True))
-            _private_root(root_fd)
-            lock_fd = _open_file(root_fd, ".store.lock", os.O_CREAT | os.O_RDWR)
+            root_fd = stack.enter_context(open_directory(root, create=initialize))
+            if initialize:
+                _private_root(root_fd)
+            else:
+                _private(os.fstat(root_fd))
+            lock_flags = (os.O_CREAT | os.O_RDWR) if initialize else os.O_RDONLY
+            lock_fd = _open_file(root_fd, ".store.lock", lock_flags)
             stack.callback(os.close, lock_fd)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             _verify(root_fd, ".store.lock", os.fstat(lock_fd))
-            ledger_fd = stack.enter_context(open_directory(ledger, create=True))
-            _private_root(ledger_fd)
+            ledger_fd = stack.enter_context(open_directory(ledger, create=initialize))
+            if initialize:
+                _private_root(ledger_fd)
+            else:
+                _private(os.fstat(ledger_fd))
             op = _Operation(root, root_fd, ledger, ledger_fd, lock_fd, links, owners)
-            op.recover_links()
+            if initialize:
+                op.recover_links()
             yield op
 
     def records(self, *, with_status=False):
@@ -400,6 +433,9 @@ class SkillStore:
             op.verify_skill(name, skill, revision)
             previous, seen = views.get(name, (None, set()))
             views[name] = (revision, (seen if previous == revision else set()) | {path})
+            if path == _MAIN:
+                with suppress(OSError, ValueError, RecursionError):
+                    op.record_use(name)
             return text
 
     def _manage(self, action, name, views, actor, session, tainted, fields):
@@ -543,23 +579,80 @@ class _Operation:
         if self.revision(skill) != revision:
             raise StoreError("The skill changed. View it again before editing.")
 
-    def records(self):
+    def read_sidecar(self, name, *, ledger=False, limit=_STATE_LIMIT):
+        fd = self.ledger_fd if ledger else self.root_fd
+        info = _stat(fd, name)
+        if info is None:
+            return None, None
+        if info.st_uid != os.getuid():
+            raise StoreError("Skill state must belong to the owner.")
+        # Older or manually created usage data may have the owner's default
+        # mode. It is inside a private directory and the next write sets 0600.
+        data = _read(fd, name, private=name != _USAGE, limit=limit)
+        _verify(fd, name, info)
+        return data, info
+
+    def write_sidecar(self, name, data, expected, *, ledger=False, limit=_STATE_LIMIT):
+        if len(data) > limit:
+            raise StoreError("The skill state exceeds its size limit.")
+        fd = self.ledger_fd if ledger else self.root_fd
+        self._verify_storage()
+        _verify(fd, name, expected)
+        _atomic(fd, name, data)
+        return _stat(fd, name)
+
+    def record_use(self, name):
+        data, expected = self.read_sidecar(_USAGE)
+        try:
+            rows = {} if data is None else _usage(data)
+        except (ValueError, RecursionError):
+            rows = {}
+        previous = rows.get(name)
+        now = time.time()
+        rows[name] = ({"count": previous["count"] + 1, "last_used": max(now, previous["last_used"])}
+                      if previous else {"count": 1, "last_used": now})
+        self.write_sidecar(_USAGE, _json(rows).encode(), expected)
+
+    def records(self, *, strict=False):
         try:
             fd = _open_file(self.ledger_fd, "ledger.jsonl")
         except FileNotFoundError:
             return []
         rows = {}
         with os.fdopen(fd, "rb") as file:
-            for line in file:
+            initial = os.fstat(fd)
+            torn_tail = False
+            lines = iter(lambda: file.readline(_STATE_LIMIT), b"") if strict else file
+            for line in lines:
                 if not line.endswith(b"\n"):
+                    if strict:
+                        raise StoreError("Incomplete skill ledger record.")
                     break
+                if strict and line.endswith(_TORN_END):
+                    # The writer seals interrupted lines without modifying
+                    # their bytes. A later valid row confirms append recovered.
+                    torn_tail = True
+                    continue
                 try:
                     row = json.loads(line.decode())
                     if _valid_record(row):
                         rid = row["id"]
+                        if strict and rid in rows:
+                            raise StoreError("Duplicate skill ledger record.")
                         rows[rid] = None if rid in rows else row
+                        torn_tail = False
+                        continue
                 except (ValueError, RecursionError):
-                    continue
+                    if strict:
+                        raise StoreError("Invalid skill ledger record.") from None
+                if strict:
+                    raise StoreError("Invalid skill ledger record.")
+            if strict:
+                if torn_tail:
+                    raise StoreError("Incomplete skill ledger recovery.")
+                if _stamp(initial) != _stamp(os.fstat(fd)):
+                    raise StoreError("The skill ledger changed while being read.")
+                _verify(self.ledger_fd, "ledger.jsonl", initial)
         return [row for row in rows.values() if row is not None]
 
     def _append(self, row):
@@ -572,7 +665,7 @@ class _Operation:
                 if file.read(1) != b"\n":
                     # Preserve torn bytes. A missing newline alone must never
                     # let a subsequent append turn a torn record into a valid one.
-                    prefix = b"\0\n"
+                    prefix = _TORN_END
             _write(file.fileno(), prefix + _json(row).encode() + b"\n")
         os.fsync(self.ledger_fd)
 
@@ -728,12 +821,16 @@ class _Operation:
             os.fsync(source)
 
     def change(self, action, name, path, before, after, skill, revision, *,
-               actor="owner", session="", tainted=False, snapshot=None, restored_from=None):
+               actor="owner", session="", tainted=False, snapshot=None, restored_from=None,
+               timestamp=None, record_id=None):
+        if actor not in _ACTORS or (actor == "curator" and action != "archive"):
+            raise StoreError("Invalid skill ledger actor.")
         parts = _path(path)
         _scan_metadata(name, path, session)
         verdict = (_scan_file(after.decode(), name, path) if after is not None
                    else content_scan.Verdict(())).to_json()
-        row = {"id": uuid4().hex, "ts": datetime.now(timezone.utc).isoformat(), "op": action,
+        row = {"id": record_id or uuid4().hex,
+               "ts": timestamp or datetime.now(timezone.utc).isoformat(), "op": action,
                "skill": name, "path": path, "before": _digest(before) if before is not None else None,
                "after": _digest(after) if after is not None else None, "actor": actor,
                "session": session, "tainted": tainted, "scan": verdict}
