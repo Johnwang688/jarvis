@@ -10,6 +10,7 @@ stack; the installed `jarvis` console script imports it (never calls it).
 
 from datetime import datetime, timezone
 import errno
+from functools import cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -67,6 +68,12 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
     pid = os.getpid()
     directory = str(data_dir)
     hud_root = config.HUD3_DIR if hud_dir is None else hud_dir
+
+    @cache
+    def get_feed():
+        from .feed import Feed
+
+        return Feed(data_dir / "feed", lock_timeout=owner_routes.FEED_LOCK_TIMEOUT)
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
@@ -162,9 +169,13 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
         def _run_route(self, body):
             try:
-                status, payload = self._route.handler(body)
+                status, payload = self._route.run(body, get_feed)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
+                if isinstance(payload, dict) and "error" in payload:
+                    # Only send fixed public error text across the HTTP boundary.
+                    message = self.responses.get(status, ("Request failed",))[0]
+                    payload = {"error": message}
                 encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
             except Exception:
                 self.send_error(500)
@@ -287,8 +298,9 @@ class Daemon:
         self._requested_port = config.V3_API_PORT if port is None else port
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
-        self._scheduler = Scheduler(default_jobs() if jobs is None else jobs,
-                                    state=self._data_dir / "jobs/state.json")
+        if jobs is None:
+            jobs = default_jobs(feed_root=self._data_dir / "feed")
+        self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json")
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
         self._lock = threading.Lock()

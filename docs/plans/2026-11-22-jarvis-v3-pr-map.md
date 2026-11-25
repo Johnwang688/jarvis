@@ -1076,7 +1076,7 @@ CLIs' own safeguards. What follows from it:
 
 ### B1: Brief store, schema and routing
 - **Scope:** `jarvis/v3/feed.py`, `jarvis/v3/tools/feed.py` and
-  `tests/v3/feed_check.py`. Owner-only v3 daemon routes are waiting for A6a.
+  `tests/v3/feed_check.py`.
   Live quiet-hours and push wiring and the jarvis-brain tool offer follow in B2.
 - **Spec:**
   - Stores briefs (contract 1.7) in `FEED_DIR` (JSONL + an index). It
@@ -1088,7 +1088,7 @@ CLIs' own safeguards. What follows from it:
       quiet-hours callback reports quiet;
     - everything else → batched for B4.
   - Actions: approve, edit, other (free text), not_now, plus feedback taps.
-    Approve with a `proposal_id` calls I4.
+    Approvals with a `proposal_id` are recorded. I4 adds proposal execution.
   - Expiry: a decision past `default.at` runs its default only if the default
     is a no-op; anything else expires (H10). K5 wires the daemon to tick
     the feed every 60 s.
@@ -1097,6 +1097,7 @@ CLIs' own safeguards. What follows from it:
     today's inbox rule.
 - **Acceptance:**
   - [x] Schema validation tests.
+  - [x] Owner-only v3 daemon routes for reading, answering and giving feedback.
   - [x] Routing table tests with a fake clock, across quiet hours.
   - [x] The agent tool surface exposes only posting.
   - [x] The push payload carries only count and rank.

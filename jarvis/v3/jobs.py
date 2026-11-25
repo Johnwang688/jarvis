@@ -347,7 +347,7 @@ def idle_seconds(roots=None, *, now=None):
     return 1e12 if newest == -math.inf else max(0.0, now - newest)
 
 
-def default_jobs():
+def default_jobs(*, feed_root=None):
     feed = None
 
     def feed_tick():
@@ -355,7 +355,7 @@ def default_jobs():
         if feed is None:
             from .feed import Feed
 
-            feed = Feed()
+            feed = Feed() if feed_root is None else Feed(feed_root)
         feed.tick()
 
     idle_required = 2 * 3600

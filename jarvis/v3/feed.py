@@ -1,13 +1,13 @@
 """Private brief store, routing and owner action state.
 
-Daemon owner routes (A6a) and wiring to real QuietHours/Push (B2) are out of scope.
+Wiring to real QuietHours/Push follows in B2.
 Approval execution and push delivery are at most once: a crash after the logged
 claim can lose the callback. A no-op default is only a durable state transition,
 applied once when tick processes the deadline. Expiry calls no action.
 The push transport must check quiet hours again at send time, after the durable delivery claim.
 """
 
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 from uuid import uuid4
 
 from jarvis import config, untrusted
@@ -35,6 +36,7 @@ _KINDS = {"decision", "news", "digest"}
 _ATTACHMENTS = {"draft", "diff", "thread", None}
 _AGENT_OPEN = 5
 _AGENT_DAILY = 20
+_RECENT_LIMIT = 20
 _LOG = "briefs.jsonl"
 _INDEX = "index.json"
 _INDEX_TEMP = ".index.tmp"
@@ -57,6 +59,14 @@ _ENCODED_URL_PASSWORD = re.compile(
 
 class FeedError(ValueError):
     """A brief operation was refused or could not complete."""
+
+
+class BriefNotFound(FeedError):
+    """The requested brief ID is absent or malformed."""
+
+
+class FeedBusy(FeedError):
+    """The feed lock could not be acquired before the deadline."""
 
 
 def _text(value, limit, *, empty=False):
@@ -220,13 +230,15 @@ def _route(fields, now, *, system_local):
 
 
 @contextmanager
-def _private_file(directory, name, flags):
+def _private_file(directory, name, flags, *, readonly=False):
     fd = os.open(name, flags | _FILE_FLAGS, 0o600, dir_fd=directory)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
             raise FeedError("Feed files must be private regular files.")
         if stat.S_IMODE(info.st_mode) != 0o600:
+            if readonly:
+                raise FeedError("Feed files must be private regular files.")
             os.fchmod(fd, 0o600)
         yield fd
     finally:
@@ -267,7 +279,7 @@ def _write(fd, raw):
 
 def _id(value):
     if not isinstance(value, str) or re.fullmatch("[0-9a-f]{32}", value) is None:
-        raise FeedError("Brief not found.")
+        raise BriefNotFound("Brief not found.")
     return value
 
 
@@ -283,13 +295,15 @@ class _Row:
 class _Projection:
     rows: dict[str, _Row] = field(default_factory=dict)
     counts: Counter = field(default_factory=Counter)
+    open_rows: dict[str, _Row] = field(default_factory=dict)
+    recent: deque[_Row] = field(default_factory=lambda: deque(maxlen=_RECENT_LIMIT))
     position: int = 0
     stamp: tuple | None = None
 
     def row(self, bid):
         row = self.rows.get(_id(bid))
         if row is None:
-            raise FeedError("Brief not found.")
+            raise BriefNotFound("Brief not found.")
         return row
 
     def transition(self, row, state, resolved_by, answer=None):
@@ -297,6 +311,8 @@ class _Projection:
         self.counts[state] += 1
         row.brief.update(state=state, resolved_by=resolved_by, answer=answer)
         row.pending = False
+        del self.open_rows[row.brief["id"]]
+        self.recent.appendleft(row)
 
     def apply(self, event):
         _shape(event, ("event", "id"), ("brief", "pending", "answer", "tag", "at"))
@@ -326,7 +342,7 @@ class _Projection:
                 raise FeedError("Invalid brief post record.")
             values.update(id=bid, created=created, actor=actor, session=session, route=route,
                           state="open", feedback=[], resolved_by=None, answer=None)
-            self.rows[bid] = _Row(values, _parse_time(created), _deadline(values), pending)
+            self.rows[bid] = self.open_rows[bid] = _Row(values, _parse_time(created), _deadline(values), pending)
             self.counts["open"] += 1
             return
         row = self.row(bid)
@@ -361,30 +377,52 @@ class _Projection:
 
 
 class Feed:
-    def __init__(self, root=None, *, clock=None, quiet=None, push=None, execute=None):
+    def __init__(self, root=None, *, clock=None, quiet=None, push=None, execute=None,
+                 lock_timeout=None):
+        """Wait up to lock_timeout seconds per acquisition, or indefinitely by default."""
         self.root = Path(FEED_DIR if root is None else root).expanduser().absolute()
         self._system_local = clock is None
         self._clock = clock if clock is not None else lambda: datetime.now().astimezone()
         self._quiet = quiet
         self._push = push
         self._execute = execute
+        self._lock_timeout = lock_timeout
         self._projection = _Projection()
 
+    def _acquire_lock(self, directory):
+        if self._lock_timeout is None:
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            return
+        deadline = time.monotonic() + self._lock_timeout
+        while True:
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FeedBusy("Feed is busy.") from None
+                time.sleep(min(0.05, remaining))
+
     @contextmanager
-    def _locked(self):
+    def _locked(self, *, readonly=False):
         # Open a fresh directory description so flock also serializes threads
         # using the same Feed instance. All I/O is relative to this pinned fd.
-        with open_directory(self.root, create=True) as directory:
-            fcntl.flock(directory, fcntl.LOCK_EX)
+        with open_directory(self.root, create=not readonly) as directory:
+            self._acquire_lock(directory)
             info = os.fstat(directory)
             if info.st_uid != os.getuid():
                 raise FeedError("The feed directory must belong to its owner.")
             if stat.S_IMODE(info.st_mode) != 0o700:
+                if readonly:
+                    raise FeedError("The feed directory must be private.")
                 os.fchmod(directory, 0o700)
-            with _private_file(directory, _LOG, os.O_RDWR | os.O_APPEND | os.O_CREAT) as log:
+            flags = os.O_RDONLY if readonly else os.O_RDWR | os.O_APPEND | os.O_CREAT
+            with _private_file(directory, _LOG, flags, readonly=readonly) as log:
                 state = self._refresh(log)
                 # Check the index before changes, including when it is a link.
-                self._sync_index(directory, state)
+                if not readonly:
+                    self._sync_index(directory, state)
                 yield directory, log, state
 
     def _refresh(self, log):
@@ -439,6 +477,14 @@ class Feed:
             raw = b"!\n" + raw
         _write(log, raw)
         os.fsync(log)
+        if events[0]["event"] == "answer":
+            # An answer appends to the existing brief log. The file sync
+            # commits it, even if syncing the directory or index fails.
+            state = self._refresh(log)
+            with suppress(OSError, FeedError):
+                os.fsync(directory)
+                self._sync_index(directory, state)
+            return
         os.fsync(directory)
         self._sync_index(directory, self._refresh(log))
 
@@ -501,12 +547,23 @@ class Feed:
         with self._locked() as (_, _, snapshot):
             return self._sorted(row for row in snapshot.rows.values() if row.brief["state"] == state)
 
+    def snapshot(self):
+        """Copy the open queue and latest resolutions from one locked view."""
+        try:
+            with self._locked(readonly=True) as (_, _, state):
+                return {
+                    "briefs": self._sorted(state.open_rows.values()),
+                    "recent": [deepcopy(row.brief) for row in state.recent],
+                }
+        except FileNotFoundError:
+            return {"briefs": [], "recent": []}
+
     def batch(self):
         with self._locked() as (_, _, state):
             return self._sorted(row for row in state.rows.values()
                                 if row.brief["state"] == "open" and row.brief["route"] == "batch")
 
-    def answer(self, bid, action, *, text=None):
+    def answer(self, bid, action, *, text=None, return_brief=False):
         answer = _answer(action, text)
         with self._locked() as (directory, log, state):
             brief = state.row(bid).brief
@@ -514,20 +571,24 @@ class Feed:
                 raise FeedError("The brief is already closed.")
             proposal = brief["proposal_id"] if action == "approve" else None
             self._record(directory, log, [{"event": "answer", "id": bid, "answer": answer}])
+            result = deepcopy(self._projection.rows[bid].brief) if return_brief else None
         if proposal is not None and self._execute is not None:
             try:
                 self._execute(proposal)
             except Exception:
                 pass
             else:
-                return
+                return result
             raise FeedError("The approval was recorded but proposal execution failed.")
+        return result
 
-    def feedback(self, bid, tag):
+    def feedback(self, bid, tag, *, return_brief=False):
         _enum(tag, FEEDBACK_TAGS)
         with self._locked() as (directory, log, state):
             if tag not in state.row(bid).brief["feedback"]:
                 self._record(directory, log, [{"event": "feedback", "id": bid, "tag": tag}])
+            if return_brief:
+                return deepcopy(self._projection.rows[bid].brief)
 
     def tick(self, now=None):
         """Process expiries and claim one combined push for deferred open briefs."""
