@@ -94,7 +94,7 @@ describe("briefs", () => {
     returns([decision, news, digest]);
     await mount();
     const [first, second, third] = cards();
-    expect([...first.firstElementChild!.querySelectorAll("button")].map((item) => item.textContent))
+    expect([...first.querySelectorAll(".feed-actions button")].map((item) => item.textContent))
       .toEqual(["Approve", "Edit", "Other…", "Not now"]);
     const text = first.textContent!;
     const fields = ["Publish the sample report?", "Due", "Rank 1", "Why now", "Recommend", "the checklist is complete",
@@ -151,7 +151,7 @@ describe("briefs", () => {
     expect(card.textContent).toContain("Line one\nLine two");
     expect(card.textContent).not.toContain("\u202e");
     expect(card.textContent).toContain(longRef);
-    expect(card.firstElementChild?.querySelector("button")?.textContent).toBe("Approve");
+    expect(card.querySelector(".feed-actions button")?.textContent).toBe("Approve");
     const links = [...card.querySelectorAll("a")];
     expect(links).toHaveLength(1);
     expect(links[0].href).toBe("https://example.invalid/checklist");
