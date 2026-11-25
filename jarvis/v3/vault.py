@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import date
 import fcntl
@@ -151,7 +151,42 @@ def _body(body, *, allow_empty: bool = False) -> None:
         raise VaultError("Memory body must be text without NUL characters and must contain content.")
 
 
-def _parse(location: Location, raw: bytes) -> Entry:
+def body_cap(location: Location) -> int:
+    return USER_CAP if location.name == "USER" else ENTRY_CAP
+
+
+def _new_entry(folder, name, description, body, source):
+    if not isinstance(folder, str) or folder not in FOLDERS:
+        raise VaultError("Use a known memory folder.")
+    if not _slug(name):
+        raise VaultError("Use a short kebab-case memory name.")
+    _metadata("description", description)
+    _metadata("source", source)
+    _body(body)
+    return Entry(Location(folder, name), description, source, body, date.today().isoformat())
+
+
+def _patch_body(entry, old, new):
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise VaultError("Old and new patch values must be text.")
+    pos = entry.body.find(old)
+    if old:
+        if pos < 0 or entry.body.find(old, pos + 1) >= 0:
+            raise VaultError("Patch text must occur exactly once in the memory body.")
+    elif entry.location.folder or entry.body:
+        raise VaultError("Empty patch text is only valid for an empty profile or commitments.")
+    return entry.body[:pos] + new + entry.body[pos + len(old):], pos
+
+
+@contextmanager
+def _writable(write_scope):
+    with (write_scope() if write_scope is not None else nullcontext(True)) as allowed:
+        if not allowed:
+            raise VaultError("The chat turn is stopping.")
+        yield
+
+
+def _parse(location: Location, raw: bytes, info: os.stat_result) -> Entry:
     if len(raw) > _MAX_FILE_BYTES:
         raise VaultError("Memory file is too large to read.")
     stream = StringIO(raw.decode("utf-8"), newline="\n")
@@ -192,7 +227,7 @@ def _parse(location: Location, raw: bytes) -> Entry:
     rest = stream.read()
     _body(rest, allow_empty=not location.folder)
     return Entry(location, fields["description"], fields["source"], rest, fields["updated"],
-                 fields["status"], fields.get("replaced_by", ""), _revision(raw), tuple(layout), newline, closing)
+                 fields["status"], fields.get("replaced_by", ""), _revision(raw, info), tuple(layout), newline, closing)
 
 
 def _is_archived(raw: bytes) -> bool:
@@ -232,8 +267,10 @@ def _archived_header(directory, filename):
     return False
 
 
-def _revision(raw: bytes) -> bytes:
-    return hashlib.sha256(raw).digest()
+def _revision(raw: bytes, info: os.stat_result) -> bytes:
+    # Change time also distinguishes reused inodes and in-place edits that restore the old bytes.
+    identity = f"{info.st_dev}:{info.st_ino}:{info.st_ctime_ns}:".encode("ascii")
+    return hashlib.sha256(identity + raw).digest()
 
 
 def _scan(text: str, *, purpose: content_scan.Purpose = "memory") -> tuple[str, ...]:
@@ -296,16 +333,18 @@ def _read_bytes(fd: int) -> bytes:
         return stream.read(_MAX_FILE_BYTES + 1)
 
 
-def _read_file(directory: int, name: str, *, private: bool = True, allow_prefix: bool = False) -> bytes:
+def _read_file(directory: int, name: str, *, private: bool = True,
+               allow_prefix: bool = False) -> tuple[bytes, os.stat_result]:
     # An owner's editor leaves 0644 behind; the 0700 folder keeps it private, and the next write makes it 0600.
     with _regular_file(directory, name, private=private) as fd:
+        info = os.fstat(fd)
         raw = _read_bytes(fd)
     if not allow_prefix and len(raw) > _MAX_FILE_BYTES:
         raise VaultError("Memory file is too large to read.")
-    return raw
+    return raw, info
 
 
-def _check_revision(directory: int, filename: str, expected: bytes | None) -> None:
+def _check_revision(directory: int, filename: str, expected: bytes | None) -> bytes | None:
     try:
         if expected is None:
             os.stat(filename, dir_fd=directory, follow_symlinks=False)
@@ -313,12 +352,12 @@ def _check_revision(directory: int, filename: str, expected: bytes | None) -> No
             with _regular_file(directory, filename, private=False) as fd:
                 before = os.fstat(fd)
                 raw = _read_bytes(fd)
-                if len(raw) <= _MAX_FILE_BYTES and _revision(raw) == expected:
+                if len(raw) <= _MAX_FILE_BYTES and _revision(raw, before) == expected:
                     after = os.stat(filename, dir_fd=directory, follow_symlinks=False)
                     if (before.st_dev == after.st_dev and before.st_ino == after.st_ino
                             and before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
                             and before.st_ctime_ns == after.st_ctime_ns):
-                        return
+                        return raw
     except FileNotFoundError:
         if expected is None:
             return
@@ -327,7 +366,8 @@ def _check_revision(directory: int, filename: str, expected: bytes | None) -> No
     raise VaultError("Memory entry changed during the write. Read it again.")
 
 
-def _atomic_replace(directory: int, filename: str, raw: bytes, expected: bytes | None) -> None:
+def _atomic_replace(directory: int, filename: str, raw: bytes, expected: bytes | None, *,
+                    write_scope=None) -> bytes:
     tmp = ".entry-" + uuid4().hex
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS, 0o600, dir_fd=directory)
     try:
@@ -336,8 +376,11 @@ def _atomic_replace(directory: int, filename: str, raw: bytes, expected: bytes |
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        _check_revision(directory, filename, expected)
-        os.replace(tmp, filename, src_dir_fd=directory, dst_dir_fd=directory)
+            _check_revision(directory, filename, expected)
+            with _writable(write_scope):
+                os.replace(tmp, filename, src_dir_fd=directory, dst_dir_fd=directory)
+                # The rename can change ctime. Use the same file descriptor after the rename.
+                return _revision(raw, os.fstat(stream.fileno()))
     except BaseException:
         with suppress(OSError):
             os.unlink(tmp, dir_fd=directory)
@@ -400,12 +443,12 @@ class Vault:
     def _load(self, root: int, location: Location, *, write: bool = False) -> Entry | None:
         try:
             with self._folder(root, location.folder, write=write) as directory:
-                raw = _read_file(directory, location.filename, private=False)
+                raw, info = _read_file(directory, location.filename, private=False)
         except FileNotFoundError:
             if location.folder:
                 return None
             return self._initial(location)
-        return _parse(location, raw)
+        return _parse(location, raw, info)
 
     @staticmethod
     def _initial(location: Location) -> Entry:
@@ -487,10 +530,10 @@ class Vault:
                     return
                 entry = None
             else:
-                raw = _read_file(directory, location.filename, private=False, allow_prefix=True)
+                raw, info = _read_file(directory, location.filename, private=False, allow_prefix=True)
                 if _is_archived(raw):
                     return
-                entry = _parse(location, raw)
+                entry = _parse(location, raw, info)
         except FileNotFoundError:
             return
         except (OSError, UnicodeError, VaultError):
@@ -523,8 +566,17 @@ class Vault:
         entry.scan_markdown(entry.markdown())
         return entry
 
+    def check_add_target(self, location: Location) -> None:
+        """Check for an absent destination without creating vault directories."""
+        try:
+            with self._locked() as root:
+                if self._load(root, location) is not None:
+                    raise VaultError("The destination memory entry already exists.")
+        except FileNotFoundError:
+            pass
+
     def _check_caps(self, root: int, entry: Entry, *, adding: bool) -> None:
-        cap = USER_CAP if entry.location.name == "USER" else ENTRY_CAP
+        cap = body_cap(entry.location)
         over_chars = len(entry.body) - cap
         over_entries = 0
         if adding and entry.location.folder == "facts":
@@ -541,68 +593,61 @@ class Vault:
 
     @staticmethod
     def _save(root: int, directory: int, entry: Entry, raw: bytes, rules: tuple[str, ...],
-              archive_existing: bool = False):
+              archive_existing: bool = False, write_scope=None):
         location = entry.location
         expected = entry.revision
         flags = [{"name": location.ref, "rule": rule} for rule in rules]
         if flags:
             _check_revision(directory, location.filename, expected)
-            _log_flags(root, flags)
+            with _writable(write_scope):
+                _log_flags(root, flags)
         if archive_existing:
             with _directory(directory, ".archive", create=True) as archive:
-                Vault._finish_archive(directory, archive, location, expected)
+                Vault._finish_archive(directory, archive, location, expected, write_scope=write_scope)
             expected = None
-        _atomic_replace(directory, location.filename, raw, expected)
-        return replace(entry, revision=_revision(raw)), flags
+        revision = _atomic_replace(directory, location.filename, raw, expected, write_scope=write_scope)
+        return replace(entry, revision=revision), flags
 
     def add(self, folder: str, name: str, description: str, body: str, source: str, *,
-            purpose: content_scan.Purpose = "memory"):
-        if not isinstance(folder, str) or folder not in FOLDERS or not _slug(name):
-            raise VaultError("Use a known folder and a short kebab-case memory name.")
-        _metadata("description", description)
-        _metadata("source", source)
-        _body(body)
-        entry = Entry(Location(folder, name), description, source, body, date.today().isoformat())
+            purpose: content_scan.Purpose = "memory", require_absent=False, write_scope=None):
+        entry = _new_entry(folder, name, description, body, source)
         with self._locked(write=True) as root:
-            return self._add(root, entry, purpose=purpose)
+            return self._add(root, entry, purpose=purpose, require_absent=require_absent,
+                             write_scope=write_scope)
 
     def _add(self, root: int, entry: Entry, *, importing: bool = False,
-             purpose: content_scan.Purpose = "memory"):
+             purpose: content_scan.Purpose = "memory", require_absent=False, write_scope=None):
         location = entry.location
         existing = self._load(root, location, write=True)
+        if require_absent and existing is not None:
+            raise VaultError("The destination memory entry changed after approval.")
         if existing is not None and (existing.status == "active" or importing):
             raise VaultError(f"Memory entry {safe_summary(location.ref)} already exists.")
         self._check_caps(root, entry, adding=True)
         text = entry.markdown()
         rules = entry.scan_markdown(text, purpose=purpose)
+        raw = text.encode("utf-8")
         with self._folder(root, location.folder, create=True) as directory:
             if importing and self._was_archived(directory, location):
                 raise VaultError("Memory entry was previously archived.")
             if existing is not None:
                 entry = replace(entry, revision=existing.revision)
-            return self._save(root, directory, entry, text.encode("utf-8"), rules, existing is not None)
+            return self._save(root, directory, entry, raw, rules, existing is not None, write_scope)
 
     def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None], *,
-              purpose: content_scan.Purpose = "memory", review_patch: bool = False):
-        if not isinstance(old, str) or not isinstance(new, str):
-            raise VaultError("Patch values must be text.")
+              purpose: content_scan.Purpose = "memory", review_patch: bool = False,
+              expected: tuple[Location, bytes | None] | None = None, write_scope=None):
         with self._locked(write=True) as root:
             entry = self._resolve(root, name, write=True)
             location = entry.location
+            if expected is not None and (location, entry.revision) != expected:
+                raise VaultError("Memory entry changed after approval. Read it again before patching.")
             if location not in reads:
                 raise VaultError("Read the memory entry in this session before patching.")
             if reads[location] != entry.revision:
                 raise VaultError("Memory entry changed since the read. Read it again before patching.")
-            if not old:
-                if location.folder or entry.body:
-                    raise VaultError("Empty patch text is only valid for an empty profile or commitments.")
-                pos = 0
-            else:
-                pos = entry.body.find(old)
-                if pos < 0 or entry.body.find(old, pos + 1) >= 0:
-                    raise VaultError("Patch text must occur exactly once in the memory body.")
+            body, pos = _patch_body(entry, old, new)
             old_end = pos + len(old)
-            body = entry.body[:pos] + new + entry.body[old_end:]
             if purpose == "consolidation-memory" and location == Location("", "commitments"):
                 _keep_commitments_block(entry.body, body)
             _body(body, allow_empty=not location.folder)
@@ -614,8 +659,9 @@ class Vault:
             rules = entry.scan_markdown(text, purpose="memory" if strict_patch else purpose)
             if strict_patch and content_scan.review_patch_creates_directive(before, body, pos, old_end, pos + len(new)):
                 raise VaultError("Memory scanner blocked content (agent-override).")
+            raw = text.encode("utf-8")
             with self._folder(root, location.folder) as directory:
-                return self._save(root, directory, entry, text.encode("utf-8"), rules)
+                return self._save(root, directory, entry, raw, rules, write_scope=write_scope)
 
     def rewrite(self, name: str, transform, *, purpose: content_scan.Purpose):
         """Transform a root entry's current body under the vault write lock."""
@@ -634,10 +680,12 @@ class Vault:
             return self._save(root, root, entry, text.encode("utf-8"), rules)
 
     @staticmethod
-    def _finish_archive(directory: int, archive: int, location: Location, expected: bytes) -> None:
+    def _finish_archive(directory: int, archive: int, location: Location, expected: bytes, *,
+                        write_scope=None) -> None:
         filename = f"{location.name}.{uuid4().hex}.md"
         _check_revision(directory, location.filename, expected)
-        os.rename(location.filename, filename, src_dir_fd=directory, dst_dir_fd=archive)
+        with _writable(write_scope):
+            os.rename(location.filename, filename, src_dir_fd=directory, dst_dir_fd=archive)
 
     @staticmethod
     def _was_archived(directory: int, location: Location) -> bool:
@@ -648,15 +696,19 @@ class Vault:
         except FileNotFoundError:
             return False
 
-    def archive(self, name: str, replaced_by: str = ""):
+    def archive(self, name: str, replaced_by: str = "", *,
+                expected: tuple[Location, bytes | None] | None = None, write_scope=None):
         if not isinstance(replaced_by, str):
             raise VaultError("Invalid replacement name.")
         with self._locked(write=True) as root:
             entry = self._resolve(root, name, write=True, pending_archive=True)
             location = entry.location
+            if expected is not None and (location, entry.revision) != expected:
+                raise VaultError("Memory entry changed after approval. Review it again before archiving.")
             if not location.folder:
                 raise VaultError("This fixed vault entry cannot be archived.")
-            if entry.status == "active":
+            already_archived = entry.status == "archived"
+            if not already_archived:
                 replacement = self._resolve(root, replaced_by, write=True).location if replaced_by else None
                 if replacement == location:
                     raise VaultError("Choose a different active replacement.")
@@ -668,14 +720,14 @@ class Vault:
             raw = text.encode("utf-8")
             with self._folder(root, location.folder) as directory:
                 with _directory(directory, ".archive", create=True) as archive:
-                    if _revision(raw) == entry.revision:
-                        self._finish_archive(directory, archive, location, entry.revision)
+                    if already_archived and _check_revision(directory, location.filename, entry.revision) == raw:
+                        self._finish_archive(directory, archive, location, entry.revision, write_scope=write_scope)
                         return entry, []
-                    entry, flags = self._save(root, directory, entry, raw, rules)
+                    entry, flags = self._save(root, directory, entry, raw, rules, write_scope=write_scope)
                     # The persisted status already hides the entry. A retry can
                     # finish moving it if the filesystem or an editor intervenes.
                     with suppress(OSError, VaultError):
-                        self._finish_archive(directory, archive, location, entry.revision)
+                        self._finish_archive(directory, archive, location, entry.revision, write_scope=write_scope)
                     return entry, flags
 
     def import_memory(self, source_dir) -> tuple[list[str], list[str]]:
@@ -690,7 +742,8 @@ class Vault:
                     try:
                         if not _slug(name):
                             raise VaultError("Invalid legacy filename.")
-                        body = _read_file(source, filename, private=False).decode("utf-8")
+                        raw, _ = _read_file(source, filename, private=False)
+                        body = raw.decode("utf-8")
                         _body(body)
                         description = next(line.strip().lstrip("# ").strip()
                                            for line in body.splitlines() if line.strip().lstrip("# ").strip())

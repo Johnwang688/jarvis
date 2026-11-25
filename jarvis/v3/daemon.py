@@ -20,6 +20,7 @@ import time
 
 from jarvis import config
 from . import hud, owner_routes
+from .approvals import ApprovalBroker
 from .chat import ChatService
 from .jobs import Scheduler, default_jobs, idle_seconds
 
@@ -310,7 +311,7 @@ class Daemon:
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
-        self._chat = ChatService(self._chats_root) if chat is None else chat
+        self._chat = self._new_chat() if chat is None else chat
         if jobs is None:
             jobs = default_jobs(feed_root=self._data_dir / "feed", chats_root=self._chats_root,
                                 index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite")
@@ -328,13 +329,16 @@ class Daemon:
         chat_idle = self._chat.idle_seconds()
         return min(chat_idle, idle_seconds(chats_root=self._chats_root)) if chat_idle else 0.0
 
+    def _new_chat(self):
+        return ChatService(self._chats_root, approvals=ApprovalBroker(log=self._data_dir / "approvals.jsonl"))
+
     def start(self) -> None:
         with self._lock:
             if self._server is not None:
                 return
             _prepare_data_dir(self._data_dir)
             if self._chat is None:
-                self._chat = ChatService(self._chats_root)
+                self._chat = self._new_chat()
             try:
                 server = ThreadingHTTPServer(
                     ("127.0.0.1", self._requested_port),
@@ -364,6 +368,8 @@ class Daemon:
             if self._server is None:
                 return
             self._chat.close()
+            if self._owns_chat:
+                self._chat.approvals.shutdown()
             self._scheduler.stop()
             self._server.shutdown()
             self._server.server_close()
