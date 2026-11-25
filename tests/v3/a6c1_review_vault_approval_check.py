@@ -7,6 +7,26 @@ from a6c1_acceptance_check import ADD, Base, reply
 
 
 class VaultApprovalReview(Base):
+    def test_pending_approval_snapshot_replays_only_public_tool_events(self):
+        service = self.talk(reply("Ready."), reply(calls=[("vault_add", ADD)]), reply("Done."))
+        service.send("Start a conversation.")
+        self.assertEqual(self.wait_idle(service), "idle")
+        service.send("Save the note.")
+        item = self.next_card()
+
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["approvals"], 1)
+        self.assertEqual([row["text"] for row in snapshot["history"]], ["Start a conversation.", "Ready."])
+        replay = snapshot["replay"]
+        self.assertEqual(replay["history_prefix"], 0)
+        self.assertEqual(replay["events"], service.events(0)["events"])
+        prompt, tool = replay["events"][-2:]
+        self.assertEqual((prompt["kind"], prompt["text"]), ("user", "Save the note."))
+        self.assertEqual(tool, {"kind": "tool_start", "name": "vault_add", "seq": snapshot["seq"], "t": tool["t"]})
+        self.assertEqual(service.approval_snapshot()["session_id"], snapshot["session_id"])
+        self.assertEqual([row["id"] for row in service.approval_snapshot()["approvals"]], [item["id"]])
+
     def test_vault_write_methods_require_a_broker_decision(self):
         from jarvis.v3 import fastpath
 

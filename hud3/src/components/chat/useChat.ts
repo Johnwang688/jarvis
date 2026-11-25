@@ -10,10 +10,10 @@ const TIMEOUT_MS = 10_000;
 
 export const isActive = (state: ChatState) => state === "running" || state === "stopping";
 
-type MessageRow = ChatMessage & { kind: "message" };
+type MessageRow = ChatMessage & { kind: "message"; steerSeq?: number };
 type ToolRow = ChatTool & { kind: "tool"; resultUnavailable?: boolean };
 export type ChatRow = MessageRow | ToolRow;
-type ChatView = Omit<ChatSnapshot, "history" | "tools"> & {
+type ChatView = Omit<ChatSnapshot, "history" | "tools" | "replay"> & {
   rows: ChatRow[];
   notice?: "stopped" | "error";
 };
@@ -41,14 +41,23 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
     if (event.seq <= after) continue;
     after = event.seq;
     switch (event.kind) {
-      case "user":
+      case "user": {
         rows = closeTools(rows);
         next.draft = "";
         next.notice = undefined;
-        rows.push({ kind: "message", role: "user", text: event.text, t: event.t });
+        if (event.inputs) {
+          // Carry the exact queued rows forward, including repeated text.
+          const carried = new Set(event.inputs.map(({ seq }) => seq));
+          rows = rows.filter((row) => row.kind !== "message" || row.steerSeq === undefined || !carried.has(row.steerSeq));
+          rows.push(...event.inputs.map(({ seq, text }): MessageRow =>
+            ({ kind: "message", role: "user", text, t: event.t, steerSeq: seq })));
+        } else {
+          rows.push({ kind: "message", role: "user", text: event.text, t: event.t });
+        }
         break;
+      }
       case "steer":
-        rows.push({ kind: "message", role: "user", text: event.text, t: event.t, steered: true });
+        rows.push({ kind: "message", role: "user", text: event.text, t: event.t, steered: true, steerSeq: event.seq });
         break;
       case "reply":
         next.draft = "";
@@ -66,11 +75,15 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
         break;
       }
       case "error":
-      case "stopped":
+      case "stopped": {
         next.notice = event.kind;
         next.draft = "";
         rows = closeTools(rows);
+        const discarded = new Set(event.discarded);
+        rows = rows.map((row) => row.kind === "message" && row.steerSeq !== undefined && discarded.has(row.steerSeq)
+          ? { ...row, steered: false, discarded: true } : row);
         break;
+      }
     }
   }
   if (!isActive(next.state)) {
@@ -80,7 +93,8 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
   return { ...next, rows: limitHistory(rows) };
 }
 
-function reconcileSnapshot({ history, tools, ...snapshot }: ChatSnapshot, current?: ChatView): ChatView {
+function reconcileSnapshot({ history, tools, replay, ...snapshot }: ChatSnapshot, current?: ChatView): ChatView {
+  if (replay) history = history.slice(0, replay.history_prefix);
   const rows: MessageRow[] = history.map((message) => ({ ...message, kind: "message" }));
   const active = isActive(snapshot.state);
   const snapshotTools = active ? [...tools] : tools.filter((tool) => tool.ok !== undefined);
@@ -126,7 +140,12 @@ function reconcileSnapshot({ history, tools, ...snapshot }: ChatSnapshot, curren
     [row, ...(knownTools.get(index) ?? [])]);
   transcript.push(...snapshotTools.map((tool): ToolRow => ({ ...tool, kind: "tool" })));
   transcript.push(...rows.slice(toolsBefore));
-  return { ...snapshot, draft: active ? snapshot.draft : "", rows: transcript };
+  const view = { ...snapshot, draft: active ? snapshot.draft : "", rows: transcript };
+  if (!replay?.events.length) return view;
+  const replayed = applyEvents({ ...view, seq: replay.events[0].seq - 1 }, {
+    state: view.state, seq: view.seq, gap: false, events: replay.events, approvals: view.approvals,
+  });
+  return { ...replayed, draft: view.draft };
 }
 
 export function useChat() {
@@ -153,15 +172,17 @@ export function useChat() {
     }
 
     function adoptSnapshot(snapshot: ChatSnapshot) {
-      if (current && current.session_id === snapshot.session_id && current.seq === snapshot.seq) {
+      if (current && current.seq === snapshot.seq && current.session_id === snapshot.session_id) {
         // A matching cursor lets us keep event-only labels and finished tools.
         publish({
           ...current,
+          session_id: snapshot.session_id,
           state: snapshot.state,
           draft: isActive(snapshot.state) ? snapshot.draft : "",
           approvals: snapshot.approvals,
         });
       } else {
+        if (current && current.session_id !== snapshot.session_id) setFeedback(undefined);
         publish(reconcileSnapshot(snapshot, current));
       }
       needsSnapshot = false;
@@ -189,20 +210,24 @@ export function useChat() {
           const batch = await readEvents(current.seq, signal);
           if (!canPublish()) return;
           readStopped = false;
-          if (batch.gap || batch.seq < current.seq) {
+          if (batch.gap || batch.seq < current.seq
+            || (batch.session_id !== undefined && batch.session_id !== current.session_id)) {
             needsSnapshot = true;
             const snapshot = await readChat(signal);
             if (canPublish()) adoptSnapshot(snapshot);
           } else {
             publish(applyEvents(current, batch));
+            if (!isActive(batch.state) || batch.events.some((event) => event.kind === "reply")) {
+              setFeedback((previous) => previous?.error ? previous : undefined);
+            }
             if (isActive(batch.state)) {
               const snapshot = await readChat(signal);
               if (!canPublish()) return;
-              if (snapshot.session_id !== current.session_id) adoptSnapshot(snapshot);
-              // A newer snapshot can already include a reply. Let the next events poll catch up.
-              else if (snapshot.seq === current.seq) {
-                publish({ ...current, approvals: snapshot.approvals, draft: isActive(snapshot.state) ? snapshot.draft : "" });
+              if (snapshot.seq === current.seq
+                || snapshot.session_id !== current.session_id) {
+                adoptSnapshot(snapshot);
               } else if (snapshot.approvals !== current.approvals) {
+                // A newer snapshot can already include a reply. Let events catch up.
                 publish({ ...current, approvals: snapshot.approvals });
               }
             }

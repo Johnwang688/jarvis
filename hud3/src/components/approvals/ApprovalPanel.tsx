@@ -232,8 +232,10 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   );
 }
 
-export function ApprovalPanel({ count, stopping }: { count: number; stopping: boolean }) {
-  const { shown, ready, busy, readError, notice, answer } = useApprovals(count);
+export function ApprovalPanel({ count, stopping, sessionId }: {
+  count: number; stopping: boolean; sessionId?: string | null;
+}) {
+  const { shown, ready, busy, readError, notice, answer } = useApprovals(count, sessionId);
   return (
     <>
       {shown && <ApprovalCard key={shown.key} shown={shown} ready={ready} busy={busy || stopping} answer={answer} />}

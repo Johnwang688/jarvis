@@ -5,6 +5,7 @@ export interface ChatMessage {
   text: string;
   t?: number;
   steered?: boolean;
+  discarded?: boolean;
 }
 
 export interface ChatTool {
@@ -21,18 +22,22 @@ export interface ChatSnapshot {
   tools: ChatTool[];
   history: ChatMessage[];
   approvals: number;
+  replay?: { history_prefix: number; events: ChatEvent[] };
 }
 
+type SteerInput = { seq: number; text: string };
 type ChatEvent = { seq: number; t?: number } & (
-  | { kind: "user" | "steer" | "reply"; text: string }
+  | { kind: "user"; text: string; inputs?: SteerInput[] }
+  | { kind: "steer" | "reply"; text: string }
   | { kind: "tool_start"; name: string }
   | ({ kind: "tool_end"; ok: boolean; summary: string } & ChatTool)
-  | { kind: "error" | "stopped" }
+  | { kind: "error" | "stopped"; discarded?: number[] }
 );
 
 interface ChatEvents {
   state: ChatState;
   seq: number;
+  session_id?: string | null;
   gap: boolean;
   events: ChatEvent[];
   approvals: number;
@@ -73,6 +78,9 @@ function isEvent(value: unknown): value is ChatEvent {
   if (!record(value) || !isSequence(value.seq) || !isTimestamp(value.t)) return false;
   switch (value.kind) {
     case "user":
+      return typeof value.text === "string" && (value.inputs === undefined ||
+        (Array.isArray(value.inputs) && value.inputs.every((input) =>
+          record(input) && isSequence(input.seq) && typeof input.text === "string")));
     case "steer":
     case "reply":
       return typeof value.text === "string";
@@ -82,7 +90,7 @@ function isEvent(value: unknown): value is ChatEvent {
       return typeof value.name === "string" && typeof value.ok === "boolean" && typeof value.summary === "string";
     case "error":
     case "stopped":
-      return true;
+      return value.discarded === undefined || (Array.isArray(value.discarded) && value.discarded.every(isSequence));
     default:
       return false;
   }
@@ -101,7 +109,6 @@ export function actionError(action: ChatAction, failure: unknown): string {
       if (status === 400) return "Chat could not accept this message. Check the text and try again.";
       if (status === 409) return "Jarvis is stopping. Try sending again when it stops.";
       if (status === 429) return "Too many messages are queued. Try again shortly.";
-      if (status === 503) return "Chat needs a model key before it can send messages.";
       return "Could not confirm the send. Your message is still here.";
     case "stop":
       return "Could not stop the turn. Try again.";
@@ -132,22 +139,34 @@ export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
     || !Array.isArray(value.tools) || !value.tools.every((tool) => typeof tool === "string" || isTool(tool))) {
     throw new Error("Invalid chat snapshot");
   }
-  const tools = value.tools.map((tool: string | ChatTool) => typeof tool === "string"
-    ? { name: tool }
-    : { name: tool.name, ok: tool.ok ?? undefined, summary: tool.summary ?? undefined });
+  // String entries are the daemon's available tool names, not observed calls.
+  const tools = value.tools.filter(isTool).map(({ name, ok, summary }) => ({
+    name, ok: ok ?? undefined, summary: summary ?? undefined,
+  }));
   const history = value.history.map(({ role, text, t }: ChatMessage) => ({ role, text, t }));
+  let replay: ChatSnapshot["replay"];
+  if (value.replay !== undefined) {
+    const { replay: candidate } = value;
+    if (!record(candidate) || !isSequence(candidate.history_prefix) || candidate.history_prefix > history.length
+      || !Array.isArray(candidate.events) || !candidate.events.every(isEvent)) {
+      throw new Error("Invalid chat replay");
+    }
+    replay = { history_prefix: candidate.history_prefix, events: candidate.events };
+  }
   return { state: value.state, seq: value.seq, session_id: value.session_id, draft: value.draft,
-    history, tools, approvals: value.approvals ?? 0 };
+    history, tools, replay, approvals: value.approvals ?? 0 };
 }
 
 export async function readEvents(after: number, signal: AbortSignal): Promise<ChatEvents> {
   const value = await request(signal, "events", { after });
   if (!record(value) || !isState(value.state) || !isSequence(value.seq) || typeof value.gap !== "boolean"
+    || (value.session_id != null && typeof value.session_id !== "string")
     || (value.approvals !== undefined && !isSequence(value.approvals))
     || !Array.isArray(value.events) || (!value.gap && !value.events.every(isEvent))) {
     throw new Error("Invalid chat events");
   }
-  return { state: value.state, seq: value.seq, gap: value.gap, events: value.gap ? [] : value.events,
+  return { state: value.state, seq: value.seq, session_id: value.session_id as string | null | undefined,
+    gap: value.gap, events: value.gap ? [] : value.events,
     approvals: value.approvals ?? 0 };
 }
 

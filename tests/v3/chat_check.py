@@ -207,8 +207,49 @@ assert svc.close()
         self.finish(svc)
         self.assertEqual(len(model.seen), 2)
         self.assertIn({"role": "user", "content": "Second question.\n\nThird question."}, model.seen[1])
-        self.assertEqual([(e["kind"], e["text"]) for e in svc.events(0)["events"] if e["kind"] == "reply"],
+        events = svc.events(0)["events"]
+        self.assertEqual([(e["kind"], e["text"]) for e in events if e["kind"] == "reply"],
                          [("reply", "First answer."), ("reply", "Second answer.")])
+        followup = next(event for event in events if "inputs" in event)
+        self.assertEqual(followup["inputs"], [
+            {"seq": event["seq"], "text": event["text"]} for event in events if event["kind"] == "steer"
+        ])
+        snapshot = svc.snapshot()
+        self.assertEqual(snapshot["replay"], {"history_prefix": 0, "events": events})
+        self.assertEqual([row["t"] for row in snapshot["history"]],
+                         [events[0]["t"], events[3]["t"], followup["t"], followup["t"], events[-1]["t"]])
+
+    def test_event_history_is_scoped_to_the_selected_session(self):
+        svc = self.service(Model(reply("Old answer."), reply("New answer.")))
+        svc.send("Old question.")
+        self.finish(svc)
+        old = svc.snapshot()
+        new_id = svc.new_session()["session_id"]
+        self.assertNotEqual(new_id, old["session_id"])
+        self.assertEqual(svc.events(old["seq"])["session_id"], new_id)
+        self.assertEqual(svc.snapshot()["seq"], old["seq"])
+        self.assertEqual(svc.snapshot()["replay"], {"history_prefix": 0, "events": []})
+        svc.send("New question.")
+        self.finish(svc)
+        new = svc.events(0)
+        self.assertEqual(new["session_id"], new_id)
+        self.assertTrue(new["gap"])
+        self.assertEqual([row["text"] for row in new["events"]], ["New question.", "New answer."])
+
+    def test_replay_starts_at_a_whole_turn_after_event_gap(self):
+        with patch.object(chat, "EVENT_LIMIT", 5):
+            svc = self.service(Model(reply("Old answer."), reply(None, ("vault_list", {})), reply("New answer.")))
+        svc.send("Old question.")
+        self.finish(svc)
+        svc.send("New question.")
+        self.finish(svc)
+        batch = svc.events(0)
+        self.assertTrue(batch["gap"])
+        self.assertEqual(batch["events"][0]["kind"], "reply")
+        snapshot = svc.snapshot()
+        self.assertEqual(snapshot["replay"], {"history_prefix": 2, "events": batch["events"][1:]})
+        self.assertEqual([row["kind"] for row in snapshot["replay"]["events"]],
+                         ["user", "tool_start", "tool_end", "reply"])
 
     def test_provider_error_drops_steers_before_a_retry(self):
         entered, release = self.hold()
@@ -229,6 +270,8 @@ assert svc.close()
         self.wait_for(lambda: svc.events(0)["state"] == "error")
         (error,) = [event for event in svc.events(0)["events"] if event["kind"] == "error"]
         self.assertEqual(error["dropped"], 1)
+        (steer,) = [event for event in svc.events(0)["events"] if event["kind"] == "steer"]
+        self.assertEqual(error["discarded"], [steer["seq"]])
         self.assertFalse(svc.send("Fresh question.")["steered"])
         self.finish(svc)
         users = [row["content"] for row in model.seen[-1] if row["role"] == "user"]
