@@ -23,6 +23,7 @@ from . import hud, owner_routes
 from .approvals import ApprovalBroker
 from .chat import ChatService
 from .jobs import Scheduler, default_jobs, idle_seconds
+from .work import WorkService
 
 
 SERVICE_NAME = "jarvis-agentd"
@@ -339,7 +340,13 @@ class Daemon:
         return min(chat_idle, idle_seconds(chats_root=self._chats_root)) if chat_idle else 0.0
 
     def _new_chat(self):
-        return ChatService(self._chats_root, approvals=ApprovalBroker(log=self._data_dir / "approvals.jsonl"))
+        # The chat and the work route read the same registry and ledger: this daemon's data folder.
+        from .work import Ledger, Registry
+
+        root = self._data_dir / "work"
+        return ChatService(self._chats_root, approvals=ApprovalBroker(log=self._data_dir / "approvals.jsonl"),
+                           work=WorkService(registry=Registry(root / "projects.json"),
+                                            ledger=Ledger(root / "threads.jsonl")))
 
     def start(self) -> None:
         with self._lock:

@@ -26,7 +26,7 @@ import time
 import unicodedata
 from uuid import uuid4
 
-from jarvis import config
+from jarvis import config, untrusted
 
 from . import t3_client
 from ._paths import open_directory
@@ -44,6 +44,12 @@ _T3_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _SUFFIX = re.compile(r"[a-f0-9]{4}")
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 _BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+# Default-ignorable marks, fillers and blank glyphs outside the shared control categories.
+_INVISIBLE_PATH = re.compile(
+    r"[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u2800\u3164"
+    r"\ud800-\udfff\ufe00-\ufe0f\uffa0\ufff0-\ufff8\U00013441\U00013442"
+    r"\U0001d159\U000e0000-\U000e0fff]"
+)
 _CREDENTIAL_DIRS = (".config/jarvis", ".ssh", ".gnupg", ".claude", ".codex", ".t3")
 _PROJECT_FIELDS = {"path", "provider", "model", "base"}
 _PLAN_FIELDS = _PROJECT_FIELDS | {"project", "title", "brief", "branch"}
@@ -51,6 +57,7 @@ _EVENT_FIELDS = {"v", "kind", "thread_id", "at"}
 _START_FIELDS = _EVENT_FIELDS | {"run_id", "project", "title", "branch", "brief_sha256"}
 _STATUS_FIELDS = _EVENT_FIELDS | {"status", "waiting_on_owner"}
 _UNKNOWN_THREAD = "That is not a thread Jarvis started."
+_WRONG_THREAD = "T3 returned a different thread than requested."
 
 
 class WorkError(Exception):
@@ -101,12 +108,20 @@ def _allowed_path(path):
         raise WorkError("That directory cannot be registered for work.")
 
 
+def _visible_path(path):
+    text = str(path)
+    if _INVISIBLE_PATH.search(text) or any(map(untrusted.unseen, text)):
+        raise WorkError("Project path contains invisible or control characters.")
+
+
 def _resolve_path(value):
     try:
         original = Path(value)
         if not original.is_absolute():
             raise WorkError("Project path must be absolute.")
+        _visible_path(original)
         path = original.resolve(strict=True)
+        _visible_path(path)
         if not path.is_dir() or original.resolve(strict=True) != path:
             raise WorkError("Project path must be a stable, existing directory.")
         _allowed_path(path)
@@ -407,7 +422,7 @@ class Ledger:
 
 class WorkService:
     def __init__(self, *, registry=None, ledger=None, t3=None, clock=time.time, token=secrets.token_hex):
-        directory = config.V3_DIR / "work"
+        directory = Path(config.V3_DIR) / "work"
         self._registry = Registry(directory / "projects.json") if registry is None else registry
         self._ledger = Ledger(directory / "threads.jsonl") if ledger is None else ledger
         self._t3 = t3_client.T3() if t3 is None else t3
@@ -436,7 +451,9 @@ class WorkService:
         return dict(project=registered.name, path=registered.path, provider=registered.provider,
                     model=registered.model, title=title, brief=brief, base=registered.base, branch=branch)
 
-    def start(self, plan: dict) -> Thread:
+    def start(self, plan: dict, *, guard=None) -> Thread:
+        """Start the planned thread. `guard`, when given, is called last, just
+        before T3 is asked: it raises to stop a start that is no longer wanted."""
         if type(plan) is not dict or plan.keys() != _PLAN_FIELDS:
             raise WorkError("Invalid work start plan.")
         project = self._current_project(plan["project"])
@@ -455,6 +472,8 @@ class WorkService:
                     or not _valid_suffix(branch[len(prefix):])):
                 raise WorkError("Invalid work branch in start plan.")
             options = {"worktree": project.base, "branch": branch}
+        if guard is not None:
+            guard()
         run = _checked(self._t3.start, project.path, brief, provider=project.provider,
                        model=project.model, title=title, **options)
         at = self._clock()
@@ -479,9 +498,19 @@ class WorkService:
 
     def show(self, thread_id, *, messages=4) -> t3_client.State:
         self._ledger.get(thread_id)
-        return _checked(self._t3.show, thread_id, messages=messages)
+        state = _checked(self._t3.show, thread_id, messages=messages)
+        if state.thread_id != thread_id:
+            raise WorkError(_WRONG_THREAD)
+        return state
 
-    def send(self, thread_id, message) -> t3_client.Run:
+    def send(self, thread_id, message, *, guard=None) -> t3_client.Run:
         self._ledger.get(thread_id)
         _message(message)
-        return _checked(self._t3.send, thread_id, message)
+        if guard is not None:
+            guard()
+        run = _checked(self._t3.send, thread_id, message)
+        if run.thread_id != thread_id:
+            raise WorkError(_WRONG_THREAD)
+        # A thread that had finished is live again: the watch job follows it.
+        self._ledger.record_status(thread_id, status="running", waiting_on_owner=False, at=self._clock())
+        return run

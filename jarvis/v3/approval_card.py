@@ -4,6 +4,8 @@ from jarvis import untrusted
 from jarvis.tools import secrets
 from jarvis.v2 import redact
 
+from .work import WorkError
+
 
 CARD_TEXT_LIMIT = 1200
 _TITLES = {
@@ -13,6 +15,8 @@ _TITLES = {
     "calendar_create": "Create a calendar event",
     "calendar_update": "Update a calendar event",
     "calendar_delete": "Delete a calendar event",
+    "work_start": "Start a coding thread",
+    "work_send": "Send to a coding thread",
 }
 _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
 
@@ -68,6 +72,23 @@ def _vault_rows(tool, args, preview):
         yield "Replacement", preview["replacement"]
 
 
+def _work_rows(tool, args, preview):
+    if tool == "work_start":
+        yield "Project", preview["project"]
+        yield "Folder", preview["path"]
+        yield "Agent", f"{preview['provider']} / {preview['model']}"
+        branch = preview["branch"]
+        yield "Runs in", (f"A new worktree from {preview['base']} on branch {branch}"
+                          if branch is not None else "The project folder")
+        yield "Thread title", preview["title"]
+        yield "Brief", preview["brief"]
+    else:
+        yield "Thread", preview["title"]
+        yield "Thread id", preview["thread_id"]
+        yield "In project", preview["project"]
+        yield "Message", args["message"]
+
+
 def build_card(tool, args, preview):
     if tool.startswith("calendar_"):
         from .tools.calendar import DESCRIPTION_LIMIT
@@ -76,12 +97,18 @@ def build_card(tool, args, preview):
         # Calendar validates proposed descriptions before building the preview.
         # Render all of the redacted text even if the credential markers add length.
         limits = {"Description": None, "New description": None, "Current description": DESCRIPTION_LIMIT}
+    elif tool in ("work_start", "work_send"):
+        rows = _work_rows(tool, args, preview)
+        limits = dict.fromkeys(("Brief", "Message", "Folder"))
     else:
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)
-    return {"title": card_text(_TITLES[tool]),
-            "rows": [
-                {"label": card_text(label),
-                 "value": card_text(value, limit=limits.get(label, CARD_TEXT_LIMIT))}
-                for label, value in rows
-            ]}
+    title = card_text(_TITLES[tool])
+    shown_rows = []
+    for label, value in rows:
+        shown_label = card_text(label)
+        shown = card_text(value, limit=limits.get(label, CARD_TEXT_LIMIT))
+        if tool == "work_start" and label != "Brief" and shown != value:
+            raise WorkError("The coding thread details cannot be shown safely.")
+        shown_rows.append({"label": shown_label, "value": shown})
+    return {"title": title, "rows": shown_rows}

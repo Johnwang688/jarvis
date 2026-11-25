@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from jarvis import config
 
+from . import t3_client
 from ._paths import open_directory
 
 
@@ -27,6 +28,8 @@ ERROR_MESSAGE = "The chat turn could not complete."
 CALENDAR_TOOLS = frozenset({"calendar_list", "calendar_free"})
 CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_delete"})
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
+WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})
+WORK_GATED = frozenset({"work_start", "work_send"})
 TOOL_NAMES = frozenset({
     "get_datetime", "vault_list", "vault_read", "vault_search", "index_search",
     "skill_view", "skill_names", "brief_post", *CALENDAR_TOOLS,
@@ -52,9 +55,25 @@ def calendar_available():
     return Path(config.GOOGLE_TOKEN_PATH).is_file()
 
 
-def available_tools(names=TOOL_NAMES, *, gated=False):
+def _work_available(work):
+    if work is None:
+        return False
+    try:
+        if not work.projects():
+            return False
+        t3_client.resolve()
+    except Exception:
+        return False
+    return True
+
+
+def available_tools(names=TOOL_NAMES, *, gated=False, work=None):
     if gated:
         names = names | GATED_TOOLS
+    if _work_available(work):
+        names = names | WORK_TOOLS
+        if gated:
+            names = names | WORK_GATED
     return sorted(names if calendar_available() else names - (CALENDAR_TOOLS | CALENDAR_WRITES))
 
 
@@ -145,13 +164,14 @@ _BAD_SESSION = (ChatStorageError, OSError, ValueError, TypeError, KeyError, Recu
 
 class ChatService:
     def __init__(self, root, *, completion=None, clock=time.time, feed_root=None,
-                 approvals=None, calendar=None):
+                 approvals=None, calendar=None, work=None):
         self.root = Path(root).expanduser().absolute()
         self._feed_root = self.root.parent / "feed" if feed_root is None else Path(feed_root)
         self._completion = completion
         self._clock = clock
         self.approvals = approvals
         self._calendar = calendar
+        self.work = work
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._stop = threading.Event()
@@ -251,7 +271,7 @@ class ChatService:
                 if self._session_id is not None:
                     raise ChatStorageError("Chat session is unavailable.") from None
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
-                    "draft": self._draft, "tools": available_tools(gated=self.approvals is not None),
+                    "draft": self._draft, "tools": available_tools(gated=self.approvals is not None, work=self.work),
                     "history": history, "last_error": self._last_error,
                     "replay": self._replay(len(history)),
                     "approvals": self._approval_count()}
@@ -407,7 +427,7 @@ class ChatService:
                         take_steering=self._take_steering,
                         admit_completion=self._admit_completion, emit=self._on_event,
                         tool_write=self._tool_write, turn_id=self._turn_id,
-                        approvals=self.approvals, calendar=self._calendar,
+                        approvals=self.approvals, calendar=self._calendar, work=self.work,
                     )
                     with self._lock:
                         if self._closed.is_set():
