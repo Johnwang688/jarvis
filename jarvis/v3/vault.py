@@ -561,16 +561,35 @@ class Vault:
                     raise VaultError("Patch text must occur exactly once in the memory body.")
             old_end = pos + len(old)
             body = entry.body[:pos] + new + entry.body[old_end:]
+            if purpose == "consolidation-memory" and location == Location("", "commitments"):
+                _keep_commitments_block(entry.body, body)
             _body(body, allow_empty=not location.folder)
             before = entry.body
             entry = replace(entry, body=body, updated=date.today().isoformat())
             self._check_caps(root, entry, adding=False)
             text = entry.markdown()
-            rules = entry.scan_markdown(text, purpose="memory" if review_patch else purpose)
-            if review_patch and content_scan.review_patch_creates_directive(before, body, pos, old_end, pos + len(new)):
+            strict_patch = review_patch or purpose == "consolidation-memory"
+            rules = entry.scan_markdown(text, purpose="memory" if strict_patch else purpose)
+            if strict_patch and content_scan.review_patch_creates_directive(before, body, pos, old_end, pos + len(new)):
                 raise VaultError("Memory scanner blocked content (agent-override).")
             with self._folder(root, location.folder) as directory:
                 return self._save(root, directory, entry, text.encode("utf-8"), rules)
+
+    def rewrite(self, name: str, transform, *, purpose: content_scan.Purpose):
+        """Transform a root entry's current body under the vault write lock."""
+        if not isinstance(name, str) or name not in _ROOT_ENTRIES:
+            raise VaultError("Only a fixed vault entry can be rewritten.")
+        with self._locked(write=True) as root:
+            entry = self._resolve(root, name, write=True)
+            body = transform(entry.body)
+            if body == entry.body:
+                return entry, []
+            _body(body, allow_empty=True)
+            entry = replace(entry, body=body, updated=date.today().isoformat())
+            self._check_caps(root, entry, adding=False)
+            text = entry.markdown()
+            rules = entry.scan_markdown(text, purpose=purpose)
+            return self._save(root, root, entry, text.encode("utf-8"), rules)
 
     @staticmethod
     def _finish_archive(directory: int, archive: int, location: Location, expected: bytes) -> None:
@@ -645,6 +664,22 @@ class Vault:
                     else:
                         added.append(entry.location.ref)
         return added, skipped
+
+
+def _keep_commitments_block(before: str, after: str) -> None:
+    """Foreground agents and the owner may still edit the block by hand.
+
+    A malformed block makes every later consolidation tool write refuse until
+    it is fixed by hand. The tools never silently repair or drop the block.
+    """
+    from .commitments import CommitmentError, block_text
+
+    try:
+        if block_text(before) == block_text(after):
+            return
+    except CommitmentError:
+        pass
+    raise VaultError("Use the commitment tools to edit the commitments table. Repair malformed blocks by hand.")
 
 
 def entry_summary(location: Location, entry: Entry | None) -> str:

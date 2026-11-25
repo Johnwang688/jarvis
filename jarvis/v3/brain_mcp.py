@@ -26,15 +26,17 @@ from .tools.skills import SkillTools
 from .vault import Vault
 
 
-CONSOLIDATE_TOOLS = (
+_MEMORY_AND_SEARCH_TOOLS = (
     "memory_list", "memory_read", "memory_add", "memory_patch", "memory_archive",
     "memory_search", "session_search",
 )
+_COMMITMENT_TOOLS = ("commitment_upsert", "commitment_close")
+CONSOLIDATE_TOOLS = (*_MEMORY_AND_SEARCH_TOOLS, *_COMMITMENT_TOOLS)
+PROFILE = (*sorted(_MEMORY_AND_SEARCH_TOOLS), "skill_manage", "skill_view")
 MEMORY_REVIEW_TOOLS = (
     "memory_list", "memory_read", "memory_search", "memory_add", "memory_patch", "session_search",
 )
 SKILL_REVIEW_TOOLS = ("skill_view", "skill_manage", "session_search")
-PROFILE = (*sorted(CONSOLIDATE_TOOLS), "skill_manage", "skill_view")
 PROFILE_ENV = "JARVIS_BRAIN_PROFILE"
 REVIEW_DOC_ENV = "JARVIS_BRAIN_DOC"
 REVIEW_SESSION_ENV = "JARVIS_BRAIN_SESSION"
@@ -78,10 +80,10 @@ def _schema(method, *, internal=()):
 
 
 _METHODS = {
-    name: (session_search if name == "session_search" else
-           getattr(MemoryTools if name.startswith("memory_") else SkillTools, name))
-    for name in PROFILE
+    name: getattr(MemoryTools, name) for name in _MEMORY_AND_SEARCH_TOOLS if name != "session_search"
 }
+_METHODS.update(session_search=session_search, skill_manage=SkillTools.skill_manage,
+                skill_view=SkillTools.skill_view)
 _SCHEMAS = {name: _schema(method, internal=("index",) if name == "session_search" else ())
             for name, method in _METHODS.items()}
 _REVIEW_ADD_SCHEMA = deepcopy(_SCHEMAS["memory_add"])
@@ -125,11 +127,26 @@ class Brain:
                          {**_SCHEMAS, "memory_add": _REVIEW_ADD_SCHEMA})
         # All readers must still treat vault entries as untrusted data.
         purpose = "consolidation-memory" if profile in ("consolidate", "review-memory") else "memory"
-        self._memory = MemoryTools(Vault() if vault is None else vault, write_purpose=purpose,
+        self._vault = Vault() if vault is None else vault
+        self._memory = MemoryTools(self._vault, write_purpose=purpose,
                                    review_patch=profile == "review-memory")
         self._index = index
         self._store = store
         self._session = uuid4().hex if session is None else session
+
+    @cached_property
+    def _commitment_definitions(self):
+        # The daemon imports the consolidation schedule without serving MCP.
+        from .tools.commitments import CommitmentTools
+
+        tools = CommitmentTools(self._vault, self._index)
+        methods = {name: getattr(tools, name) for name in _COMMITMENT_TOOLS}
+        return {name: (method, _schema(method)) for name, method in methods.items()}
+
+    def _definition(self, name):
+        if name in _COMMITMENT_TOOLS:
+            return self._commitment_definitions[name]
+        return _METHODS[name], self._schemas[name]
 
     @cached_property
     def _skills(self):
@@ -150,8 +167,9 @@ class Brain:
     def list_tools(self):
         tools = []
         for name in self._tools:
-            schema = deepcopy(self._schemas[name])
-            description = getdoc(_METHODS[name])
+            method, schema = self._definition(name)
+            schema = deepcopy(schema)
+            description = getdoc(method)
             if self._read_only_search and name == "session_search":
                 schema["properties"]["mode"].update(enum=["read"], description='Use "read".')
                 schema["required"].append("mode")
@@ -165,15 +183,18 @@ class Brain:
     def call(self, name, arguments):
         if name not in self._tools:
             return _result("Error: Tool is outside the brain profile.", error=True)
-        if not _valid(arguments, self._schemas[name]):
-            return _result("Error: Arguments do not match the tool schema.", error=True)
-        if self._read_only_search and name == "session_search" and arguments.get("mode") != "read":
-            return _result('Error: This brain profile requires session_search mode "read".', error=True)
         try:
+            method, schema = self._definition(name)
+            if not _valid(arguments, schema):
+                return _result("Error: Arguments do not match the tool schema.", error=True)
+            if self._read_only_search and name == "session_search" and arguments.get("mode") != "read":
+                return _result('Error: This brain profile requires session_search mode "read".', error=True)
             if name == "session_search":
                 if self._review and arguments.get("doc") != self._review_doc:
                     return _result("Error: This brain profile can read only the session under review.", error=True)
                 text = self._search(**arguments)
+            elif name in _COMMITMENT_TOOLS:
+                text = method(**arguments)
             else:
                 if name == "memory_add" and self._memory_source is not None:
                     arguments = {**arguments, "source": self._memory_source}

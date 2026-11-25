@@ -120,6 +120,7 @@ replaced_by: <slug>         # only when archived for contradiction
 Body. Facts are declarative ("John prefers X"), never imperative. [[links]] allowed.
 ```
 
+- `commitments.md` carries the structured block specified in P2.
 - Caps: `USER.md` ≤ 3,000 chars, each entry body ≤ 4,000 chars, `facts/`
   ≤ 400 active entries.
 - When a cap is hit, the write fails with an error that lists the current
@@ -1128,17 +1129,27 @@ CLIs' own safeguards. What follows from it:
 
 ### P2: Commitments
 - **Scope:** extend P1's prompt and schema; `commitments.md` gets a
-  structured table block (who, what, due, direction, source, state).
+  structured table block and two consolidation tools.
 - **Spec:**
   - Extract promises from **John's own sent mail and chat turns** (owner
     text only; other people's claims about John never create a commitment
-    on their own).
+    on their own). To record or close an `owner-owes` row from chat, cite
+    a specific indexed owner turn as `transcript:<source>/<ref>#<message number>`.
+    Both tools take a short verbatim `evidence` quote. For `owner-owes`,
+    it must occur in that turn or above the first quote or forward marker
+    in the cited owner-sent mail.
   - Also extract what others owe him, from received mail.
-  - The structured block is parsed by code into `SIGNALS_DIR/commitments.json`
-    for I2.
+  - The Markdown table sits between whole-line markers
+    `<!-- commitments:begin -->` and `<!-- commitments:end -->`. Its columns
+    are `id | who | what | due | direction | source | state`. Direction is
+    `owner-owes` or `owed-to-owner`. State is `open`, `done`, or `dropped`.
+    Due dates use `YYYY-MM-DD`, with `-` for an undated row. Cells contain
+    plain text. Markup, hidden text, and embedded line breaks make a block malformed.
+  - I2 reads the block through `commitments.load()` and owns the
+    `SIGNALS_DIR/commitments.json` snapshot.
 - **Acceptance:**
-  - [ ] Parser round-trip tests.
-  - [ ] The owner-text-only rule is tested (a received email saying "John
+  - [x] Parser round-trip tests.
+  - [x] The owner-text-only rule is tested (a received email saying "John
     will send X" doesn't create an outgoing commitment).
 - **Depends:** P1. **Size:** S.
 

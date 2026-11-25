@@ -29,6 +29,7 @@ from jarvis.v2 import redact
 from . import claude_jobs
 from .brain_mcp import CONSOLIDATE_TOOLS as TOOLS, PROFILE_ENV
 from .index import open_directory
+from .provenance import owner_authored as _owner_authored, provenance
 from .vault import Vault
 
 
@@ -36,7 +37,6 @@ JOB = "consolidate"
 MODEL = "sonnet"
 MAX_DOCS = 150
 _CHICAGO = ZoneInfo("America/Chicago")
-_TRANSCRIPTS = frozenset({"claude", "codex", "jarvis", "t3", "transcript"})
 _PROMPT = Path(__file__).with_name("prompts") / "consolidate.md"
 _STATE = "state.json"
 _LOG = "log.jsonl"
@@ -69,16 +69,6 @@ def due(now, *, last_run) -> bool:
     return last_run is None or datetime.fromtimestamp(last_run, _CHICAGO).date() < local.date()
 
 
-def _owner_authored(doc):
-    if doc["source"] in _TRANSCRIPTS:
-        return True
-    try:
-        meta = json.loads(doc["meta_json"] or "null")
-    except (ValueError, RecursionError):
-        return False
-    return isinstance(meta, dict) and meta.get("from_owner") == 1
-
-
 def select(index, *, since, until):
     docs = index.documents_between(since=since, until=until)
     # Stable partition preserves the index's newest-first order within each group.
@@ -89,12 +79,9 @@ def select(index, *, since, until):
 def build_prompt(docs) -> str:
     lines = []
     for doc in docs:
-        source = doc["source"]
-        ref = doc["ref"]
-        provenance = f"transcript:{source}/{ref}" if source in _TRANSCRIPTS else f"{source}:{ref}"
         fields = {
             "id": doc["id"],
-            "source": untrusted.one_line(redact.for_display(provenance), cap=420),
+            "source": untrusted.one_line(redact.for_display(provenance(doc)), cap=420),
             "title": untrusted.one_line(redact.for_display(doc.get("title") or ""), cap=240) or "(untitled)",
             "time": doc["ts"],
         }

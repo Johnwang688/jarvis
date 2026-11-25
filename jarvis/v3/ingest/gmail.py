@@ -28,8 +28,10 @@ _ID = re.compile(r"[a-zA-Z0-9_-]{1,256}")
 _CHARSET = re.compile(r"""\bcharset\s*=\s*["']?([\w.-]+)""", re.I)
 _REPLY = re.compile(r"(?i)(?:on\s+.{1,720}\s+wrote|le\s+.{1,720}\s+a écrit)\s*:")
 _REPLY_DETAIL = re.compile(r"\b\d{4}\b.*\b\d{1,2}:\d{2}\b|<[^<>\s]+@[^<>\s]+>")
-_ORIGINAL = re.compile(r"(?i)-{2,}\s*(?:original message|forwarded message)\s*-{2,}")
+_ORIGINAL = re.compile(r"(?i)-{2,}\s*(?:original message|forwarded message)\s*-{2,}|(?:begin )?forwarded message\s*:")
 _MAIL_FIELD = re.compile(r"(?i)(?:from|sent|date|to|subject):")
+_INDEXED_HEADER = re.compile(r"\AFrom: [^\r\n]*\r?\nTo: [^\r\n]*\r?\nDate: [^\r\n]*(?:(?:\r?\n){2}|\Z)")
+_INDEXED_ATTACHMENTS = re.compile(r"(?:(?:\r?\n){2}|\A)Attachments: [^\r\n]*\Z")
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _SHARED_WORD_CHARS = (r"A-Za-z0-9_\-", r"A-Za-z0-9_", r"A-Za-z0-9/+", r"A-Za-z0-9/+=")
 _MAIL_BOUNDARY = re.compile(r"(\(\?<?!)\[(?:"
@@ -123,14 +125,22 @@ class _HTMLText(HTMLParser):
     _void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
              "meta", "param", "source", "track", "wbr"}
 
-    def __init__(self):
+    def __init__(self, *, sent=False):
         super().__init__()
         self.text = []
         self._hidden = []
+        self._sent = sent
+        self._cut = False
 
     def handle_starttag(self, tag, attrs):
+        if self._cut:
+            return
         attributes = dict(attrs)
         quoted = "gmail_quote" in (attributes.get("class") or "").split()
+        if self._sent and not self._hidden and (quoted or tag == "blockquote"):
+            self.text.append("\n>\n")
+            self._cut = True
+            return
         if tag == "blockquote" and not self._hidden:
             attributed = self._follows_attribution()
             quoted = quoted or attributed or (attributes.get("type") or "").lower() == "cite"
@@ -150,6 +160,8 @@ class _HTMLText(HTMLParser):
             self.handle_data("\n")
 
     def handle_endtag(self, tag):
+        if self._cut:
+            return
         if self._hidden:
             if tag in self._hidden:
                 while self._hidden.pop() != tag:
@@ -158,7 +170,7 @@ class _HTMLText(HTMLParser):
             self.handle_data("\n")
 
     def handle_data(self, data):
-        if not self._hidden:
+        if not self._hidden and not self._cut:
             self.text.append(data)
 
     def _follows_attribution(self):
@@ -189,13 +201,31 @@ def _body_data(part, content_type):
     return _decode(raw, charset[1] if charset else None)
 
 
-def _reply_width(previous, line):
+def _reply_width(previous, line, *, require_detail=True):
     for width in range(1, min(3, len(previous) + 1) + 1):
         prior = previous[len(previous) - width + 1:]
         attribution = " ".join(s.strip() for s in [*prior, line])
-        if _REPLY.fullmatch(attribution) and _REPLY_DETAIL.search(attribution):
+        if _REPLY.fullmatch(attribution) and (not require_detail or _REPLY_DETAIL.search(attribution)):
             return width
     return 0
+
+
+def _before_first_quote(text):
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(">") or _ORIGINAL.fullmatch(stripped):
+            return "".join(lines[:i])
+        if stripped.endswith(":") and (width := _reply_width(lines[max(0, i - 2):i], line, require_detail=False)):
+            return "".join(lines[:i + 1 - width])
+    return text
+
+
+def owner_written_text(text):
+    """Return the owner-written prefix of an indexed sent-mail body verbatim."""
+    if header := _INDEXED_HEADER.match(text):
+        text = _INDEXED_ATTACHMENTS.sub("", text[header.end():])
+    return _before_first_quote(text)
 
 
 def _strip_replies(text):
@@ -258,7 +288,7 @@ def _is_attachment(part, headers):
                 or _header(headers.get("content-disposition")).lower().startswith("attachment"))
 
 
-def _mail_body(payload):
+def _mail_body(payload, *, sent=False):
     bodies = {"text/plain": [], "text/html": []}
     remaining = dict.fromkeys(bodies, _BODY_CHARS)
     files = []
@@ -281,7 +311,7 @@ def _mail_body(payload):
         content_type = headers.get("content-type")
         text = _body_data(part, content_type[:4096] if isinstance(content_type, str) else mime[:4096])
         if text and kind == "text/html":
-            parser = _HTMLText()
+            parser = _HTMLText(sent=sent)
             try:
                 parser.feed(text)
                 parser.close()
@@ -290,11 +320,18 @@ def _mail_body(payload):
                 # parser. Keep only the text it had already emitted.
                 pass
             text = "".join(parser.text)
-        text = _strip_replies(text)
-        if text:
+        if sent:
+            authored = _before_first_quote(text)
+            cut = authored != text
+            text = authored.strip()
+        else:
+            text = _strip_replies(text)
+            cut = False
+        # An empty sent prefix still selects this MIME type over its fallback.
+        if text or cut:
             budget = remaining[kind]
             bodies[kind].append(text[:budget])
-            remaining[kind] = max(0, budget - len(text) - 2)
+            remaining[kind] = 0 if cut else max(0, budget - len(text) - 2)
     return "\n\n".join(bodies["text/plain"] or bodies["text/html"]), files
 
 
@@ -424,7 +461,7 @@ def _document(mid, record, owner, labels, ts):
     from_owner = int("SENT" in labels or bool(owner and _mailbox(mailbox) == owner))
     sender, to, date, title = (_mail_text(_header(headers.get(key)))
                                for key in ("from", "to", "date", "subject"))
-    body, files = _mail_body(payload)
+    body, files = _mail_body(payload, sent=bool(from_owner))
     text = [f"From: {sender}\nTo: {to}\nDate: {date}"]
     if body:
         text.append(_mail_text(body, field=False))

@@ -481,6 +481,20 @@ class Index:
         with self._transaction() as db:
             return [dict(row) for row in db.execute("SELECT * FROM docs ORDER BY ts DESC, id LIMIT ?", (limit,))]
 
+    def document(self, source: str, ref: str) -> dict | None:
+        """Return the header matching an exact source and reference."""
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM docs WHERE id=? AND source=? AND ref=?",
+                             (_document_id(source, ref), source, ref)).fetchone()
+            return dict(row) if row is not None else None
+
+    def message(self, doc: str, seq: int) -> dict | None:
+        """Return the document header and the chunks of one message."""
+        if not 1 <= seq < 2**63:
+            return None
+        result = self._view(doc, "AND seq=?", (seq,))
+        return result if result and result["messages"] else None
+
     def documents_between(self, *, since: float, until: float) -> list[dict]:
         """Return document headers in (since, until], newest first."""
         with self._transaction() as db:
