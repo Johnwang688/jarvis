@@ -1,6 +1,6 @@
 """Scan stored agent content.
 
-The consolidation directive rule is an accident guard, not an adversarial boundary.
+The consolidation and reviewer directive rule is an accident guard, not an adversarial boundary.
 Planted orders are harmless only when every reader treats vault text as data.
 
 `denied-shell` is the gate's *lexical* judge (`rules._judge_segment`): destructive
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
+from os.path import commonprefix
 import re
 import shlex
 from typing import Iterator, Literal
@@ -68,6 +69,12 @@ _IMPERATIVE = re.compile(
 )
 _DIRECTIVE_START = r"(?:\A|[.!?;:\r\n\u2028\u2029])[ \t>+*#_`\"'\[(-]*"
 _DIRECTIVE_TEXT = r"[\s>+*#_`\"'\[(-]*"
+# Reviewer patches can turn an inline aside into a directive.
+_REVIEW_DIRECTIVE_START = (
+    r"(?:\A|[.!?;:\r\n\u2028\u2029]|(?<=[\s)\]}])[(\[{\"'`]|(?<=\s)-(?=[ \t]))"
+    r"[ \t>+*#_`\"'\[({-]*"
+)
+_REVIEW_DIRECTIVE_TEXT = r"[\s>+*#_`\"'\[({-]*"
 _ADDRESSEE = (
     r"(?:(?:dear|hey|hello|attention|to|as)\s+)?(?:the\s+|an\s+)?"
     # Include common lookalikes of the name without folding unrelated prose.
@@ -79,33 +86,71 @@ _REQUEST_HEAD = (
     r"from\s+now\s+on|going\s+forward|henceforth|remember|memori[sz]e|keep\s+in\s+mind|"
     r"(?:make|take)\s+(?:a\s+)?note\s+of|note\s+down|summari[sz]e|recap|paraphrase)\b"
 )
-_ASSISTANT_DIRECTIVE = re.compile(
-    r"\byou\s+(?:must|should|shall|will|always|never|can(?:not)?|may|don't|"
-    r"need\s+to|have\s+to|do\s+not|better)\b"
-    r"|\byou(?:\s+are|'re)\s+(?:to|expected\s+to|required\s+to)\b"
-    r"|\b(?:can|could|would|will)\s+you\b"
-    r"|\byour\s+(?:task|job|instructions?|orders?|role)\s+(?:is|are)\b"
-    r"|\bfrom\s+now\s+on\s*[,:-]\s*\w"
-    rf"|{_DIRECTIVE_START}(?:{_REQUEST_HEAD}|{_ADDRESSEE}(?:"
-    # Require direct address, with Markdown layout allowed before the request.
-    rf"[\])\"']?[ \t]*[,:;!?\r\n\u2028\u2029-]{_DIRECTIVE_TEXT}"
-    r"(?!(?:a|an|the|who|which|whose)\b|\w+\s+by\b)\w"
-    r"|[ \t]+please\b))",
-    re.IGNORECASE,
-)
+
+
+def _directive_pattern(start, layout):
+    return re.compile(
+        r"\byou\s+(?:must|should|shall|will|always|never|can(?:not)?|may|don't|"
+        r"need\s+to|have\s+to|do\s+not|better)\b"
+        r"|\byou(?:\s+are|'re)\s+(?:to|expected\s+to|required\s+to)\b"
+        r"|\b(?:can|could|would|will)\s+you\b"
+        r"|\byour\s+(?:task|job|instructions?|orders?|role)\s+(?:is|are)\b"
+        r"|\bfrom\s+now\s+on\s*[,:-]\s*\w"
+        rf"|{start}(?:{_REQUEST_HEAD}|{_ADDRESSEE}(?:"
+        # Require direct address, with Markdown layout allowed before the request.
+        rf"[\])\"']?[ \t]*[,:;!?\r\n\u2028\u2029-]{layout}"
+        r"(?!(?:a|an|the|who|which|whose)\b|\w+\s+by\b)\w"
+        r"|[ \t]+please\b))",
+        re.IGNORECASE,
+    )
+
+
+_ASSISTANT_DIRECTIVE = _directive_pattern(_DIRECTIVE_START, _DIRECTIVE_TEXT)
+_REVIEW_DIRECTIVE = _directive_pattern(_REVIEW_DIRECTIVE_START, _REVIEW_DIRECTIVE_TEXT)
 _DIRECTIVE_PUNCTUATION = str.maketrans("‘’“”∶꞉、−", "''\"\"::,-")
+_REQUEST_TAIL = re.compile(r"[^.!?;:,∶꞉、\r\n\u2028\u2029)\]}\"'`‘’“”]*")
 
 
-def _directive_hits(text: str) -> Iterator[Hit]:
+def _directive_hits(text: str, pattern: re.Pattern = _ASSISTANT_DIRECTIVE) -> Iterator[Hit]:
     # Normalize punctuation and full-width letters while preserving source offsets.
     parts, offsets = [], []
     for offset, char in enumerate(text):
         part = "-" if category(char) == "Pd" else normalize("NFKC", char).translate(_DIRECTIVE_PUNCTUATION)
         parts.append(part)
         offsets.extend([offset] * len(part))
-    for match in _ASSISTANT_DIRECTIVE.finditer("".join(parts)):
+    for match in pattern.finditer("".join(parts)):
         start, end = match.span()
         yield Hit("agent-override", (offsets[start], offsets[end - 1] + 1), "block")
+
+
+def _review_directive_spans(text: str) -> Iterator[Span]:
+    for hit in _directive_hits(text, _REVIEW_DIRECTIVE):
+        left, right = hit.span
+        # The regex can end at the first letter of a request. Include the
+        # rest of its clause so edits that turn it into an order are checked.
+        yield left, _REQUEST_TAIL.match(text, right).end()
+
+
+def review_patch_creates_directive(before: str, after: str, start: int, old_end: int, new_end: int) -> bool:
+    """Check directives in the resulting body against those it already contained."""
+    old, new = before[start:old_end], after[start:new_end]
+    if old == new:
+        return False
+    # An edit can quote more context than it changes. Keep equivalent hits in
+    # the unchanged prefix and suffix, allowing for offsets shifted by the edit.
+    prefix = len(commonprefix((old, new)))
+    suffix = len(commonprefix((old[prefix:][::-1], new[prefix:][::-1])))
+    previous = set(_review_directive_spans(before))
+    shift = new_end - old_end
+    for left, right in _review_directive_spans(after):
+        if right <= start + prefix and (left, right) in previous:
+            continue
+        if left >= new_end - suffix and (left - shift, right - shift) in previous:
+            continue
+        return True
+    return False
+
+
 _URL = re.compile(r"""https?://[^\s<>"'`]+""", re.IGNORECASE)
 _URL_OR_BLOB = re.compile(
     rf"{_URL.pattern}|(?P<blob>(?-i:(?<![A-Za-z0-9+/])[A-Za-z0-9+/]+={{0,2}}))",

@@ -29,9 +29,10 @@ def _tool(method):
 class MemoryTools:
     """Bind one instance per session. The optional index is reserved for vault FTS."""
 
-    def __init__(self, vault: Vault, *, index=None, write_purpose: Purpose = "memory"):
+    def __init__(self, vault: Vault, *, index=None, write_purpose: Purpose = "memory", review_patch: bool = False):
         self._vault = vault
         self._write_purpose = write_purpose
+        self._review_patch = review_patch
         self._reads = {}
         self._flags = []
         self._lock = RLock()
@@ -76,7 +77,8 @@ class MemoryTools:
         new: Annotated[str, "Text to replace that substring with."],
     ) -> str:
         """Replace one unique substring in a memory body read in this session."""
-        entry, flags = self._vault.patch(name, old, new, self._reads, purpose=self._write_purpose)
+        entry, flags = self._vault.patch(name, old, new, self._reads, purpose=self._write_purpose,
+                                        review_patch=self._review_patch)
         self._reads[entry.location] = entry.revision
         self._flags.extend(flags)
         return f"Patched {entry.location.ref}."

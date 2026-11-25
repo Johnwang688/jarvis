@@ -1,10 +1,16 @@
-"""Newline-delimited MCP over v3's bound brain toolset."""
+"""Newline-delimited MCP over v3's bound brain toolset.
+
+The review-memory profile uses the strict scan as an accident guard. Its
+patches check for newly introduced directives in the resulting body and keep
+the original source line.
+"""
 
 from copy import deepcopy
 from functools import cached_property
 from inspect import Parameter, getdoc, signature
 import json
 import os
+import re
 import sys
 from threading import Thread
 from typing import Annotated, Unpack, get_args, get_origin, get_type_hints
@@ -12,6 +18,7 @@ from uuid import uuid4
 
 from jarvis.v2 import redact
 
+from .hooks.turn_end import valid_session
 from .index import Index
 from .tools.memory import MemoryTools
 from .tools.session_search import session_search
@@ -23,9 +30,18 @@ CONSOLIDATE_TOOLS = (
     "memory_list", "memory_read", "memory_add", "memory_patch", "memory_archive",
     "memory_search", "session_search",
 )
+MEMORY_REVIEW_TOOLS = (
+    "memory_list", "memory_read", "memory_search", "memory_add", "memory_patch", "session_search",
+)
+SKILL_REVIEW_TOOLS = ("skill_view", "skill_manage", "session_search")
 PROFILE = (*sorted(CONSOLIDATE_TOOLS), "skill_manage", "skill_view")
 PROFILE_ENV = "JARVIS_BRAIN_PROFILE"
-_PROFILES = {None: PROFILE, "consolidate": CONSOLIDATE_TOOLS}
+REVIEW_DOC_ENV = "JARVIS_BRAIN_DOC"
+REVIEW_SESSION_ENV = "JARVIS_BRAIN_SESSION"
+REVIEW_TAINTED_ENV = "JARVIS_BRAIN_TAINTED"
+_REVIEW_PROFILES = {"review-memory": MEMORY_REVIEW_TOOLS, "review-skill": SKILL_REVIEW_TOOLS}
+_PROFILES = {None: PROFILE, "consolidate": CONSOLIDATE_TOOLS, **_REVIEW_PROFILES}
+_DOC_ID = re.compile(r"[0-9a-f]{64}")
 PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2024-11-05"})
 _MAX_LINE = 1024 * 1024
@@ -68,6 +84,9 @@ _METHODS = {
 }
 _SCHEMAS = {name: _schema(method, internal=("index",) if name == "session_search" else ())
             for name, method in _METHODS.items()}
+_REVIEW_ADD_SCHEMA = deepcopy(_SCHEMAS["memory_add"])
+_REVIEW_ADD_SCHEMA["required"].remove("source")
+_REVIEW_ADD_SCHEMA["properties"]["source"]["description"] = "The server sets the session source."
 
 
 def _result(text, *, error=False):
@@ -82,12 +101,32 @@ def _valid(arguments, schema):
                     for key, value in arguments.items()))
 
 
+def _review_scope():
+    doc = os.environ.get(REVIEW_DOC_ENV, "")
+    session = os.environ.get(REVIEW_SESSION_ENV, "")
+    provider, _, sid = session.partition(":")
+    tainted = os.environ.get(REVIEW_TAINTED_ENV)
+    if (not _DOC_ID.fullmatch(doc) or provider not in ("claude", "codex")
+            or not valid_session(sid) or tainted not in ("0", "1")):
+        raise ValueError("Invalid brain review scope.")
+    return doc, session, tainted == "1"
+
+
 class Brain:
     def __init__(self, *, vault=None, index=None, store=None, session=None, profile=None):
         self._tools = _PROFILES[profile]
-        self._read_only_search = profile == "consolidate"
-        self._memory = MemoryTools(Vault() if vault is None else vault,
-                                   write_purpose="consolidation-memory" if profile == "consolidate" else "memory")
+        self._review = profile in _REVIEW_PROFILES
+        self._read_only_search = self._review or profile == "consolidate"
+        self._review_doc, self._tainted = None, False
+        if self._review:
+            self._review_doc, session, self._tainted = _review_scope()
+        self._memory_source = f"reviewer:{session}" if profile == "review-memory" else None
+        self._schemas = (_SCHEMAS if self._memory_source is None else
+                         {**_SCHEMAS, "memory_add": _REVIEW_ADD_SCHEMA})
+        # All readers must still treat vault entries as untrusted data.
+        purpose = "consolidation-memory" if profile in ("consolidate", "review-memory") else "memory"
+        self._memory = MemoryTools(Vault() if vault is None else vault, write_purpose=purpose,
+                                   review_patch=profile == "review-memory")
         self._index = index
         self._store = store
         self._session = uuid4().hex if session is None else session
@@ -101,7 +140,8 @@ class Brain:
             from .skill_store import SkillStore
 
             store = SkillStore()
-        return SkillTools(store, session=self._session, actor="foreground")
+        return SkillTools(store, session=self._session, actor="reviewer" if self._review else "foreground",
+                          tainted=self._tainted)
 
     def _search(self, **arguments):
         with Index(self._index) as opened:
@@ -110,26 +150,33 @@ class Brain:
     def list_tools(self):
         tools = []
         for name in self._tools:
-            schema = deepcopy(_SCHEMAS[name])
+            schema = deepcopy(self._schemas[name])
             description = getdoc(_METHODS[name])
             if self._read_only_search and name == "session_search":
                 schema["properties"]["mode"].update(enum=["read"], description='Use "read".')
                 schema["required"].append("mode")
                 description = "Read one page of an indexed document by ID."
+                if self._review:
+                    schema["properties"]["doc"].update(enum=[self._review_doc], description="ID of the session under review.")
+                    schema["required"].append("doc")
             tools.append({"name": name, "description": description, "inputSchema": schema})
         return {"tools": tools}
 
     def call(self, name, arguments):
         if name not in self._tools:
             return _result("Error: Tool is outside the brain profile.", error=True)
-        if not _valid(arguments, _SCHEMAS[name]):
+        if not _valid(arguments, self._schemas[name]):
             return _result("Error: Arguments do not match the tool schema.", error=True)
         if self._read_only_search and name == "session_search" and arguments.get("mode") != "read":
             return _result('Error: This brain profile requires session_search mode "read".', error=True)
         try:
             if name == "session_search":
+                if self._review and arguments.get("doc") != self._review_doc:
+                    return _result("Error: This brain profile can read only the session under review.", error=True)
                 text = self._search(**arguments)
             else:
+                if name == "memory_add" and self._memory_source is not None:
+                    arguments = {**arguments, "source": self._memory_source}
                 target = self._memory if name.startswith("memory_") else self._skills
                 text = getattr(target, name)(**arguments)
             clean = redact.for_display(text)[:_RESULT_CHARS]

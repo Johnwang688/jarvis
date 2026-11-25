@@ -120,6 +120,23 @@ def _valid_cursor(cursor):
             and isinstance(cursor["skipping"], bool) and isinstance(cursor["sample"], str))
 
 
+def _snapshot(stream, info, offset):
+    return [info.st_dev, info.st_ino, offset, _fingerprint(stream, offset).hex()]
+
+
+def _matches_snapshot(stream, info, snapshot):
+    dev, ino, offset, sample = snapshot
+    return ((info.st_dev, info.st_ino) == (dev, ino) and offset <= info.st_size
+            and _fingerprint(stream, offset).hex() == sample)
+
+
+def _valid_snapshot(snapshot):
+    return (isinstance(snapshot, list) and len(snapshot) == 4
+            and all(_uint(value) and value < 1 << 64 for value in snapshot[:3])
+            and isinstance(snapshot[3], str)
+            and (re.fullmatch(r"[0-9a-f]{32}", snapshot[3]) if snapshot[2] else snapshot[3] == ""))
+
+
 @contextmanager
 def _open_transcript(path, judge):
     if _credential_path(path, judge):
@@ -155,7 +172,7 @@ def _scan(provider, stream, info, cursor=None):
         raise _ScanPending({"dev": info.st_dev, "ino": info.st_ino, "offset": offset,
                             "tools": tools, "turns": turns, "skipping": skipping,
                             "sample": _fingerprint(stream, offset).hex()})
-    return tools, turns
+    return tools, turns, offset
 
 
 def count(provider, transcript) -> tuple[int, int]:
@@ -167,7 +184,8 @@ def count(provider, transcript) -> tuple[int, int]:
         if not transcript_reference(path):
             return 0, 0
         with _open_transcript(_path(path), credential_folder_judge()) as (stream, info):
-            return _scan(provider, stream, info)
+            tools, turns, _ = _scan(provider, stream, info)
+            return tools, turns
     except (OSError, _Unusable):
         return 0, 0
 
@@ -260,9 +278,10 @@ def _state_name(provider, path, stream, info):
 
 
 def _valid_progress(value):
-    return (isinstance(value, dict) and _PROGRESS_KEYS <= value.keys() <= _PROGRESS_KEYS | {"scan"}
+    return (isinstance(value, dict) and _PROGRESS_KEYS <= value.keys() <= _PROGRESS_KEYS | {"scan", "snapshot"}
             and all(_uint(value[key]) for key in _PROGRESS_KEYS)
-            and ("scan" not in value or _valid_cursor(value["scan"])))
+            and ("scan" not in value or _valid_cursor(value["scan"]))
+            and ("snapshot" not in value or _valid_snapshot(value["snapshot"])))
 
 
 def _legacy_progress(value):
@@ -308,7 +327,8 @@ def _prune(directory, seen_at):
 
 
 def _valid_review(item):
-    return (isinstance(item, dict) and _REVIEW_KEYS <= item.keys() <= _REVIEW_KEYS | {"progress", "state"}
+    return (isinstance(item, dict) and _REVIEW_KEYS <= item.keys() <= _REVIEW_KEYS | {"progress", "state", "snapshot"}
+            and ("snapshot" not in item or _valid_snapshot(item["snapshot"]))
             and ((isinstance(item.get("state"), str) and _STATE_NAME.fullmatch(item["state"])
                   and _valid_progress(item.get("progress"))) if "state" in item
                  else ("progress" not in item or _legacy_progress(item["progress"])))
@@ -353,16 +373,37 @@ class Consumer:
             raise _Unusable("Transcript is outside the provider's session folder.")
         return _open_transcript(path, judge)
 
-    def _resume(self, state, judge, seen_at):
+    @staticmethod
+    def _deliver(state, token, reviews, received, accept):
+        if accept is None:
+            if token is not None:
+                _returned.add((os.getpid(), token))
+            return [{key: review[key] for key in _REVIEW_KEYS} for review in reviews]
+        accept(reviews, received)
+        # The downstream write has synced before we remove the journal. If
+        # interrupted here, delivery repeats before the downstream job runs.
+        if token is not None:
+            _remove(state, _PENDING)
+            os.fsync(state)
+        return []
+
+    def _resume(self, state, judge, seen_at, accept):
         try:
             pending = _read_json(state, _PENDING, _JOURNAL_BYTES)
         except FileNotFoundError:
             return None
         # Refuse a corrupt journal rather than advancing past undelivered reviews.
-        if (not isinstance(pending, dict) or pending.keys() != {"token", "reviews"}
+        if (not isinstance(pending, dict) or not {"token", "reviews"} <= pending.keys() <= {"token", "reviews", "received"}
                 or not valid_session(pending["token"]) or not isinstance(pending["reviews"], list)
+                or ("received" in pending and not _uint(pending["received"]))
                 or not all(_valid_review(review) for review in pending["reviews"])):
             raise ValueError("Invalid review journal.")
+        received = pending.get("received")
+        if received is None and accept is not None:
+            # Older journals have the original count time in their progress.
+            times = [review["progress"]["last_seen"] for review in pending["reviews"] if "state" in review]
+            published = os.stat(_PENDING, dir_fd=state, follow_symlinks=False).st_mtime_ns
+            received = min(times) if times else min(seen_at, published)
         receipt = os.getpid(), pending["token"]
         if receipt in _returned:
             _remove(state, _PENDING)
@@ -375,6 +416,9 @@ class Consumer:
             try:
                 with self._open(provider, transcript, judge) as (stream, info):
                     name = _state_name(provider, transcript, stream, info)
+                    snapshot = review.get("snapshot")
+                    if accept is not None and snapshot is not None and not _matches_snapshot(stream, info, snapshot):
+                        continue
             except (OSError, _Unusable):
                 continue
             if "state" in review:
@@ -396,9 +440,8 @@ class Consumer:
                 progress["size"] = info.st_size
             progress["last_seen"] = seen_at
             _write_json(state, name, progress)
-            reviews.append({key: review[key] for key in _REVIEW_KEYS})
-        _returned.add(receipt)
-        return reviews
+            reviews.append(review)
+        return self._deliver(state, pending["token"], reviews, received, accept)
 
     def _items(self, queue, now):
         items = []
@@ -420,7 +463,7 @@ class Consumer:
                 _remove(queue, name)
         return sorted(items)
 
-    def _drain(self, queue, state, judge, now, seen_at):
+    def _drain(self, queue, state, judge, now, seen_at, accept):
         seen, deferred, consumed = set(), set(), []
         updates, reviews = {}, []
         for _, name, item in self._items(queue, now):
@@ -443,10 +486,23 @@ class Consumer:
                 if info.st_size < progress["size"]:
                     progress.update(skill=0, memory=0, size=0)
                 try:
+                    previous = progress.get("snapshot")
+                    if accept is not None and previous is not None and not _matches_snapshot(stream, info, previous):
+                        # A truncate and regrow can leave the same inode, size and counts.
+                        progress.update(skill=0, memory=0, size=0)
+                        progress.pop("scan", None)
+                        progress.pop("snapshot")
                     if self._incremental:
-                        tools, turns = _scan(provider, stream, info, progress.get("scan"))
+                        tools, turns, offset = _scan(provider, stream, info, progress.get("scan"))
                     else:
                         tools, turns = self.count(provider, transcript)
+                        offset = info.st_size
+                    if tools < progress["skill"] or turns < progress["memory"]:
+                        progress.update(skill=0, memory=0, size=0)
+                    due = [(kind, total) for kind, total, threshold in (
+                        ("skill", tools, SKILL_STEPS), ("memory", turns, MEMORY_TURNS),
+                    ) if total - progress[kind] >= threshold]
+                    snapshot = _snapshot(stream, info, offset) if due or accept is not None else None
                 except _ScanPending as exc:
                     progress["scan"] = exc.cursor
                     _write_json(state, key, progress)
@@ -457,40 +513,43 @@ class Consumer:
                     continue
             seen.add(key)
             progress.pop("scan", None)
-            if tools < progress["skill"] or turns < progress["memory"]:
-                progress.update(skill=0, memory=0, size=0)
-            for kind, total, threshold in (("skill", tools, SKILL_STEPS), ("memory", turns, MEMORY_TURNS)):
-                if total - progress[kind] < threshold:
-                    continue
+            if accept is not None:
+                progress["snapshot"] = snapshot
+            for kind, total in due:
                 progress[kind] = total
                 progress["size"] = info.st_size
                 reviews.append({"kind": kind, "provider": provider, "session_id": item["session_id"],
                                 "transcript": str(transcript), "tool_steps": tools, "user_turns": turns,
-                                "state": key, "progress": progress})
+                                "state": key, "progress": progress, "snapshot": snapshot})
             updates[key] = progress
             consumed.append(name)
 
         token = uuid4().hex if reviews else None
         if token is not None:
-            _write_json(state, _PENDING, {"token": token, "reviews": reviews})
+            _write_json(state, _PENDING, {"token": token, "reviews": reviews, "received": seen_at})
         for key, progress in updates.items():
             _write_json(state, key, progress)
         for name in consumed:
             _remove(queue, name)
         if consumed:
             os.fsync(queue)
-        if token is not None:
-            _returned.add((os.getpid(), token))
-        return [{key: review[key] for key in _REVIEW_KEYS} for review in reviews]
+        return self._deliver(state, token, reviews, seen_at, accept)
 
     def tick(self):
         """Return a batch. Handle it before polling again in this process."""
+        return self._tick(accept=None)
+
+    def handoff(self, accept):
+        """Call accept(reviews, received_ns) under the queue lock before acknowledging."""
+        self._tick(accept)
+
+    def _tick(self, accept):
         with open_directory(self.state, create=True) as state:
             fcntl.flock(state, fcntl.LOCK_EX)
             judge = credential_folder_judge()
             now = self.clock()
             seen_at = int(now * _NS_PER_SECOND)
-            pending = self._resume(state, judge, seen_at)
+            pending = self._resume(state, judge, seen_at, accept)
             if pending is not None:
                 return pending
             _prune(state, seen_at)
@@ -498,5 +557,5 @@ class Consumer:
                 try:
                     queue = stack.enter_context(open_directory(self.queue))
                 except FileNotFoundError:
-                    return []
-                return self._drain(queue, state, judge, now, seen_at)
+                    return self._deliver(state, None, [], seen_at, accept)
+                return self._drain(queue, state, judge, now, seen_at, accept)

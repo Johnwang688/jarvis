@@ -112,7 +112,7 @@ New `config` constants, each with an env override as is the pattern in
 name: kebab-slug            # unique within its folder
 kind: fact|person|project|preference|style|commitment
 description: one line, used for recall
-source: gmail:<msgid> | calendar:<eventid> | transcript:<path>#<n> | owner | …
+source: gmail:<msgid> | calendar:<eventid> | transcript:<path>#<n> | reviewer:<provider>:<session_id> | owner | …
 updated: 2026-11-22
 status: active|archived
 replaced_by: <slug>         # only when archived for contradiction
@@ -172,7 +172,7 @@ and `user_turns`.
  "usage_pct_before": 41, "outcome": "ok|skipped-budget|skipped-usage|error"}
 ```
 
-Consolidation appends and syncs a `started` row before calling the runner.
+Consolidation and the reviewer append and sync a `started` row before calling the runner.
 The start and the later outcome share a `start_ticket`. The start counts
 toward the caps even if the outcome cannot be written.
 
@@ -696,7 +696,9 @@ S1–S6. It is the owner's decision.
   B4 adds `morning-brief` and `evening-wrap` as due-scheduled jobs with no
   idle requirement. They reuse the feed and budget.
   Jobs with a due predicate must satisfy it after backoff. The review queue
-  consumer joins in L2, when its reviews have a reader.
+  consumer joins in L2, when its reviews have a reader. The reviewer runs
+  after transcript ingestion, polls the review queue every five minutes,
+  and shares the lazy index.
 - **Acceptance:**
   - [x] Ordered ticks, persisted outcomes, backoff and idle checks.
   - [x] Bounded idle scan and shutdown, including a stalled job.
@@ -914,32 +916,61 @@ S1–S6. It is the owner's decision.
 - **Depends:** M4 (installer), S5 (payloads). **Size:** S.
 
 ### L2: Reviewer
-- **Scope:** `jarvis/v3/reviewer.py`, prompt files under
-  `jarvis/v3/prompts/review_*.md`, `tests/v3/reviewer_check.py`.
+- **Scope:** `jarvis/v3/reviewer.py`, `jarvis/v3/prompts/review_*.md`,
+  the `review-memory` and `review-skill` brain MCP profiles, the scheduled
+  reviewer in `jobs.py`, and `tests/v3/reviewer_check.py`.
 - **Spec:**
-  - Consumes L1's review requests. Asks `budget.admit("reviewer")`. Builds
-    the digest: last 24 turns verbatim + a summary of older turns, made
-    **without a model** by heuristic truncation of tool outputs to their
-    first and last lines, capped at 60k tokens.
-  - Sets `tainted` if the transcript has web fetch, browser or Gmail-read
-    tool results.
-  - Runs a K2 job: model Haiku (H9). Tools: `jarvis-brain` `skill_view`,
-    `skill_manage`, `memory_read`, `memory_add`, `memory_patch` (memory
-    tools only for memory reviews), plus read-only `Read`/`Grep`. Nothing
-    else.
-  - Prompts are ported from Hermes `_SKILL_REVIEW_PROMPT`, cited with its
-    MIT license: patch the loaded skill first, then umbrella, then a
-    reference, then new; lessons not logs; the do-not-capture list;
-    statement-form memory.
-  - The result is recorded to the budget; ledger entries come from M5.
+  - Polls L1 once per tick and syncs the backlog before acknowledging its
+    journal. The owner-private state directory is locked across each tick.
+    Duplicate pending reviews of the same transcript keep their original
+    receipt time and attempts, including on journal replay. The handoff
+    retains the counted prefix fingerprint so a replaced or truncated and
+    regrown transcript starts with fresh counts, receipt time, and attempts.
+    Corrupt backlogs are set aside and kept. A review waits until the index
+    cursor for that file covers the byte offset counted by L1. It expires
+    after seven days and is dropped if its transcript is gone or comes from
+    a Jarvis job. The consumer and ingester use matching provider folders,
+    `~/.claude/projects` and `~/.codex/sessions` by default.
+  - Runs at most one K2 Haiku job (H9) in an empty private directory per tick.
+    The reviewer resolves the CLI before recording a durable budget start
+    at runner entry. A refusal preserves the backlog and defers
+    admission for one hour. A runner error retries up to three total attempts.
+    Outcomes go to the budget and a metadata-only reviewer log. A crash can
+    retry a job whose outcome has yet to be saved in the backlog. Completed
+    and abandoned reviews stay out of the backlog on restart. The vault and
+    skill store guard duplicate writes, and skill changes use M5's ledger.
+  - The prompt fences the review kind, provider, indexed document ID,
+    counts, and taint. The model reads that session through `session_search`
+    in `read` mode. The prompt contains no transcript text or path, and the
+    job has no built-in `Read` or `Grep`.
+  - Both review MCP profiles require a valid bound doc ID, provider-qualified
+    session ID, and taint flag at startup. The server allows `session_search`
+    only in `read` mode for that document, across its pages. `review-skill`
+    also allows `skill_view` and `skill_manage`, binding reviewer provenance
+    and taint. `review-memory` also allows `memory_list`, `memory_read`,
+    `memory_search`, `memory_add`, and `memory_patch`. Adds use the
+    `consolidation-memory` scan and get server-set reviewer source. Patches
+    use the standard memory scan and check the resulting body for directives
+    the edit creates or completes. Patches keep the entry's original source.
+  - The reviewer computes lexical taint from tool-call names containing
+    `web`, `fetch`, `browser`, `mail`, `calendar`, `http`, `url`, or `search`
+    after case folding, or an `http://` or `https://` in tool input. A scan
+    truncated at 64 MiB is tainted. Tainted skills that pass the scanner go
+    live and will be listed first in the L3 digest (H4).
+  - The prompts treat the fenced reference and returned session data as
+    untrusted. Skill reviews prefer a loaded skill, then an umbrella skill,
+    then a reference file, then a new skill for the class of task. Memory
+    reviews save declarative facts. Both omit transient details and secrets
+    and write only when there is a lasting lesson or fact.
 - **Acceptance:**
-  - [ ] Fake-binary test: argv carries exactly the allowlist above and the
-    tainted flag reaches `skill_manage`.
-  - [ ] Budget refusal → item stays queued, retried next day, dropped after
-    7 d.
-  - [ ] The digest builder is tested for the cap and the verbatim tail.
-  - [ ] A golden test: on 3 fixture transcripts, a recorded fake response
-    produces the expected ledger ops.
+  - [x] The fake binary receives the exact review allowlist and no built-in
+    tools. The server enforces both profiles, document scope, and provenance.
+  - [x] Budget refusal preserves pending reviews and delays readmission.
+    Expiry, error retries, corrupt-state recovery, and crash replay are tested.
+  - [x] Claude and Codex fixtures reach the real MCP server through fake
+    jobs. Vault and ledger writes, taint, pagination, and prompt fencing are
+    checked.
+  - [x] The five-minute job follows ingestion and opens its stores lazily.
   - [ ] Live probe under $0.02 on a synthetic transcript, spend reported.
 - **Depends:** L1, K2, K3, M5. **Size:** M.
 
