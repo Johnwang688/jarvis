@@ -67,6 +67,15 @@ class WorkBoundaries(unittest.TestCase):
         self.assertEqual(thread, self.ledger.get(thread.thread_id))
 
 
+    def test_ids_shaped_like_real_t3_ids_are_accepted(self):
+        # Shapes recorded from the real CLI on 2026-11-25 (values are fakes).
+        thread_id = "cli:0a000000-0aa0-0000-0aa0-000a0a0000a0"
+        run_id = "cli:thread:cli%3A0a000000-0aa0-0000-0aa0-000a0a0000a0:message:1"
+        self.t3.start.return_value = t3_client.Run(thread_id, run_id, "queued")
+        thread = self.service.start(self.plan())
+        self.assertEqual(thread.thread_id, thread_id)
+        self.assertEqual(self.ledger.get(thread_id).project, "demo")
+
 
 if __name__ == "__main__":
     unittest.main()

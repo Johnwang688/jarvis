@@ -219,7 +219,8 @@ def _field(obj, key, expected):
 def _run(data, waiting: bool) -> Run:
     thread = _field(data, "threadId", str)
     run = _field(data, "runId", str)
-    status = _field(data, "status", str)
+    # A start that does not wait answers before the run has a status: it is queued.
+    status = _field(data, "status", str) if "status" in data else "queued"
     return Run(thread, run, "waiting" if waiting else status)
 
 

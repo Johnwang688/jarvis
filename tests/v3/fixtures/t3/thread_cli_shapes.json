@@ -4,7 +4,7 @@
   "finished": 0,
   "waiting_for_an_answer": 2
  },
- "note": "Shapes only (key names and value types) of `t3 thread ... --json` answers, recorded by scripts/spikes/v3/s3_drive_t3.py. Identical for the Claude and Codex providers.",
+ "note": "Shapes only (key names and value types) of `t3 thread ... --json` answers, recorded by scripts/spikes/v3/s3_drive_t3.py. Identical for the Claude and Codex providers. `thread_start` (no --wait) was recorded on 2026-11-25: it carries no status.",
  "statuses_seen": [
   "running",
   "completed",
@@ -103,6 +103,11 @@
    "updatedAt": "str",
    "worktreePath": "null"
   }
+ },
+ "thread_start": {
+  "projectId": "str",
+  "runId": "str",
+  "threadId": "str"
  },
  "thread_start_wait": {
   "error": "null",

@@ -182,6 +182,16 @@ class Errors(Base):
         self.fails("shape", self.t3.start, "/work/project", "hi", provider="codex", model="m")
         self.fails("shape", self.t3.list, "/work/project")
 
+    def test_a_start_that_does_not_wait_has_no_status_and_reads_as_queued(self):
+        self.assertEqual(set(SHAPES["thread_start"]), {"threadId", "projectId", "runId"})   # what the real CLI answers
+        self.plan(start={"out": {"threadId": "mcp:t-1", "projectId": "p-1", "runId": "run:1"}})
+        run = self.t3.start("/work/project", "hi", provider="codex", model="m")
+        self.assertEqual((run.thread_id, run.run_id, run.status), ("mcp:t-1", "run:1", "queued"))
+        self.assertIn(run.status, t3_client.RUNNING)
+        for bad in (None, 3, ["running"]):                                                   # a status that is present must still be text
+            self.plan(start={"out": {"threadId": "mcp:t-1", "runId": "run:1", "status": bad}})
+            self.fails("shape", self.t3.start, "/work/project", "hi", provider="codex", model="m")
+
     def test_the_fixture_shapes_are_what_the_client_reads(self):
         for key in ("threadId", "runId", "status"):
             self.assertIn(key, SHAPES["thread_start_wait"])
