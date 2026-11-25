@@ -400,7 +400,7 @@ def _find_cli(name):
 
 
 def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None,
-                 signals_dir=None, find_cli=None, executor=None):
+                 signals_dir=None, find_cli=None, executor=None, executor_activity=None):
     """Build the daemon jobs without opening their stores or contacting providers.
 
     The Gmail grant check and OAuth refresh read the file separately.
@@ -656,12 +656,14 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         except Exception as exc:
             raise _JobNotStarted from exc
 
-        learning = None
+        learning = activity = None
         if which == "evening":
             from .learning_digest import summary_line
 
             learning = summary_line
-        result = run(which, feed=feed, budget=brief_budget, calendar=calendar, mail=mail, learning=learning)
+            activity = executor_activity
+        result = run(which, feed=feed, budget=brief_budget, calendar=calendar, mail=mail,
+                     activity=activity, learning=learning)
         if result.outcome == "error":
             if result.retryable:
                 raise _JobNotStarted

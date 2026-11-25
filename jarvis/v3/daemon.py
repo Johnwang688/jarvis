@@ -375,7 +375,7 @@ class Daemon:
         if jobs is None:
             jobs = default_jobs(feed_root=self._data_dir / "feed", chats_root=self._chats_root,
                                 index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite",
-                                executor=self._sweep_executor)
+                                executor=self._sweep_executor, executor_activity=self._executor_activity)
         self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json",
                                     idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
@@ -423,10 +423,19 @@ class Daemon:
         return min(chat_idle, idle_seconds(chats_root=self._chats_root)) if chat_idle else 0.0
 
     def _initiative(self):
+        from .chat import calendar_available
         from .feed import Feed
         from .policy import Policy
         from .proposals import ProposalStore
+        from .vault import Vault
         from .work import Ledger, Registry
+
+        def calendar_factory(*, approve):
+            if not calendar_available():
+                return None
+            from .tools.calendar import CalendarTools
+
+            return CalendarTools(approve=approve)
 
         with self._executor_lock:
             if self._executor is None:
@@ -438,9 +447,14 @@ class Daemon:
                 else:
                     registry, ledger = self._work()
                 work = WorkService(registry=registry, ledger=ledger)
+                vault = Vault(os.environ.get("JARVIS_VAULT") or self._data_dir / "vault")
                 self._executor = (feed, Executor(ProposalStore(self._data_dir / "proposals"),
-                                                 feed, work, Policy(), stop=self._executor_stop))
+                                                 feed, work, Policy(), calendar_factory, vault,
+                                                 stop=self._executor_stop))
             return self._executor
+
+    def _executor_activity(self, since, until):
+        return self._initiative()[1].activity_counts(since, until)
 
     def _get_feed(self):
         return self._initiative()[0]

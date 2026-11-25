@@ -27,6 +27,9 @@ _NEWS = {
     "policy": "Current policy forbids this proposal.",
     "policy_changed": "The policy level increased. The action needs a new approval.",
     "unavailable": "This action is not available yet.",
+    "calendar_disconnected": "Google Calendar is not connected.",
+    "calendar_past": "The calendar block's start time has passed.",
+    "vault_blocked": "The vault note was blocked by the content scanner.",
     "failed": "The proposal could not be completed.",
     "unknown": "The action may or may not have run before the executor stopped.",
 }
@@ -80,6 +83,8 @@ class Executor(Worker):
         self._feed = feed
         self._work = work
         self._policy = policy
+        self._calendar_factory = calendar_factory
+        self._vault = vault
         self._clock = clock
 
     def _now(self):
@@ -173,13 +178,25 @@ class Executor(Worker):
         return revision["id"]
 
     def _observe(self, proposal, brief, directory):
+        from .feed import FeedError, _parse_time
         from .work import WorkError
 
         pid = proposal["id"]
         default = proposal["brief"]["default"]
         deadline = (datetime.fromisoformat(default["at"]) if default is not None
                     else datetime.fromisoformat(proposal["created"]) + timedelta(hours=72))
-        if self._now() > deadline or (brief is not None and brief["resolved_by"] in ("default", "expiry")):
+        now = self._now()
+        expired = now > deadline
+        action = proposal["action"]
+        if (expired and proposal["kind"] == "calendar.block" and action is not None
+                and self._approved_by_owner(brief)):
+            # Record failure news for an owner-approved block that missed its
+            # start. A brief resolved by the feed's expiry still stays expired.
+            try:
+                expired = _parse_time(action["args"].get("start")) >= now
+            except FeedError:
+                pass
+        if expired or (brief is not None and brief["resolved_by"] in ("default", "expiry")):
             return self._finish(directory, proposal, "expired")
         if brief is None or brief["resolved_by"] != "owner":
             return None
@@ -205,6 +222,59 @@ class Executor(Worker):
         if self._stop.is_set():
             raise _Stopped
 
+    def _create_calendar_block(self, action, guard):
+        from .fastpath import _CalendarGrant
+        from .feed import _parse_time
+        from .tools.calendar import _event_id
+
+        if self._calendar_factory is None:
+            raise _Refused("unavailable")
+        start = _parse_time(action["args"]["start"])
+        if start < self._now():
+            raise _Refused("calendar_past")
+
+        stopped = late = False
+
+        def cancelled():
+            nonlocal stopped, late
+            stopped = stopped or self._stop.is_set()
+            late = late or start < self._now()
+            return stopped or late
+
+        grant = _CalendarGrant("calendar.create", action["preview"], cancelled)
+        calendar = self._calendar_factory(approve=grant)
+        guard()
+        if calendar is None:
+            raise _Refused("calendar_disconnected")
+        result = calendar.calendar_create(**action["args"], cancelled=cancelled)
+        # CalendarTools returns errors as text. Release the claim only when
+        # its pre-request callback observed the stop, never after a live POST.
+        if stopped:
+            raise _Stopped
+        if late:
+            raise _Refused("calendar_past")
+        if not grant.used or not result.startswith("Created event ") or not result.endswith("."):
+            raise _Refused("failed")
+        return f"calendar:{_event_id(result[len('Created event '):-1])}"
+
+    def _add_vault_note(self, proposal, guard):
+        from .content_scan import scan
+
+        if self._vault is None:
+            raise _Refused("unavailable")
+        args = proposal["action"]["args"]
+        # The card names the entry from the preview and the write uses the
+        # args: the note goes only where the card said it would.
+        expected = f"{args.get('folder')}/{args.get('name')}"
+        if proposal["action"]["preview"].get("ref") != expected:
+            raise _Refused("binding")
+        if not scan(args["body"], purpose="memory").ok:
+            raise _Refused("vault_blocked")
+        guard()
+        entry, _ = self._vault.add(args["folder"], args["name"], args["description"], args["body"],
+                                   source=f"jarvis:proposal:{proposal['id']}", require_absent=True)
+        return entry.location.ref
+
     def _perform(self, proposal, brief, approved_at):
         action = proposal["action"]
         if action is None:
@@ -225,6 +295,10 @@ class Executor(Worker):
             return self._work.start(action["preview"], guard=guard).thread_id
         if tool == "work_send":
             return self._work.send(**action["args"], guard=guard).thread_id
+        if tool == "calendar_create":
+            return self._create_calendar_block(action, guard)
+        if tool == "vault_add":
+            return self._add_vault_note(proposal, guard)
         raise _Refused("unavailable")
 
     def _execute(self, proposal, brief, directory):

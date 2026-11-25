@@ -5,7 +5,7 @@ The watch job (W2) and the T3 panel (W3) are separate packages.
 
 from contextlib import closing
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from functools import cached_property, partial, wraps
 from inspect import signature
@@ -146,8 +146,8 @@ def _take_grant(tool, args):
 @dataclass
 class _CalendarGrant:
     action: str
-    preview: dict
-    stop: Callable
+    preview: dict = field(repr=False)  # the approved event text stays out of repr
+    stop: Callable = field(repr=False)
     used: bool = False
 
     def __call__(self, action, details):
