@@ -8,6 +8,7 @@ from email import errors as header_errors
 from functools import partial
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 MAX_BODY = 64 * 1024
 FEED_LOCK_TIMEOUT = 2.0
 WORK_THREAD_CAP = 50
+_PROPOSAL_REF = re.compile(r"[0-9a-f]{32}:[0-9a-f]{64}")
 _MALFORMED_HEADERS = (
     header_errors.FirstHeaderLineIsContinuationDefect,
     header_errors.InvalidHeaderDefect,
@@ -112,8 +114,11 @@ def _feed_answer(body, feed):
     bid, action = body["id"], body["action"]
     brief = feed.answer(bid, action, text=body.get("text"), return_brief=True)
     result = {"brief": brief}
-    if action == "approve" and brief["proposal_id"] is not None:
+    proposal_ref = brief["proposal_id"]
+    if action == "approve" and proposal_ref is not None:
         result["executed"] = False
+        if feed._execute is not None and _PROPOSAL_REF.fullmatch(proposal_ref):
+            result["queued"] = True
     return 200, result
 
 

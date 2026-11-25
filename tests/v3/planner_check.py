@@ -332,7 +332,7 @@ class PlannerCheck(unittest.TestCase):
         for filename, count in (("jobs_check.py", 1), ("job_wiring_check.py", 2), ("daily_briefs_check.py", 1)):
             with self.subTest(filename=filename):
                 source = Path(__file__).with_name(filename).read_text()
-                self.assertEqual(source.count('"triggers", "work-watch", "planner", "consolidate"'), count)
+                self.assertEqual(source.count('"triggers", "work-watch", "planner", '), count)
         with (patch.object(planner.time, "time", return_value=self.now),
               patch.object(planner, "_read_calendar", side_effect=AssertionError("unexpected advisory read")),
               patch("jarvis.v3.claude_jobs.run_job", side_effect=AssertionError("unexpected model runner")),

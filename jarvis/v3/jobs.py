@@ -400,7 +400,7 @@ def _find_cli(name):
 
 
 def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None,
-                 signals_dir=None, find_cli=None):
+                 signals_dir=None, find_cli=None, executor=None):
     """Build the daemon jobs without opening their stores or contacting providers.
 
     The Gmail grant check and OAuth refresh read the file separately.
@@ -427,6 +427,10 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
 
     def feed_tick():
         get_feed().tick()
+
+    def run_executor():
+        if executor is not None:
+            executor()
 
     idle_required = 2 * 3600
 
@@ -674,6 +678,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             Job("triggers", run_triggers, every_s=300),
             Job("work-watch", watch_work, every_s=120),
             Job("planner", run_planner, every_s=300),
+            Job("executor", run_executor, every_s=60),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
             Job("learning-digest", post_learning, due=learning_due),
