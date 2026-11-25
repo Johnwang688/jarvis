@@ -173,11 +173,27 @@ One file per item, `<ts>-<rand>.json`:
  "attachment": {"type": "draft|diff|thread|null", "ref": "…"},
  "proposal_id": "…|null",
  "state": "open|approved|edited|other|dismissed|expired|done",
+ "route": "push|batch", "time_critical": false,
+ "actor": "jarvis|agent", "session": "agent session id|null",
+ "answer": {"action": "approve|edit|other|not_now", "text": "…|null"},
+ "resolved_by": "owner|default|expiry|null",
  "feedback": ["too_long", "missing_context"]}
 ```
 
 - `default` is **required** for `kind=decision`.
 - `rank` uses 1–8, matching the inbox's rank meaning today.
+- `answer` is null until an owner answers. Only edit and other take text.
+  `resolved_by` is null while open.
+- The store assigns `id`, `created`, `state` and `route`. A rank of 1 or 2
+  routes to push when the due date is today in the feed clock's zone or
+  `time_critical` is true. Other briefs go to batch.
+- The bound agent tool supplies the actor and session. Agent briefs use
+  ranks 3–8, carry no proposal or time-critical flag, and are limited to
+  five open briefs per session and 20 agent posts across the last 24 hours.
+- The log records approval before proposal execution. Execution is at most
+  once per brief, so a crash after recording can lose the callback. A due
+  no-op default is itself a durable transition and takes effect once when
+  processed. Non-no-op defaults expire without execution.
 
 ### 1.8 Proposal (I3)
 
@@ -1038,17 +1054,17 @@ CLIs' own safeguards. What follows from it:
 ## 10. Track B: Briefs + feed
 
 ### B1: Brief store, schema and routing
-- **Scope:** `jarvis/v3/feed.py`, routes on the v3 daemon's API (A3;
-  owner-only, the same auth model as v2's `hud_api.py`),
-  `tests/v3/feed_check.py`.
+- **Scope:** `jarvis/v3/feed.py`, `jarvis/v3/tools/feed.py` and
+  `tests/v3/feed_check.py`. Owner-only v3 daemon routes are waiting for A6a.
+  Live quiet-hours and push wiring and the jarvis-brain tool offer follow in B2.
 - **Spec:**
   - Stores briefs (contract 1.7) in `FEED_DIR` (JSONL + an index). It
     validates: `default` is required for decisions, `ask` ≤ 120 chars,
     `why_now` ≤ 200, at most 3 `options`.
   - Routing:
     - rank ≤ 2 **and** (due today or time-critical) → phone push via the
-      existing `push.py` `{count, rank}` payload, deferred during quiet
-      hours via `quiet.py`/`quiet_defer.py`;
+      `{count, rank}` payload. The store defers delivery while the
+      quiet-hours callback reports quiet;
     - everything else → batched for B4.
   - Actions: approve, edit, other (free text), not_now, plus feedback taps.
     Approve with a `proposal_id` calls I4.
@@ -1058,11 +1074,11 @@ CLIs' own safeguards. What follows from it:
     `owner_post` pattern) and can never read or answer them, matching
     today's inbox rule.
 - **Acceptance:**
-  - [ ] Schema validation tests.
-  - [ ] Routing table tests with a fake clock, across quiet hours.
-  - [ ] An agent call to answer a brief is refused.
-  - [ ] The push payload carries only count and rank.
-  - [ ] Expiry runs the default exactly once.
+  - [x] Schema validation tests.
+  - [x] Routing table tests with a fake clock, across quiet hours.
+  - [x] The agent tool surface exposes only posting.
+  - [x] The push payload carries only count and rank.
+  - [x] Expiry applies a no-op default exactly once.
 - **Size:** M.
 
 ### B2: HUD Jarvis feed panel
