@@ -11,7 +11,7 @@ it("shows a failed first daily brief attempt as an error", async () => {
       jobs: {
         "morning-brief": { last_run: null, last_outcome: "error", failures: 1 },
       },
-    } : { briefs: [], recent: [] },
+    } : url === "/v3/owner/work" ? { projects: [], threads: [] } : { briefs: [], recent: [] },
   )));
   const host = document.body.appendChild(document.createElement("div"));
   const root = createRoot(host);

@@ -142,6 +142,39 @@ class Layout(window.Window):
             left, top, right, bottom = seen["panels"][name]
             self.assertGreater(bottom - top, 600, f"{name} should take the height of the window")
 
+    def test_a_full_work_list_scrolls_inside_its_panel(self):
+        self.start_daemon()
+        self.open_window()
+        names = [f"project-{n}" for n in range(4)]
+        now = time.time()
+        threads = [
+            {"thread_id": f"thread-{n}", "project": names[n % len(names)],
+             "title": f"Fixture title {n} " + "W" * 60, "status": "running",
+             "waiting_on_owner": n % 3 == 0, "started_at": now - n, "updated_at": now - n}
+            for n in range(50)
+        ]
+        self.page.route(self.origin + "/v3/owner/work", lambda route: route.fulfill(json={
+            "projects": [{"name": name} for name in names], "threads": threads,
+        }))
+        self.page.reload(wait_until="load")
+        panel = self.page.get_by_role("region", name="T3", exact=True)
+        self.expect(panel.locator("li")).to_have_count(50, timeout=window.WAIT_MS)
+        scroll_list = panel.locator(".work-list")
+        controls = "button,a,input,select,textarea,iframe,details,summary,[tabindex],[contenteditable]"
+        for width, height in (*SIZES, (390, 844)):
+            with self.subTest(view=(width, height)):
+                seen = self.measure(width, height, "work")
+                if width > 680:
+                    self.assert_one_screen(seen, inside=("chat", "feed", "status", "cron", "t3", "vault", "skills"))
+                else:
+                    self.assertLessEqual(seen["window"][0], seen["window"][1] + 1)
+                    self.assertGreater(seen["window"][2], seen["window"][3])
+                    self.assertLess(seen["panels"]["chat"][1], seen["panels"]["feed"][1])
+                scroll, client = scroll_list.evaluate("el => [el.scrollHeight, el.clientHeight]")
+                self.assertGreater(client, 0, "the list has no room")
+                self.assertGreater(scroll, client, "the list should scroll inside the T3 panel")
+                self.assertEqual(panel.locator(controls).count(), 0)
+
     def test_an_approval_card_stays_on_screen(self):
         self.request_vault_add("The note was saved.")
         for width, height in ((1280, 720), (1100, 640)):

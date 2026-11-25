@@ -110,7 +110,7 @@
 .agent-rail .agent-panel p { font-size: 12px; }
 
 /* A slot with nothing to show yet is one quiet line. */
-.agent-rail .agent-panel:not([data-panel="cron"]) {
+.agent-rail .agent-panel:not([data-panel="cron"], .work-panel) {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -118,7 +118,7 @@
   padding-block: 10px;
 }
 
-.agent-rail .agent-panel:not([data-panel="cron"]) h2 { margin-bottom: 0; }
+.agent-rail .agent-panel:not([data-panel="cron"], .work-panel) h2 { margin-bottom: 0; }
 
 /* The job list takes what the rail has left and scrolls inside its panel. */
 .agent-rail [data-panel="cron"] {
@@ -169,6 +169,47 @@
 .agent-jobs li[data-state="ok"] .agent-job-state { color: var(--accent-hi); }
 .agent-jobs li[data-state="failed"] .agent-job-state { color: var(--red); }
 
+.agent-rail .work-panel {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  max-height: 260px;
+}
+
+.work-list {
+  min-height: 0;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.work-project + .work-project { margin-top: 10px; }
+.work-project h3 { color: var(--text-2); font: 600 11px var(--mono); }
+.work-project ul { list-style: none; }
+
+.work-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--rim);
+}
+
+.work-title { flex-basis: 100%; min-width: 0; color: var(--text); }
+.work-status {
+  padding: 1px 5px;
+  border: 1px solid var(--rim);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.work-when { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.work-row[data-state="running"] .work-status { color: var(--accent-hi); }
+.work-row[data-state="waiting"] .work-status { color: var(--amber); }
+.work-row[data-state="error"] .work-status { color: var(--red); }
+.work-row[data-state="done"] .work-status,
+.work-row[data-state="unknown"] .work-status { color: var(--text-muted); }
+
 /* A narrower window drops the rail under the feed; the page still does not scroll. */
 @media (max-width: 1040px) {
   .agent-grid {
@@ -176,6 +217,10 @@
     grid-template-rows: minmax(0, 1.4fr) minmax(0, 1fr);
     grid-template-areas: "feed chat" "rail chat";
   }
+}
+
+@media (680px < width <= 1040px) {
+  .agent-rail:has(.work-list) [data-panel="cron"] { min-height: 72px; }
 }
 
 /* Phone width is the one place the page scrolls: one column, the chat first. */
@@ -191,7 +236,7 @@
   .agent-chat { height: 520px; }
   .agent-feed { max-height: 520px; }
   .agent-rail { overflow-y: visible; }
-  .agent-rail [data-panel="cron"] { flex: none; }
+  .agent-rail [data-panel="cron"], .agent-rail .work-panel { flex: none; }
   .agent-jobs { overflow-y: visible; }
 }
 

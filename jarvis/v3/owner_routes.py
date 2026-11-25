@@ -19,10 +19,12 @@ from .chat import ChatBusy, ChatInboxFull
 if TYPE_CHECKING:
     from .chat import ChatService
     from .feed import Feed
+    from .work import Ledger, Registry
 
 
 MAX_BODY = 64 * 1024
 FEED_LOCK_TIMEOUT = 2.0
+WORK_THREAD_CAP = 50
 _MALFORMED_HEADERS = (
     header_errors.FirstHeaderLineIsContinuationDefect,
     header_errors.InvalidHeaderDefect,
@@ -38,9 +40,13 @@ class Route:
     with_feed: bool = field(default=False, kw_only=True)
     with_chat: bool = field(default=False, kw_only=True)
     with_data_dir: bool = field(default=False, kw_only=True)
+    with_work: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
-            chat: ChatService | None = None, *, data_dir: Path | None = None) -> tuple[int, object]:
+            chat: ChatService | None = None, *, data_dir: Path | None = None,
+            get_work: Callable[[], tuple[Registry, Ledger]] | None = None) -> tuple[int, object]:
+        if self.with_work:
+            return self.handler(body, get_work)
         if self.with_data_dir:
             return self.handler(body, data_dir)
         if self.with_chat:
@@ -66,6 +72,36 @@ class Route:
 
 def _feed_snapshot(body, feed):
     return 200, feed.snapshot()
+
+
+def _work_snapshot(body, get_work):
+    """Read recorded work. Starting, steering, watching and T3 calls are out of scope."""
+    from .work import WorkError
+
+    try:
+        registry, ledger = get_work()
+        projects = registry.list()
+        threads = ledger.threads()
+    except WorkError:
+        return 503, {"error": "Service Unavailable"}
+
+    projects = sorted(projects, key=lambda project: project.name)[:32]
+    threads = sorted(threads, key=lambda thread: thread.started_at, reverse=True)[:WORK_THREAD_CAP]
+    return 200, {
+        "projects": [{"name": project.name} for project in projects],
+        "threads": [
+            {
+                "thread_id": thread.thread_id,
+                "project": thread.project,
+                "title": thread.title,
+                "status": thread.status,
+                "waiting_on_owner": thread.waiting_on_owner,
+                "started_at": thread.started_at,
+                "updated_at": thread.updated_at,
+            }
+            for thread in threads
+        ],
+    }
 
 
 def _feed_answer(body, feed):
@@ -211,6 +247,7 @@ def _learned(body, data_dir, *, action):
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
+    ("GET", "/v3/owner/work"): Route(_work_snapshot, with_work=True),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),
     ("POST", "/v3/owner/feed/feedback"): Route(_feed_feedback, with_feed=True),

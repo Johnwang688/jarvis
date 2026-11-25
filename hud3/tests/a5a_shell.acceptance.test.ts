@@ -48,11 +48,11 @@ describe("the v3 window", () => {
     expect(box.querySelectorAll("iframe,button,input,textarea")).toHaveLength(0);
   });
 
-  it("asks only for /v3/status, chat and the feed", async () => {
+  it("asks only for /v3/status, chat, the feed and the T3 panel's work list (W3)", async () => {
     await mount();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(calls.length).toBeGreaterThan(1);
-    expect([...new Set(calls)].sort()).toEqual(["/v3/owner/chat", "/v3/owner/feed", "/v3/status"]);
+    expect([...new Set(calls)].sort()).toEqual(["/v3/owner/chat", "/v3/owner/feed", "/v3/owner/work", "/v3/status"]);
   });
 
   it("shows the running daemon", async () => {

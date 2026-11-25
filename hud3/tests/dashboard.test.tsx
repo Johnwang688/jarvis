@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     calls.push(url);
+    if (url === "/v3/owner/work") return json({ projects: [], threads: [] });
     return json(url === "/v3/status" ? status : { briefs: [], recent: [] });
   }));
   box = document.createElement("div"); document.body.append(box);

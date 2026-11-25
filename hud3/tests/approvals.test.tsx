@@ -64,6 +64,7 @@ beforeEach(() => {
       case `${chatPath}/send`: return json({ state: "running", steered: true }, 202);
       case `${chatPath}/stop`: return stopChat();
       case "/v3/owner/feed": return json({ briefs: [], recent: [] });
+      case "/v3/owner/work": return json({ projects: [], threads: [] });
       case "/v3/status": return json({});
       default: throw new Error("Unexpected request");
     }

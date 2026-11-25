@@ -108,7 +108,7 @@ export function useDaemonStatus(): DaemonStatus | null | undefined {
   return status;
 }
 
-function span(seconds: number): string {
+export function span(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
   if (s < 60) return `${s} s`;
   if (s < 3600) return `${Math.floor(s / 60)} min`;
