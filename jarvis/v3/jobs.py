@@ -396,11 +396,12 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
     The Gmail grant check and OAuth refresh read the file separately.
     A test grant at a different path can exercise wiring with a fake client.
     The transcript ingest's `budget_s` bounds the scan. The index opens first.
-    The review queue consumer is deferred to L2, when its reviews have a reader.
+    The reviewer consumes the queue after transcript ingestion.
     """
     feed = None
     index = None
     gmail_runner = None
+    reviewer_runner = None
     budget = None
 
     def get_feed():
@@ -443,6 +444,18 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             ingest(get_index(), budget_s=20)
         else:
             ingest(get_index(), chats=chats_root, budget_s=20)
+
+    def review_sessions():
+        nonlocal reviewer_runner
+        if reviewer_runner is None:
+            from .budget import Budget
+            from .claude_usage import read_windows
+            from .review_queue import Consumer
+            from .reviewer import Reviewer
+
+            reviewer_runner = Reviewer(consumer=Consumer(), budget=Budget(usage=read_windows), index=get_index())
+        if any(row["outcome"] == "error" for row in reviewer_runner.tick()):
+            raise RuntimeError("Session review failed.")
 
     def ingest_gmail():
         nonlocal gmail_runner
@@ -515,6 +528,7 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
     return [Job("feed", feed_tick, every_s=60),
             Job("skill-curator", curate, due=curator_due, needs_idle_s=idle_required),
             Job("transcripts", ingest_transcripts, every_s=300),
+            Job("reviewer", review_sessions, every_s=300),
             Job("gmail", ingest_gmail, every_s=300),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),

@@ -541,7 +541,7 @@ class Vault:
             return self._save(root, directory, entry, text.encode("utf-8"), rules, existing is not None)
 
     def patch(self, name: str, old: str, new: str, reads: dict[Location, bytes | None], *,
-              purpose: content_scan.Purpose = "memory"):
+              purpose: content_scan.Purpose = "memory", review_patch: bool = False):
         if not isinstance(old, str) or not isinstance(new, str):
             raise VaultError("Patch values must be text.")
         with self._locked(write=True) as root:
@@ -554,17 +554,21 @@ class Vault:
             if not old:
                 if location.folder or entry.body:
                     raise VaultError("Empty patch text is only valid for an empty profile or commitments.")
-                body = new
+                pos = 0
             else:
                 pos = entry.body.find(old)
                 if pos < 0 or entry.body.find(old, pos + 1) >= 0:
                     raise VaultError("Patch text must occur exactly once in the memory body.")
-                body = entry.body[:pos] + new + entry.body[pos + len(old):]
+            old_end = pos + len(old)
+            body = entry.body[:pos] + new + entry.body[old_end:]
             _body(body, allow_empty=not location.folder)
+            before = entry.body
             entry = replace(entry, body=body, updated=date.today().isoformat())
             self._check_caps(root, entry, adding=False)
             text = entry.markdown()
-            rules = entry.scan_markdown(text, purpose=purpose)
+            rules = entry.scan_markdown(text, purpose="memory" if review_patch else purpose)
+            if review_patch and content_scan.review_patch_creates_directive(before, body, pos, old_end, pos + len(new)):
+                raise VaultError("Memory scanner blocked content (agent-override).")
             with self._folder(root, location.folder) as directory:
                 return self._save(root, directory, entry, text.encode("utf-8"), rules)
 
