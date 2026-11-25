@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import errno
 import fcntl
 import hashlib
+from io import BytesIO
 import json
 import math
 import os
@@ -48,6 +49,10 @@ _TORN_END = b"\0\n"
 
 class StoreError(ValueError):
     """An error whose message is safe to return on the tool surface."""
+
+
+class StoreBusy(StoreError):
+    """The operation could not acquire the store lock by its deadline."""
 
 
 def _leaf(value):
@@ -152,6 +157,16 @@ def _digest(data):
 def _scan_metadata(*values):
     if any(not content_scan.scan(value, purpose="skill").ok for value in values):
         raise StoreError("Skill metadata failed its content scan.")
+
+
+def _visible_record(row):
+    # Older stores could record blocked metadata. Keep those receipts
+    # available internally without displaying the blocked strings.
+    try:
+        _scan_metadata(row["skill"], row["path"], row["session"])
+    except StoreError:
+        return False
+    return True
 
 
 def _scan_file(text, name, path):
@@ -331,11 +346,12 @@ def _valid_record(row):
 
 
 class SkillStore:
-    def __init__(self, root=None, *, ledger=None, links=None, owner_roots=None):
+    def __init__(self, root=None, *, ledger=None, links=None, owner_roots=None, lock_deadline=None):
         self._root = root
         self._ledger = ledger
         self._links = None if links is None else tuple(links)
         self._owners = None if owner_roots is None else tuple(owner_roots)
+        self._lock_deadline = lock_deadline
 
     def _root_path(self):
         root = self._root
@@ -344,9 +360,27 @@ class SkillStore:
             root = Path(override).expanduser() if override else config.V3_DIR / "skills"
         return Path(os.path.abspath(root))
 
+    def _acquire_lock(self, fd, mode, *, nonblocking):
+        if nonblocking:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+        elif self._lock_deadline is None:
+            fcntl.flock(fd, mode)
+        else:
+            while True:
+                try:
+                    fcntl.flock(fd, mode | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    remaining = self._lock_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise StoreBusy("Skill store is busy.") from None
+                    time.sleep(min(0.05, remaining))
+
     @contextmanager
-    def _operation(self, *, initialize=True, readonly=False):
+    def _operation(self, *, initialize=True, readonly=False, nonblocking_read=False):
         initialize = initialize and not readonly
+        # A deadline-bound owner request only acts on existing storage.
+        create = initialize and self._lock_deadline is None
         consumers = (Path.home() / ".claude/skills", Path.home() / ".codex/skills")
         root = self._root_path()
         ledger = Path(os.path.abspath(self._ledger if self._ledger is not None else config.V3_DIR / "skill-ledger"))
@@ -355,12 +389,12 @@ class SkillStore:
         owners = dict.fromkeys([*(Path(os.path.abspath(p)) for p in owners), *links])
         with ExitStack() as stack:
             try:
-                root_fd = stack.enter_context(open_directory(root, create=initialize))
-                if initialize:
+                root_fd = stack.enter_context(open_directory(root, create=create))
+                if create:
                     _private_root(root_fd)
                 else:
                     _private(os.fstat(root_fd))
-                lock_flags = (os.O_CREAT | os.O_RDWR) if initialize else os.O_RDONLY
+                lock_flags = (os.O_CREAT | os.O_RDWR) if create else os.O_RDONLY
                 lock_fd = _open_file(root_fd, ".store.lock", lock_flags)
             except FileNotFoundError:
                 if not readonly:
@@ -369,13 +403,14 @@ class SkillStore:
                 yield _Operation(root, None, ledger, None, None, links, owners)
                 return
             stack.callback(os.close, lock_fd)
-            fcntl.flock(lock_fd, fcntl.LOCK_SH if readonly else fcntl.LOCK_EX)
+            lock_mode = fcntl.LOCK_SH if readonly else fcntl.LOCK_EX
+            self._acquire_lock(lock_fd, lock_mode, nonblocking=nonblocking_read and not initialize)
             _verify(root_fd, ".store.lock", os.fstat(lock_fd))
             if readonly:
                 yield _Operation(root, root_fd, ledger, None, lock_fd, links, owners)
                 return
-            ledger_fd = stack.enter_context(open_directory(ledger, create=initialize))
-            if initialize:
+            ledger_fd = stack.enter_context(open_directory(ledger, create=create))
+            if create:
                 _private_root(ledger_fd)
             else:
                 _private(os.fstat(ledger_fd))
@@ -386,15 +421,7 @@ class SkillStore:
 
     def records(self, *, with_status=False):
         with self._operation() as op:
-            rows = []
-            for row in op.records():
-                # Older stores could record blocked metadata. Keep the receipt
-                # available internally without displaying the blocked strings.
-                try:
-                    _scan_metadata(row["skill"], row["path"], row["session"])
-                except StoreError:
-                    continue
-                rows.append(row)
+            rows = op.records(visible_only=True)
             if with_status:
                 return [dict(row, status=op.status(row)) for row in rows]
             return rows
@@ -630,7 +657,7 @@ class _Operation:
                       if previous else {"count": 1, "last_used": now})
         self.write_sidecar(_USAGE, _json(rows).encode(), expected)
 
-    def records(self, *, strict=False):
+    def records(self, *, strict=False, visible_only=False, limit=None):
         try:
             fd = _open_file(self.ledger_fd, "ledger.jsonl")
         except FileNotFoundError:
@@ -639,7 +666,15 @@ class _Operation:
         with os.fdopen(fd, "rb") as file:
             initial = os.fstat(fd)
             torn_tail = False
-            lines = iter(lambda: file.readline(_STATE_LIMIT), b"") if strict else file
+            stream = file
+            if limit is not None:
+                if initial.st_size > limit:
+                    raise StoreError("The skill ledger exceeds its read limit.")
+                data = file.read(limit + 1)
+                if len(data) > limit:
+                    raise StoreError("The skill ledger exceeds its read limit.")
+                stream = BytesIO(data)
+            lines = iter(lambda: stream.readline(_STATE_LIMIT), b"") if strict else stream
             for line in lines:
                 if not line.endswith(b"\n"):
                     if strict:
@@ -670,7 +705,8 @@ class _Operation:
                 if _stamp(initial) != _stamp(os.fstat(fd)):
                     raise StoreError("The skill ledger changed while being read.")
                 _verify(self.ledger_fd, "ledger.jsonl", initial)
-        return [row for row in rows.values() if row is not None]
+        return [row for row in rows.values()
+                if row is not None and (not visible_only or _visible_record(row))]
 
     def _append(self, row):
         self._verify_storage()

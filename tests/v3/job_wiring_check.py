@@ -143,6 +143,9 @@ class JobWiringCheck(unittest.TestCase):
                          {"transcripts": "ok", "feed": "ok"})
 
     def test_daemon_full_defaults_start_tick_and_stop_offline(self):
+        names = {"feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
+                 "schoolwork", "github", "consolidate", "morning-brief", "learning-digest",
+                 "evening-wrap"}
         due_names = {"feed", "transcripts", "reviewer", "gmail", "calendar",
                      "schoolwork", "github", "consolidate"}
         no_network = AssertionError("unexpected outbound request")
@@ -154,7 +157,7 @@ class JobWiringCheck(unittest.TestCase):
               patch.object(google_auth, "access_token", side_effect=no_network) as token):
             server = daemon.Daemon(port=0)
             scheduler = server._scheduler
-            self.assertEqual(set(scheduler.status()), due_names | {"skill-curator", "morning-brief", "evening-wrap"})
+            self.assertEqual(set(scheduler.status()), names)
             self.assertFalse(self.index.exists())
             scheduler._clock = lambda: datetime(2026, 11, 24, 3, 30,
                                                  tzinfo=ZoneInfo("America/Chicago")).timestamp()

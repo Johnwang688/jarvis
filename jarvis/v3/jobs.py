@@ -572,6 +572,19 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         morning, evening = schedule_from_env(os.environ)
         return due(now, last_run=last_run, which=which, morning=morning, evening=evening)
 
+    def learning_due(now, last_run):
+        from .daily_briefs import schedule_from_env
+        from .learning_digest import DIGEST_AT, due
+
+        _, evening = schedule_from_env(os.environ)
+        return due(now, last_run=last_run, at=min(DIGEST_AT, evening))
+
+    def post_learning():
+        from .learning_digest import run
+
+        if run(feed=get_feed()).outcome == "error":
+            raise RuntimeError("Learning digest failed.")
+
     def post_brief(which):
         from .daily_briefs import read_calendar, read_mail, run
 
@@ -586,7 +599,12 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         except Exception as exc:
             raise _JobNotStarted from exc
 
-        result = run(which, feed=feed, budget=brief_budget, calendar=calendar, mail=mail)
+        learning = None
+        if which == "evening":
+            from .learning_digest import summary_line
+
+            learning = summary_line
+        result = run(which, feed=feed, budget=brief_budget, calendar=calendar, mail=mail, learning=learning)
         if result.outcome == "error":
             if result.retryable:
                 raise _JobNotStarted
@@ -602,4 +620,5 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
             cli_job("github", "gh", 600),
             Job("consolidate", consolidate, due=consolidate_due),
             Job("morning-brief", partial(post_brief, "morning"), due=partial(brief_due, "morning")),
+            Job("learning-digest", post_learning, due=learning_due),
             Job("evening-wrap", partial(post_brief, "evening"), due=partial(brief_due, "evening"))]

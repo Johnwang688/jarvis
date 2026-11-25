@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from email import errors as header_errors
+from functools import partial
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+import time
 from typing import TYPE_CHECKING
 
 from jarvis import config
@@ -33,9 +36,12 @@ class Route:
     owner: bool = field(default=True, kw_only=True)
     with_feed: bool = field(default=False, kw_only=True)
     with_chat: bool = field(default=False, kw_only=True)
+    with_data_dir: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
-            chat: ChatService | None = None) -> tuple[int, object]:
+            chat: ChatService | None = None, *, data_dir: Path | None = None) -> tuple[int, object]:
+        if self.with_data_dir:
+            return self.handler(body, data_dir)
         if self.with_chat:
             try:
                 return self.handler(body, chat)
@@ -111,6 +117,76 @@ def _chat_new(body, chat):
     return 200, chat.new_session()
 
 
+def _learned_target(store, rid, *, rollback, nonblocking=False):
+    with store._operation(initialize=False, nonblocking_read=nonblocking) as op:
+        rows = op.records()
+        target = next((row for row in rows if row["id"] == rid), None)
+        if target is None or op.status(target) != "applied":
+            return target, False, False
+        if rollback:
+            for row in reversed(rows):
+                if (row["skill"], row["path"]) != (target["skill"], target["path"]) or op.status(row) != "applied":
+                    continue
+                repeated = (row["id"] != rid and row["op"] == "rollback" and row["actor"] == "owner"
+                            and (row["before"], row["after"]) == (target["after"], target["before"]))
+                return target, True, repeated
+        return target, True, False
+
+
+def _learned(body, data_dir, *, action):
+    rollback = action == "rollback"
+    keys = {"id"} if rollback else {"id", "on"}
+    if (body.keys() != keys or not isinstance(body["id"], str)
+            or (not rollback and type(body["on"]) is not bool)):
+        return 400, {"error": "Invalid learned skill action."}
+
+    from .skill_store import SkillStore, StoreBusy, StoreError, _ID
+
+    rid = body["id"]
+    not_found = 404, {"error": "Skill ledger record not found."}
+    refused = 409, {"error": "Skill operation refused."}
+    busy = 503, {"error": "Skill store is busy."}
+    if not _ID.fullmatch(rid):
+        return not_found
+    store = SkillStore(data_dir / "skills", ledger=data_dir / "skill-ledger",
+                       lock_deadline=time.monotonic() + FEED_LOCK_TIMEOUT)
+    try:
+        target, applied, repeated = _learned_target(store, rid, rollback=rollback)
+    except FileNotFoundError:
+        return not_found
+    except StoreBusy:
+        return busy
+    except (OSError, ValueError):
+        return refused
+    if target is None:
+        return not_found
+    if not applied:
+        return refused
+    if repeated:
+        return 200, {"changed": False}
+    try:
+        if rollback:
+            store.rollback(rid)
+            return 200, {"changed": True}
+        set_flag = store.pin if action == "pin" else store.lock
+        result = set_flag(target["skill"], body["on"])
+        return 200, {"changed": result != "Skill flag is already in the requested state."}
+    except StoreBusy:
+        return busy
+    except StoreError:
+        # Another owner action may have completed the rollback after lookup.
+        # After a write-phase refusal, this check can only clarify the result.
+        if rollback:
+            try:
+                if _learned_target(store, rid, rollback=True, nonblocking=True)[2]:
+                    return 200, {"changed": False}
+            except (OSError, ValueError):
+                pass
+        return refused
+    except (OSError, ValueError):
+        return refused
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
@@ -122,6 +198,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v3/owner/chat/stop"): Route(_chat_stop, with_chat=True),
     ("POST", "/v3/owner/chat/events"): Route(_chat_events, with_chat=True),
     ("POST", "/v3/owner/chat/new"): Route(_chat_new, with_chat=True),
+    ("POST", "/v3/owner/learned/rollback"): Route(partial(_learned, action="rollback"), with_data_dir=True),
+    ("POST", "/v3/owner/learned/pin"): Route(partial(_learned, action="pin"), with_data_dir=True),
+    ("POST", "/v3/owner/learned/lock"): Route(partial(_learned, action="lock"), with_data_dir=True),
 }
 PUBLIC = frozenset(key for key, route in ROUTES.items() if not route.owner)
 
