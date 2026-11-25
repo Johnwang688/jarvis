@@ -4,13 +4,14 @@ Daemon owner routes (A6a) and wiring to real QuietHours/Push (B2) are out of sco
 Approval execution and push delivery are at most once: a crash after the logged
 claim can lose the callback. A no-op default is only a durable state transition,
 applied once when tick processes the deadline. Expiry calls no action.
+The push transport must check quiet hours again at send time, after the durable delivery claim.
 """
 
 from collections import Counter
 from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import fcntl
 import json
 import os
@@ -46,6 +47,12 @@ _INVISIBLE = re.compile(
     r"[\ud800-\udfff\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164"
     r"\ufe00-\ufe0f\uffa0\ufff0-\ufff8\U000e0000-\U000e0fff]"
 )
+# The shared display scrub treats percent signs in URL passwords as possible
+# placeholders. Withhold passwords containing a percent-encoded byte here.
+_ENCODED_URL_PASSWORD = re.compile(
+    r"((?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://[^\s:/?#@'\"<>`]*:)"
+    r"[^\s/?#@'\"<>`]*%[0-9a-fA-F]{2}[^\s/?#@'\"<>`]*(?=@)"
+)
 
 
 class FeedError(ValueError):
@@ -59,7 +66,8 @@ def _text(value, limit, *, empty=False):
 
     if not valid(value):
         raise FeedError("A brief text field is invalid or too long.")
-    clean = redact.for_display(value)
+    clean = _ENCODED_URL_PASSWORD.sub(r"\1***", value)
+    clean = redact.for_display(clean)
     if not valid(clean):
         raise FeedError("A brief text field is invalid or too long after redaction.")
     return clean
@@ -88,11 +96,18 @@ def _parse_time(value):
         raise FeedError("A brief time must be an ISO datetime with a timezone.") from None
 
 
-def _date_field(value):
+def _date_field(value, *, replay):
     if value is None:
         return None
     clean = _text(value, 64)
     _parse_time(clean)
+    if not replay:
+        # fromisoformat accepts any single character as the separator. Keep
+        # older records readable while requiring ISO dates in new posts.
+        try:
+            date.fromisoformat(clean.partition("T")[0])
+        except ValueError:
+            raise FeedError("A brief time must be an ISO datetime with a timezone.") from None
     return clean
 
 
@@ -114,7 +129,7 @@ def _items(value, limit):
     return value
 
 
-def _fields(fields):
+def _fields(fields, *, replay=False):
     _shape(fields, _POST_FIELDS, _OPTIONAL_FIELDS)
     kind = _enum(fields["kind"], _KINDS)
     rank = fields["rank"]
@@ -125,7 +140,7 @@ def _fields(fields):
         raise FeedError("A brief's time_critical flag must be a boolean.")
     result = {
         "kind": kind, "rank": rank, "time_critical": critical,
-        "ask": _text(fields["ask"], 120), "due": _date_field(fields.get("due")),
+        "ask": _text(fields["ask"], 120), "due": _date_field(fields.get("due"), replay=replay),
         "why_now": _text(fields.get("why_now", ""), 200, empty=True),
         "options": [], "context": [], "recommend": None, "default": None,
         "attachment": None, "proposal_id": None,
@@ -149,7 +164,7 @@ def _fields(fields):
         # Redaction must never turn supplied text into the reserved action.
         if action == "none" and default["action"] != "none":
             raise FeedError("Invalid brief default.")
-        result["default"] = {"action": action, "at": _date_field(default["at"])}
+        result["default"] = {"action": action, "at": _date_field(default["at"], replay=replay)}
     elif kind == "decision":
         raise FeedError("A decision brief requires a default.")
     attachment = fields.get("attachment")
@@ -191,13 +206,16 @@ def _deadline(brief):
     return None
 
 
-def _route(fields, now):
+def _route(fields, now, *, system_local):
     if fields["rank"] > 2:
         return "batch"
     if fields["time_critical"]:
         return "push"
     due = fields["due"]
-    today = due is not None and _parse_time(due).astimezone(now.tzinfo).date() == now.date()
+    # astimezone(None) uses the system offset at the due instant. The default
+    # clock's tzinfo only contains the offset at the posting instant.
+    zone = None if system_local else now.tzinfo
+    today = due is not None and _parse_time(due).astimezone(zone).date() == now.date()
     return "push" if today else "batch"
 
 
@@ -294,7 +312,7 @@ class _Projection:
             actor = values.pop("actor")
             session = values.pop("session")
             route = _enum(values.pop("route"), {"push", "batch"})
-            values = _fields(values)
+            values = _fields(values, replay=True)
             session = _provenance(values, actor, session)
             pending = event["pending"]
             # Replay the route chosen in the original clock's zone. The
@@ -345,6 +363,7 @@ class _Projection:
 class Feed:
     def __init__(self, root=None, *, clock=None, quiet=None, push=None, execute=None):
         self.root = Path(FEED_DIR if root is None else root).expanduser().absolute()
+        self._system_local = clock is None
         self._clock = clock if clock is not None else lambda: datetime.now().astimezone()
         self._quiet = quiet
         self._push = push
@@ -406,7 +425,10 @@ class Feed:
                     return
         except FileNotFoundError:
             pass
-        _replace_index(directory, expected)
+        # The log already owns the state. A failed cache write must not
+        # suppress a callback for an action the log has committed.
+        with suppress(OSError):
+            _replace_index(directory, expected)
 
     def _record(self, directory, log, events):
         if not events:
@@ -436,13 +458,18 @@ class Feed:
             instant = _instant(now)
             if actor == "agent":
                 self._check_agent_caps(state, session, instant)
-            route = _route(values, now)
-            pending = route == "push" and self._quiet is not None and self._quiet.is_quiet(now)
+            route = _route(values, now, system_local=self._system_local)
             bid = uuid4().hex
             values.update(created=now.isoformat(), actor=actor, session=session, route=route)
-            self._record(directory, log, [{"event": "post", "id": bid, "brief": values, "pending": pending}])
+            self._record(directory, log, [{"event": "post", "id": bid, "brief": values,
+                                           "pending": route == "push"}])
             result = deepcopy(self._projection.rows[bid].brief)
-            if route == "push" and not pending:
+            if route == "push" and (self._quiet is None or not self._quiet.is_quiet(self._clock())):
+                try:
+                    self._record(directory, log, [{"event": "notify", "id": bid}])
+                except OSError:
+                    # The post is durable. An unconfirmed claim cannot send.
+                    return result
                 ranks = [row.brief["rank"] for row in self._projection.rows.values()
                          if row.brief["state"] == "open" and row.brief["route"] == "push"]
                 payload = len(ranks), min(ranks)
@@ -458,10 +485,8 @@ class Feed:
                 # Include future timestamps after a backward clock adjustment.
                 recent += now - row.created < timedelta(days=1)
                 opened += brief["session"] == session and brief["state"] == "open"
-        if opened >= _AGENT_OPEN:
-            raise FeedError("This session already has five open briefs.")
-        if recent >= _AGENT_DAILY:
-            raise FeedError("Agents have reached the brief limit for the last 24 hours.")
+        if opened >= _AGENT_OPEN or recent >= _AGENT_DAILY:
+            raise FeedError("Agent brief capacity has been reached.")
 
     def get(self, bid):
         with self._locked() as (_, _, state):
