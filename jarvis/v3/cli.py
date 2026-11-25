@@ -101,8 +101,14 @@ def learned(args) -> int:
 
     store = SkillStore()
     try:
-        if args.action == "ledger":
-            for row in store.records(with_status=True):
+        if args.action in ("ledger", "curate"):
+            if args.action == "curate":
+                from .skill_curator import Curator
+
+                rows = Curator(store).run(dry_run=args.dry_run)
+            else:
+                rows = store.records(with_status=True)
+            for row in rows:
                 print(json.dumps(row))
             return 0
         if args.action == "rollback":
@@ -167,6 +173,8 @@ def add_commands(sub):
     skills.set_defaults(func=learned)
     commands = skills.add_subparsers(dest="action", required=True)
     commands.add_parser("ledger", help="show the learned skill ledger as JSON lines")
+    commands.add_parser("curate", help="curate learned skills and print the digest as JSON lines").add_argument(
+        "--dry-run", action="store_true", help="preview changes without writing")
     commands.add_parser("rollback", help="undo an applied ledger change").add_argument("id")
     for action in ("pin", "unpin", "lock", "unlock"):
         commands.add_parser(action, help=f"{action} a learned skill").add_argument("name")
