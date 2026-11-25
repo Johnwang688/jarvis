@@ -8,15 +8,18 @@ gets 0700 (only a symlinked final component is refused). Run it as
 stack; the installed `jarvis` console script imports it (never calls it).
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
 from functools import cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Callable
 
 from jarvis import config
 from . import hud, owner_routes
@@ -28,6 +31,17 @@ from .work import WorkService
 
 SERVICE_NAME = "jarvis-agentd"
 _MAX_JSON_DEPTH = 128
+_CONFIGURED_PHONE_HOST = object()
+LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PhoneServices:
+    feed: Callable
+    chat: ChatService | None
+    data_dir: Path
+    work: Callable
+    status: Callable
 
 
 class _HeaderReader:
@@ -73,7 +87,8 @@ def _check_json_depth(value, depth=1):
 
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
-                    chat: ChatService | None = None, *, work=None) -> type[BaseHTTPRequestHandler]:
+                    chat: ChatService | None = None, *, work=None,
+                    phone_status=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -94,8 +109,21 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
 
     get_work = default_work if work is None else work
 
+    def status():
+        return {
+            "service": SERVICE_NAME,
+            "version": "v3",
+            "pid": pid,
+            "started_at": started_at,
+            "uptime_s": time.monotonic() - started_tick,
+            "data_dir": directory,
+            "jobs": {} if scheduler is None else scheduler.status(),
+            "phone": {"bound": False, "host_configured": False} if phone_status is None else phone_status(),
+        }
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
+        phone_services = _PhoneServices(get_feed, chat, data_dir, get_work, status)
 
         def log_message(self, *args):
             pass
@@ -271,15 +299,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             if self._route is not None:
                 self._run_route(None)
             elif self._target == "/v3/status":
-                self._json(200, {
-                    "service": SERVICE_NAME,
-                    "version": "v3",
-                    "pid": pid,
-                    "started_at": started_at,
-                    "uptime_s": time.monotonic() - started_tick,
-                    "data_dir": directory,
-                    "jobs": {} if scheduler is None else scheduler.status(),
-                })
+                self._json(200, status())
             elif (asset := hud.static_file(hud_root, path)) is not None:
                 self._reply(200, *asset)
             elif path == "/":
@@ -314,8 +334,11 @@ def _prepare_data_dir(path: Path) -> None:
 
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
-                 hud_dir: Path | None = None, *, jobs=None, chat=None, work=None):
+                 hud_dir: Path | None = None, *, jobs=None, chat=None, work=None,
+                 phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST):
         self._requested_port = config.V3_API_PORT if port is None else port
+        self._phone_host = config.remote_host() if phone_host is _CONFIGURED_PHONE_HOST else phone_host
+        self._requested_phone_port = phone_port
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._work = work
@@ -329,11 +352,43 @@ class Daemon:
                                     idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
+        self._phone_server = None
         self._lock = threading.Lock()
 
     @property
     def port(self) -> int:
         return self.address[1]
+
+    @property
+    def phone_port(self) -> int | None:
+        server = self._phone_server
+        return None if server is None else server.server_port
+
+    def _phone_status(self) -> dict:
+        return {"bound": self.phone_port is not None, "host_configured": bool(self._phone_host)}
+
+    def _start_phone(self, services) -> None:
+        if not self._phone_host:
+            return
+        from jarvis.v2.remote_auth import RemoteAuth
+        from . import phone
+
+        port = self._requested_phone_port
+        if port is None:
+            port = 0 if self._requested_port == 0 else config.REMOTE_PORT
+        auth = RemoteAuth(config.remote_dir(), self._phone_host)
+        root = config.HUD3_DIR if self._hud_dir is None else self._hud_dir
+        server = phone.bind(self._phone_host, port, auth=auth, services=services, hud_dir=root)
+        if server is None:
+            return
+        try:
+            threading.Thread(target=server.serve_forever, name="jarvis-phone", daemon=True).start()
+        except RuntimeError:
+            server.server_close()
+            auth.server = None
+            LOG.warning("Phone listener could not start.")
+            return
+        self._phone_server = server
 
     def _idle_seconds(self):
         chat_idle = self._chat.idle_seconds()
@@ -355,11 +410,10 @@ class Daemon:
             _prepare_data_dir(self._data_dir)
             if self._chat is None:
                 self._chat = self._new_chat()
+            handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
+                                      work=self._work, phone_status=self._phone_status)
             try:
-                server = ThreadingHTTPServer(
-                    ("127.0.0.1", self._requested_port),
-                    _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat, work=self._work),
-                )
+                server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
                 raise RuntimeError(
                     f"Could not bind v3 daemon on 127.0.0.1:{self._requested_port}. "
@@ -378,11 +432,24 @@ class Daemon:
                 raise
             self.address = server.server_address
             self._server = server
+            self._start_phone(handler.phone_services)
 
     def stop(self) -> None:
         with self._lock:
             if self._server is None:
                 return
+            if self._phone_server is not None:
+                phone = self._phone_server
+                phone.shutdown()
+                phone.server_close()
+                phone.auth.server = None
+                self._phone_server = None
+                try:
+                    phone.auth.final_save()
+                except Exception:
+                    # A failed save of phone state must not keep the window's
+                    # listener, the chat or the jobs from stopping.
+                    LOG.warning("Phone state could not be saved at stop.")
             self._chat.close()
             if self._owns_chat:
                 self._chat.approvals.shutdown()

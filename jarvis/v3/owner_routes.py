@@ -273,6 +273,8 @@ def is_owner(handler: BaseHTTPRequestHandler) -> bool:
     Page scripts cannot set that header. Programs on the owner's machine can
     supply these headers themselves.
     """
+    if getattr(handler.server, "remote_only", False):
+        return False
     port = handler.server.server_port
     if handler.server.server_address != ("127.0.0.1", port):
         return False
