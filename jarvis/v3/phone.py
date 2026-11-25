@@ -327,13 +327,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
         if answer is None:
             if phone_auth.session_for(self) is None:
                 return self._error(401)
-            try:
-                routes = import_module("jarvis.v3.phone_routes")
-            except ModuleNotFoundError as exc:
-                if exc.name != "jarvis.v3.phone_routes":
-                    raise
-            else:
-                answer = routes.data_route(self, self.command, path, body)
+            routes = import_module("jarvis.v3.phone_routes")
+            answer = routes.data_route(self, self.command, path, body)
         if answer is None:
             return self._error(404)
         return self._json(*answer)

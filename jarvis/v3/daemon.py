@@ -85,6 +85,15 @@ def _check_json_depth(value, depth=1):
         _check_json_depth(child, depth + 1)
 
 
+def _decode_route_body(data: bytes) -> dict:
+    body = json.loads(data.decode("utf-8"), parse_constant=_reject_json_constant,
+                      object_pairs_hook=_unique_json_keys)
+    if not isinstance(body, dict):
+        raise ValueError("expected a JSON object")
+    _check_json_depth(body)
+    return body
+
+
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None,
@@ -284,11 +293,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             try:
                 if len(data) != length:
                     raise ValueError("incomplete body")
-                body = json.loads(data.decode("utf-8"), parse_constant=_reject_json_constant,
-                                  object_pairs_hook=_unique_json_keys)
-                if not isinstance(body, dict):
-                    raise ValueError("expected a JSON object")
-                _check_json_depth(body)
+                body = _decode_route_body(data)
             except (ValueError, RecursionError):
                 self.send_error(400)
                 return
