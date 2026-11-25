@@ -37,7 +37,7 @@ from jarvis.v3.policy import DEFAULTS, Policy
 TABLE = {
     "L0": ["mail.file", "mail.label", "mail.archive", "mail.draft", "vault.update", "research.start", "investigation.readonly", "calendar.block"],
     "L1": ["calendar.block_move", "pr.draft_open", "thread.fix_test", "calendar.add_due_date"],
-    "L2": ["mail.send", "mail.reply", "calendar.respond", "calendar.invite", "calendar.event_change", "calendar.event_delete", "money.spend", "pr.merge", "thread.start"],
+    "L2": ["mail.send", "mail.reply", "calendar.respond", "calendar.invite", "calendar.event_change", "calendar.event_delete", "money.spend", "pr.merge", "thread.start", "thread.send"],
     "L3": ["credential.read", "credential.write", "policy.write", "gate.change", "school.submit", "data.delete_others"],
 }
 

@@ -640,6 +640,10 @@ def _v3_paths() -> set[Path]:
     return {Path(p).expanduser().resolve() for p in (
         config.V3_POLICY_FILE, config.V3_SKILLS_DIR, config.V3_SKILL_LEDGER_DIR,
         config.V3_REVIEW_QUEUE_DIR, config.V3_BUDGET_LEDGER,
+        # Where Jarvis may start coding work, the threads it started, and what
+        # it proposed and was approved to do: the owner's commands and the
+        # daemon write these, never an agent's write tool.
+        Path(config.V3_DIR) / "work", Path(config.V3_DIR) / "proposals",
         home / ".claude.json", home / ".claude" / "settings.json", home / ".claude" / "settings.local.json",
         home / ".codex" / "config.toml", home / ".codex" / "hooks.json")}
 

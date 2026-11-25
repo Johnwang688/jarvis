@@ -53,6 +53,7 @@ DEFAULTS: dict[str, Level] = {
     "money.spend": "L2",
     "pr.merge": "L2",
     "thread.start": "L2",
+    "thread.send": "L2",
     **dict.fromkeys(NEVER, "L3"),
 }
 _KIND = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")

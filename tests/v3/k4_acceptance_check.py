@@ -34,8 +34,9 @@ class Base(unittest.TestCase):
             self.enterContext(patch.object(config, name, value))
         self.files = [v3 / "policy.json", v3 / "budget.jsonl", self.home / ".claude.json", self.home / ".claude" / "settings.json", self.home / ".claude" / "settings.local.json",
                       self.home / ".codex" / "config.toml", self.home / ".codex" / "hooks.json"]
-        self.trees = [v3 / "skills", v3 / "skill-ledger", v3 / "review-queue"]
-        self.inside = [self.trees[0] / "release-steps" / "SKILL.md", self.trees[0] / ".pending" / "x" / "SKILL.md", self.trees[1] / "ledger.jsonl", self.trees[1] / "blobs" / "ab", self.trees[2] / "1.json"]
+        self.trees = [v3 / "skills", v3 / "skill-ledger", v3 / "review-queue", v3 / "work", v3 / "proposals"]
+        self.inside = [self.trees[0] / "release-steps" / "SKILL.md", self.trees[0] / ".pending" / "x" / "SKILL.md", self.trees[1] / "ledger.jsonl", self.trees[1] / "blobs" / "ab", self.trees[2] / "1.json",
+                       self.trees[3] / "projects.json", self.trees[3] / "threads.jsonl", self.trees[4] / "proposals.jsonl"]
         self.free = [v3 / "vault" / "facts" / "tea.md", v3 / "index.sqlite", v3 / "feed" / "a.json", v3 / "policy.json.txt", v3 / "skills2" / "x", self.home / ".claude" / "notes.md", self.home / ".codex" / "AGENTS.md",
                      self.home / "project" / "policy.json", self.home / "project" / "skills" / "x" / "SKILL.md", self.home / "project" / ".claude" / "settings.json"]
         for p in [*self.files, *self.inside, *self.free]:
