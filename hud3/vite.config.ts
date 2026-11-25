@@ -52,6 +52,6 @@ export default defineConfig({
   worker: { plugins: () => [bundleGuard(repoRoot), sharedPackages()] },
   test: {
     environment: "jsdom",
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.{ts,tsx}"],
   },
 });

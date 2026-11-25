@@ -10,12 +10,12 @@ import App from "../src/App";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const STATUS = { service: "jarvis-agentd", version: "v3", pid: 4242, started_at: "2026-11-24T05:00:00+00:00", uptime_s: 61, data_dir: "/x/v3" };
-let root: Root; let box: HTMLElement; let calls: string[]; let respond: () => Promise<Response>;
+let root: Root; let box: HTMLElement; let calls: string[]; let respond: (url?: string) => Promise<Response>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 beforeEach(() => {
   vi.useFakeTimers();
   calls = []; respond = async () => json(STATUS);
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => { calls.push(String(input instanceof Request ? input.url : input)); return respond(); }));
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => { const url = String(input instanceof Request ? input.url : input); calls.push(url); return respond(url); }));
   vi.stubGlobal("WebSocket", class { constructor(u: string) { calls.push("ws:" + u); } });
   vi.stubGlobal("EventSource", class { constructor(u: string) { calls.push("es:" + u); } });
   box = document.createElement("div"); document.body.append(box);
@@ -48,11 +48,11 @@ describe("the v3 window", () => {
     expect(box.querySelectorAll("iframe,button,input,textarea")).toHaveLength(0);
   });
 
-  it("asks only for /v3/status", async () => {
+  it("asks only for /v3/status and the feed", async () => {
     await mount();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(calls.length).toBeGreaterThan(1);
-    expect(new Set(calls)).toEqual(new Set(["/v3/status"]));
+    expect([...new Set(calls)].sort()).toEqual(["/v3/owner/feed", "/v3/status"]); // B2: the feed panel reads its one route; nothing else
   });
 
   it("shows the running daemon", async () => {
@@ -90,7 +90,7 @@ describe("the v3 window", () => {
 
   it("a slow answer never overwrites a newer one, and polls never pile up", async () => {
     const open: ((r: Response) => void)[] = [];
-    respond = () => new Promise<Response>((r) => { open.push(r); });
+    respond = (url) => url?.endsWith("/v3/status") ? new Promise<Response>((r) => { open.push(r); }) : Promise.resolve(json({ briefs: [], recent: [] }));
     await mount();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     const pending = open.length;
