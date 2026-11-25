@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from jarvis import config, google_auth
+from jarvis.tools import secrets
 from jarvis.v3 import daily_briefs as briefs, jobs
 from jarvis.v3.budget import Budget
 from jarvis.v3.claude_jobs import JobResult
@@ -154,6 +155,58 @@ class DailyBriefs(unittest.TestCase):
         self.assertTrue(prompt.endswith("[end of web content 1234abcd]"))
         self.assertNotIn("Invalid event", prompt)
 
+    def test_titles_are_redacted_before_flattening_and_capping(self):
+        key_lines = ("ZmFrZS1saW5lLTE=", "ZmFrZS1saW5lLTI=", "ZmFrZS1saW5lLTM=")
+        key_tail = "\n".join((*key_lines, "-----END PRIVATE KEY-----"))
+        token = "fake-token-at-the-title-boundary"
+        prefix = "x" * 110 + " "
+        events = [
+            {"id": "example-key", "title": "Lab\n" + key_tail, "start": NOW},
+            {"id": "example-cut", "title": prefix + token, "start": NOW},
+            {"id": "example-only", "title": token, "start": NOW},
+            {"id": "example-key-only", "title": "AQ\n" + key_tail, "start": NOW},
+        ]
+        with patch.object(secrets, "secret_values", return_value=[token]):
+            result = self.run_brief(calendar=lambda *_: events)
+            self.assertEqual(result.outcome, "posted")
+            context = self.feed.get(result.brief_id)["context"]
+        self.assertTrue(context[0]["label"].startswith("Lab"))
+        self.assertTrue(context[1]["label"].startswith(prefix))
+        self.assertIn(context[2]["label"], ("(untitled)", secrets.REDACTED))
+        self.assertIn(context[3]["label"], ("(untitled)", "[withheld: private key]"))
+        self.assertTrue(all(len(line["label"]) <= 120 and "\n" not in line["label"] for line in context))
+        prompt = self.runner.call_args.args[1]
+        for surface, text in (
+            ("prompt", prompt),
+            ("feed", (self.root / "feed" / "briefs.jsonl").read_text()),
+            ("state", (self.state / "state.json").read_text()),
+            ("log", (self.state / "log.jsonl").read_text()),
+        ):
+            with self.subTest(surface=surface):
+                for fragment in (*key_lines, token[:8]):
+                    self.assertNotIn(fragment, text)
+
+    def test_prompt_carries_times_and_leaves_refs_in_feed(self):
+        self.seed()
+        (source_brief,) = self.feed.batch()
+        due = NOW + timedelta(hours=2)
+        result = self.run_brief(
+            calendar=lambda *_: [{"id": "example-event", "title": "Calendar lab", "start": NOW}],
+            commitments=lambda *_: [{"id": "example-commitment", "title": "Report due", "due": due}],
+        )
+        self.assertEqual(result.outcome, "posted")
+        self.assertEqual(self.feed.get(result.brief_id)["context"], [
+            {"label": "Report due", "ref": "commitment:example-commitment"},
+            {"label": "Calendar lab", "ref": "calendar:example-event"},
+            {"label": "Lab opens today.", "ref": f"brief:{source_brief['id']}"},
+        ])
+        prompt = self.runner.call_args.args[1]
+        self.assertEqual([json.loads(line) for line in prompt.splitlines() if line.startswith("{")], [
+            {"label": "Report due", "time": due.isoformat()},
+            {"label": "Calendar lab", "time": NOW.isoformat()},
+            {"label": "Lab opens today."},
+        ])
+
     def test_non_list_source_yields_a_note(self):
         result = self.run_brief(calendar=lambda *_: {"id": "not-a-list"}, mail=lambda *_: "not a list")
         self.assertEqual((result.outcome, result.summary), ("posted", "none"))
@@ -191,15 +244,18 @@ class DailyBriefs(unittest.TestCase):
     def test_model_token_is_redacted_in_feed(self):
         self.seed()
         fake = "ghp_" + "Fake" * 9
-        self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=f"Lab update\n{fake}")
+        key_tail = "ZmFrZS1tb2RlbC1saW5l"
+        text = f"Lab update\n{fake}\n{key_tail}\n-----END PRIVATE KEY-----"
+        self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=text)
         result = self.run_brief()
         self.assertEqual((result.outcome, result.summary), ("posted", "model"))
         why = self.feed.get(result.brief_id)["why_now"]
         self.assertIn("Lab update", why)
-        self.assertNotIn(fake, why)
         self.assertNotIn("\n", why)
-        for path in (self.root / "feed" / "briefs.jsonl", self.state / "log.jsonl"):
-            self.assertNotIn(fake, path.read_text())
+        for content in (why, (self.root / "feed" / "briefs.jsonl").read_text(),
+                        (self.state / "state.json").read_text(), (self.state / "log.jsonl").read_text()):
+            self.assertNotIn(fake, content)
+            self.assertNotIn(key_tail, content)
 
 
 class Wiring(unittest.TestCase):

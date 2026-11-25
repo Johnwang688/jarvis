@@ -5,6 +5,7 @@ I4 activity, C3 due-soon items and closing old digests are outside B4. Agents
 cannot read the feed through the skill. This job answers no brief.
 """
 
+from base64 import b64decode, b64encode
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time as wall_time, timedelta
@@ -19,11 +20,12 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from jarvis import config, untrusted
+from jarvis.v2 import redact
 from jarvis.v2.quiet import parse_hhmm
 
 from . import claude_jobs
 from ._paths import open_directory
-from .feed import FeedError, _text, _unique_keys
+from .feed import FeedError, _redact_text, _text, _unique_keys
 
 JOB = "brief"
 MODEL = "haiku"
@@ -48,6 +50,7 @@ class Digest:
     ask: str
     lines: list[dict[str, str]]
     items: int
+    times: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,12 +114,31 @@ def read_mail(index, since, until):
     return [{"id": doc["ref"], "title": doc["title"]} for doc in docs if doc["source"] == "gmail"][:3]
 
 
+def _redact_display(value):
+    clean = _redact_text(value)
+    if clean != f"{redact.WITHHELD_PREFIX}{redact.KEY}]":
+        return clean
+    first, newline, _ = value.partition("\n")
+    # A footer-only key match can absorb a short heading like "Lab".
+    # Keep it only when it cannot be a canonical base64 line and the same
+    # scrub with a prose prefix leaves it intact and withholds all that follows.
+    if not (newline and 1 <= len(first) < 4 and first.isascii() and first.isalpha()):
+        return clean
+    padded = first.encode("ascii").ljust(4, b"=")
+    if len(first) > 1 and b64encode(b64decode(padded)) == padded:
+        return clean
+    prefix = "Title: "
+    candidate = _redact_text(prefix + value).removeprefix(prefix)
+    return candidate if candidate == first + newline + clean else clean
+
+
 def _display_line(value, limit):
     if not isinstance(value, str):
         return ""
-    line = untrusted.one_line(value, cap=max(2, len(value)))
-    # Use the feed's text rules before cutting so redaction can see complete
-    # tokens, including a credential that straddles the length limit.
+    # Keep the original line boundaries for multiline secrets. Scrub again
+    # after normalization, before any cut, in case it exposes another token.
+    raw_clean = _redact_display(value)
+    line = untrusted.one_line(raw_clean, cap=max(2, len(raw_clean)))
     clean = _text(line, max(limit, len(line)), empty=True)
     return _text(untrusted.one_line(clean, cap=limit), limit, empty=True)
 
@@ -128,7 +150,7 @@ def _label(value):
         return "(untitled)"
 
 
-def _item(source, row, title="title"):
+def _item(source, row, title="title", *, time_field=None):
     identifier = row.get("id")
     if not isinstance(identifier, str) or not identifier.strip():
         return None
@@ -138,7 +160,10 @@ def _item(source, row, title="title"):
             return None
     except FeedError:
         return None
-    return {"label": _label(row.get(title)), "ref": ref}
+    item = {"label": _label(row.get(title)), "ref": ref}
+    if time_field is not None:
+        item["time"] = row[time_field].astimezone(_CHICAGO).isoformat()
+    return item
 
 
 def _read(reader, args, name, notes, expected=list):
@@ -154,8 +179,9 @@ def _read(reader, args, name, notes, expected=list):
     return expected()
 
 
-def _items(source, rows):
-    return [item for row in rows if isinstance(row, dict) and (item := _item(source, row)) is not None]
+def _items(source, rows, *, time_field=None):
+    return [item for row in rows if isinstance(row, dict)
+            and (item := _item(source, row, time_field=time_field)) is not None]
 
 
 def _timed(rows, field, *, until=None):
@@ -195,9 +221,9 @@ def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, ac
     events = _read(calendar, (opening, closing), "Calendar", notes)
     if calendar is None:
         notes.append({"label": "Calendar not connected", "ref": "jarvis:calendar"})
-    calendar_lines = _items("calendar", _timed(events, "start"))
+    calendar_lines = _items("calendar", _timed(events, "start"), time_field="start")
     pending = _read(commitments, (later,), "Commitments", notes)
-    commitment_lines = _items("commitment", _timed(pending, "due", until=later.timestamp()))
+    commitment_lines = _items("commitment", _timed(pending, "due", until=later.timestamp()), time_field="due")
 
     if morning:
         since = datetime.fromtimestamp(now - 86_400, _CHICAGO)
@@ -208,12 +234,19 @@ def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, ac
         lines = _activity_line(counts) + decisions + calendar_lines + commitment_lines + other
     count = len(lines)
     ask = f"{_HEADINGS[which]} · {count} {'item' if count == 1 else 'items'}"
-    return Digest(ask, lines[:MAX_LINES - len(notes)] + notes, count)
+    visible = lines[:MAX_LINES - len(notes)] + notes
+    times = tuple(line.pop("time", None) for line in visible)
+    return Digest(ask, visible, count, times)
 
 
 def build_prompt(digest) -> str:
-    body = "\n".join(json.dumps({"label": row["label"], "ref": row["ref"]},
-                                ensure_ascii=False) for row in digest.lines)
+    rows = []
+    for index, line in enumerate(digest.lines):
+        row = {"label": line["label"]}
+        if index < len(digest.times) and (when := digest.times[index]) is not None:
+            row["time"] = when
+        rows.append(json.dumps(row, ensure_ascii=False))
+    body = "\n".join(rows)
     return _PROMPT.read_text(encoding="utf-8").strip() + "\n\n" + untrusted.fence(body, "daily brief items")
 
 
