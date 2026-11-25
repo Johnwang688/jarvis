@@ -1,0 +1,67 @@
+{
+  "vault_add": {
+    "title": "Add a vault entry",
+    "rows": [
+      {"label": "Entry", "value": "facts/sample-entry"},
+      {"label": "Revision", "value": "absent"},
+      {"label": "Description", "value": "Sample note"},
+      {"label": "Source", "value": "Sample chat"},
+      {"label": "Body", "value": "Sample text"}
+    ]
+  },
+  "vault_patch": {
+    "title": "Patch a vault entry",
+    "rows": [
+      {"label": "Entry", "value": "facts/sample-entry"},
+      {"label": "Revision", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      {"label": "Scanner flags", "value": "sample flag"},
+      {"label": "Old text", "value": "Sample text"},
+      {"label": "New text", "value": "Updated text"}
+    ]
+  },
+  "vault_archive": {
+    "title": "Archive a vault entry",
+    "rows": [
+      {"label": "Entry", "value": "facts/sample-entry"},
+      {"label": "Revision", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      {"label": "Replacement", "value": "facts/sample-replacement"}
+    ]
+  },
+  "calendar_create": {
+    "title": "Create a calendar event",
+    "rows": [
+      {"label": "Title", "value": "Sample planning"},
+      {"label": "Start", "value": "2030-01-09T10:00:00-06:00"},
+      {"label": "End", "value": "2030-01-09T11:00:00-06:00"},
+      {"label": "Description", "value": "Sample agenda"},
+      {"label": "Reminders", "value": "10 minutes before (popup)"},
+      {"label": "Delivery", "value": "No attendees, no emails sent"}
+    ]
+  },
+  "calendar_update": {
+    "title": "Update a calendar event",
+    "rows": [
+      {"label": "Event", "value": "sample-event"},
+      {"label": "Revision", "value": "\"sample-revision\""},
+      {"label": "Current title", "value": "Sample planning"},
+      {"label": "Current start", "value": "2030-01-09T10:00:00-06:00"},
+      {"label": "Current end", "value": "2030-01-09T11:00:00-06:00"},
+      {"label": "Current description", "value": "Sample agenda"},
+      {"label": "New title", "value": "Updated planning"},
+      {"label": "New start", "value": "2030-01-09T10:00:00-06:00"},
+      {"label": "New end", "value": "2030-01-09T11:00:00-06:00"},
+      {"label": "New description", "value": "Sample agenda"}
+    ]
+  },
+  "calendar_delete": {
+    "title": "Delete a calendar event",
+    "rows": [
+      {"label": "Event", "value": "sample-event"},
+      {"label": "Revision", "value": "\"sample-revision\""},
+      {"label": "Current title", "value": "Sample planning"},
+      {"label": "Current start", "value": "2030-01-09T10:00:00-06:00"},
+      {"label": "Current end", "value": "2030-01-09T11:00:00-06:00"},
+      {"label": "Current description", "value": "Sample agenda"}
+    ]
+  }
+}

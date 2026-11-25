@@ -20,6 +20,7 @@ export interface ChatSnapshot {
   draft: string;
   tools: ChatTool[];
   history: ChatMessage[];
+  approvals: number;
 }
 
 type ChatEvent = { seq: number; t?: number } & (
@@ -34,6 +35,7 @@ interface ChatEvents {
   seq: number;
   gap: boolean;
   events: ChatEvent[];
+  approvals: number;
 }
 
 export type ChatAction = { route: "send"; text: string } | { route: "stop" | "new" };
@@ -122,7 +124,9 @@ async function request(signal: AbortSignal, route?: string, body?: object): Prom
 
 export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
   const value = await request(signal);
+  // Older chat responses predate approvals.
   if (!record(value) || !isState(value.state) || !isSequence(value.seq)
+    || (value.approvals !== undefined && !isSequence(value.approvals))
     || (value.session_id !== null && typeof value.session_id !== "string")
     || typeof value.draft !== "string" || !Array.isArray(value.history) || !value.history.every(isMessage)
     || !Array.isArray(value.tools) || !value.tools.every((tool) => typeof tool === "string" || isTool(tool))) {
@@ -132,16 +136,19 @@ export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
     ? { name: tool }
     : { name: tool.name, ok: tool.ok ?? undefined, summary: tool.summary ?? undefined });
   const history = value.history.map(({ role, text, t }: ChatMessage) => ({ role, text, t }));
-  return { state: value.state, seq: value.seq, session_id: value.session_id, draft: value.draft, history, tools };
+  return { state: value.state, seq: value.seq, session_id: value.session_id, draft: value.draft,
+    history, tools, approvals: value.approvals ?? 0 };
 }
 
 export async function readEvents(after: number, signal: AbortSignal): Promise<ChatEvents> {
   const value = await request(signal, "events", { after });
   if (!record(value) || !isState(value.state) || !isSequence(value.seq) || typeof value.gap !== "boolean"
+    || (value.approvals !== undefined && !isSequence(value.approvals))
     || !Array.isArray(value.events) || (!value.gap && !value.events.every(isEvent))) {
     throw new Error("Invalid chat events");
   }
-  return { state: value.state, seq: value.seq, gap: value.gap, events: value.gap ? [] : value.events };
+  return { state: value.state, seq: value.seq, gap: value.gap, events: value.gap ? [] : value.events,
+    approvals: value.approvals ?? 0 };
 }
 
 export async function writeChat(action: ChatAction, signal: AbortSignal):

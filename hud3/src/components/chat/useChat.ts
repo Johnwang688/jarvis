@@ -34,7 +34,7 @@ function limitHistory(rows: ChatRow[]): ChatRow[] {
 }
 
 function applyEvents(current: ChatView, batch: EventBatch): ChatView {
-  const next = { ...current, state: batch.state, seq: batch.seq };
+  const next = { ...current, state: batch.state, seq: batch.seq, approvals: batch.approvals };
   let rows = [...current.rows];
   let after = current.seq;
   for (const event of batch.events) {
@@ -159,6 +159,7 @@ export function useChat() {
           ...current,
           state: snapshot.state,
           draft: isActive(snapshot.state) ? snapshot.draft : "",
+          approvals: snapshot.approvals,
         });
       } else {
         publish(reconcileSnapshot(snapshot, current));
@@ -200,7 +201,9 @@ export function useChat() {
               if (snapshot.session_id !== current.session_id) adoptSnapshot(snapshot);
               // A newer snapshot can already include a reply. Let the next events poll catch up.
               else if (snapshot.seq === current.seq) {
-                publish({ ...current, draft: isActive(snapshot.state) ? snapshot.draft : "" });
+                publish({ ...current, approvals: snapshot.approvals, draft: isActive(snapshot.state) ? snapshot.draft : "" });
+              } else if (snapshot.approvals !== current.approvals) {
+                publish({ ...current, approvals: snapshot.approvals });
               }
             }
           }
@@ -241,11 +244,12 @@ export function useChat() {
         const result = await writeChat(action, AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]));
         if (disposed) return false;
         if ("sessionId" in result) {
-          publish({ session_id: result.sessionId, state: "idle", seq: current.seq, draft: "", rows: [] });
+          publish({ session_id: result.sessionId, state: "idle", seq: current.seq, draft: "", rows: [], approvals: 0 });
           needsSnapshot = true;
         } else {
           publish({ ...current, state: result.state, notice: undefined,
-            draft: isActive(result.state) ? current.draft : "" });
+            draft: isActive(result.state) ? current.draft : "",
+            approvals: action.route === "stop" ? 0 : current.approvals });
           if (result.steered) setFeedback({ text: "Message added to this turn." });
           if (action.route === "stop") {
             // Read the terminal event even if Stop has already returned idle.

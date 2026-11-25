@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { ApprovalPanel } from "../approvals/ApprovalPanel";
 import { isActive, useChat, type ChatRow } from "./useChat";
 import type { ChatMessage } from "./chatApi";
 
@@ -101,6 +102,7 @@ export function ChatPanel() {
           {(chat.state === "error" || chat.notice === "error") &&
             <p className="chat-error" role="status">The turn failed. Try sending a message again.</p>}
           {chat.notice === "stopped" && <p role="status">Turn stopped.</p>}
+          <ApprovalPanel key={chat.session_id} count={chat.approvals} stopping={pending === "stop"} />
           <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
             <textarea aria-label="Message" aria-describedby={showHint ? "chat-length" : undefined}
               aria-invalid={count > TEXT_LIMIT || undefined} dir="auto" rows={3}
