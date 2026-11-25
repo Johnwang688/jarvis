@@ -148,12 +148,21 @@ The `curator` actor is reserved for deterministic curator archives.
 
 ### 1.5 Review queue item (L1)
 
-One file per item, `<ts>-<rand>.json`:
+One private file per item, `<ts>-<rand>.json`, in `V3_DIR/review-queue`.
+The hook uses an absolute `JARVIS_V3_DIR` override or the default under HOME:
 
 ```json
-{"provider": "claude|codex", "transcript": "/abs/path.jsonl", "session_id": "…",
- "cwd": "/abs", "tool_steps": 14, "user_turns": 3, "ended_at": "…"}
+{"provider": "claude|codex", "transcript": "/abs/path.jsonl",
+ "session_id": "…", "cwd": "/abs", "ended_at": "UTC ISO 8601"}
 ```
+
+Claude supplies the transcript path. Codex supplies the thread ID and writes
+`null` for the path. The consumer locates the Codex transcript by thread ID.
+It reads transcripts only inside the provider's session folder, without
+following symlinks. A transcript reference is an absolute path to a regular
+file with no trailing slash. The consumer counts tool steps and user turns.
+Returned reviews contain `kind`, `provider`, `session_id`, `transcript`, `tool_steps`,
+and `user_turns`.
 
 ### 1.6 Budget ledger line (K3)
 
@@ -821,28 +830,44 @@ S1–S6. It is the owner's decision.
 
 ## 6. Track L: Learning loop
 
-### L1: Turn-end hooks → review queue
+### L1: Turn-end hooks → review queue ✓
 - **Scope:** `jarvis/v3/hooks/turn_end.py` (a stdlib-only hook script);
-  install entries added to `jarvis brain install`; a queue consumer in the
-  daemon; `tests/v3/turn_end_check.py`.
+  install entries added to `jarvis brain install`; the queue consumer in
+  `jarvis/v3/review_queue.py`; `tests/v3/turn_end_check.py`.
 - **Spec:**
-  - Claude `Stop` hook and Codex turn-complete hook (format from S5). The
-    script reads the hook JSON from stdin and writes one queue item
-    (contract 1.5) atomically.
-  - **No network, no imports from `jarvis.tools`, exits 0 in < 50 ms**
-    whatever happens. A crash must never block the user's session.
+  - Claude `Stop` reads JSON from stdin, and Codex turn-complete reads JSON
+    from the final argument (S5). The script atomically publishes one
+    reference (contract 1.5) and caps the queue at 500 items.
+  - The hook uses only the standard library, exits silently with code 0, and
+    bounds stdin reads and producer lock waits. The timing check targets
+    < 50 ms excluding interpreter startup. Publication is synchronous and
+    bounded only by the filesystem.
   - Skips when `JARVIS_JOB` is set (recursion guard).
-  - The consumer counts tool steps and user turns since the last review of
-    that session (state kept per session id). It enqueues a skill review
-    at ≥ 10 tool steps and a memory review at ≥ 10 user turns (config).
-  - Drops items whose transcript lies under a credential path, and items
-    older than 7 d.
+  - The consumer keeps review baselines per transcript file, identified by
+    provider, real path, device, inode and creation time (first-seen time
+    when creation time is unavailable). It resolves the file when consuming
+    the notification. Both baselines restart at zero when the file shrinks
+    below the reviewed byte length or a count falls below its baseline.
+    State for files unseen for 30 days is pruned.
+    It returns a skill review at ≥ 10 tool steps and a memory review at
+    ≥ 10 user turns (config).
+  - Drops items older than 7 d and items with an unreadable transcript, a
+    credential path or a transcript outside its provider's session folder.
+  - One consumer lock covers each tick. Counts use the length observed at
+    open. Each count reads at most 16 MiB, and the consumer checkpoints
+    larger scans for subsequent ticks. Lines above 1 MiB are skipped as in
+    transcript ingestion.
+  - A durable journal records due reviews before the consumer advances
+    counts or removes their queue items. Handle the returned batch before
+    polling again in the same process. An interrupted batch replays, and a
+    restart before the next poll can replay the most recently returned batch.
+    One daemon owns the consumer. A second live consumer can repeat a batch.
 - **Acceptance:**
-  - [ ] S5's fixture payloads parse.
-  - [ ] A malformed payload exits 0 and writes nothing.
-  - [ ] Recursion guard tested.
-  - [ ] Thresholds tested.
-  - [ ] Timing assertion < 50 ms (excluding interpreter start).
+  - [x] S5's fixture payloads parse.
+  - [x] A malformed payload exits 0 and writes nothing.
+  - [x] Recursion guard tested.
+  - [x] Thresholds tested.
+  - [x] Timing assertion < 50 ms (excluding interpreter start).
 - **Depends:** M4 (installer), S5 (payloads). **Size:** S.
 
 ### L2: Reviewer

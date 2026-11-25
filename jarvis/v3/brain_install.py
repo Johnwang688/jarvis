@@ -1,8 +1,10 @@
-"""Owner CLI for the user-scope Claude and Codex brain registrations.
+"""Owner CLI for user-scope MCP registrations and turn-end hooks.
 
 Stated limits: an agent CLI that rewrites its own config in the instant between
 the last check and the rename is not seen (close it first); an inline
 `mcp_servers = {...}` table in Codex's config is refused, not edited.
+A tagged `notify` line reformatted into a multiline array is treated as
+the owner's setting and left in place, with a line printed to explain why.
 """
 
 from contextlib import ExitStack, suppress
@@ -13,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import sys
 import time
@@ -25,9 +28,14 @@ from .index import open_directory
 
 
 _SERVER = "jarvis-brain"
+_STOP = "Stop"
+_STOP_TAG = "Jarvis Brain turn-end"
+_HOOK_TAG = " # jarvis-brain turn-end"
+_TAGGED_NOTIFY = re.compile(r"^[^\r\n]*#[ \t]+jarvis-brain[ \t]+turn-end[ \t]*(?:\r?\n|\Z)", re.M)
 _BEGIN = "# BEGIN jarvis-brain MCP"
 _END = "# END jarvis-brain MCP"
 _MARKERS = re.compile(rf"^(?:{re.escape(_BEGIN)}|{re.escape(_END)})(?:\r?\n|\Z)", re.M)
+_TABLE_START = re.compile(rf"^(?:[ \t]*\[|{re.escape(_BEGIN)})", re.M)
 _BACKUP = re.compile(r"\d{20}-[0-9a-f]{32}-(missing|[0-9a-f]{64})-([0-9a-f]{64})")
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -68,6 +76,16 @@ def _registration():
         python = Path(sys.executable).absolute()
     return {"command": str(python), "args": ["-m", "jarvis", "brain", "mcp"],
             "env": {"PYTHONPATH": str(repo)}}
+
+
+def _hook_argv(registration, provider):
+    script = Path(__file__).resolve().parent / "hooks" / "turn_end.py"
+    return [registration["command"], "-I", "-S", str(script), provider]
+
+
+def _stop_entry(registration):
+    return {"hooks": [{"type": "command", "command": shlex.join(_hook_argv(registration, "claude")),
+                       "statusMessage": _STOP_TAG}]}
 
 
 def _identity(info):
@@ -158,12 +176,14 @@ def _bad_constant(_value):
 
 
 def _parse(text, table):
-    if table == "mcpServers":
-        data = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_bad_constant)
+    if table in ("mcpServers", "hooks"):
+        data = json.loads(text.removeprefix("\ufeff"), object_pairs_hook=_unique_object, parse_constant=_bad_constant)
     else:
         data = tomllib.loads(text)
     if not isinstance(data, dict) or not isinstance(data.get(table, {}), dict):
-        raise _Refused("Config and its MCP server settings must be objects.")
+        raise _Refused("Config and its managed settings must be objects.")
+    if table == "hooks" and not isinstance(data.get(table, {}).get(_STOP, []), list):
+        raise _Refused("Claude's Stop hooks must be an array.")
     return data
 
 
@@ -173,6 +193,10 @@ _JSON_DECODER = json.JSONDecoder()
 
 def _skip_space(text, offset):
     return _JSON_SPACE.match(text, offset).end()
+
+
+def _json_start(text):
+    return _skip_space(text, int(text.startswith("\ufeff")))
 
 
 def _json_members(text, start):
@@ -204,7 +228,7 @@ def _json_append(text, start, members, key, value):
 
 def _claude_edit(target, entry):
     text = target.text
-    root_start = _skip_space(text, 0)
+    root_start = _json_start(text)
     root = _json_members(text, root_start)
     if target.table not in root:
         return _json_append(text, root_start, root, target.table, {_SERVER: entry})
@@ -222,6 +246,103 @@ def _claude_edit(target, entry):
     elif len(keys) > 1:
         end = members[keys[1]][0]
     return text[:key_start] + text[end:]
+
+
+def _json_elements(text, start):
+    """Return token spans for an already validated JSON array."""
+    spans = []
+    pos = _skip_space(text, start + 1)
+    while text[pos] != "]":
+        _, end = _JSON_DECODER.raw_decode(text, pos)
+        spans.append((pos, end))
+        pos = _skip_space(text, end)
+        if text[pos] == ",":
+            pos = _skip_space(text, pos + 1)
+    return spans
+
+
+def _remove_element(text, spans, index):
+    start, end = spans[index]
+    if index:
+        start = spans[index - 1][1]
+    elif len(spans) > 1:
+        end = spans[1][0]
+    return text[:start] + text[end:]
+
+
+def _marked_stop(command):
+    return isinstance(command, dict) and command.get("statusMessage") == _STOP_TAG
+
+
+def _looks_like_old_stop(command):
+    if not (isinstance(command, dict) and command.get("type") == "command"
+            and isinstance(script := command.get("command"), str)):
+        return False
+    try:
+        argv = shlex.split(script)
+    except ValueError:
+        return False
+    return (len(argv) == 5 and argv[1:3] == ["-I", "-S"] and argv[4] == "claude"
+            and Path(argv[3]).parts[-4:] == ("jarvis", "v3", "hooks", "turn_end.py"))
+
+
+def _stop_groups(data):
+    return data.get("hooks", {}).get(_STOP, [])
+
+
+def _stop_commands(data):
+    return [command for group in _stop_groups(data)
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list)
+            for command in group["hooks"] if _marked_stop(command)]
+
+
+def _edit_stop(target, entry, install):
+    text = target.text
+    start = _json_start(text)
+    root = _json_members(text, start)
+    if "hooks" not in root:
+        return _json_append(text, start, root, "hooks", {_STOP: [entry]})
+    _, start, _ = root["hooks"]
+    hooks = _json_members(text, start)
+    if _STOP not in hooks:
+        return _json_append(text, start, hooks, _STOP, [entry])
+    _, start, _ = hooks[_STOP]
+    for index, group in reversed(list(enumerate(_stop_groups(target.parsed)))):
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            continue
+        owned = [i for i, command in enumerate(group["hooks"]) if _marked_stop(command)]
+        if not owned:
+            continue
+        spans = _json_elements(text, start)
+        if len(owned) == len(group["hooks"]) and group.keys() == {"hooks"}:
+            text = _remove_element(text, spans, index)
+            continue
+        group_start, _ = spans[index]
+        _, commands, _ = _json_members(text, group_start)["hooks"]
+        for i in reversed(owned):
+            text = _remove_element(text, _json_elements(text, commands), i)
+    if install:
+        spans = _json_elements(text, start)
+        end = spans[-1][1] if spans else start + 1
+        literal = json.dumps(entry, ensure_ascii=False)
+        return text[:end] + (", " if spans else "") + literal + text[end:]
+    return text
+
+
+def _without_stop(data):
+    outer = dict(data)
+    hooks = dict(outer.pop("hooks", {}))
+    groups = hooks.pop(_STOP, [])
+    kept = []
+    for group in groups:
+        if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+            other = [command for command in group["hooks"] if not _marked_stop(command)]
+            if len(other) != len(group["hooks"]):
+                if not other and group.keys() == {"hooks"}:
+                    continue
+                group = {**group, "hooks": other}
+        kept.append(group)
+    return outer, hooks, kept
 
 
 def _newline(text):
@@ -273,6 +394,77 @@ def _codex_edit(target, entry):
     return text[:start] + block + text[end:]
 
 
+def _notify_line(argv):
+    return "notify = [" + ", ".join(_toml_string(arg) for arg in argv) + "]" + _HOOK_TAG
+
+
+def _owned_notify_span(data, text):
+    if "notify" in data:
+        for span in _TAGGED_NOTIFY.finditer(text):
+            # Prove the tagged line contains the whole top-level setting.
+            stripped = text[:span.start()] + text[span.end():]
+            try:
+                if _notify_settings_match(data, tomllib.loads(stripped), None):
+                    return span
+            except ValueError:
+                continue
+    return None
+
+
+def _notify_settings_match(before, after, expected):
+    actual = after.get("notify")
+    before = {name: value for name, value in before.items() if name != "notify"}
+    after = {name: value for name, value in after.items() if name != "notify"}
+    return actual == expected and (after == before or repr(after) == repr(before))
+
+
+def _add_notify(text, parsed, argv):
+    newline = _newline(text)
+    line = _notify_line(argv) + newline
+    table = _TABLE_START.search(text)
+    pos = table.start() if table is not None else len(text)
+    separator = newline if pos and text[pos - 1] != "\n" else ""
+    inserted = text[:pos] + separator + line + text[pos:]
+    try:
+        if _notify_settings_match(parsed, tomllib.loads(inserted), argv):
+            return inserted
+    except ValueError:
+        pass
+    # A table-looking line can occur inside a multiline value. Inserting
+    # before the entire document is safe and preserves every original line.
+    return line + text
+
+
+def _plan_notify(action, target, text, argv, out):
+    parsed = _parse(text, target.table)
+    span = _owned_notify_span(parsed, text)
+    managed = span is not None and parsed["notify"] == argv
+    if span is not None:
+        detail = ("removing Jarvis's marked hook" if action == "uninstall" else
+                  "installed and unchanged" if managed else
+                  "replacing Jarvis's previous hook" if action == "install" else
+                  "marked hook differs from install")
+    else:
+        detail = ("kept as the owner's setting (no single-line Jarvis marker)"
+                  if "notify" in parsed else "not installed")
+    out(f"{target.path} notify: {detail}.")
+    if action == "status":
+        return managed
+    if action == "install" and "notify" not in parsed:
+        edited = _add_notify(text, parsed, argv)
+    elif action == "install" and span is not None and not managed:
+        newline = _newline(span.group()) if span.group().endswith("\n") else ""
+        edited = text[:span.start()] + _notify_line(argv) + newline + text[span.end():]
+    elif action == "uninstall" and span is not None:
+        edited = text[:span.start()] + text[span.end():]
+    else:
+        return text
+    after = _parse(edited, target.table)
+    if not _notify_settings_match(parsed, after, argv if action == "install" else None):
+        raise _Refused("The edit would change settings outside Jarvis's Codex hook.")
+    return edited
+
+
 def _without_entry(data, table):
     outer = dict(data)
     servers = dict(outer.pop(table, {}))
@@ -294,6 +486,8 @@ def _check_edit(target, edited, entry):
 
 def _restore(target):
     digest = _digest(target.before.data)
+    # Follow exact receipts back through an upgrade (for example, M4 alone
+    # followed by M4 plus L1), without restoring a drifted managed entry.
     for name, prior_hash, installed_hash in _backups(target):
         if digest != installed_hash:
             continue
@@ -304,33 +498,34 @@ def _restore(target):
             return True, None
         if _digest(backup.data) != prior_hash:
             raise _Refused("Backup bytes differ from the recorded original.")
-        before = _parse(backup.data.decode("utf-8"), target.table)
-        # A repair backup can contain a drifted Jarvis entry. Uninstall must
-        # remove the registration rather than reinstate that entry.
-        if _SERVER not in before.get(target.table, {}):
+        text = backup.data.decode("utf-8")
+        before = _parse(text, target.table)
+        if not ((target.table != "hooks" and _SERVER in before.get(target.table, {}))
+                or (target.table == "hooks" and _stop_commands(before))
+                or (target.table == "mcp_servers" and _owned_notify_span(before, text))):
             return True, backup.data
+        digest = prior_hash
     return False, None
 
 
 def _target(stack, home, path):
-    claude = path.name == ".claude.json"
-    table = "mcpServers" if claude else "mcp_servers"
+    table = {".claude.json": "mcpServers", "settings.json": "hooks", "config.toml": "mcp_servers"}[path.name]
     try:
         directory = stack.enter_context(open_directory(path.parent))
     except FileNotFoundError:
         return None
     before = _read(directory, path.name)
-    if claude and before is None:
+    if table == "mcpServers" and before is None:
         try:
             with open_directory(home / ".claude"):
                 pass
         except FileNotFoundError:
             return None
-    text = before.data.decode("utf-8") if before is not None else ("{}\n" if claude else "")
+    text = before.data.decode("utf-8") if before is not None else ("" if table == "mcp_servers" else "{}\n")
     return _Target(path, directory, before, table, text, _parse(text, table))
 
 
-def _plan(action, target, registration, out):
+def _plan_mcp(action, target, registration, out):
     servers = target.parsed.get(target.table, {})
     present = _SERVER in servers
     current = servers.get(_SERVER)
@@ -350,22 +545,69 @@ def _plan(action, target, registration, out):
         return matches
     if (action == "install" and matches) or (action == "uninstall" and not present):
         out(f"{target.path}: {'already installed' if matches else 'already absent'}.")
-        return None
+        return target.text
     if action == "install" and ours:
         out(f"{target.path}: already installed, with options you added (kept).")
-        return None
+        return target.text
     if action == "install" and present and extra:
         raise _Refused("The Jarvis entry was changed and has options of your own. Run `jarvis brain uninstall` first.")
     if not codex and present and not matches and not any(_backups(target)):
         raise _Refused("Existing Claude registration differs and has no Jarvis backup.")
+    entry = registration if action == "install" else None
+    text = _codex_edit(target, entry) if codex else _claude_edit(target, entry)
+    _check_edit(target, text, entry)
+    return text
+
+
+def _plan_stop(action, target, entry, out):
+    commands = _stop_commands(target.parsed)
+    expected = entry["hooks"]
+    present = commands == expected
+    detail = ("removing Jarvis's marked hooks" if commands and action == "uninstall" else
+              "installed" if present else "previous or duplicate entries found" if commands else "not installed")
+    out(f"{target.path} Stop hook: {detail}.")
+    if action == "status":
+        return present
+    install = action == "install"
+    if install:
+        for i, group in enumerate(_stop_groups(target.parsed)):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for j, command in enumerate(group["hooks"]):
+                if not _marked_stop(command) and _looks_like_old_stop(command):
+                    out(f"{target.path} Stop[{i}].hooks[{j}]: possible stale Jarvis hook kept "
+                        "(unmarked). Remove it manually if it is an older Jarvis hook.")
+    elif _without_stop(target.parsed)[2]:
+        out(f"{target.path} Stop hook: kept owner's unmarked hooks and settings.")
+    if (install and present) or (not install and not commands):
+        return target.text
+    edited = _edit_stop(target, entry, install)
+    after = _parse(edited, target.table)
+    if (_stop_commands(after) != (expected if install else [])
+            or _without_stop(after) != _without_stop(target.parsed)):
+        raise _Refused("The edit would change settings outside Jarvis's Claude hook.")
+    return edited
+
+
+def _plan(action, target, registration, out):
+    stop = _stop_entry(registration)
+    notify = _hook_argv(registration, "codex")
+    if target.table == "hooks":
+        result = _plan_stop(action, target, stop, out)
+    else:
+        result = _plan_mcp(action, target, registration, out)
+        if target.table == "mcp_servers":
+            hook = _plan_notify(action, target, target.text if action == "status" else result, notify, out)
+            result = result and hook if action == "status" else hook
+    if action == "status":
+        return result
+    if result == target.text:
+        return None
     if action == "uninstall":
         exact, before = _restore(target)
         if exact:
             return _Edit(target, before)
-    entry = registration if action == "install" else None
-    text = _codex_edit(target, entry) if codex else _claude_edit(target, entry)
-    _check_edit(target, text, entry)
-    return _Edit(target, text.encode("utf-8"))
+    return _Edit(target, result.encode("utf-8"))
 
 
 def _apply(action, edits, snapshots, stack, out):
@@ -391,7 +633,8 @@ def _apply(action, edits, snapshots, stack, out):
             os.unlink(target.path.name, dir_fd=target.directory)
         else:
             os.replace(temp, target.path.name, src_dir_fd=target.directory, dst_dir_fd=target.directory)
-        out(f"{target.path}: {'installed' if action == 'install' else 'uninstalled'} jarvis-brain. "
+        detail = "Jarvis's Stop hook" if target.table == "hooks" else "jarvis-brain settings"
+        out(f"{target.path}: {'installed' if action == 'install' else 'uninstalled'} {detail}. "
             "Restart open Claude Code and Codex sessions to see it.")
         os.fsync(target.directory)
 
@@ -406,7 +649,7 @@ def _run(action, home, out):
             fcntl.flock(home_fd, fcntl.LOCK_SH if action == "status" else fcntl.LOCK_EX)
             registration = _registration()
             plans, snapshots = [], []
-            for path in (home / ".claude.json", home / ".codex/config.toml"):
+            for path in (home / ".claude.json", home / ".claude/settings.json", home / ".codex/config.toml"):
                 target = _target(stack, home, path)
                 if target is None:
                     out(f"{path}: consumer absent, skipped.")
