@@ -215,9 +215,24 @@ toward the caps even if the outcome cannot be written.
 ```json
 {"id": "…", "kind": "calendar.block|mail.reply|thread.start|vault.update|…",
  "level_proposed": "L0|L1|L2|L3", "level": "assigned by I1 policy, never by the model",
- "tainted": true, "signal": "signal id", "action": {"tool": "…", "args": {}},
+ "tainted": true, "attendees": 0, "owner_event": false, "money": false,
+ "signal": "signal id", "action": {"tool": "…", "args": {}},
  "brief": "<Brief fields>", "dedupe_key": "…", "state": "new|briefed|approved|running|done|failed|dismissed"}
 ```
+
+I3 and I4 supply the policy facts from verified provenance and action data.
+`tainted` is required for L0/L1. A calendar action needs integer `attendees`
+equal to zero for L0/L1, and a calendar move, change or deletion also needs
+boolean `owner_event` equal to false. `money` is an optional boolean for
+spending outside `money.spend`.
+
+| Default or floor | Canonical kinds for proposals and policy rules |
+|---|---|
+| L0 default | `mail.file`, `mail.label`, `mail.archive`, `mail.draft`, `vault.update`, `research.start`, `investigation.readonly`, `calendar.block` |
+| L1 default | `calendar.block_move`, `pr.draft_open`, `thread.fix_test`, `calendar.add_due_date` |
+| L2 default | `calendar.event_change`, `calendar.event_delete`, `pr.merge`, `thread.start` |
+| L2 hard floor | `mail.send`, `mail.reply`, `mail.forward`, `calendar.invite`, `calendar.respond`, `share.*` (kind family), `money.spend` |
+| L3 hard floor | `credential.read`, `credential.write`, `policy.write`, `gate.change`, `school.submit`, `data.delete_others` |
 
 ### 1.9 Policy file (I1, protected)
 
@@ -228,6 +243,22 @@ toward the caps even if the outcome cannot be written.
  "default_level": "L2",
  "promotions": [{"kind": "…", "from": "L2", "to": "L1", "approved_by_owner_at": "…"}]}
 ```
+
+The kind names are shared with §1.8. Rules are checked in file order and
+the first matching selector supplies the level, or the defaults apply if
+none matches. `when` matches present, exact-type JSON scalar facts. A missing
+fact or a same-type unequal value skips that rule. A present fact with the
+wrong type makes an otherwise possible rule undecidable. If an undecidable
+rule encountered before the first match is stricter than the matched or
+default level, raise the result to at least that rule's level and at least L2.
+Hard rules still apply to the resulting level, including an L2 floor for
+unknown kinds.
+Proposals with keys that are not exact strings ask, with the L3 hard kinds
+preserved. A missing file uses the defaults. An invalid file uses L2, with
+the L3 hard kinds preserved. The owner CLI replaces only the unconditional
+rule, puts it after conditional rules, and prints all configured rules for
+that kind in evaluation order. The shared shell gate refuses the policy writer.
+I5 owns promotions and the HUD route is outside I1.
 
 ---
 
@@ -1198,8 +1229,8 @@ CLIs' own safeguards. What follows from it:
 
 ### I1: Policy engine ⚑ boundary
 - **Scope:** `jarvis/v3/policy.py`, the `POLICY_FILE` loader,
-  `jarvis policy show|set` (owner-run CLI, and an owner-only HUD route),
-  `tests/v3/policy_check.py`.
+  `jarvis policy show|set` (owner-run CLI), and `tests/v3/policy_check.py`.
+  Promotions are I5 work. The owner-only HUD route is outside I1.
 - **Spec:**
   - `level_for(proposal) -> Level` from contract 1.9 rules, with the
     defaults from plan §13 as amended by OG2.
@@ -1209,15 +1240,17 @@ CLIs' own safeguards. What follows from it:
       sharing) → at least L2;
     - money → L2;
     - the gate's DENY classes and schoolwork submission → L3;
-    - an unknown kind → `default_level` (L2).
-  - Only the owner CLI or HUD route writes it. **Every level asks** (H10): the
+    - moves, changes and deletions of calendar events without verified Jarvis ownership → at least L2;
+    - an unknown kind → `default_level` when no file rule matches, with an L2 floor in either case.
+  - The owner CLI writes it. **Every level asks** (H10): the
     executor needs an approval record for L0 and L1 too.
 - **Acceptance:**
-  - [ ] Table tests for every default rule.
-  - [ ] Hard rules can't be overridden by a file rule (a test writes a
+  - [x] Table tests for every default rule.
+  - [x] Hard rules can't be overridden by a file rule (a test writes a
     permissive file and the hard rule still wins).
-  - [ ] A malformed file → everything L2 (fail closed).
-  - [ ] Mutation evidence on each hard rule.
+  - [x] A malformed file → L2 with the L3 hard kinds preserved.
+  - [x] Mutation evidence on each hard rule (13 of 13, including order,
+    malformed-file fallback and owner writer).
 - **Depends:** OG2. **Size:** S–M.
 
 ### I2: Triggers

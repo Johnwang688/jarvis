@@ -152,6 +152,47 @@ def brain_registration(args) -> int:
             "uninstall": brain_install.uninstall}[args.action]()
 
 
+def policy_show(_args) -> int:
+    from .policy import MONEY, OTHER_PEOPLE, Policy
+
+    print("Effective policy for untainted proposals with no spend, attendees, or owner event.")
+    print("Rows with a condition use those values in place of the example facts.")
+    for kind, when, decision in Policy().table():
+        condition = f"  when {json.dumps(when, sort_keys=True)}" if when else ""
+        hard = ""
+        if kind in OTHER_PEOPLE or kind.startswith("share."):
+            hard = "  [hard:other-people floor L2]"
+        elif kind in MONEY:
+            hard = "  [hard:money floor L2]"
+        print(f"{kind}  {decision['level']}  [{decision['why']}]{hard}{condition}")
+    print("Hard L2 floors")
+    print("  Tainted proposals or missing or invalid taint facts")
+    print(f"  {', '.join(sorted(OTHER_PEOPLE))}, share.*, or calendar actions without a verified zero attendee count")
+    print(f"  {', '.join(sorted(MONEY))}, spending, or an invalid money fact")
+    print("  Moving or deleting calendar events without verified Jarvis ownership")
+    print("  Unrecognized kinds")
+    return 0
+
+
+def policy_set(args) -> int:
+    from .policy import Policy, set_rule
+
+    try:
+        previous, current = set_rule(config.V3_POLICY_FILE, args.kind, args.level)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("Error: The policy file could not be updated safely.", file=sys.stderr)
+        return 1
+    print(f"Set {args.kind} to {args.level}. Effective level {previous} -> {current}.")
+    for rule in Policy(config.V3_POLICY_FILE).rules_for(args.kind):
+        when = rule.get("when", {})
+        condition = f"  when {json.dumps(when, sort_keys=True)}" if when else ""
+        print(f"{rule['kind']}  {rule['level']}{condition}")
+    return 0
+
+
 def consolidate_vault(args) -> int:
     from . import consolidate
     from .budget import Budget
@@ -214,6 +255,14 @@ def add_commands(sub):
     for action in ("install", "status", "uninstall"):
         brain_sub.add_parser(action, help=f"{action} the user-scope brain MCP registration").set_defaults(
             func=brain_registration)
+
+    policy = sub.add_parser("policy", help="owner controls for proposal policy")
+    policy_sub = policy.add_subparsers(dest="action", required=True)
+    policy_sub.add_parser("show", help="show the effective decision-rights table").set_defaults(func=policy_show)
+    setter = policy_sub.add_parser("set", help="set a policy rule")
+    setter.add_argument("kind")
+    setter.add_argument("level")
+    setter.set_defaults(func=policy_set)
 
 
 def main(argv: list[str]) -> int:
