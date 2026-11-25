@@ -38,9 +38,11 @@ _PROJECT_LIMIT = 32
 _TEXT_LIMIT = 16_000
 _NOFOLLOW = os.O_NOFOLLOW | os.O_NONBLOCK
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
-# T3's ids are UUIDs today. Anything that is not a short plain identifier is
-# treated as text T3 was made to echo, and is not used.
-_T3_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+# T3's ids look like `cli:<uuid>` for a thread and
+# `cli:thread:cli%3A<uuid>:message:1` for a run. Anything that is not a short
+# identifier of that alphabet (no spaces) is treated as text T3 was made to
+# echo, and is not used.
+_T3_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:%-]{0,127}")
 _SUFFIX = re.compile(r"[a-f0-9]{4}")
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 _BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
