@@ -282,8 +282,8 @@ def checked_start(self):
         assert response.status == 200
         assert set(json.load(response)["jobs"]) == {
             "feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
-            "schoolwork", "github", "consolidate", "morning-brief", "learning-digest",
-            "evening-wrap",
+            "schoolwork", "github", "triggers", "consolidate", "morning-brief",
+            "learning-digest", "evening-wrap",
         }
     assert not forbidden.intersection(sys.modules)
     signal.raise_signal(signal.SIGTERM)
