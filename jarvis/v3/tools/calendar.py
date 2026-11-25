@@ -348,6 +348,25 @@ class CalendarTools:
             return "\n".join(["No events to display.", *notes])
         return untrusted.fence("\n".join(lines), url, max_chars=_MAX_OUTPUT, notes=notes)
 
+    def event_titles(self, start: datetime, end: datetime) -> list[dict]:
+        """Read primary calendar event IDs, titles and aware start times."""
+        first, last = _window(start.isoformat(), end.isoformat())
+        events, complete = self._pages(_PRIMARY, first, last)
+        if not complete:
+            raise _CalendarError("Calendar page limit reached. Use a shorter range.")
+        rows = []
+        for event, zone in events:
+            if not isinstance(event, dict) or event.get("status") == "cancelled":
+                continue
+            try:
+                identifier = _event_id(event.get("id"))
+                begin, finish, _ = _event_times(event, zone)
+            except _CalendarError:
+                continue
+            if finish >= begin and finish > first and begin < last:
+                rows.append({"id": identifier, "title": event.get("summary"), "start": begin})
+        return rows
+
     @_text_result
     def calendar_free(self, start, end, min_minutes=30):
         """Report free intervals on primary in America/Chicago time."""

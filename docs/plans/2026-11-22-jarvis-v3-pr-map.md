@@ -688,6 +688,8 @@ S1–S6. It is the owner's decision.
   at 03:30 Chicago without an idle requirement. The three jobs share a lazily
   opened index. Gmail polls only with a valid saved grant for Gmail read access.
   Consolidation uses the Claude budget and reports failures to the scheduler.
+  B4 adds `morning-brief` and `evening-wrap` as due-scheduled jobs with no
+  idle requirement. They reuse the feed and budget.
   Jobs with a due predicate must satisfy it after backoff. The review queue
   consumer joins in L2, when its reviews have a reader.
 - **Acceptance:**
@@ -1226,10 +1228,10 @@ CLIs' own safeguards. What follows from it:
   - Delivered as `digest` briefs. Voice mode reads the morning brief
     conversationally.
 - **Acceptance:**
-  - [ ] The input assembler is tested with fixtures from each source.
-  - [ ] Missing sources degrade gracefully (calendar not authorized →
+  - [x] The input assembler is tested with fixtures from each source.
+  - [x] Missing sources degrade gracefully (calendar not authorized →
     "Calendar not connected" line).
-  - [ ] Line cap enforced in code.
+  - [x] Line cap enforced in code.
   - [ ] Live probe under $0.02.
 - **Depends:** B1, C1, C3, K2/K3 (P2, L3, I4 enrich it when present).
   **Size:** M.

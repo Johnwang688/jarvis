@@ -43,7 +43,7 @@ class Base(unittest.TestCase):
 
 class Table(Base):
     def test_names_and_schedules(self):
-        self.assertEqual(sorted(self.jobs), ["consolidate", "feed", "gmail", "skill-curator", "transcripts"])
+        self.assertLessEqual({"consolidate", "feed", "gmail", "skill-curator", "transcripts"}, set(self.jobs))   # later PRs add jobs
         self.assertEqual((self.jobs["transcripts"].every_s, self.jobs["gmail"].every_s), (300, 300))
         self.assertEqual(self.jobs["consolidate"].needs_idle_s, 0)
         self.assertIsNone(self.jobs["consolidate"].every_s)
