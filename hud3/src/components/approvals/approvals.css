@@ -1,0 +1,81 @@
+.agent-grid:has(.approval-card) { align-content: start; }
+.agent-column:has(.approval-card) { align-self: start; }
+
+.approval-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-float);
+  box-shadow: var(--glass-shadow);
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.approval-card[data-expired] { border-color: var(--rim); }
+.approval-card:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.approval-card h3 {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.approval-header {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rim);
+}
+
+.approval-actions, .approval-wait {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.approval-wait {
+  justify-content: space-between;
+  color: var(--amber);
+  font: 11px/1.35 var(--mono);
+}
+
+.approval-card .approval-approve {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-hi);
+}
+
+.approval-card .approval-approve:hover:not(:disabled) { background: var(--accent-hover); }
+
+.approval-card dl { display: grid; min-width: 0; align-content: start; gap: 4px; }
+.approval-field { display: grid; grid-template-columns: minmax(0, 5.25rem) minmax(0, 1fr); gap: 6px; }
+.approval-field dt { color: var(--text-muted); }
+.approval-field dd { min-width: 0; color: var(--text); }
+.approval-target dd { font-weight: 600; white-space: pre-wrap; }
+
+.approval-summary {
+  max-height: 10rem;
+  overflow: auto;
+}
+
+.approval-policy, .approval-details {
+  padding-top: 6px;
+  border-top: 1px solid var(--rim);
+}
+
+.approval-details summary { cursor: pointer; color: var(--text-2); }
+.approval-details dl {
+  max-height: 12rem;
+  overflow: auto;
+  margin-top: 6px;
+  padding: 6px;
+  background: var(--glass-solid);
+  border-radius: var(--radius-btn);
+}
+.approval-details dd { white-space: pre-wrap; }
+.agent-chat .approval-error { color: var(--red); }

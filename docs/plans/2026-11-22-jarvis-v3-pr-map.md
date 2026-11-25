@@ -471,10 +471,12 @@ it runs beside the later waves, in this order:
     [with a conversation](../screens/v3-chat-panel-conversation.png) and
     [empty](../screens/v3-chat-panel-empty.png).
 - **A6c: approvals in v3** ⚑ boundary. A broker, the approval card panel
-  (hud3 reuses v2's card), and the fast path's gated tools. Agents never reach
+  (hud3 shares v2's arming and button helpers), and the fast path's gated tools. Agents never reach
   it (control-plane rules). **Depends:** A6b. **Size:** M.
   - [x] A6c-1 approval broker, owner approval routes and six gated chat tools.
-  - [ ] A6c-2 hud3 approval card with the `approvals` count read by `chatApi`.
+  - [x] A6c-2 hud3 approval card with the `approvals` count read by `chatApi`.
+    Screenshots [with an armed vault card](../screens/v3-approval-card-vault.png)
+    and [with calendar details open](../screens/v3-approval-card-calendar.png).
   - [ ] A6c-3 `run_command`, `write_file` and `edit_file` in a pinned folder.
 - **A6d: speech.** `/stt` and `/say` on the v3 daemon from the v1 voice modules
   (`voice`, `stt_local`, `stt_settings`, `speaker` import nothing from v2);
