@@ -43,6 +43,7 @@ _KEYS = {"id", "ts", "op", "skill", "path", "before", "after", "actor", "session
 _FIELDS = {"name", "description", "created_by", "pinned", "locked"}
 _USAGE = ".usage.json"
 _STATE_LIMIT = 1024 * 1024
+_TORN_END = b"\0\n"
 
 
 class StoreError(ValueError):
@@ -620,12 +621,18 @@ class _Operation:
         rows = {}
         with os.fdopen(fd, "rb") as file:
             initial = os.fstat(fd)
+            torn_tail = False
             lines = iter(lambda: file.readline(_STATE_LIMIT), b"") if strict else file
             for line in lines:
                 if not line.endswith(b"\n"):
                     if strict:
                         raise StoreError("Incomplete skill ledger record.")
                     break
+                if strict and line.endswith(_TORN_END):
+                    # The writer seals interrupted lines without modifying
+                    # their bytes. A later valid row confirms append recovered.
+                    torn_tail = True
+                    continue
                 try:
                     row = json.loads(line.decode())
                     if _valid_record(row):
@@ -633,6 +640,7 @@ class _Operation:
                         if strict and rid in rows:
                             raise StoreError("Duplicate skill ledger record.")
                         rows[rid] = None if rid in rows else row
+                        torn_tail = False
                         continue
                 except (ValueError, RecursionError):
                     if strict:
@@ -640,6 +648,8 @@ class _Operation:
                 if strict:
                     raise StoreError("Invalid skill ledger record.")
             if strict:
+                if torn_tail:
+                    raise StoreError("Incomplete skill ledger recovery.")
                 if _stamp(initial) != _stamp(os.fstat(fd)):
                     raise StoreError("The skill ledger changed while being read.")
                 _verify(self.ledger_fd, "ledger.jsonl", initial)
@@ -655,7 +665,7 @@ class _Operation:
                 if file.read(1) != b"\n":
                     # Preserve torn bytes. A missing newline alone must never
                     # let a subsequent append turn a torn record into a valid one.
-                    prefix = b"\0\n"
+                    prefix = _TORN_END
             _write(file.fileno(), prefix + _json(row).encode() + b"\n")
         os.fsync(self.ledger_fd)
 

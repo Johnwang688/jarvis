@@ -768,8 +768,9 @@ S1–S6. It is the owner's decision.
     `LEARNED_SKILLS_DIR/.usage.json`.
   - `due()` requires a week between runs and at least 2 h idle (no active
     turns). Daemon scheduling will be wired in a later PR.
-  - Agent-created, unpinned skills unused for 14 d → `stale`; at 30 d →
-    archived (ledgered).
+  - Agent-created, unpinned skills go stale after 14 d and are archived
+    after 30 d, measured from the later of their last use and latest
+    applied ledger record.
   - Skills referenced by a schedule or trigger are exempt.
   - **No LLM consolidation.**
   - Emits a digest line per change (consumed by L3).

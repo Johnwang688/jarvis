@@ -75,13 +75,15 @@ def _state(data):
 
 def _activity(applied):
     newest, lives = {}, {}
+    high_water = float("-inf")
     for row in applied.values():
         name = row["skill"]
-        ts = _timestamp(row["ts"])
-        # Keep the latest timestamp even when the wall clock regresses.
-        newest[name] = max(ts, newest.get(name, ts))
+        # Append order survives a wall clock regression. Give a later edit
+        # or create at least the time already observed by the ledger.
+        high_water = max(high_water, _timestamp(row["ts"]))
+        newest[name] = high_water
         if row["path"] == _MAIN and row["before"] is None:
-            lives[name] = row["id"], newest[name]
+            lives[name] = row["id"]
     return newest, lives
 
 
@@ -145,8 +147,6 @@ class _Digest:
             if (row["actor"], row["op"], row["skill"], row["ts"]) != (
                     "curator", "archive", name, line["ts"]):
                 raise StoreError("The curator archive differs from its pending change.")
-            if not self.dry_run and _stat(self.op.root_fd, name) is None:
-                self.op._sync_links(name, live=False)
         return self.finish(applied=row is not None)
 
 
@@ -177,6 +177,12 @@ class Curator:
                 recovered = digest.recover(applied)
                 if recovered is not None:
                     lines.append(recovered)
+                if not dry_run:
+                    # A published archive can outlast a failed consumer unlink.
+                    archived = {row["skill"] for row in applied.values() if row["actor"] == "curator"}
+                    for name in sorted(archived):
+                        if _stat(op.root_fd, name) is None:
+                            op._sync_links(name, live=False)
                 last_change = digest.state["last_change"]
                 if last_change is None or _timestamp(ts) >= last_change:
                     self._curate(op, digest, usage, newest, lives, referenced, now, ts, lines)
@@ -189,9 +195,8 @@ class Curator:
         for name in sorted(lives):
             if name.casefold() in referenced or op.owner(name) is not None:
                 continue
-            life, since = lives[name]
-            used = usage.get(name, {}).get("last_used")
-            last = used if used is not None and used >= since else newest[name]
+            life = lives[name]
+            last = max(newest[name], usage.get(name, {}).get("last_used", newest[name]))
             age = now - last
             if age < 0:
                 continue
