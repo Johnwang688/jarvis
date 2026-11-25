@@ -411,6 +411,7 @@ it runs beside the later waves, in this order:
   Host/Origin rules as v2's `check_origin`/`is_owner`, JSON only, owner-only by
   default; a route table test that refuses any unlisted route. No action yet.
   **Depends:** A5b. **Size:** S.
+  - [x] Exact owner route dispatch, bounded JSON POSTs, and harmless identity and ping probes.
 - **A6b: fast path chat.** `jarvis/v3/fastpath.py`: the v1 `Agent` (D2,
   invariants 1–10 unchanged) with a bound, ungated toolset and a deny-all
   approver; transcripts under `V3_DIR`; a chat panel in hud3. Copy-on-write
