@@ -13,11 +13,12 @@ class _ChangeFields(TypedDict, total=False):
 
 
 class SkillTools:
-    def __init__(self, store, *, session, actor="reviewer", tainted=False):
+    def __init__(self, store, *, session, actor="reviewer", tainted=False, readonly=False):
         self._store = store
         self._session = session
         self._actor = actor
         self._tainted = tainted
+        self._readonly = readonly
         self._views = {}
 
     def skill_view(
@@ -29,7 +30,7 @@ class SkillTools:
         from ..skill_store import StoreError
 
         try:
-            return self._store._view(name, path, self._views)
+            return self._store._view(name, path, self._views, readonly=self._readonly)
         except StoreError as exc:
             return f"Error: {exc}"
         except Exception:
@@ -44,6 +45,8 @@ class SkillTools:
         """Create, patch, write a file, remove a file, or archive a learned skill."""
         from ..skill_store import StoreError
 
+        if self._readonly:
+            return "Error: This skill session is read-only."
         try:
             return self._store._manage(action, name, self._views, self._actor,
                                        self._session, self._tainted, kw)

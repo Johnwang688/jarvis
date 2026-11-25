@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import fcntl
 import hashlib
 import json
@@ -67,23 +67,40 @@ _CODE = re.compile(r"[_/\\()[\]{}.:;=<>+*\x60@$%&|!^~#-]")
 _CORRUPTION = {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
 
 
-def _private_file(directory: int, name: str, *, create: bool = False) -> None:
+def _private_file(directory: int, name: str, *, create=False, required=False, readonly=False) -> None:
+    if readonly:
+        # Opening and closing a separate descriptor for a live SQLite file
+        # can release SQLite's POSIX locks elsewhere in this process.
+        try:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            if required:
+                raise
+            return
+        _check_private_file(info)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("Index files must be private regular files.")
+        return
+
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     if create:
         flags |= os.O_CREAT
     try:
         fd = os.open(name, flags, 0o600, dir_fd=directory)
     except FileNotFoundError:
-        if create:
+        if create or required:
             raise
         return
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-            raise ValueError("Index files must be private regular files.")
+        _check_private_file(os.fstat(fd))
         os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
+
+
+def _check_private_file(info):
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise ValueError("Index files must be private regular files.")
 
 
 def _document_id(source: str, ref: str) -> str:
@@ -146,11 +163,17 @@ def _phrase(text: str) -> str:
 
 
 class Index:
-    def __init__(self, path=None):
+    def __init__(self, path=None, *, readonly=False, write_scope=None):
         if path is None:
             path = os.environ.get("JARVIS_INDEX_DB") or config.V3_DIR / "index.sqlite"
         self.path = Path(path).expanduser().absolute()
         self._lock = threading.RLock()
+        self._reader_needs_cleanup = readonly
+        self._write_scope = write_scope
+        if readonly:
+            with open_directory(self.path.parent) as directory:
+                self._db = self._open_reader(directory)
+            return
         with open_directory(self.path.parent, create=True) as directory:
             # A directory lock coordinates initial creation and recovery. SQLite
             # handles subsequent reader snapshots and writer serialization.
@@ -174,6 +197,48 @@ class Index:
                         continue
                 _private_file(directory, self.path.name, create=True)
                 self._db = self._open(directory)
+
+    def _reader_uri(self, directory):
+        _private_file(directory, self.path.name, required=True, readonly=True)
+        info = os.fstat(directory)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("The index directory must be private.")
+        for suffix in ("-wal", "-shm", "-journal"):
+            _private_file(directory, self.path.name + suffix, readonly=True)
+        return (Path(f"/proc/self/fd/{directory}") / self.path.name).as_uri()
+
+    def _reader_write_scope(self):
+        return self._write_scope() if self._write_scope is not None else nullcontext(True)
+
+    def _open_reader(self, directory):
+        uri = self._reader_uri(directory)
+        # SQLite may open WAL coordination files when it first reads a schema.
+        with self._reader_write_scope() as allowed:
+            if not allowed:
+                raise RuntimeError("The index read was cancelled.")
+            db = sqlite3.connect(uri + "?mode=ro", uri=True, isolation_level=None,
+                                 check_same_thread=False, timeout=0)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA temp_store=MEMORY")
+                if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                    raise RuntimeError("The index schema is unavailable for reading.")
+                return db
+            except BaseException:
+                db.close()
+                self._cleanup_reader_wal(uri)
+                raise
+
+    @staticmethod
+    def _cleanup_reader_wal(uri):
+        # SQLite only cleans up WAL sidecars on the last read-write close.
+        # Let SQLite arbitrate with live readers and writers using WAL locks.
+        try:
+            with closing(sqlite3.connect(uri + "?mode=rw", uri=True, timeout=0)) as db:
+                db.execute("PRAGMA query_only=ON")
+                db.execute("PRAGMA user_version").fetchone()
+        except sqlite3.Error:
+            pass
 
     def _open(self, directory: int) -> sqlite3.Connection:
         db = sqlite3.connect(
@@ -221,6 +286,15 @@ class Index:
     def close(self):
         with self._lock:
             self._db.close()
+            if self._reader_needs_cleanup:
+                self._reader_needs_cleanup = False
+                with self._reader_write_scope() as allowed:
+                    if allowed:
+                        try:
+                            with open_directory(self.path.parent) as directory:
+                                self._cleanup_reader_wal(self._reader_uri(directory))
+                        except (OSError, ValueError):
+                            pass
 
     def __enter__(self):
         return self

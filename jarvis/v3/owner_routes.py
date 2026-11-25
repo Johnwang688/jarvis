@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING
 
 from jarvis import config
 
+from .chat import ChatBusy, ChatInboxFull
+
 if TYPE_CHECKING:
+    from .chat import ChatService
     from .feed import Feed
 
 
@@ -29,8 +32,17 @@ class Route:
     handler: Callable[..., tuple[int, object]]
     owner: bool = field(default=True, kw_only=True)
     with_feed: bool = field(default=False, kw_only=True)
+    with_chat: bool = field(default=False, kw_only=True)
 
-    def run(self, body: dict | None, get_feed: Callable[[], Feed]) -> tuple[int, object]:
+    def run(self, body: dict | None, get_feed: Callable[[], Feed],
+            chat: ChatService | None = None) -> tuple[int, object]:
+        if self.with_chat:
+            try:
+                return self.handler(body, chat)
+            except ChatInboxFull:
+                return 429, {"error": "The chat steering queue is full."}
+            except ChatBusy:
+                return 409, {"error": "Chat is busy."}
         if not self.with_feed:
             return self.handler(body)
         from .feed import BriefNotFound, FeedBusy, FeedError
@@ -68,12 +80,48 @@ def _feed_feedback(body, feed):
     return 200, {"brief": feed.feedback(body["id"], body["tag"], return_brief=True)}
 
 
+def _chat_snapshot(body, chat):
+    return 200, chat.snapshot()
+
+
+def _chat_send(body, chat):
+    if body.keys() != {"text"}:
+        return 400, {"error": "Expected a chat message."}
+    try:
+        return 202, chat.send(body["text"])
+    except ValueError:
+        return 400, {"error": "Invalid chat message."}
+
+
+def _chat_events(body, chat):
+    if body.keys() != {"after"} or type(body["after"]) is not int or body["after"] < 0:
+        return 400, {"error": "Expected a nonnegative event sequence number."}
+    return 200, chat.events(body["after"])
+
+
+def _chat_stop(body, chat):
+    if body:
+        return 400, {"error": "Expected an empty object."}
+    return 200, chat.stop()
+
+
+def _chat_new(body, chat):
+    if body:
+        return 400, {"error": "Expected an empty object."}
+    return 200, chat.new_session()
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),
     ("POST", "/v3/owner/feed/feedback"): Route(_feed_feedback, with_feed=True),
+    ("GET", "/v3/owner/chat"): Route(_chat_snapshot, with_chat=True),
+    ("POST", "/v3/owner/chat/send"): Route(_chat_send, with_chat=True),
+    ("POST", "/v3/owner/chat/stop"): Route(_chat_stop, with_chat=True),
+    ("POST", "/v3/owner/chat/events"): Route(_chat_events, with_chat=True),
+    ("POST", "/v3/owner/chat/new"): Route(_chat_new, with_chat=True),
 }
 PUBLIC = frozenset(key for key, route in ROUTES.items() if not route.owner)
 
