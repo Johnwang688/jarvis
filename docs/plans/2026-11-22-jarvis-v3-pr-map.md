@@ -1576,6 +1576,10 @@ CLIs' own safeguards. What follows from it:
 
 ---
 
+## Track W: Jarvis-started T3 threads
+- [x] W2 adds the bounded two-minute watcher and deduplicated status briefs.
+- [ ] Run W2 acceptance with W1a's real ledger before merging.
+
 ## 13. Track R: Cutover (after the gates)
 
 v2 is archived, not deleted (A-1). Discord, the inbox, the providers, chat
