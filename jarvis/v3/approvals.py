@@ -106,10 +106,10 @@ class ApprovalBroker:
             self._finish(request, "expired")
 
     def ask(self, tool, args, card, *, session_id, turn_id, verdict, preview=None, cancelled=None,
-            on_approved=None):
-        with self._changed:
-            request = None
-            try:
+            on_approved=None, on_pending=None):
+        request = None
+        try:
+            with self._changed:
                 if self._closed or self._cancelled(cancelled):
                     return False
                 id = self._new_id()
@@ -123,6 +123,9 @@ class ApprovalBroker:
                 request = _Request(item, turn_id, deadline, cancelled)
                 self._append(request, "pending", asked_at)
                 self._pending[id] = request
+            if on_pending is not None:
+                on_pending()
+            with self._changed:
                 while request.state == "pending":
                     now = self._clock()
                     self._advance(request, now)
@@ -133,18 +136,21 @@ class ApprovalBroker:
                 if on_approved is not None:
                     on_approved(id, signature)
                 return True
-            except Exception:
+        except Exception:
+            with self._changed:
                 if request is not None and self._pending.get(request.item["id"]) is request:
                     self._finish(request, "cancelled")
-                return False
+            return False
 
-    def pending(self):
+    def pending(self, *, turn_id=None):
         with self._changed:
             now = self._clock()
-            for request in list(self._pending.values()):
+            requests = [request for request in self._pending.values()
+                        if turn_id is None or request.turn_id == turn_id]
+            for request in requests:
                 self._advance(request, now)
             return [dict(deepcopy(request.item), expires_in=max(0, request.deadline - now))
-                    for request in self._pending.values()]
+                    for request in requests if request.state == "pending"]
 
     def answer(self, id, digest, decision):
         if decision not in ("approve", "deny"):

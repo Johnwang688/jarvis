@@ -85,6 +85,53 @@ class ChatCheck(unittest.TestCase):
         self.addCleanup(release.set)
         return entered, release
 
+    def test_listener_overflow_discards_its_queue_and_preserves_other_listeners(self):
+        entered, release = self.hold()
+        slow_calls = []
+        fast_calls = []
+        received = threading.Condition()
+
+        def slow_listener(event):
+            slow_calls.append(event["kind"])
+            entered.set()
+            release.wait(5)
+
+        def fast_listener(event):
+            if event["kind"] not in ("user", "delta", "reply"):
+                return
+            with received:
+                fast_calls.append(event["text"])
+                received.notify_all()
+
+        def stream(on_delta, **kwargs):
+            if not entered.wait(5):
+                raise TimeoutError("The fixture listener did not start.")
+            for index in range(chat.LISTENER_QUEUE_LIMIT + 1):
+                piece = f"{index} "
+                on_delta(piece)
+                with received:
+                    if not received.wait_for(lambda: piece in fast_calls, timeout=5):
+                        raise TimeoutError("The fixture listener did not receive a delta.")
+            return reply("A fixture answer.")
+
+        svc = self.service(Model(stream))
+        svc.subscribe(slow_listener)
+        svc.subscribe(fast_listener)
+        try:
+            with self.assertLogs("jarvis.v3.chat", level="WARNING") as output:
+                svc.send("A fixture request.")
+                self.finish(svc)
+            self.assertEqual(output.records[0].getMessage(),
+                             "A chat event listener overflowed and was removed.")
+            with received:
+                self.assertTrue(received.wait_for(lambda: fast_calls[-1] == "A fixture answer.", timeout=5))
+                self.assertEqual(fast_calls, ["A fixture request.",
+                                              *(f"{i} " for i in range(chat.LISTENER_QUEUE_LIMIT + 1)),
+                                              "A fixture answer."])
+        finally:
+            release.set()
+        self.assertEqual(slow_calls, ["user"])
+
     def test_brief_cap_resets_each_turn_and_posts_under_the_session(self):
         def posts(*labels):
             return reply(None, *(("brief_post", {"kind": "news", "ask": label}) for label in labels))
