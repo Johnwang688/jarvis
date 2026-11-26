@@ -30,8 +30,8 @@ describe("the v3 window", () => {
     await mount();
     expect(box.querySelector("[data-orb]")).not.toBeNull();
     const ids = [...box.querySelectorAll<HTMLElement>("[data-panel]")].map((p) => p.dataset.panel);
-    expect(ids.slice().sort()).toEqual(["chat", "cron", "feed", "skills", "status", "t3", "vault"]);
-    for (const [id, name] of [["t3", "T3"], ["chat", "Chat"], ["feed", "Feed"], ["vault", "Vault"], ["skills", "Skills"], ["cron", "Cron"], ["status", "Status"]] as const) {
+    expect(ids.slice().sort()).toEqual(["chat", "cron", "feed", "skills", "status", "t3", "vault", "voice"]);
+    for (const [id, name] of [["t3", "T3"], ["chat", "Chat"], ["feed", "Feed"], ["vault", "Vault"], ["skills", "Skills"], ["cron", "Cron"], ["status", "Status"], ["voice", "Voice"]] as const) {
       const p = panel(id);
       const label = document.getElementById(p.getAttribute("aria-labelledby") ?? "");
       expect(label?.textContent).toBe(name);
@@ -48,11 +48,11 @@ describe("the v3 window", () => {
     expect(box.querySelectorAll("iframe,button,input,textarea")).toHaveLength(0);
   });
 
-  it("asks only for /v3/status, chat, the feed and the T3 panel's work list (W3)", async () => {
+  it("polls the status, chat, feed, Voice and T3 panel routes", async () => {
     await mount();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(calls.length).toBeGreaterThan(1);
-    expect([...new Set(calls)].sort()).toEqual(["/v3/owner/chat", "/v3/owner/feed", "/v3/owner/work", "/v3/status"]);
+    expect([...new Set(calls)].sort()).toEqual(["/v3/owner/chat", "/v3/owner/feed", "/v3/owner/voice", "/v3/owner/work", "/v3/status"]);
   });
 
   it("shows the running daemon", async () => {

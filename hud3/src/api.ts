@@ -14,6 +14,12 @@ const paths = {
   work: ["/v3/owner/work", "/m/api/work"],
 } as const;
 
+const windowPaths = {
+  voice: "/v3/owner/voice",
+  voiceSettings: "/v3/owner/voice/settings",
+  voiceHelper: "/v3/owner/voice/helper",
+} as const;
+
 const phonePaths = {
   me: "/m/api/me",
   "login/options": "/m/api/login/options",
@@ -27,7 +33,7 @@ const phonePaths = {
 } as const;
 
 export type PhoneApiName = keyof typeof phonePaths;
-export type ApiName = keyof typeof paths | PhoneApiName;
+export type ApiName = keyof typeof paths | keyof typeof windowPaths | PhoneApiName;
 type Surface = "window" | "phone";
 
 let current: Surface = "window";
@@ -45,6 +51,7 @@ export function setSurface(next: Surface) {
 export function apiPath(name: ApiName): string {
   read = true;
   if (Object.hasOwn(paths, name)) return paths[name as keyof typeof paths][current === "phone" ? 1 : 0];
+  if (current === "window" && Object.hasOwn(windowPaths, name)) return windowPaths[name as keyof typeof windowPaths];
   if (current === "phone" && Object.hasOwn(phonePaths, name)) return phonePaths[name as PhoneApiName];
   throw new Error("API route unavailable on this surface");
 }

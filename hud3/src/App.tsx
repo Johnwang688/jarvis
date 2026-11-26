@@ -5,6 +5,7 @@ import { Jobs, StatusView, useDaemonStatus } from "./Status";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { FeedPanel } from "./components/feed/FeedPanel";
 import { WorkPanel } from "./components/work/WorkPanel";
+import { VoicePanel } from "./components/voice/VoicePanel";
 
 function Panel({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -44,6 +45,7 @@ export default function App() {
         <FeedPanel />
         <ChatPanel onApprovalsChange={setApprovals} />
         <div className="agent-rail">
+          <VoicePanel />
           <Panel id="cron" title="Cron">
             <Jobs status={status} />
           </Panel>

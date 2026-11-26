@@ -19,6 +19,9 @@ const routes = {
   approvals: ["/v3/owner/approvals", "/m/api/approvals"],
   approvalsAnswer: ["/v3/owner/approvals/answer", "/m/api/approvals/answer"],
   work: ["/v3/owner/work", "/m/api/work"],
+  voice: ["/v3/owner/voice", null],
+  voiceSettings: ["/v3/owner/voice/settings", null],
+  voiceHelper: ["/v3/owner/voice/helper", null],
   me: [null, "/m/api/me"],
   "login/options": [null, "/m/api/login/options"],
   "login/verify": [null, "/m/api/login/verify"],
@@ -53,7 +56,11 @@ it("PH3.3 maps every phone name to its fixed route", async () => {
   const { apiPath, setSurface, surface } = await import("../src/api");
   setSurface("phone");
   expect(surface()).toBe("phone");
-  for (const name of Object.keys(routes) as ApiName[]) expect(apiPath(name), name).toBe(routes[name][1]);
+  for (const name of Object.keys(routes) as ApiName[]) {
+    const expected = routes[name][1];
+    if (expected === null) expect(() => apiPath(name), name).toThrow();
+    else expect(apiPath(name), name).toBe(expected);
+  }
 });
 
 it("PH3.5 centralizes fetch and API paths in api.ts", () => {

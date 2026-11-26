@@ -161,6 +161,10 @@ class Table(Base):
         self.assertLessEqual({
             ("GET", "/v3/owner/whoami"), ("POST", "/v3/owner/ping"), ("POST", "/v3/owner/proposal"),
         }, set(ROUTES))
+        self.assertEqual({key for key in ROUTES if key[1].startswith("/v3/owner/voice")}, {
+            ("GET", "/v3/owner/voice"), ("POST", "/v3/owner/voice/settings"),
+            ("POST", "/v3/owner/voice/helper"),
+        })
         self.assertTrue(all(method in ("GET", "POST") and path.startswith("/v3/owner/") for method, path in ROUTES))   # later PRs add routes; all stay under /v3/owner/
         self.assertEqual(owner_routes.PUBLIC, frozenset())
         self.assertTrue(all(route.owner for route in ROUTES.values()))
