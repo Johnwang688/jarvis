@@ -242,6 +242,15 @@ summaries do not replace detailed matchers, exceptions or owner choices.
   owner starts the bridge. Keep local voice privacy/offline and owner-only
   stores. VEX tests use fakes; compilation is not a verified robot download.
 
+## Jarvis versioning
+
+`jarvis --version` and `jarvis -v` report the version from
+`jarvis/__init__.py`, which also supplies the package version. Start at
+`3.0.1`. For each commit, bump the patch for routine changes (for example,
+`3.0.1` to `3.0.2`). For a major change or a new feature, bump the minor
+and reset the patch to zero (for example, `3.0.1` to `3.1.0`). End the
+commit subject with the resulting version, as in `Fix CLI help (3.0.2)`.
+
 ## Testing and operating the checkout
 
 Use focused free checks, then the integration sweep. Independent review
