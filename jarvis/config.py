@@ -1588,7 +1588,17 @@ FAST_READ_ONLY_PROPOSE = (
 )
 
 
+V3_PC_PARAGRAPH = (
+    "For an owner request to open something on the desk PC, use app_open for a supported app "
+    "(including spoken aliases), folder_open for a registered project folder, or link_open for "
+    "a public HTTPS link."
+)
+
+
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
+    "For an owner request to open something on the desk PC": (
+        (("app_open", "folder_open", "link_open"), None),
+    ),
     "On a desk turn, `hud_browser_act`": ((("hud_browser_act",), None),),
     "**Other chats in the HUD**": (
         (("chat_list", "chat_summary", "chat_search", "chat_read", "chat_send", "chat_wait"),
@@ -1697,7 +1707,8 @@ def _original_prompt_rules() -> dict:
     """Index only our exact canonical paragraphs, never caller prefix matches."""
     paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
     paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH, FAST_LIMITS_PARAGRAPH,
-                       FAST_DIRECT_PARAGRAPH, FAST_PROPOSE_PARAGRAPH, FAST_CHATS_PARAGRAPH))
+                       FAST_DIRECT_PARAGRAPH, FAST_PROPOSE_PARAGRAPH, FAST_CHATS_PARAGRAPH,
+                       V3_PC_PARAGRAPH))
     result = {}
     for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
         matches = [p for p in paragraphs if p.startswith(opening)]

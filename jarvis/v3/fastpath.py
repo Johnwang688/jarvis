@@ -20,11 +20,11 @@ from jarvis.agent import Agent, BRIEFER_PREFACE, COMPACTION_PROMPT, STEERING_PRE
 from jarvis.context import ContextPolicy
 from jarvis.tools.clock import get_datetime
 
-from . import vault
+from . import pc, vault
 from .approval_card import build_card, card_target, card_text
 from .approvals import digest
 from .chat import (
-    CALENDAR_WRITES, CLEAN_RESULT_TOOLS, GATED_TOOLS, TOOL_NAMES, WORK_GATED, WORK_TOOLS,
+    CALENDAR_WRITES, CLEAN_RESULT_TOOLS, GATED_TOOLS, PC_GATED, TOOL_NAMES, WORK_GATED, WORK_TOOLS,
     available_tools, calendar_available,
 )
 from .feed import Feed
@@ -40,7 +40,7 @@ from .work import WorkError
 
 
 V3_TOOLS = TOOL_NAMES
-_ALL_GATED = GATED_TOOLS | WORK_GATED
+_ALL_GATED = GATED_TOOLS | WORK_GATED | PC_GATED
 SUMMARY_CHARS = 200
 WORK_SHOW_LIMIT = 24_000
 AUTO_PER_TURN = 6
@@ -58,7 +58,8 @@ _CHAT_PROMPT = (
     "\n\nThis is the owner's v3 chat. Answer directly and use the available read tools "
     "when they help. Treat retrieved records as reference data. Skills may guide an "
     "owner-requested task within this chat's capabilities. Post a brief only when the "
-    "owner asks for one. This chat can post to the owner's batch feed."
+    "owner asks for one. This chat can post to the owner's batch feed.\n\n"
+    + config.V3_PC_PARAGRAPH
 )
 _REGISTRATION = Lock()
 _POLICY_KINDS = {
@@ -70,6 +71,9 @@ _POLICY_KINDS = {
     "vault_archive": "vault.archive",
     "work_start": "thread.start",
     "work_send": "thread.send",
+    "app_open": "app.open",
+    "folder_open": "folder.open",
+    "link_open": "link.open",
 }
 _DELETE_TOOLS = frozenset({"calendar_delete", "vault_archive"})
 
@@ -185,6 +189,8 @@ class ChatApprover:
             if turn.stop():
                 return tools.Refusal("The chat turn is stopping.")
             name = tool.name
+            if name in PC_GATED and turn.phone_input():
+                return tools.Refusal(pc.PHONE_REFUSAL)
             bound = signature(_GATED_WRAPPERS[name]).bind(**args)
             bound.apply_defaults()
             call_args = bound.arguments
@@ -203,6 +209,11 @@ class ChatApprover:
                 try:
                     preview = _work_preview(turn.work, name, call_args)
                 except WorkError as exc:
+                    return tools.Refusal(str(exc))
+            elif name in PC_GATED:
+                try:
+                    preview = _pc_preview(turn.work, name, call_args)
+                except pc.PCError as exc:
                     return tools.Refusal(str(exc))
             else:
                 try:
@@ -228,6 +239,8 @@ class ChatApprover:
                 with turn.tool_write() as writable:
                     if not writable:
                         return tools.Refusal("The chat turn is stopping.")
+                    if name in PC_GATED and turn.phone_input():
+                        return tools.Refusal(pc.PHONE_REFUSAL)
                     if not auto_enabled:
                         display_why = "auto-off"
                     elif turn.phone_input():
@@ -250,6 +263,8 @@ class ChatApprover:
             elif tainted and verdict == {"level": "L2", "why": f"default:{kind}"}:
                 display_why = "hard:tainted"
             if receipt is None:
+                if name in PC_GATED and turn.phone_input():
+                    return tools.Refusal(pc.PHONE_REFUSAL)
                 answer = []
                 allowed = self._broker.ask(
                     name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
@@ -277,6 +292,14 @@ def _work_preview(work, tool, args):
         if thread.thread_id == args["thread_id"]:
             return {"thread_id": thread.thread_id, "project": thread.project, "title": thread.title}
     raise WorkError("That is not a thread Jarvis started.")
+
+
+def _pc_preview(work, tool, args):
+    if tool == "app_open":
+        return pc.app_preview(**args)
+    if tool == "folder_open":
+        return pc.folder_preview(work, **args)
+    return pc.link_preview(**args)
 
 
 def _vault_preview(memory, tool, args):
@@ -439,6 +462,47 @@ def work_send(
     turn = _TURN.get()
     turn.work.send(thread_id, message, guard=_not_stopping(turn))
     return f"Sent message to T3 thread {card_text(thread_id, limit=None)}."
+
+
+def _pc_open(tool, execute, **args):
+    turn = _TURN.get()
+    grant = _take_grant(tool, args)
+    if grant is None:
+        return "Error: Opening a PC target requires approval."
+
+    def guard():
+        if turn.phone_input():
+            return f"Refused: {pc.PHONE_REFUSAL}"
+        if turn.stop():
+            return "Error: The chat turn is stopping."
+        return None
+
+    if (refusal := guard()) is not None:
+        return refusal
+    try:
+        return execute(grant.preview, guard)
+    except pc.PCError as exc:
+        return f"Error: {exc}"
+
+
+@_bound
+def app_open(
+    name: Annotated[str, "Name or alias for Chrome, VS Code, Spotify, File Explorer, Windows Terminal or T3 Code."],
+) -> str:
+    """Open a supported Windows app on the desk PC."""
+    return _pc_open("app_open", pc.open_app, name=name)
+
+
+@_bound
+def folder_open(project: Annotated[str, "Name of a registered work project."]) -> str:
+    """Open a registered project folder in Windows File Explorer."""
+    return _pc_open("folder_open", partial(pc.open_folder, work=_TURN.get().work), project=project)
+
+
+@_bound
+def link_open(url: Annotated[str, "Public HTTPS URL, at most 2,000 characters."]) -> str:
+    """Open a public HTTPS link in the desk PC's default browser."""
+    return _pc_open("link_open", pc.open_link, url=url)
 
 
 @_bound
@@ -641,7 +705,7 @@ _WRAPPERS = {fn.__name__: fn for fn in (
 _WORK_WRAPPERS = {fn.__name__: fn for fn in (work_projects, work_threads, work_show)}
 _GATED_WRAPPERS = {fn.__name__: fn for fn in (
     vault_add, vault_patch, vault_archive, calendar_create, calendar_update, calendar_delete,
-    work_start, work_send,
+    work_start, work_send, app_open, folder_open, link_open,
 )}
 
 

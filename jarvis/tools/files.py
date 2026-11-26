@@ -61,6 +61,7 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/voice_link.py",
         "jarvis/v3/voice/link.py",
         "jarvis/v3/voice/wire.py",
+        "jarvis/v3/pc.py",
         "jarvis/v2/voice_chat.py",
         "jarvis/v2/voice_intent.py",
         "jarvis/v2/voice_model.py",

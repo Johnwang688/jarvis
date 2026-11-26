@@ -341,7 +341,7 @@ class ChatFlow(Base):
         self.assertEqual(self.wait_idle(svc), "idle")
         self.assertEqual(self.states(None), [])
         self.assertFalse(any(text.startswith(("The user declined", "Refused:")) for text in self.results()), self.results())
-        offered = A6B - CAL | {"vault_add", "vault_patch", "vault_archive"}                 # no Google grant here
+        offered = A6B - CAL | {"vault_add", "vault_patch", "vault_archive", "app_open", "folder_open", "link_open"}
         self.assertEqual((set(self.model.seen[0]["tools"]), set(svc.snapshot()["tools"])), (offered, offered))
         plain = self.service(Model(reply("Hi.")))
         self.assertEqual((set(plain.snapshot()["tools"]), plain.snapshot()["approvals"], plain.approvals), (A6B - CAL, 0, None))

@@ -543,14 +543,15 @@ class WorkService:
     def projects(self) -> list[Project]:
         return self._registry.list()
 
-    def _current_project(self, name):
+    def current_project(self, name) -> Project:
+        """Return the registered project after checking its canonical directory."""
         project = self._registry.get(name)
         if _resolve_path(project.path) != project.path:
             raise WorkError("Registered project path changed.")
         return project
 
     def plan_start(self, project, title, brief, *, worktree=True) -> dict:
-        registered = self._current_project(project)
+        registered = self.current_project(project)
         title = _title(title)
         _message(brief)
         branch = None
@@ -567,7 +568,7 @@ class WorkService:
         before T3 is asked: it raises to stop a start that is no longer wanted."""
         if type(plan) is not dict or plan.keys() != _PLAN_FIELDS:
             raise WorkError("Invalid work start plan.")
-        project = self._current_project(plan["project"])
+        project = self.current_project(plan["project"])
         if any(plan[key] != getattr(project, key) for key in _PROJECT_FIELDS):
             raise WorkError("Registered project changed since the work was planned.")
         title = _title(plan["title"])
