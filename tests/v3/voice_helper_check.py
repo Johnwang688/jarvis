@@ -672,8 +672,9 @@ class TestClient(unittest.TestCase):
 
 
 class FakePopup:
-    def __init__(self, *, on_click):
+    def __init__(self, *, on_click, anchor=None, on_anchor_change=None):
         self._on_click = on_click
+        self.anchor, self.on_anchor_change = anchor, on_anchor_change
         self.states = []
         self.notices = []
         self.closed = False

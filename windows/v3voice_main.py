@@ -2,13 +2,15 @@
 
 import argparse
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import sys
+from tempfile import NamedTemporaryFile
 import threading
 import time
 import warnings
@@ -22,6 +24,9 @@ else:
 
 
 BIND_ADDRESS = "127.0.0.1"
+_POSITION_FILE = "popup-position.json"
+_POSITION_VERSION = 1
+_MAX_ANCHOR_DISTANCE = 32768
 
 
 @contextmanager
@@ -58,6 +63,41 @@ def log_file(folder):
         handler.close()
 
 
+def _load_anchor(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if (type(data) is not dict or type(data.get("version")) is not int
+            or data["version"] != _POSITION_VERSION):
+        return None
+    fraction, distance = data.get("fraction"), data.get("distance")
+    if (type(fraction) in (int, float) and 0 <= fraction <= 1
+            and type(distance) in (int, float) and 0 <= distance <= _MAX_ANCHOR_DISTANCE):
+        return fraction, distance
+    return None
+
+
+def _save_anchor(path, anchor, logger):
+    temporary = None
+    try:
+        if anchor is None:
+            path.unlink(missing_ok=True)
+            return
+        fraction, distance = anchor
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"version": _POSITION_VERSION, "fraction": fraction, "distance": distance},
+                      stream, allow_nan=False)
+        temporary.replace(path)
+    except (OSError, ValueError):
+        logger.warning("Could not save the voice pop-up position.")
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+
 class Helper:
     def __init__(self, host, port, key_path, *, logger, devices=None,
                  make_canceller=audio.Canceller.available, make_client=client.Client,
@@ -91,7 +131,14 @@ class Helper:
             host, port, key_path, canceller=self._capture.canceller,
             on_connect=self._connect, on_disconnect=self._disconnect, on_event=self._event,
             on_audio=self._audio, on_state=self._state)
-        self._popup = make_popup(on_click=self._click)
+        position_options = {}
+        if key_path is not None:
+            position_file = Path(key_path).with_name(_POSITION_FILE)
+            position_options = {
+                "anchor": _load_anchor(position_file),
+                "on_anchor_change": lambda anchor: _save_anchor(position_file, anchor, logger),
+            }
+        self._popup = make_popup(on_click=self._click, **position_options)
         self._key = make_key(self._on_key, on_error=self._device_error)
 
     def run(self):

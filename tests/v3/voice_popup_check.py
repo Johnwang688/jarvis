@@ -296,6 +296,8 @@ class FakeWin32:
         self.work_scale = (-1600, -50, 0, 850), 1.5
         self.on_top = True
         self.watch = False
+        self.draggable = False
+        self.rect = self.move = None
 
     def open(self, handler):
         self.owner = threading.get_ident()
@@ -308,8 +310,34 @@ class FakeWin32:
         return self.work_scale
 
     def paint(self, position, dimensions, data):
+        x, y = position
+        width, height = dimensions
+        self.rect = x, y, x + width, y + height
         self.painted_at = monotonic_ns()
         self.calls.put(("paint", (position, dimensions, len(data))))
+
+    def set_draggable(self, enabled):
+        self.draggable = enabled
+
+    def hit_test(self):
+        return popup.HTCAPTION if self.draggable else popup.HTCLIENT
+
+    def take_move(self):
+        move, self.move = self.move, None
+        return move
+
+    def drag(self, rect, *, work_scale=None, during_move=None):
+        def delivered():
+            if self.hit_test() != popup.HTCAPTION or self.rect[:2] == rect[:2]:
+                return
+            if during_move is not None:
+                during_move()
+            self.rect = rect
+            if work_scale is not None:
+                self.work_scale = work_scale
+            self.move = rect, *self.work_scale
+
+        self.events.put(delivered)
 
     def hide(self):
         self.calls.put(("hide", None))

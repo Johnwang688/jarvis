@@ -4,7 +4,7 @@ import argparse
 import ctypes
 from ctypes import wintypes as w
 from dataclasses import replace
-from math import ceil
+from math import ceil, hypot
 import os
 from pathlib import Path
 import struct
@@ -21,6 +21,16 @@ else:
 
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_MOVING = 0x0216
+WM_NCHITTEST = 0x0084
+WM_NCLBUTTONDOWN = 0x00A1
+WM_ENTERSIZEMOVE = 0x0231
+WM_EXITSIZEMOVE = 0x0232
+HTCLIENT = 1
+HTCAPTION = 2
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
 LLMHF_INJECTED = 0x01
 LLMHF_LOWER_IL_INJECTED = 0x02
 _INJECTED = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
@@ -40,6 +50,51 @@ def placement(work_area, dimensions, scale):
     left, _, right, bottom = work_area
     width, height = dimensions
     return left + (right - left - width) // 2, bottom - round(80 * scale) - height
+
+
+def _drop_anchor(rect, work, scale):
+    left, _, right, bottom = rect
+    work_left, _, work_right, work_bottom = work
+    center = (left + right) / 2
+    width = right - left
+    default_left, default_bottom = placement(work, (width, 0), scale)
+    default_center = default_left + width / 2
+    if hypot(center - default_center, bottom - default_bottom) <= 32 * scale:
+        return None
+    fraction = (center - work_left) / (work_right - work_left)
+    distance = work_bottom - bottom
+    return max(0, min(1, fraction)), max(0, distance) / scale
+
+
+def _anchored_placement(work, size, scale, anchor):
+    left, top, right, bottom = work
+    width, height = size
+    fraction, distance = anchor
+    x = left + round(fraction * (right - left) - width / 2)
+    y = bottom - round(distance * scale) - height
+    return min(max(x, left), right - width), min(max(y, top), bottom - height)
+
+
+def _stack_notice(panel, position, banner, work, gap):
+    x, y = position
+    left, top, right, bottom = work
+    if banner.width > right - left:
+        return panel, position
+    banner_y = y - gap - banner.height
+    if banner_y < top or banner_y + banner.height > bottom:
+        banner_y = y + panel.height + gap
+        if banner_y < top or banner_y + banner.height > bottom:
+            return panel, position
+    width = max(panel.width, banner.width)
+    banner_x = x + (width - banner.width) // 2 - (width - panel.width) // 2
+    banner_x = min(max(banner_x, left), right - banner.width)
+    stack_x, stack_y = min(x, banner_x), min(y, banner_y)
+    stack_right = max(x + panel.width, banner_x + banner.width)
+    stack_bottom = max(y + panel.height, banner_y + banner.height)
+    stacked = Image.new("RGBA", (stack_right - stack_x, stack_bottom - stack_y))
+    stacked.paste(panel, (x - stack_x, y - stack_y))
+    stacked.paste(banner, (banner_x - stack_x, banner_y - stack_y))
+    return stacked, (stack_x, stack_y)
 
 
 def premultiplied_bgra(image):
@@ -69,6 +124,9 @@ class _Win32:
         self.dpi_context = self.registered = None
         self.shown = False
         self.dimensions = None
+        self._draggable = False
+        self._move_start = self._move_end = None
+        self._drop_monitor = self._drop_foreground = None
 
     def open(self, mouse_handler):
         u = self.user = ctypes.WinDLL("user32", use_last_error=True)
@@ -99,8 +157,11 @@ class _Win32:
                   integer, integer, integer, integer, w.HWND, w.HMENU, w.HINSTANCE, ptr)
         signature(u.DestroyWindow, w.BOOL, w.HWND)
         signature(u.ShowWindow, w.BOOL, w.HWND, integer)
+        signature(u.SetWindowPos, w.BOOL, w.HWND, w.HWND,
+                  integer, integer, integer, integer, w.UINT)
         signature(u.DefWindowProcW, result, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
         signature(u.GetForegroundWindow, w.HWND)
+        signature(u.GetWindowRect, w.BOOL, w.HWND, ctypes.POINTER(w.RECT))
         signature(u.MonitorFromWindow, w.HMONITOR, w.HWND, w.DWORD)
         signature(u.MonitorFromPoint, w.HMONITOR, w.POINT, w.DWORD)
         signature(u.GetMonitorInfoW, w.BOOL, w.HMONITOR, ctypes.POINTER(_MonitorInfo))
@@ -124,6 +185,23 @@ class _Win32:
         def window_event(hwnd, message, wparam, lparam):
             if message == 0x0021:  # WM_MOUSEACTIVATE
                 return 3  # MA_NOACTIVATE
+            if hwnd == self.hwnd:
+                if message == WM_NCHITTEST:
+                    return HTCAPTION if self._draggable else HTCLIENT
+                if message == WM_NCLBUTTONDOWN and not self._draggable:
+                    return 0  # A caption press may have queued before an approval painted.
+                if message == WM_ENTERSIZEMOVE and self._draggable:
+                    self._move_start = self._window_rect()
+                if message == WM_MOVING and self._move_start is not None:
+                    rect = ctypes.cast(lparam, ctypes.POINTER(w.RECT)).contents
+                    u.SetWindowPos(hwnd, None, rect.left, rect.top, 0, 0,
+                                   SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    return 1  # TRUE
+                if message == WM_EXITSIZEMOVE and self._move_start is not None:
+                    rect = self._window_rect()
+                    if rect is not None and rect[:2] != self._move_start[:2]:
+                        self._move_end = rect
+                    self._move_start = None
             if message in (WM_LBUTTONDOWN, WM_LBUTTONUP):
                 return 0  # Clicks are handled exclusively by the low-level hook.
             return u.DefWindowProcW(hwnd, message, wparam, lparam)
@@ -165,11 +243,25 @@ class _Win32:
             _WINDOW_STYLE, self.name, "Jarvis Voice", 0x80000000,
             x, y, 1, 1, None, None, self.instance, None))
 
-    def monitor(self):
+    def _foreground_monitor(self):
         u = self.user
         foreground = u.GetForegroundWindow()
-        target = self._check(u.MonitorFromWindow(foreground, 2) if foreground
-                             else u.MonitorFromPoint(w.POINT(0, 0), 1))  # nearest, or primary
+        return self._check(u.MonitorFromWindow(foreground, 2) if foreground
+                           else u.MonitorFromPoint(w.POINT(0, 0), 1))  # nearest, or primary
+
+    def monitor(self):
+        foreground = self._foreground_monitor()
+        # Stay on the drop display until the foreground moves to another display.
+        if self._drop_monitor is not None and foreground == self._drop_foreground:
+            try:
+                return self._monitor_geometry(self._drop_monitor)
+            except OSError:
+                pass  # The drop monitor may have been disconnected.
+        self._drop_monitor = self._drop_foreground = None
+        return self._monitor_geometry(foreground)
+
+    def _monitor_geometry(self, target):
+        u = self.user
         info = _MonitorInfo(size=ctypes.sizeof(_MonitorInfo))
         self._check(u.GetMonitorInfoW(target, ctypes.byref(info)))
         work = info.work
@@ -184,6 +276,22 @@ class _Win32:
             finally:
                 u.DestroyWindow(probe)
         return (work.left, work.top, work.right, work.bottom), dpi / 96
+
+    def _window_rect(self):
+        rect = w.RECT()
+        if self.user.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+            return rect.left, rect.top, rect.right, rect.bottom
+
+    def set_draggable(self, enabled):
+        self._draggable = enabled
+
+    def take_move(self):
+        rect, self._move_end = self._move_end, None
+        if rect is not None:
+            self._drop_monitor = self._check(self.user.MonitorFromWindow(self.hwnd, 2))
+            self._drop_foreground = self._foreground_monitor()
+            work, scale = self._monitor_geometry(self._drop_monitor)
+            return rect, work, scale
 
     def _free_bitmap(self):
         if self.previous:
@@ -243,6 +351,8 @@ class _Win32:
             if message.message == 0x0012:  # WM_QUIT
                 return False
             u.DispatchMessageW(ref)
+            if self._move_end is not None:
+                break
         return True
 
     def close(self):
@@ -268,8 +378,9 @@ class Popup:
     promptly. Off Windows, a window requires an explicit adapter.
     """
 
-    def __init__(self, on_click=None, *, win32=None, font_paths=()):
+    def __init__(self, on_click=None, *, anchor=None, on_anchor_change=None, win32=None, font_paths=()):
         self._on_click = on_click
+        self._anchor, self._on_anchor_change = anchor, on_anchor_change
         self._fonts = tuple(font_paths)
         self._state = drawing.PopupState()
         self._countdown = None
@@ -320,7 +431,7 @@ class Popup:
             self._wake()
 
     def notice(self, state):
-        """Show a temporary notice above the current state without replacing it."""
+        """Show a temporary notice alongside the current state."""
         with self._lock:
             if not self._closed:
                 self._notice = state, monotonic() + _NOTICE_SECONDS
@@ -377,7 +488,17 @@ class Popup:
                 self._active = api
             start = monotonic()
             deadline, last_revision, answered, last_notice = None, -1, -1, None
+            dx = dy = panel_width = panel_height = 0
             while True:
+                move = api.take_move()
+                if move is not None:
+                    self._shown = self._pressed = self._pending = None
+                    rect, work, scale = move
+                    # The layered window can also contain a notice.
+                    x, y = rect[0] + dx, rect[1] + dy
+                    self._anchor = _drop_anchor((x, y, x + panel_width, y + panel_height), work, scale)
+                    if self._on_anchor_change is not None:
+                        self._on_anchor_change(self._anchor)
                 with self._lock:
                     if self._closed:
                         break
@@ -389,12 +510,13 @@ class Popup:
                     notice = self._notice
                 timeout = None
                 if state.kind == "hidden":
-                    if self._shown is not None:
+                    if self._shown is not None or move is not None:
                         self._shown = self._pressed = None
+                        api.set_draggable(False)
                         api.watch_mouse(False)
                         api.hide()
                 else:
-                    if (revision != last_revision or notice is not last_notice
+                    if (move is not None or revision != last_revision or notice is not last_notice
                             or (deadline is not None and now >= deadline)):
                         expires_at = None
                         if countdown is not None:
@@ -410,31 +532,35 @@ class Popup:
                         animated = state.kind in _ANIMATED or timed
                         if animated:
                             state = replace(state, t=state.t + now - start)
-                        work, scale = api.monitor()
+                        work, monitor_scale = api.monitor()
+                        scale = monitor_scale
                         enabled = drawing.buttons_enabled(state)
                         if not enabled:
                             api.watch_mouse(False)
-                        frame = drawing.render(state, scale=scale, font_paths=self._fonts)
-                        position = placement(work, frame.size, scale)
+                        panel = drawing.render(state, scale=scale, font_paths=self._fonts)
+                        if self._anchor is None:
+                            position = placement(work, panel.size, scale)
+                        else:
+                            available = work[2] - work[0], work[3] - work[1]
+                            while panel.width > available[0] or panel.height > available[1]:
+                                # Re-render at the scale used by hit_test on very small work areas.
+                                scale *= min(available[0] / panel.width, available[1] / panel.height, .99)
+                                panel = drawing.render(state, scale=scale, font_paths=self._fonts)
+                            position = _anchored_placement(work, panel.size, monitor_scale, self._anchor)
                         target = revision, position, scale
                         same_target = self._shown is not None and self._shown[0] == target
                         if not same_target:
                             self._shown = self._pressed = None
-                        paint_at = position
+                        frame, paint_at = panel, position
                         if notice is not None:
                             banner = drawing.render(notice[0], scale=scale, font_paths=self._fonts)
-                            gap = round(8 * scale)
-                            width = max(frame.width, banner.width)
-                            height = frame.height + gap + banner.height
-                            stacked = Image.new("RGBA", (width, height))
-                            offset = (width - frame.width) // 2
-                            stacked.paste(banner, ((width - banner.width) // 2, 0))
-                            stacked.paste(frame, (offset, banner.height + gap))
-                            paint_at = position[0] - offset, position[1] - banner.height - gap
-                            frame = stacked
+                            frame, paint_at = _stack_notice(panel, position, banner, work, round(8 * scale))
                         api.paint(paint_at, frame.size, premultiplied_bgra(frame))
+                        dx, dy = position[0] - paint_at[0], position[1] - paint_at[1]
+                        panel_width, panel_height = panel.size
                         painted_at = self._shown[2] if same_target else api.painted_at
                         self._shown = target, state, painted_at
+                        api.set_draggable(not enabled)
                         if enabled:
                             api.watch_mouse(self._clickable(target, state))
                         deadline = now + _FRAME_SECONDS if animated else None
