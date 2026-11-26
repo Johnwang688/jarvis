@@ -81,7 +81,7 @@ class Delegation(Base):
 
     def voice(self, *scripts, broker=True):
         self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/fake-claude"))
-        self.enterContext(patch.object(claude_jobs, "cli_meets_floor", return_value=True))
+        self.enterContext(patch.object(claude_jobs, "cli_version_status", return_value="ok"))
         spawn = self.enterContext(patch("subprocess.Popen", side_effect=AssertionError("real child process")))
         self.addCleanup(spawn.assert_not_called)
         factory = Factory()

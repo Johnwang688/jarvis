@@ -284,19 +284,34 @@ def _capture_version(cli, *, cwd, env, cancel, timeout):
                     timeout=min(_VERSION_TIMEOUT, timeout), cancel=cancel, stdout_cap=_VERSION_CAP)
 
 
-def _version_supported(reason, returncode, output):
+def _version_status(reason, returncode, output):
+    if reason in ("timeout", "cancelled"):
+        return reason
     if reason is not None or returncode != 0 or output.overflow:
-        return False
+        return "failed"
     parts = output.stdout.decode("utf-8").split(maxsplit=1)
     version = _parse_version(parts[0]) if parts else None
-    return version is not None and version >= _parse_version(MIN_CLI)
+    if version is None:
+        return "failed"
+    return "ok" if version >= _parse_version(MIN_CLI) else "too_old"
+
+
+def _version_supported(reason, returncode, output):
+    return _version_status(reason, returncode, output) == "ok"
+
+
+def cli_version_status(cli, *, cwd, env, cancel=None, timeout=_VERSION_TIMEOUT):
+    """Check the version floor and distinguish failed probes from old versions."""
+    try:
+        return _version_status(*_capture_version(cli, cwd=cwd, env=env, cancel=cancel, timeout=timeout))
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except (OSError, ValueError):
+        return "failed"
 
 
 def cli_meets_floor(cli, *, cwd, env, cancel=None, timeout=_VERSION_TIMEOUT):
-    try:
-        return _version_supported(*_capture_version(cli, cwd=cwd, env=env, cancel=cancel, timeout=timeout))
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return False
+    return cli_version_status(cli, cwd=cwd, env=env, cancel=cancel, timeout=timeout) == "ok"
 
 
 def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli):

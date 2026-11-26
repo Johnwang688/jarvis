@@ -9,6 +9,11 @@ from unicodedata import category
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+if __package__:
+    from .v3voice_problems import MICROPHONE, PROBLEMS, UNKNOWN
+else:
+    from v3voice_problems import MICROPHONE, PROBLEMS, UNKNOWN
+
 
 CYAN = (111, 195, 223)
 CYAN_HI = (154, 214, 234)
@@ -25,16 +30,14 @@ ASKING_HINT = 'Say “yes” or “no”, or click a button.'
 WAITING_HINT = 'Click a button, or wait for the prompt.'
 CLICK_HINT = 'Voice can’t approve this one. Click here or use your phone.'
 FINISHED_HINT = 'Ask “what happened?” for more'
-PROBLEM_TEXT = 'The microphone isn’t available.'
-PROBLEM_HINT = 'Another app may be holding it'
 LABELS = {
     "listening": "Listening", "working": "Working", "speaking": "Jarvis",
     "asking": "Approve?", "needs_click": "Needs a click", "finished": "Finished",
-    "problem": "Can’t hear you",
+    "problem": MICROPHONE[0],
 }
 HINTS = {
     "speaking": SPEAKING_HINT, "asking": ASKING_HINT, "needs_click": CLICK_HINT,
-    "finished": FINISHED_HINT, "problem": PROBLEM_HINT,
+    "finished": FINISHED_HINT, "problem": MICROPHONE[2],
 }
 
 
@@ -87,17 +90,26 @@ _EVENT_TEXT = {
 }
 
 
-def state_from_event(previous, event):
+def state_from_event(previous, event, *, device_error=False):
     """Translate decoded EVENT frames. The link driver owns display lifetimes.
 
     An approval's seconds start the display at a full bar. The window can take
     the same duration from the driver when the state is published.
     """
-    def show(kind, line="", *, label=None, buttons=False, card_id="", digest=""):
+    def show(kind, line="", *, label=None, sub=None, buttons=False, card_id="", digest=""):
         return PopupState(kind=kind, label=LABELS.get(kind, "") if label is None else label,
-                          line=line, sub=HINTS.get(kind, ""), level=previous.level,
+                          line=line, sub=HINTS.get(kind, "") if sub is None else sub, level=previous.level,
                           expires=float(buttons), buttons=buttons, t=previous.t,
                           id=card_id, digest=digest)
+
+    def problem():
+        reason = _clean(event.get("reason"))
+        if device_error and (not reason or " " in reason):
+            label, line, hint = MICROPHONE
+            line = reason or line
+        else:
+            label, line, hint = PROBLEMS.get(reason, UNKNOWN)
+        return show("problem", line, label=label, sub=hint)
 
     if type(event) is not dict:
         return previous
@@ -112,7 +124,7 @@ def state_from_event(previous, event):
         if kind == previous.kind or (kind == "asking" and previous.kind == "needs_click"):
             return previous
         if kind == "unavailable":
-            return show("problem", _clean(event.get("reason")) or PROBLEM_TEXT)
+            return problem()
         if kind == "resting":
             return show("resting", RESTING_TEXT)
         if kind in ("hidden", "listening", "working", "speaking", *APPROVALS):
@@ -146,7 +158,7 @@ def state_from_event(previous, event):
             state = replace(state, sub=WAITING_HINT)
         return state
     elif kind == "error":
-        return show("problem", _clean(event.get("reason")) or PROBLEM_TEXT)
+        return problem()
     elif kind == "notice" and "text" in event:
         title = _clean(event.get("title"))
         if title in ("Finished", "Failed", "Stopped", "Waiting on you"):
@@ -280,8 +292,8 @@ def _layout(state, scale, width, paths):
     label = measured((_clean(state.label) or LABELS.get(state.kind, "")).upper(), 11, available, bold=True)
     lines = measured(state.line, 14, available, 2)
     approval = state.kind in APPROVALS
-    sub = () if approval else measured(state.sub, 12, available)
-    body_h = 13 + (2 + 19 * len(lines) if lines else 0) + (3 + 15 if sub else 0)
+    sub = () if approval else measured(state.sub, 12, available, 2 if state.kind == "problem" else 1)
+    body_h = 13 + (2 + 19 * len(lines) if lines else 0) + (3 + 15 * len(sub) if sub else 0)
     row_h = max(46, body_h)
     center = 12 + row_h / 2
     orb = (13, center - 23, 46)
@@ -446,7 +458,7 @@ def render(state, *, scale=1.0, width=470, font_paths=()):
         line_bottom = y + 15 + 19 * len(layout.lines)
         text(layout.label, (x, y, right, y + 13), 11, accent, 13, bold=True)
         text(layout.lines, (x, y + 15, right, line_bottom), 14, TEXT, 19)
-        text(layout.sub, (x, line_bottom + 3, right, line_bottom + 18), 12, MUTED, 15)
+        text(layout.sub, (x, line_bottom + 3, right, line_bottom + 3 + 15 * len(layout.sub)), 12, MUTED, 15)
 
     center = layout.orb[1] + layout.orb[2] / 2
     if kind in ("listening", "speaking"):

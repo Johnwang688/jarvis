@@ -19,6 +19,7 @@ from unittest.mock import patch
 from PIL import Image, ImageChops
 
 from windows import v3voice_popup as popup, v3voice_render as drawing
+from windows.v3voice_problems import MICROPHONE, PROBLEMS, UNKNOWN
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,6 +109,23 @@ class Render(unittest.TestCase):
         fallback = drawing.render(state, font_paths=("example.invalid/missing-font.ttf",))
         self.assertEqual(fallback.size, drawing.size(state))
 
+    def test_longest_problem_hint_fits_and_is_drawn_at_each_scale(self):
+        state = drawing.state_from_event(drawing.PopupState(), {"kind": "error", "reason": "brain_api_key_env"})
+        self.assertEqual(state.sub, "Voice uses your Claude sign-in. Remove the key and restart the agent.")
+        for scale in (1, 1.5, 2):
+            with self.subTest(scale=scale):
+                layout = drawing._layout(state, scale, 470, ())
+                self.assertEqual(" ".join(layout.sub), state.sub)
+                self.assertEqual(len(layout.sub), 2)
+                image = drawing.render(state, scale=scale).convert("RGB")
+                with patch.object(drawing, "_layout", return_value=replace(layout, sub=())):
+                    blank = drawing.render(state, scale=scale).convert("RGB")
+                left, top, right, bottom = ImageChops.difference(image, blank).getbbox()
+                self.assertGreaterEqual(left, round(71 * scale) - 1)
+                self.assertGreaterEqual(top, round((layout.body[1] + 18 + 19 * len(layout.lines)) * scale))
+                self.assertLessEqual(right, round((470 - 15) * scale))
+                self.assertLess(bottom, image.height - round(10 * scale))
+
     def test_layout_limits_combining_marks_and_replaces_missing_glyphs(self):
         line = "A" + "\u0301" * 25 + "\U0010ffff" + "B" + "\u0301" * 3
         state = replace(SAMPLES["asking"], line=line)
@@ -174,12 +192,15 @@ class Render(unittest.TestCase):
             if isinstance(node, ast.Import):
                 names = [item.name for item in node.names]
             elif isinstance(node, ast.ImportFrom):
-                self.assertEqual(node.level, 0)
+                if node.module == "v3voice_problems":
+                    self.assertIn(node.level, (0, 1))
+                else:
+                    self.assertEqual(node.level, 0)
                 names = [node.module]
             else:
                 continue
             for name in names:
-                self.assertIn(name.partition(".")[0], sys.stdlib_module_names | {"PIL", "numpy"})
+                self.assertIn(name.partition(".")[0], sys.stdlib_module_names | {"PIL", "numpy", "v3voice_problems"})
 
         with TemporaryDirectory() as folder, TemporaryDirectory() as home:
             subprocess.run([sys.executable, str(ROOT / "windows/v3voice_popup.py"), "--render-dir", folder],
@@ -215,7 +236,6 @@ class Events(unittest.TestCase):
             ({"kind": "say", "text": "It is open"}, "Jarvis", "It is open"),
             ({"kind": "asking", "sentence": "Approve the action?", "expires_in": 60}, "Approve?", "Approve the action?"),
             ({"kind": "asking", "tool": "example", "expires_in": .5, "voice_allowed": False}, "Needs a click", "example"),
-            ({"kind": "error", "reason": "Audio device unavailable"}, "Can’t hear you", "Audio device unavailable"),
             ({"kind": "notice", "title": "Practice", "text": "Task complete"}, "Finished · Practice", "Task complete"),
         )
         for event, label, line in rows:
@@ -233,6 +253,25 @@ class Events(unittest.TestCase):
         self.assertEqual((expired.expires, expired.buttons), (0, False))
         oversized = drawing.state_from_event(previous, {"kind": "say", "text": "a" * 10000})
         self.assertEqual(oversized.line, "a" * 600 + "…")
+
+    def test_problem_reasons_use_the_table_without_drawing_codes(self):
+        previous = drawing.PopupState()
+        for event in ({"kind": "error"}, {"kind": "state", "state": "unavailable"}):
+            for reason, expected in (*PROBLEMS.items(), ("brain_closed", UNKNOWN),
+                                     *((f"made_up_{i}", UNKNOWN) for i in range(30))):
+                with self.subTest(event=event, reason=reason):
+                    state = drawing.state_from_event(previous, dict(event, reason=reason))
+                    self.assertEqual(state.kind, "problem")
+                    self.assertEqual((state.label, state.line, state.sub), expected)
+                    layout = drawing._layout(state, 1, 470, ())
+                    self.assertNotIn(reason, " ".join((*layout.label, *layout.lines, *layout.sub)).lower())
+            sentence = "Audio device unavailable."
+            state = drawing.state_from_event(previous, dict(event, reason=sentence), device_error=True)
+            self.assertEqual((state.label, state.line, state.sub), (MICROPHONE[0], sentence, MICROPHONE[2]))
+            state = drawing.state_from_event(previous, event, device_error=True)
+            self.assertEqual((state.label, state.line, state.sub), MICROPHONE)
+            state = drawing.state_from_event(previous, dict(event, reason=sentence))
+            self.assertEqual((state.label, state.line, state.sub), UNKNOWN)
 
     def test_malformed_fields_and_approval_duration_bounds(self):
         previous = SAMPLES["working"]

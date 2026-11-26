@@ -307,7 +307,7 @@ class PCCheck(Base):
     def test_voice_sdk_offers_all_tools_and_uses_chat_receipts(self):
         factory, events = Factory(), Recorder()
         self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/claude"))
-        self.enterContext(patch.object(claude_jobs, "cli_meets_floor", return_value=True))
+        self.enterContext(patch.object(claude_jobs, "cli_version_status", return_value="ok"))
         brain = ClaudeVoiceBrain(self.v3 / "voice", approvals=self.broker, work=self.work, client_factory=factory)
         self.addCleanup(brain.close)
         brain.subscribe(events)

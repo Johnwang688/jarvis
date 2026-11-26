@@ -20,6 +20,7 @@ class VoiceWindow(unittest.TestCase):
         e2e_window_check.Window.setUp(self)
         e2e_window_check.Window.start_daemon(self)
         self.snapshot = {
+            "problem": None,
             "state": "resting", "transcriber": {"name": "fixture-asr", "reason": "fixture transcriber ready"},
             "voice": {"name": "fixture-voice", "reason": "only voice"}, "detector": "fixture",
             "gpu_warm": False, "counters": {}, "brain": {"name": "fixture", "state": "idle", "turns": 1},
@@ -153,6 +154,25 @@ class VoiceWindow(unittest.TestCase):
         error = self.panel.get_by_text("The fixture helper could not be started.", exact=True)
         self.expect(error).to_have_css("color", red)
         self.assertEqual(self.helper_actions, ["start", "stop", "start"])
+
+    def test_problem_is_the_first_detail_and_disappears_when_cleared(self):
+        self.open()
+        self.open_details()
+        problem = self.details.locator(".voice-details-body > .voice-error")
+        self.expect(problem).to_have_count(0)
+        for age in (5, 86400 * 3):
+            self.snapshot["problem"] = {
+                "text": "Claude isn’t signed in.", "hint": "Run “claude” in a terminal and sign in.",
+                "at": NOW.timestamp() - age,
+            }
+            self.visible(True)
+            self.expect(problem).to_have_text("Claude isn’t signed in.")
+            self.expect(problem).to_have_attribute("title", "Run “claude” in a terminal and sign in.")
+            self.expect(problem).to_have_css("color", self.color("--red"))
+            self.assertTrue(problem.evaluate("el => el === el.parentElement.firstElementChild"))
+            self.snapshot["problem"] = None
+            self.visible(True)
+            self.expect(problem).to_have_count(0)
 
     def test_settings_release_confirms_server_value_and_refusal_restores_it(self):
         self.open()

@@ -22,6 +22,7 @@ from jarvis import config
 from .._paths import open_directory
 from ..approvals import ApprovalBroker
 from ..chat import LISTENER_QUEUE_LIMIT, available_tools
+from .brain import VoiceSessionError
 
 
 LOG = logging.getLogger(__name__)
@@ -62,10 +63,6 @@ def _jobs():
     from .. import claude_jobs
 
     return claude_jobs
-
-
-class VoiceSessionError(RuntimeError):
-    """A fixed, safe reason for failure of the voice session."""
 
 
 async def _tool_worker(fn, *args, **kwargs):
@@ -169,7 +166,6 @@ class _Turn:
 class _Session:
     id: str = field(default_factory=lambda: uuid4().hex)
     client: object = None
-    connected: bool = False
     directory: object = None
     names: tuple = ()
     model: str = ""
@@ -197,6 +193,7 @@ class ClaudeVoiceBrain:
         self._loop = None
         self._wake = None
         self._warming = None
+        self._connected = False
         self._closed = False
         self._queue = deque()
         self._active = None
@@ -207,18 +204,24 @@ class ClaudeVoiceBrain:
         self._delivery_closed = False
 
     def warm(self):
-        """Connect without asking the model anything. May raise a fixed reason code."""
+        """Connect without asking the model. Return False if a turn takes over."""
         with self._lock:
             self._start_worker()
+            if self._connected:
+                return True
             if self._active is not None or self._queue:
                 # A turn connects for itself. Waiting behind it would wait for
                 # its approval card too, and hold up whoever asked to warm.
-                return
+                return False
             if self._warming is None:
                 self._warming = Future()
             waiting = self._warming
             self._notify_worker()
-        waiting.result()
+        return waiting.result()
+
+    def is_connected(self):
+        with self._lock:
+            return self._connected and not self._closed
 
     def send(self, text, *, steer, input_id, fresh_after):
         """Both steer modes replace the in-flight utterance in the same session."""
@@ -362,7 +365,7 @@ class ClaudeVoiceBrain:
 
     def _emit(self, session, turn, kind, **fields):
         with self._lock:
-            if self._active is turn and (not turn.cancelled.is_set() or kind in ("tool_end", "auto")):
+            if self._active is turn and (not turn.cancelled.is_set() or kind in ("connected", "tool_end", "auto")):
                 self._publish(session, turn, kind, **fields)
                 return True
             return False
@@ -388,7 +391,7 @@ class ClaudeVoiceBrain:
                         # The turn makes the connection the warm-up was for.
                         with self._lock:
                             self._warming = None
-                        waiting.set_result(None)
+                        waiting.set_result(False)
                     if (turn.fresh_after is not None and session.last_end is not None
                             and turn.submitted - session.last_end >= turn.fresh_after):
                         await self._disconnect(session)
@@ -397,16 +400,19 @@ class ClaudeVoiceBrain:
                         await self._disconnect(session)
                         session = _Session()
                 elif waiting is not None:
+                    failure = None
                     try:
                         await self._connect(session)
                     except VoiceSessionError as exc:
                         await self._disconnect(session)
                         session = _Session()
-                        waiting.set_exception(exc)
-                    else:
-                        waiting.set_result(None)
+                        failure = exc
                     with self._lock:
                         self._warming = None
+                    if failure is None:
+                        waiting.set_result(True)
+                    else:
+                        waiting.set_exception(failure)
                 else:
                     await self._wake.wait()
         finally:
@@ -429,13 +435,14 @@ class ClaudeVoiceBrain:
                 raise VoiceSessionError("private_cwd")
             session.directory = tempfile.TemporaryDirectory(prefix="voice-", dir=self._data_dir)
         env = _jobs()._job_env("voice", False, {}, environ=environ)
-        if not _jobs().cli_meets_floor(cli, cwd=session.directory.name, env=env, cancel=cancel):
-            raise VoiceSessionError("cli_version")
+        version = _jobs().cli_version_status(cli, cwd=session.directory.name, env=env, cancel=cancel)
+        if version != "ok":
+            raise VoiceSessionError({"too_old": "cli_version", "timeout": "connect_timeout"}.get(version, "connect_failed"))
         # SDK env overlays the daemon environment rather than replacing it.
         return cli, {**dict.fromkeys(environ.keys() - env.keys(), ""), **env}
 
     async def _connect(self, session, cancel=None):
-        if session.connected:
+        if self._connected:
             return
         try:
             from claude_agent_sdk import ClaudeAgentOptions
@@ -463,7 +470,8 @@ class ClaudeVoiceBrain:
 
             with anyio.fail_after(CONNECT_TIMEOUT):
                 await session.client.connect()
-            session.connected = True
+            with self._lock:
+                self._connected = True
         except VoiceSessionError:
             raise
         except TimeoutError:
@@ -472,6 +480,8 @@ class ClaudeVoiceBrain:
             raise VoiceSessionError("not_signed_in" if _login_error(str(exc)) else "connect_failed") from None
 
     async def _disconnect(self, session):
+        with self._lock:
+            self._connected = False
         if session.client is not None:
             try:
                 await session.client.disconnect()
@@ -530,6 +540,8 @@ class ClaudeVoiceBrain:
                 self._usage(session, turn)
         session.turn = None
         with self._lock:
+            if not healthy:
+                self._connected = False
             if turn.cancelled.is_set():
                 kind, fields = "stopped", {}
             self._publish(session, turn, kind, **fields)
@@ -545,7 +557,7 @@ class ClaudeVoiceBrain:
                     response.cancel()
                     await asyncio.gather(response, return_exceptions=True)
                     await self._finish_tools(session, turn)
-                    return session.connected or session.directory is None
+                    return self._connected or session.directory is None
                 # Drain the interrupted result before the next query can share this client.
                 ack, received, _ = await asyncio.gather(
                     session.client.interrupt(), asyncio.shield(response), self._finish_tools(session, turn),
@@ -574,6 +586,7 @@ class ClaudeVoiceBrain:
             if reason is not None:
                 raise _AdmissionRefused(reason)
         await self._connect(session, turn.cancelled)
+        self._emit(session, turn, "connected")
         if turn.cancelled.is_set():
             return ""
         turn.queried = True

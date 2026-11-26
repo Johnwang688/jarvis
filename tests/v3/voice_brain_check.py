@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from threading import Condition, Event, Thread, current_thread
 from types import SimpleNamespace
@@ -217,7 +218,8 @@ class VoiceBrainCheck(unittest.TestCase):
         self.enterContext(patch.multiple(config, GOOGLE_TOKEN_PATH=self.token, V3_POLICY_FILE=self.home / "absent-policy",
                                         VOICE_LINK_KEY=str(self.home / "absent-voice-link.key")))
         self.cli = self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/claude"))
-        self.version = self.enterContext(patch.object(claude_jobs, "cli_meets_floor", return_value=True))
+        self.version = self.enterContext(patch.object(claude_jobs, "_capture_version",
+                                                      return_value=self.version_result(claude_jobs.MIN_CLI.encode())))
         live = self.enterContext(patch.object(llm, "chat", side_effect=AssertionError("live completion")))
         spawn = self.enterContext(patch("subprocess.Popen", side_effect=AssertionError("real child process")))
         self.addCleanup(live.assert_not_called)
@@ -242,6 +244,10 @@ class VoiceBrainCheck(unittest.TestCase):
 
     def client(self):
         return self.factory.clients[-1]
+
+    @staticmethod
+    def version_result(stdout=b"", *, reason=None, returncode=0, overflow=False):
+        return reason, returncode, SimpleNamespace(stdout=stdout, overflow=overflow)
 
     def next_card(self, turn):
         self.events.wait("approval_pending", turn=turn)
@@ -353,6 +359,8 @@ class VoiceBrainCheck(unittest.TestCase):
             self.cli.assert_not_called()
             self.brain.warm()
             self.brain.warm()
+            self.assertTrue(self.brain.is_connected())
+            self.version.assert_called_once()
             client = self.client()
             self.assertEqual((len(self.factory.clients), client.queries), (1, []))
             self.assertTrue(client.connected)
@@ -402,17 +410,17 @@ class VoiceBrainCheck(unittest.TestCase):
         self.factory.scripts.extend((script(), script((CLAIM, [VAULT_ADD, ("get_datetime", {})]), early_tools=True)))
         turn = self.send("Plain question")
         reply_event = self.events.wait("reply", turn=turn)
-        self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "reply"])
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "reply"])
         self.assertEqual(self.events.wait("user", turn=turn)["input_id"], "input-Plain question")
         self.assertEqual(reply_event["text"], ANSWER)
         turn = self.send("Write fixture")
         card = self.next_card(turn)
         self.assertEqual(card["session_id"], reply_event["session_id"])
-        self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "tool_start", "approval_pending"])
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "tool_start", "approval_pending"])
         self.assertEqual(self.events.wait("step_end", turn=turn)["text"], CLAIM)
         self.answer(card)
         self.events.wait("reply", turn=turn)
-        self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "tool_start", "approval_pending",
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "tool_start", "approval_pending",
                                                    "tool_end", "tool_start", "tool_end", "delta", "step_end", "reply"])
         self.assertEqual([name for name, _, _ in self.client().results], ["vault_add", "get_datetime"])
         self.assertEqual(Vault(self.data / "vault").read("fixture").body, VAULT_ADD[1]["body"])
@@ -454,7 +462,7 @@ class VoiceBrainCheck(unittest.TestCase):
                     self.factory.scripts.append(play)
                     turn = self.send(timing)
                     self.events.wait("reply", turn=turn)
-                self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "tool_start", "tool_end",
+                self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "tool_start", "tool_end",
                                                            "delta", "step_end", "reply"])
                 steps = [e for e in self.events.events if e["kind"] == "step_end" and e["turn"] == turn]
                 self.assertEqual([(e["text"], e["has_tools"]) for e in steps], [(ONE_CLAIM, True), (ANSWER, False)])
@@ -480,7 +488,7 @@ class VoiceBrainCheck(unittest.TestCase):
         with patch.object(brain_module, "STEP_END_TIMEOUT", 0.02):
             turn = self.send()
             self.assertEqual(self.events.wait("reply", turn=turn)["text"], ANSWER)
-        self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "tool_start", "tool_end", "tool_start",
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "tool_start", "tool_end", "tool_start",
                                                    "tool_end", "delta", "step_end", "reply"])
         steps = [e for e in self.events.events if e["kind"] == "step_end" and e["turn"] == turn]
         self.assertEqual([(e["text"], e["has_tools"]) for e in steps], [(ONE_CLAIM, True), (ANSWER, False)])
@@ -518,7 +526,7 @@ class VoiceBrainCheck(unittest.TestCase):
         self.answer(card)
         self.assertEqual(self.events.wait("reply", turn=turn)["text"], "")
         self.assertEqual(spoken.wait("say", turn=turn)["text"], "Done.")
-        self.assertEqual(self.events.kinds(turn), ["user", "step_end", "tool_start", "approval_pending", "tool_end", "reply"])
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "step_end", "tool_start", "approval_pending", "tool_end", "reply"])
 
     def test_voice_turns_speak_first_sentence_before_message_stop(self):
         self.start()
@@ -565,7 +573,7 @@ class VoiceBrainCheck(unittest.TestCase):
         self.factory.scripts.append(script((CLAIM, [VAULT_ADD]), text="The fixture note was added."))
         turn = self.brain.send("Fixture approve", steer=False, input_id="fixture-input", fresh_after=None)
         card = self.next_card(turn)
-        self.assertIsNone(queued.result(2))
+        self.assertIs(queued.result(2), False)
         during = Thread(target=self.brain.warm, daemon=True)
         during.start()
         during.join(2)
@@ -872,7 +880,7 @@ class VoiceBrainCheck(unittest.TestCase):
         workers[0].join(2)
         self.assertFalse(workers[0].is_alive())
         self.assertEqual(self.client().results, [])
-        self.assertEqual(self.events.kinds(turn), ["user", "step_end", "tool_start", "error"])
+        self.assertEqual(self.events.kinds(turn), ["user", "connected", "step_end", "tool_start", "error"])
 
     def test_barge_in_stop_and_close_cancel_cards_and_drain_in_order(self):
         self.start()
@@ -948,7 +956,9 @@ class VoiceBrainCheck(unittest.TestCase):
             with self.subTest(scenario=scenario), patch.object(brain_module, "FIRST_TOKEN_TIMEOUT", 0.1):
                 turn = self.send(scenario)
                 self.assertEqual(self.events.wait("error", turn=turn)["reason"], reason)
+                self.assertFalse(self.brain.is_connected())
         self.events.wait("reply", turn=self.send("Retry"))
+        self.assertTrue(self.brain.is_connected())
         self.assertEqual(len(self.factory.clients), 4)
         self.assertTrue(all(client.disconnected for client in self.factory.clients[:-1]))
 
@@ -968,7 +978,7 @@ class VoiceBrainCheck(unittest.TestCase):
             for reason in ("idle_timeout", "process_failed"):
                 turn = self.send(reason)
                 self.assertEqual(self.events.wait("error", turn=turn)["reason"], reason)
-                self.assertEqual(self.events.kinds(turn), ["user", "delta", "step_end", "error"])
+                self.assertEqual(self.events.kinds(turn), ["user", "connected", "delta", "step_end", "error"])
 
     def test_connect_timeout_and_preflight_errors(self):
         self.start()
@@ -979,14 +989,14 @@ class VoiceBrainCheck(unittest.TestCase):
         self.assertEqual(self.events.wait("error", turn=self.send("Missing"))["reason"], "cli_missing")
         self.version.assert_not_called()
         self.cli.return_value = "/example/bin/claude"
-        self.version.return_value = False
+        self.version.return_value = self.version_result(b"0.1.0 (Claude Code)")
         self.assertEqual(self.events.wait("error", turn=self.send("Old"))["reason"], "cli_version")
         self.assertEqual(self.factory.clients, [])
 
         async def connect_hangs():
             await asyncio.Event().wait()
 
-        self.version.return_value = True
+        self.version.return_value = self.version_result(claude_jobs.MIN_CLI.encode())
         self.factory.connect_hook = connect_hangs
         with patch.object(brain_module, "CONNECT_TIMEOUT", 0.05):
             self.assertEqual(self.events.wait("error", turn=self.send("Connect"))["reason"], "connect_timeout")
@@ -994,6 +1004,27 @@ class VoiceBrainCheck(unittest.TestCase):
         self.factory.scripts.append(script())
         self.events.wait("reply", turn=self.send("Retry"))
         self.assertTrue(self.factory.clients[0].disconnected)
+
+    def test_version_probe_failures_raise_transient_codes(self):
+        self.start()
+        version = claude_jobs.MIN_CLI.encode()
+        for label, capture, code in (
+            ("timed out", self.version_result(reason="timeout"), "connect_timeout"),
+            ("reap timed out", subprocess.TimeoutExpired("fixture", 1), "connect_timeout"),
+            ("cancelled", self.version_result(reason="cancelled"), "connect_failed"),
+            ("could not start", OSError("fixture"), "connect_failed"),
+            ("overflowed", self.version_result(version, overflow=True), "connect_failed"),
+            ("nonzero exit", self.version_result(version, returncode=1), "connect_failed"),
+            ("empty output", self.version_result(), "connect_failed"),
+            ("malformed output", self.version_result(b"fixture"), "connect_failed"),
+            ("invalid UTF-8", self.version_result(b"\xff"), "connect_failed"),
+        ):
+            with self.subTest(probe=label):
+                self.version.side_effect = [capture]
+                with self.assertRaises(brain_module.VoiceSessionError) as raised:
+                    self.brain.warm()
+                self.assertEqual(str(raised.exception), code)
+                self.assertEqual(self.factory.clients, [])
 
     def test_step_limit_interrupts_with_fixed_reply_and_no_extra_tool(self):
         self.start()

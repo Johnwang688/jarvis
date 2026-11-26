@@ -255,7 +255,7 @@ class VoiceApprovalFlow(BrokerFixture):
         self.enterContext(patch.dict(os.environ, {"HOME": str(self.root)}, clear=True))
         self.enterContext(patch.multiple(claude_jobs,
                                         resolve_native_cli=lambda: "/example/bin/claude",
-                                        cli_meets_floor=lambda *_a, **_k: True))
+                                        cli_version_status=lambda *_a, **_k: "ok"))
         self.brain = ClaudeVoiceBrain(self.data, approvals=self.broker, client_factory=self.factory,
                                       clock=self.clock, record_usage=lambda _row: None)
         self.addCleanup(self.brain.close)

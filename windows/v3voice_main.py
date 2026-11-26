@@ -164,7 +164,7 @@ class Helper:
                 with self._lock:
                     if self._connected:
                         event = {"kind": "error", "reason": reason}
-                        self._publish(self._render.state_from_event(self._display, event))
+                        self._publish(self._render.state_from_event(self._display, event, device_error=True))
                 if reason != "Talk key stopped after a hook error." and capture_active:
                     self._capture.stop()
                     capture_active = False

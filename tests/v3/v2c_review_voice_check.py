@@ -19,7 +19,7 @@ class VoiceReview(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"HOME": str(home)}, clear=True))
         self.enterContext(patch.object(config, "GOOGLE_TOKEN_PATH", home / "absent-token"))
         self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/claude"))
-        self.enterContext(patch.object(claude_jobs, "cli_meets_floor", return_value=True))
+        self.enterContext(patch.object(claude_jobs, "cli_version_status", return_value="ok"))
         for target in (patch.object(llm, "chat"), patch("subprocess.Popen")):
             blocked = self.enterContext(target)
             blocked.side_effect = AssertionError("Fixture must stay in process")
@@ -86,7 +86,7 @@ class VoiceReview(unittest.TestCase):
             turn = self.send(brain, "Read the fixture")
             self.assertEqual(self.events.wait("reply", turn=turn)["text"], answer)
         self.assertEqual(self.events.kinds(turn),
-                         ["user", "step_end", "tool_start", "tool_end", "delta", "step_end", "reply"])
+                         ["user", "connected", "step_end", "tool_start", "tool_end", "delta", "step_end", "reply"])
         self.assertEqual(self.events.wait("delta", turn=turn)["text"], answer)
 
     def test_empty_message_does_not_disarm_first_token_timeout(self):

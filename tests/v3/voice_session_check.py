@@ -2,11 +2,13 @@
 
 from collections import deque
 from threading import Condition, Event, current_thread
+import time
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 
+from jarvis.v3.voice.brain import VoiceSessionError
 from jarvis.v3.voice.engines import EngineChoice
 from jarvis.v3.voice.hearing import FRAME_SAMPLES
 from jarvis.v3.voice.session import ANSWER_WORDS, VoiceSession
@@ -223,6 +225,227 @@ class VoiceSessionCheck(unittest.TestCase):
         with patch.object(self.session, "_handle", side_effect=observe):
             self.session._post("test_fence")
             self.assertTrue(checked.wait(WAIT))
+
+    def start_brain_warm(self, *outcomes):
+        self.open(start=False)
+        attempts, waiting = Rows(), Rows()
+        outcomes = iter(outcomes)
+
+        def warm():
+            attempts.add(self.now)
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        wait = self.session._changed.wait
+
+        def wait_for_clock(timeout=None):
+            if current_thread().name == "voice-warm-brain":
+                if not waiting.rows or waiting.rows[-1] != timeout:
+                    waiting.add(timeout)
+                timeout = None  # Only advancing the fake clock wakes this test.
+            return wait(timeout)
+
+        self.brain.warm = warm
+        self.enterContext(patch.object(self.session._changed, "wait", side_effect=wait_for_clock))
+        start = self.now
+        self.session.start()
+        worker = next(worker for worker in self.session._warmers if worker.name == "voice-warm-brain")
+        self.wait_state("resting")
+        return start, attempts, waiting, worker
+
+    def advance_warm(self, seconds):
+        with self.session._changed:
+            self.now += seconds
+            self.session._changed.notify_all()
+
+    def finish_warm(self, worker):
+        worker.join(WAIT)
+        self.assertFalse(worker.is_alive())
+
+    def test_reconnect_warms_only_if_the_brain_has_disconnected(self):
+        self.open(start=False)
+        connected = Event()
+        attempts = Rows()
+
+        def warm():
+            attempts.add(current_thread())
+            connected.set()
+
+        self.brain.warm = warm
+        self.brain.is_connected = connected.is_set
+        self.session.start()
+        attempts.wait(bool)
+        self.finish_warm(attempts.rows[0])
+        self.session.stop()
+        self.session.start()
+        self.assertIsNone(self.session._brain_warmer)
+        self.assertEqual(len(attempts.rows), 1)
+
+        connected.clear()
+        self.session.stop()
+        self.session.start()
+        attempts.wait(lambda rows: len(rows) == 2)
+        self.finish_warm(attempts.rows[-1])
+
+    def test_reconnect_waits_for_an_inflight_warmup_to_exit(self):
+        self.open(start=False)
+        entered, release = Event(), Event()
+        attempts = Rows()
+
+        def warm():
+            attempts.add(current_thread())
+            if len(attempts.rows) == 1:
+                entered.set()
+                if not release.wait(WAIT):
+                    raise TimeoutError("fixture warm-up was not released")
+                raise VoiceSessionError("connect_timeout")
+
+        self.brain.warm = warm
+        self.addCleanup(release.set)
+        self.session.start()
+        self.assertTrue(entered.wait(WAIT))
+        self.session.stop()
+        self.session.start()
+        self.session.start()
+        release.set()
+        attempts.wait(lambda rows: len(rows) == 2)
+        self.finish_warm(attempts.rows[0])
+        self.assertEqual(attempts.rows, [attempts.rows[0]] * 2)
+
+    def test_start_retries_warmup_for_an_active_helper_after_setup_failure(self):
+        _, attempts, _, worker = self.start_brain_warm(VoiceSessionError("not_signed_in"), None)
+        self.finish_warm(worker)
+        self.assertEqual(self.session.status()["problem"]["code"], "brain_not_signed_in")
+        generation = self.session._generation
+        self.session.start()
+        attempts.wait(lambda rows: len(rows) == 2)
+        self.finish_warm(next(w for w in self.session._warmers if w.name == "voice-warm-brain"))
+        self.assertEqual(self.session._generation, generation)
+        self.assertIsNone(self.session.status()["problem"])
+
+    def test_warm_success_and_closed_are_silent(self):
+        for outcome in (None, VoiceSessionError("closed")):
+            with self.subTest(outcome=outcome), self.assertNoLogs("jarvis.v3.voice.session", "WARNING"):
+                start, attempts, waiting, worker = self.start_brain_warm(outcome)
+                self.finish_warm(worker)
+                self.worker_fence()
+                self.assertEqual(attempts.rows, [start])
+                self.assertEqual(waiting.rows, [])
+                self.assertEqual(self.of_kind("error"), [])
+                self.assertIsNone(self.session.status()["problem"])
+                self.session.close()
+                self.events = Rows()
+
+    def test_warm_owner_problems_are_log_safe_and_visible(self):
+        for code in ("api_key_env", "cli_missing", "cli_version", "private_cwd", "not_signed_in"):
+            with self.subTest(code=code), self.assertLogs("jarvis.v3.voice.session", "WARNING") as logs:
+                before = time.time()
+                start, attempts, waiting, worker = self.start_brain_warm(VoiceSessionError(code))
+                self.finish_warm(worker)
+                self.assertEqual(self.wait_kind("error"), {"reason": f"brain_{code}"})
+                self.worker_fence()
+                self.assertEqual(self.of_kind("error"), [{"reason": f"brain_{code}"}])
+                self.assertEqual(attempts.rows, [start])
+                self.assertEqual(waiting.rows, [])
+                problem = self.session.status()["problem"]
+                self.assertEqual(problem["code"], f"brain_{code}")
+                self.assertLessEqual(before, problem["at"])
+                self.assertLessEqual(problem["at"], time.time())
+                self.assertEqual([record.getMessage() for record in logs.records],
+                                 [f"The voice brain could not warm up: {code}"])
+                self.session.close()
+                self.events = Rows()
+
+    def test_warm_retries_at_each_deadline_then_records_the_latest_code(self):
+        failures = (VoiceSessionError("connect_timeout"), VoiceSessionError("connect_failed"),
+                    VoiceSessionError("empty_response"), VoiceSessionError("process_failed"))
+        with self.assertLogs("jarvis.v3.voice.session", "WARNING") as logs:
+            start, attempts, waiting, worker = self.start_brain_warm(*failures)
+            for index, delay in enumerate((3, 10, 30)):
+                waiting.wait(lambda rows: len(rows) > 2 * index)
+                self.assertEqual(waiting.rows[-1], delay)
+                self.assertIsNone(self.session.status()["problem"])
+                self.advance_warm(delay - 1)
+                waiting.wait(lambda rows: len(rows) > 2 * index + 1)
+                self.assertEqual(waiting.rows[-1], 1)
+                self.assertEqual(len(attempts.rows), index + 1)
+                self.advance_warm(1)
+            self.finish_warm(worker)
+            self.worker_fence()
+        self.assertEqual(attempts.rows, [start, start + 3, start + 13, start + 43])
+        self.assertEqual(self.of_kind("error"), [])
+        problem = self.session.status()["problem"]
+        self.assertEqual(problem, {"code": "brain_process_failed", "at": self.session._epoch_offset + self.now})
+        self.assertEqual([record.getMessage() for record in logs.records],
+                         [f"The voice brain could not warm up: {failure}" for failure in failures])
+
+    def test_warm_unknown_exception_retries_safely_and_success_clears_problem(self):
+        with self.assertLogs("jarvis.v3.voice.session", "WARNING") as logs:
+            start, attempts, waiting, worker = self.start_brain_warm(
+                OSError("/example/private fake-token"), False, None)
+            waiting.wait(bool)
+            with self.session._changed:
+                self.session._record_problem("turn_failed")
+            self.advance_warm(3)
+            waiting.wait(lambda rows: rows[-1] == 10)
+            self.assertEqual(self.session.status()["problem"]["code"], "turn_failed")
+            self.advance_warm(10)
+            self.finish_warm(worker)
+            self.worker_fence()
+        self.assertEqual(attempts.rows, [start, start + 3, start + 13])
+        self.assertEqual(self.of_kind("error"), [])
+        self.assertIsNone(self.session.status()["problem"])
+        self.assertEqual([record.getMessage() for record in logs.records],
+                         ["The voice brain could not warm up: unknown"])
+        self.assertNotIn("/example/private", "\n".join(logs.output))
+        self.assertNotIn("fake-token", "\n".join(logs.output))
+
+    def test_warm_wait_stops_when_the_session_stops(self):
+        with self.assertLogs("jarvis.v3.voice.session", "WARNING"):
+            start, attempts, waiting, worker = self.start_brain_warm(VoiceSessionError("connect_timeout"))
+            waiting.wait(bool)
+            self.session.stop()
+            self.finish_warm(worker)
+        self.assertEqual(attempts.rows, [start])
+        self.assertEqual(self.of_kind("error"), [])
+        self.assertIsNone(self.session.status()["problem"])
+
+    def test_warm_wait_stops_on_connection_even_before_the_reply(self):
+        with self.assertLogs("jarvis.v3.voice.session", "WARNING"):
+            start, attempts, waiting, worker = self.start_brain_warm(VoiceSessionError("connect_timeout"))
+            waiting.wait(bool)
+            self.utterance("Jarvis check the connection")
+            self.input("check the connection")
+            self.assertTrue(worker.is_alive())
+            self.brain.emit("connected")
+            self.finish_warm(worker)
+        self.assertEqual(attempts.rows, [start])
+        self.assertEqual(self.of_kind("error"), [])
+        self.assertIsNone(self.session.status()["problem"])
+
+    def test_turn_reports_known_reason_and_clears_problem_after_reply(self):
+        self.open()
+        for index, (reason, expected, log_code) in enumerate((
+            ("process_failed", "brain_process_failed", "process_failed"),
+            ("fake-token /example/private", "turn_failed", "unknown"),
+        ), start=1):
+            text = f"fixture request {index}"
+            self.utterance(f"Jarvis {text}")
+            self.input(text)
+            with self.assertLogs("jarvis.v3.voice.session", "WARNING") as logs:
+                self.brain.emit("error", reason=reason)
+                self.assertEqual(self.wait_kind("error", index), {"reason": expected})
+            self.assertEqual(self.session.status()["problem"]["code"], expected)
+            self.assertEqual([record.getMessage() for record in logs.records],
+                             [f"The voice turn failed: {log_code}"])
+            self.played(self.wait_kind("say", index)["id"])
+            self.wait_state("resting", index + 1)
+        self.utterance("Jarvis fixture recovery")
+        self.input("fixture recovery")
+        self.reply()
+        self.assertIsNone(self.session.status()["problem"])
 
     def test_wake_prefix_and_room_speech_privacy(self):
         self.open()

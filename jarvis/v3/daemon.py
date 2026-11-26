@@ -23,6 +23,7 @@ import time
 from typing import Callable
 
 from jarvis import config
+from windows.v3voice_problems import PROBLEMS, UNKNOWN
 from . import hud, owner_routes
 from .approvals import ApprovalBroker
 from .chat import ChatService
@@ -570,7 +571,7 @@ class Daemon:
         brain, session, link = self._voice_brain, self._voice_session, self._voice_link
         status = {"brain": "claude", "state": "idle", "turns": 0} if brain is None else brain.status()
         status["brain_state"] = status.pop("state")
-        status.update({"state": "resting"} if session is None else session.status())
+        status.update({"state": "resting", "problem": None} if session is None else session.status())
         status["link"] = (link.status() if link is not None else
                           {"listening": False, "connected": False, "reason": "not_started"})
         return status
@@ -613,6 +614,11 @@ class Daemon:
         status = session.status()
         panel = {name: status[name] for name in ("state", "reason", "transcriber", "voice",
                                                  "detector", "gpu_warm", "counters") if name in status}
+        problem = status.get("problem")
+        panel["problem"] = None
+        if problem is not None:
+            _, line, hint = PROBLEMS.get(problem["code"], UNKNOWN)
+            panel["problem"] = {"text": line, "hint": hint, "at": problem["at"]}
         rows = []
         for row in turns.trace()[:20]:
             rows.append({

@@ -1,12 +1,14 @@
 """Exercise the local Voice panel API with a paired fake helper and engines."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 import http.client
+from io import StringIO
 import json
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -20,9 +22,10 @@ from voice_session_check import Detector, QUIET, RAW, Rows, Transcriber
 from voice_wiring_check import CHUNK, RATE, REPLY
 
 from jarvis import config, llm
-from jarvis.v3 import phone_auth, phone_routes
+from jarvis.v3 import cli, phone_auth, phone_routes
 from jarvis.v3.daemon import Daemon
 from jarvis.v3.voice import settings, wire
+from jarvis.v3.voice.brain import VoiceSessionError
 from jarvis.v3.voice.engines import EngineChoice, KokoroVoice
 from jarvis.v3.voice.hearing import FRAME_MS
 from jarvis.v3.voice.session import ECHO_TAIL_S, VoiceSession
@@ -216,6 +219,39 @@ class PanelCheck(unittest.TestCase):
     def update(self, body, *, owner=True):
         return self.request(SETTINGS, method="POST", body=body, owner=owner)
 
+    def test_problem_snapshot_and_cli_age(self):
+        self.start()
+
+        def cli_lines(now):
+            with (patch.object(config, "V3_API_PORT", self.daemon.port),
+                  patch.object(cli.time, "time", return_value=now), redirect_stdout(StringIO()) as output):
+                self.assertEqual(cli.voice_helper(SimpleNamespace(action="status")), 0)
+            return [line for line in output.getvalue().splitlines() if line.startswith("Voice problem ")]
+
+        self.assertIsNone(self.request()[1]["problem"])
+        self.assertIsNone(self.request("/v3/status")[1]["voice"]["problem"])
+        self.assertEqual(cli_lines(time.time()), [])
+
+        def warm():
+            raise VoiceSessionError("not_signed_in")
+
+        self.daemon._voice_brain.warm = warm
+        with ExitStack() as stack:
+            helper = Helper(stack, self.daemon._voice_link.address).authenticate()
+            self.state(helper, "resting")
+            self.event(helper, kind="error", reason="brain_not_signed_in")
+            problem = self.request("/v3/status")[1]["voice"]["problem"]
+            self.assertEqual(problem["code"], "brain_not_signed_in")
+            for age, label in ((5, "just now"), (120, "2 minutes ago"), (86400 * 3, "3 days ago")):
+                with self.subTest(age=age):
+                    self.assertEqual(cli_lines(problem["at"] + age), [f"Voice problem {label}: Claude isn’t signed in."])
+                    status, snapshot = self.request()
+                    self.assertEqual(status, 200)
+                    self.assertEqual(snapshot["problem"], {
+                        "text": "Claude isn’t signed in.", "hint": "Run “claude” in a terminal and sign in.",
+                        "at": problem["at"],
+                    })
+
     def test_live_speed_follow_up_and_restart(self):
         self.start()
         with ExitStack() as stack:
@@ -301,7 +337,7 @@ class PanelCheck(unittest.TestCase):
             status, reply = self.request()
         self.assertEqual(status, 200)
         self.assertEqual(set(reply), {"state", "transcriber", "voice", "detector", "gpu_warm",
-                                      "counters", "helper", "brain", "settings", "turns"})
+                                      "counters", "helper", "brain", "settings", "turns", "problem"})
         for engine in ("transcriber", "voice"):
             self.assertEqual(set(reply[engine]), {"name", "reason"})
         self.assertEqual(reply["helper"], {"connected": True, "listening": True, "version": HELLO["version"],
