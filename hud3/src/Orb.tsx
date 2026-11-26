@@ -64,5 +64,6 @@ export function Orb() {
     };
   }, []);
 
-  return <canvas className="agent-orb" ref={canvas} data-orb aria-hidden="true" />;
+  // The id is where the startup animation's orb comes to rest.
+  return <canvas className="agent-orb" id="orb" ref={canvas} data-orb aria-hidden="true" />;
 }
