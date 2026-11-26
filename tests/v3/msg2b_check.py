@@ -233,7 +233,8 @@ class PlannerMessages(unittest.TestCase):
         self.assertNotIn("The brief begins:", wire)
         self.assertEqual(self.t3.starts[1][:2], (self.demo.path, thread_prompt(ask_message(
             ask="Review this", why_now="The signal is ready.", because="This helps decide the next step.",
-            project="demo", tainted=False,
+            project="demo", tainted=False, now=self.now,
+            sources=[{"kind": "thread", "project": "demo", "title": "Review output"}],
         ))))
         for row in (started, asked):
             key = hashlib.sha256(f"proposal:{row['id']}".encode()).hexdigest()

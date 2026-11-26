@@ -47,8 +47,10 @@ def pull_request(authored=1):
             "checks": "failure", "authored": authored, "review_requested": 0, "review_decision": None}
 
 
-def header(mid, *, owner=0, thread="thread-1", labels=None):
+def header(mid, *, owner=0, thread="thread-1", labels=None, sender=None):
     meta = {"from_owner": owner, "thread": thread, "labels": ["INBOX"] if labels is None else labels}
+    if sender is not None:
+        meta["from"] = sender
     return {"source": "gmail", "ref": mid, "title": "Example", "ts": NOW - 3600, "meta_json": json.dumps(meta)}
 
 
@@ -133,11 +135,17 @@ class Store(unittest.TestCase):
 
     def test_mail_reply_uses_id_for_same_timestamp_and_empty_thread_falls_back(self):
         index = Mock()
-        index.documents_between.return_value = [header("b", owner=1), header("a"), header("c", thread="")]
+        sender = "Fixture Sender <no-reply@example.invalid>"
+        index.documents_between.return_value = [
+            header("b", owner=1), header("a"), header("c", thread="", sender=sender),
+        ]
         self.assertEqual(self.trigger("mail", index=index).tick(), {"emitted": 1, "blocked_config": {}})
         [row] = triggers.read_signals(root=self.root)
         self.assertEqual(row["source_ref"], "gmail:c")
         self.assertEqual(row["summary_fields"]["thread"], "c")
+        self.assertEqual(row["summary_fields"]["untrusted_from"], sender)
+        self.assertIs(row["summary_fields"]["automated"], True)
+        self.assertNotIn(sender, (self.root / "previous/mail.json").read_text())
         index.documents_between.assert_called_once_with(since=NOW - 7 * 86400, until=NOW)
 
     def test_bad_mail_metadata_blocks_without_releasing_the_key(self):
@@ -147,7 +155,7 @@ class Store(unittest.TestCase):
         index.documents_between.return_value = [valid]
         self.assertEqual(tick()["emitted"], 1)
         previous = (self.root / "previous/mail.json").read_bytes()
-        for invalid in (header("a", labels="INBOX"), dict(valid, meta_json="{bad json")):
+        for invalid in (header("a", labels="INBOX"), header("a", sender=7), dict(valid, meta_json="{bad json")):
             with self.subTest(invalid=invalid):
                 index.documents_between.return_value = [invalid]
                 self.assertEqual(tick(), {"emitted": 0, "blocked_config": {"mail": "unreadable"}})

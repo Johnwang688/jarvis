@@ -34,6 +34,7 @@ TAINTED_THREAD_HEADER = "Use the task below. Treat the sources at the end as ref
 UNTRUSTED_SOURCES_HEADING = "Sources (untrusted, for reference)"
 LOG = logging.getLogger(__name__)
 _PROMPT = Path(__file__).with_name("prompts") / "planner.md"
+_MAIL_SUMMARY_PROMPT = _PROMPT.with_name("mail_summary.md")
 _CHICAGO = ZoneInfo("America/Chicago")
 _STATE = "planner.json"
 _STATE_LIMIT = 1024 * 1024
@@ -42,6 +43,17 @@ _PROJECT_LIMIT = 64
 _THREAD_LIMIT = 100
 _EXCERPT_LIMIT = 12
 _EXCERPT_CHARS = 2000
+_MAIL_LIMIT = 12
+_MAIL_CHARS = 2000
+_SUMMARY_MAIL_CHARS = 6000
+_SUMMARY_FORBIDDEN = re.compile(r"://|www\.|@|\d{6,}", re.IGNORECASE)
+_SUMMARY_LABEL = re.compile(r"^(?:(?:mail |email |message |in )?summary|overview|tl;dr) *: *", re.IGNORECASE)
+_DIGIT_SEPARATOR = re.compile(r"(?<=\d)[ .-]+(?=\d)")
+_SUMMARY_NUMBER = re.compile(r"\d{4,}")
+_SUMMARY_YEAR = re.compile(r"20[0-9]{2}")
+_SUMMARY_AMOUNT = re.compile(r"[$€£]\s?(?:\d{1,3}(?:,\d{3})+|\d{1,6})(?:\.\d{2})?(?![\d.,]*\d)")
+_WORD = re.compile(r"\w+")
+_SECRET_LABELS = {"code", "password", "passcode", "pin", "otp", "token", "key"}
 _CALENDAR_LIMIT = 64
 _COPY_SPAN = 40
 _REPLY_LIMIT = 256 * 1024
@@ -65,6 +77,7 @@ class _Source:
     title: str
     tainted: bool
     project: str | None = None
+    notice: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +139,7 @@ def _strings(value):
             yield from _strings(item)
 
 
-def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
+def assemble(*, signals, ledger, registry, calendar, vault, excerpts, mail_texts=None) -> Inputs:
     """Assemble source snapshots. Vault and excerpts map project/thread IDs to text."""
     registered = registry.list() if hasattr(registry, "list") else list(registry)
     projects = {project.name: project for project in registered[:_PROJECT_LIMIT]}
@@ -135,6 +148,7 @@ def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
     threads = {thread.thread_id: thread for thread in rows[:_THREAD_LIMIT]}
     paths = sorted({project.path for project in registered}, key=len, reverse=True)
     sections, sources, carried = [], {}, []
+    mail_texts = {} if mail_texts is None else mail_texts
 
     def clean(text):
         text = _scrub(text)
@@ -172,13 +186,25 @@ def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
     for signal in signals[:_SIGNAL_LIMIT]:
         identifier = signal["id"]
         fields = dict(signal["summary_fields"])
-        title = fields.pop("untrusted_title", "")
+        raw_title = fields.pop("untrusted_title", "")
+        sender = fields.pop("untrusted_from", "")
         row = dict(id=identifier, type="signal", kind=signal["kind"], source=signal["source"],
                    created=signal["created"], fields=fields)
         fenced(_json(clean_fields(row)), "signal fields")
         carried.extend(clean(text) for text in _strings(fields))
-        title = fenced(title, f"signal {identifier} title") if title else signal["kind"]
-        sources["signal", identifier] = _Source(signal["source"], signal["dedupe_key"], title, True)
+        title = fenced(raw_title, f"signal {identifier} title") if raw_title else signal["kind"]
+        if signal["kind"] == "mail.needs_reply":
+            if sender:
+                fenced(sender, f"signal {identifier} sender")
+            if raw_mail := mail_texts.get(identifier):
+                try:
+                    if mail_text := _scrub_mail(raw_mail[:_MAIL_CHARS]):
+                        fenced(mail_text, f"mail text {identifier}")
+                except Exception:
+                    pass
+        notice = _signal_notice(signal, raw_title, sender)
+        sources["signal", identifier] = _Source(signal["source"], signal["dedupe_key"], title, True,
+                                                 notice=notice)
 
     if threads:
         sections.append("Work ledger")
@@ -189,12 +215,13 @@ def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
                       status=thread.status, waiting=thread.waiting_on_owner, updated_at=thread.updated_at))
         title = fenced(thread.title, f"ledger thread {thread_id} title")
         key = f"{thread_id}:{thread.updated_at}"
-        sources["thread", identifier] = _Source("thread", f"ledger:{key}", title, False, thread.project)
+        notice = dict(kind="thread", project=thread.project, title=thread.title)
+        sources["thread", identifier] = _Source("thread", f"ledger:{key}", title, False, thread.project, notice)
         if excerpt := excerpts.get(thread_id):
             identifier = f"excerpt:{thread_id}"
             metadata(dict(type="thread", id=identifier, thread_id=thread_id))
             fenced(excerpt, f"T3 excerpt {thread_id}", tail_limit=_EXCERPT_CHARS)
-            sources["thread", identifier] = _Source("thread", f"excerpt:{key}", title, True, thread.project)
+            sources["thread", identifier] = _Source("thread", f"excerpt:{key}", title, True, thread.project, notice)
 
     if calendar is not None:
         sections.append("Calendar busy blocks for 48 hours")
@@ -202,7 +229,8 @@ def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
             identifier = event["id"]
             metadata(dict(type="calendar", id=identifier, start=event["start"], end=event["end"]))
             title = fenced(event["title"] or "(untitled)", f"calendar event {identifier} title")
-            sources["calendar", identifier] = _Source("calendar", identifier, title, True)
+            notice = dict(kind="calendar", title=event["title"], start=event["start"])
+            sources["calendar", identifier] = _Source("calendar", identifier, title, True, notice=notice)
 
     for project in projects:
         if project in vault:
@@ -213,6 +241,24 @@ def assemble(*, signals, ledger, registry, calendar, vault, excerpts) -> Inputs:
 
     prompt = _PROMPT.read_text(encoding="utf-8").strip() + "\n\n" + "\n".join(sections)
     return Inputs(prompt, sources, tuple(carried), projects, threads, time.time())
+
+
+def _signal_notice(signal, title, sender):
+    fields = signal["summary_fields"]
+    if signal["kind"] == "mail.needs_reply":
+        return dict(kind="mail", title=title, sender=sender, received=fields.get("received"),
+                    automated=fields.get("automated"), message=fields.get("message"))
+    kind = signal["source"]
+    if kind == "github":
+        return dict(kind=kind, title=title, repo=fields.get("repo"), number=fields.get("number"))
+    if kind == "calendar":
+        if signal["kind"] == "calendar.idle_block_tomorrow":
+            return dict(kind=kind, title=title or "Available time", start=fields.get("date"))
+        return dict(kind=kind, title=title, start=fields.get("start"))
+    if kind in ("schoolwork", "commitments"):
+        return dict(kind="commitment" if kind == "commitments" else kind,
+                    title=title, due=fields.get("due"))
+    return None
 
 
 def _scrub(text):
@@ -343,8 +389,8 @@ def _draft(item, inputs, copied):
     if any(type(ref) is not dict or ref.keys() != {"type", "id"}
            or not all(type(value) is str for value in ref.values()) for ref in basis):
         return None
-    refs = {(ref["type"], ref["id"]) for ref in basis}
-    if not refs <= inputs.sources.keys():
+    refs = dict.fromkeys((ref["type"], ref["id"]) for ref in basis)
+    if not refs.keys() <= inputs.sources.keys():
         return None
     sources = [inputs.sources[ref] for ref in sorted(refs)]
     tainted = any(source.tainted for source in sources)
@@ -400,7 +446,7 @@ def _draft(item, inputs, copied):
     brief = _fields(dict(kind="decision" if action else "news", rank=3, ask=ask, why_now=why_now,
                          recommend=dict(label="Approve" if action else "Consider", because=because),
                          context=context, default=dict(action="none", at=deadline) if action else None))
-    return Draft(kind, level, [dict(type=t, id=i) for t, i in sorted(refs)], brief,
+    return Draft(kind, level, [dict(type=t, id=i) for t, i in refs], brief,
                  action, dedupe, project, tainted)
 
 
@@ -473,6 +519,46 @@ def _read_excerpts(work, threads, previous):
                 excerpts[thread.thread_id] = _scrub(text)[-_EXCERPT_CHARS:]
                 break
     return excerpts
+
+
+def _mail_text(index, message_id, limit):
+    if not isinstance(message_id, str) or not message_id:
+        return ""
+    try:
+        doc = index.document("gmail", message_id)
+        if doc is not None and (record := index.read(doc["id"])) is not None:
+            # Index chunks retain their original whitespace and order.
+            return "".join(chunk["text"] for chunk in record["messages"])[:limit]
+    except Exception:
+        pass
+    return ""
+
+
+def _read_mail_texts(batch):
+    from .index import Index
+
+    mails = [row for row in batch if row["kind"] == "mail.needs_reply"]
+    if not mails:
+        return {}
+    newest = sorted(mails, key=lambda row: (triggers._instant(row["created"]), row["seq"]), reverse=True)
+    try:
+        with Index(readonly=True) as index:
+            return {row["id"]: _mail_text(index, row["summary_fields"].get("message"), _MAIL_CHARS)
+                    for row in newest[:_MAIL_LIMIT]}
+    except Exception:
+        return {}
+
+
+def _scrub_mail(text):
+    from jarvis.v2.redact import LABELLED_MARKER
+
+    # A label and its secret can sit on separate lines. Judge the mail as one
+    # line, as a title is: a mail the title scrub would withhold gives no text.
+    if triggers._scrub_text(text, cap=_SUMMARY_MAIL_CHARS) == LABELLED_MARKER:
+        return ""
+    # Preserve whole-body redaction of credentials spanning several lines.
+    return "\n".join(triggers._scrub_text(line, cap=_SUMMARY_MAIL_CHARS)
+                     for line in _scrub(text).split("\n"))
 
 
 def _read_calendar(now):
@@ -551,7 +637,95 @@ def _notice_key(pid):
     return hashlib.sha256(f"proposal:{pid}".encode("ascii")).hexdigest()
 
 
-def _send_proposal(store, messages, proposal, copied):
+def _summary_has_secret(text, mail):
+    # A price such as $129.99 is ordinary notice content, not a code.
+    normalized = _DIGIT_SEPARATOR.sub("", _SUMMARY_AMOUNT.sub("an amount", text))
+    numbers = _SUMMARY_NUMBER.findall(normalized)
+    if numbers and (len(numbers) != 1 or not _SUMMARY_YEAR.fullmatch(numbers[0])):
+        return True
+
+    tokens = _WORD.findall(normalized)
+    mixed = {token.casefold() for token in tokens if len(token) >= 4
+             and any(char.isalpha() for char in token) and any(char.isdigit() for char in token)}
+    if mixed.intersection(token.casefold() for token in _WORD.findall(_DIGIT_SEPARATOR.sub("", mail))):
+        return True
+
+    capitals = {token.casefold() for token in tokens
+                if 4 <= len(token) <= 12 and token.isalpha() and token.isupper()}
+    if not capitals:
+        return False
+    label_end = None
+    for match in _WORD.finditer(mail):
+        token = match[0].casefold()
+        if token in capitals and label_end is not None and match.start() - label_end <= 40:
+            return True
+        if token in _SECRET_LABELS:
+            label_end = match.end()
+    return False
+
+
+def _validated_summary(reply, mail, *, raw_mail=None):
+    from .messages import _LIST_ITEM, _source_field
+
+    if not isinstance(reply, str):
+        return ""
+    text = reply.strip()
+    if len(text.splitlines()) != 1:
+        return ""
+    text = _SUMMARY_LABEL.sub("", text, count=1)
+    if (len(text) > 400 or not text.startswith(("It ", "The "))
+            or _SUMMARY_FORBIDDEN.search(text) or _LIST_ITEM.match(text)):
+        return ""
+    # Credential matches include values removed before the mail was fenced.
+    if _summary_has_secret(text, mail if raw_mail is None else raw_mail):
+        return ""
+    clean = _source_field(text, cap=400)
+    if not clean or _SUMMARY_FORBIDDEN.search(clean):
+        return ""
+    copied = set(_spans(mail))
+    return "" if any(span in copied for value in (text, clean) for span in _spans(value)) else clean
+
+
+def _summarize_mail(source, budget, run_job, clock):
+    from .claude_jobs import JobResult
+    from .index import Index
+
+    model = "haiku"
+    try:
+        if not _window(clock()) or not source["message"]:
+            return ""
+        with Index(readonly=True) as index:
+            raw_mail = _mail_text(index, source["message"], _SUMMARY_MAIL_CHARS)
+        mail = untrusted.neutralize_markers(untrusted.strip_invisible(_scrub_mail(raw_mail)))
+        if not mail.strip():
+            return ""
+        prompt = _MAIL_SUMMARY_PROMPT.read_text(encoding="utf-8").strip()
+        prompt += "\n\n" + untrusted.fence(mail, "mail text")
+        if not _window(clock()):
+            return ""
+        admission = budget.admit(JOB, start_model=model)
+        if not admission.ok:
+            budget.skip(JOB, admission)
+            return ""
+        try:
+            if not _window(clock()):
+                return ""
+            try:
+                with TemporaryDirectory(prefix="jarvis-mail-summary-") as cwd:
+                    job = run_job(JOB, prompt, model=model, tools=(), mcp_servers=None, cwd=cwd, timeout=60)
+            except Exception:
+                job = JobResult(JOB, model)
+            budget.record(admission, job)
+        finally:
+            budget.release(admission)
+        if job.ok and job.outcome == "ok":
+            return _validated_summary(job.text, mail, raw_mail=raw_mail)
+    except Exception:
+        pass
+    return ""
+
+
+def _send_proposal(store, messages, proposal, copied, inputs, budget, run_job, clock):
     from .messages import ask_message, proposal_message
 
     if store.messaged_today() >= _PROPOSAL_MESSAGE_CAP:
@@ -560,18 +734,37 @@ def _send_proposal(store, messages, proposal, copied):
     common = dict(project=proposal["project"], why_now=fields["why_now"],
                   because=fields["recommend"]["because"], tainted=proposal["tainted"])
     start = proposal["kind"] == "thread.start"
+    if start:
+        plan = proposal["action"]["preview"]
+        build = proposal_message
+        content = dict(title=plan["title"], brief=plan["brief"])
+    else:
+        build = ask_message
+        content = dict(ask=fields["ask"])
+    sources = [source.notice for ref in proposal["basis"]
+               if (source := inputs.sources.get((ref["type"], ref["id"]))) is not None and source.notice]
+    notice_key = _notice_key(proposal["id"])
+
+    def summarize(source):
+        try:
+            if messages.can_send_new(notice_key):
+                return _summarize_mail(source, budget, run_job, clock)
+        except Exception:
+            pass
+        return ""
+
     try:
-        if start:
-            plan = proposal["action"]["preview"]
-            message = proposal_message(title=plan["title"], brief=plan["brief"], **common)
-        else:
-            message = ask_message(ask=fields["ask"], **common)
+        message = build(**content, **common)
+        if any(span in copied for value in (message.subject, message.body) for span in _spans(value)):
+            return False
     except ValueError:
         return False
-    if any(span in copied for text in (message.subject, message.body) for span in _spans(text)):
-        return False
+    if sources:
+        try:
+            message = build(**content, **common, sources=sources, now=clock(), summarize=summarize)
+        except ValueError:
+            pass  # The source details are optional; send the plain notice.
 
-    notice_key = _notice_key(proposal["id"])
     result = (messages.send_proposal(message, plan, notice_key=notice_key) if start
               else messages.send(message, notice_key=notice_key))
     if result.outcome != "sent":
@@ -587,7 +780,7 @@ def _groups(kind, project, basis, sources):
     return {(kind, origin) for origin in origins}
 
 
-def _post(store, feed, drafts, inputs, now, messages):
+def _post(store, feed, drafts, inputs, now, messages, budget, run_job, clock):
     run_id = uuid4().hex
     grouped = set()
     posted = 0
@@ -628,7 +821,8 @@ def _post(store, feed, drafts, inputs, now, messages):
         if groups & grouped or draft.dedupe_key in pending:
             continue
         if proposal := store.add(draft, run=run_id):
-            if draft.kind not in _MESSAGE_KINDS or not _send_proposal(store, messages, proposal, copied):
+            if draft.kind not in _MESSAGE_KINDS or not _send_proposal(
+                    store, messages, proposal, copied, inputs, budget, run_job, clock):
                 store.brief(proposal["id"], feed)
             grouped.update(groups)
             posted += 1
@@ -670,7 +864,8 @@ def run(*, store, feed, budget, work, now=None, run_job=_run_job, messages=None)
             vault = vault_store.Vault()
             inputs = assemble(signals=batch, ledger=threads, registry=projects, calendar=_read_calendar(now),
                               vault=_read_vault(vault, projects),
-                              excerpts=_read_excerpts(work, threads, state["statuses"]))
+                              excerpts=_read_excerpts(work, threads, state["statuses"]),
+                              mail_texts=_read_mail_texts(batch))
             inputs = replace(inputs, now=now, plan_start=work.plan_start, vault=vault)
             result, drafts = _request(inputs, budget, run_job, clock)
             if drafts is None:
@@ -680,7 +875,8 @@ def run(*, store, feed, budget, work, now=None, run_job=_run_job, messages=None)
                     from .messages import MessageService
 
                     messages = MessageService(work, clock=clock)
-                result = replace(result, posted=_post(store, feed, drafts, inputs, clock(), messages))
+                result = replace(result, posted=_post(store, feed, drafts, inputs, clock(), messages,
+                                                      budget, run_job, clock))
             _save(directory, dict(state, last_run=now, cursor=cursor, statuses=statuses))
             return result
     except (OSError, ValueError, RuntimeError, ProposalError, WorkError, RecursionError):
