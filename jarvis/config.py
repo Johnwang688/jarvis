@@ -1119,6 +1119,14 @@ STT_LOCAL_TIMEOUT_S = 30.0
 # the cloud chain keeps time to answer if local is slow.
 STT_LOCAL_BUDGET_SHARE = 0.45
 
+# v3 speech uses local engines exclusively. The v1 STT/TTS defaults stay separate.
+V3_WHISPER_MODEL_DIR = Path(os.environ.get("JARVIS_V3_WHISPER_MODEL") or
+                            Path.home() / ".cache" / "jarvis-stt" / "large-v3-turbo")
+V3_TRANSCRIBER = os.environ.get("JARVIS_V3_TRANSCRIBER") or "auto"
+V3_VOICE = os.environ.get("JARVIS_V3_VOICE") or "auto"
+V3_KOKORO_SPEED = _env_number("JARVIS_V3_KOKORO_SPEED", 1.35, 0.8, 2.0)
+V3_END_SILENCE_MS = int(_env_number("JARVIS_V3_END_SILENCE_MS", 500, 300, 1500))
+
 
 # Speaker verification (voice rework V12, plan 3.4, decisions V-2, V-12, V-14,
 # answered Q7 and Q12): NeMo TitaNet-small through sherpa-onnx, inside the

@@ -24,6 +24,20 @@ dependencies = [
 # Local TTS (the default backend when installed): `uv pip install -e .[voice]`
 # plus the model files in ~/.cache/jarvis-tts/ — see CLAUDE.md.
 voice = ["kokoro-onnx>=0.4"]
+# CUDA 12 / cuDNN 9, as used by the local speech spike. The GPU runtime
+# provides the same onnxruntime module as the CPU distribution.
+voice-gpu = [
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.9.1",
+    "onnxruntime-gpu==1.23.2",
+    "nvidia-cublas-cu12==12.9.3.13",
+    "nvidia-cudnn-cu12==9.28.1.4",
+    "nvidia-cuda-runtime-cu12==12.9.79",
+    "nvidia-cufft-cu12==11.4.1.4",
+    "nvidia-curand-cu12>=10.3.10,<10.4",
+    "nvidia-cuda-nvrtc-cu12==12.9.86",
+    "nvidia-nvjitlink-cu12==12.9.86",
+]
 # Second local TTS backend + voice cloning/hybrids (jarvis/pocket.py).
 # pocket-tts pulls CPU PyTorch — heavyweight; install with a CPU torch index
 # (e.g. UV_TORCH_BACKEND=cpu) so a multi-GB CUDA wheel doesn't ride along.
@@ -42,3 +56,7 @@ path = "jarvis/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["jarvis", "windows"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"hud/vendor/silero-vad/silero_vad_v5.1.2.onnx" = "jarvis/v3/voice/silero_vad_v5.1.2.onnx"
+"hud/vendor/silero-vad/LICENSE.txt" = "jarvis/v3/voice/silero-LICENSE.txt"
