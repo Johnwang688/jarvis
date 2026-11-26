@@ -36,7 +36,7 @@ class SpeakingReview(unittest.TestCase):
             finally:
                 played.set()
 
-        def on_audio(id, samples, sample_rate, first):
+        def on_audio(id, samples, sample_rate, first, last):
             if stopped.is_set():
                 audio_after_stop.append(id)
 

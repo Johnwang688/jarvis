@@ -65,8 +65,8 @@ class Session:
     def played(self, ident):
         self.calls.append(("played", ident))
 
-    def playback_stopped(self):
-        self.calls.append(("flushed",))
+    def playback_stopped(self, number):
+        self.calls.append(("flushed", number))
 
 
 class Helper:
@@ -131,9 +131,14 @@ class LinkTests(unittest.TestCase):
 
     def start_link(self):
         self.write_key()
-        link = self.make_link()
+        self.session = Session()
+
+        def attach(*, on_event, on_audio):
+            self.session.on_event, self.session.on_audio = on_event, on_audio
+            return self.session
+
+        link = self.make_link(factory=attach)
         self.assertTrue(link.start())
-        self.session = link._session
         return link
 
     def helper(self):
@@ -141,7 +146,11 @@ class LinkTests(unittest.TestCase):
 
     def connect(self, **kwargs):
         peer = self.helper().authenticate(**kwargs)
-        until(lambda: self.link.status()["connected"])
+        if kwargs.get("hello", True):
+            until(lambda: self.link.status()["connected"])
+        else:
+            until(lambda: self.link._session is self.session)
+            self.assertEqual(self.link.status(), {"listening": True, "connected": False})
         return peer
 
     def test_key_file(self):
@@ -170,7 +179,7 @@ class LinkTests(unittest.TestCase):
         self.path.unlink()
         self.write_key()
         self.assertTrue(link.start())
-        self.assertIs(link._session, session)
+        self.assertIsNone(link._session)
         self.assertEqual(link.address[0], "127.0.0.1")
         self.assertNotIn(link.port, range(8402, 8411))
         self.assertEqual(link.status(), {"listening": True, "connected": False})
@@ -342,8 +351,17 @@ class LinkTests(unittest.TestCase):
             peer.send(wire.AUDIO, (DISTINCT_PCM, None))
             peer.send(wire.KEY, True)
             peer.send(wire.KEY, False)
+            self.session.on_event("say", id="fake-sentence", text="Fixture speech")
+            self.session.on_audio("fake-sentence", np.zeros(320, dtype=np.int16), 16000, True, last=True)
+            self.assertEqual(peer.read()[1]["id"], "fake-sentence")
+            self.assertTrue(peer.read()[1][1] & wire.LAST)
             peer.send(wire.PLAYED, {"id": "fake-sentence"})
-            peer.send(wire.FLUSHED, None)
+            peer.send(wire.PLAYED, {"id": "fake-sentence"})
+            peer.send(wire.PING, b"played!!")
+            self.assertEqual(peer.read(), (wire.PONG, b"played!!"))
+            self.session.on_event("flush", n=4)
+            self.assertEqual(peer.read(), (wire.EVENT, {"kind": "flush", "n": 4}))
+            peer.send(wire.FLUSHED, 4)
             peer.send(wire.CLICK, {"id": "fake-card", "digest": "fake-digest", "decision": "approve"})
             peer.send(wire.LEVEL, 51)
             peer.send(wire.PING, b"example!")
@@ -359,7 +377,7 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(first.tobytes(), DISTINCT_PCM)
             self.assertIsNone(second)
             self.assertEqual(self.session.calls[3:], [("key", True), ("key", False),
-                                                      ("played", "fake-sentence"), ("flushed",)])
+                                                      ("played", "fake-sentence"), ("flushed", 4)])
             self.session.on_event("say", id="example", text=DISTINCT_WORDS)
             self.session.on_audio("example", np.frombuffer(DISTINCT_PCM, dtype="<i2"), 16000, True)
             self.assertEqual(peer.read()[1]["text"], DISTINCT_WORDS)
@@ -378,6 +396,10 @@ class LinkTests(unittest.TestCase):
     def test_session_exception_is_logged_without_peer_data(self):
         self.start_link()
         peer = self.connect()
+        self.session.on_event("say", id=DISTINCT_WORDS, text="Fixture speech")
+        self.session.on_audio(DISTINCT_WORDS, np.zeros(320, dtype=np.int16), 16000, True, last=True)
+        self.assertEqual(peer.read()[1]["id"], DISTINCT_WORDS)
+        self.assertTrue(peer.read()[1][1] & wire.LAST)
         with patch.object(self.session, "played", side_effect=RuntimeError(DISTINCT_WORDS)):
             with self.assertLogs(transport.LOG, "WARNING") as captured:
                 peer.send(wire.PLAYED, {"id": DISTINCT_WORDS})
@@ -385,6 +407,63 @@ class LinkTests(unittest.TestCase):
         self.assertEqual([entry.message for entry in captured.records],
                          ["Voice link connection stopped after an internal error."])
         until(lambda: self.session.calls == [("start",), ("stop",)])
+
+    def test_invalid_approval_duration_does_not_disconnect_or_drop_the_prompt(self):
+        self.start_link()
+        peer = self.connect()
+        asking = {"id": "fake-card", "digest": "fake-digest", "tool": "fixture",
+                  "sentence": "Approve the fixture action?"}
+        self.session.on_event("asking", **asking, expires_in=float("nan"))
+        peer.send(wire.PING, b"example!")
+        self.assertEqual(peer.read(), (wire.EVENT, dict(asking, kind="asking")))
+        self.assertEqual(peer.read(), (wire.PONG, b"example!"))
+        with self.assertLogs(transport.LOG, "WARNING"):
+            self.session.on_event("asking", **dict(asking, id=None), expires_in=10)
+        try:
+            peer.send(wire.PING, b"example!")
+            self.assertEqual(peer.read(), (wire.PONG, b"example!"))
+        except (OSError, wire.ProtocolError):
+            self.fail("An invalid asking event disconnected the helper.")
+
+    def test_played_waits_until_the_last_frame_has_been_written(self):
+        self.start_link()
+        peer = self.connect()
+        sending, allow_send, received, allow_ack = (threading.Event() for _ in range(4))
+        send, deliver = transport._Peer.send, transport.VoiceLink._deliver
+
+        def hold_last(connection, data, deadline=None):
+            if data[0] == wire.AUDIO_OUT:
+                sending.set()
+                allow_send.wait(3)
+            send(connection, data, deadline)
+
+        def hold_ack(link, connection, kind, value, now):
+            if kind == wire.PLAYED:
+                received.set()
+                allow_ack.wait(3)
+            deliver(link, connection, kind, value, now)
+
+        with (patch.object(transport._Peer, "send", hold_last),
+              patch.object(transport.VoiceLink, "_deliver", hold_ack)):
+            self.session.on_event("say", id="fake-sentence", text="Fixture speech")
+            self.session.on_audio("fake-sentence", np.zeros(320, dtype=np.int16), 16000, True, last=True)
+            try:
+                self.assertEqual(peer.read()[1]["id"], "fake-sentence")
+                self.assertTrue(sending.wait(2))
+                peer.send(wire.PLAYED, {"id": "fake-sentence"})
+                self.assertTrue(received.wait(2))
+                allow_send.set()
+                self.assertEqual(peer.read()[1][1], wire.FIRST | wire.LAST)
+            finally:
+                allow_send.set()
+                allow_ack.set()
+            peer.send(wire.PING, b"earlyack")
+            self.assertEqual(peer.read(), (wire.PONG, b"earlyack"))
+            self.assertEqual(self.session.calls, [("start",)])
+            peer.send(wire.PLAYED, {"id": "fake-sentence"})
+            peer.send(wire.PING, b"example!")
+            self.assertEqual(peer.read(), (wire.PONG, b"example!"))
+            self.assertEqual(self.session.calls, [("start",), ("played", "fake-sentence")])
 
     def test_level_is_rate_limited(self):
         self.start_link()
@@ -545,13 +624,13 @@ class WireTests(unittest.TestCase):
     def test_round_trip_every_frame_and_event_kind(self):
         up = [(wire.HELLO, HELLO), (wire.AUDIO, (b"a" * 640, b"b" * 640)),
               (wire.AUDIO, (b"c" * 640, None)), (wire.KEY, True), (wire.KEY, False),
-              (wire.PLAYED, {"id": 42}), (wire.FLUSHED, None),
+              (wire.PLAYED, {"id": 42}), (wire.FLUSHED, 42),
               (wire.CLICK, {"id": "example", "digest": "fake-digest", "decision": "deny"}),
               (wire.PING, b"example!"), (wire.LEVEL, 255)]
         events = [dict(kind="state", state="unavailable", reason="example"), dict(kind="partial", text="example"),
                   dict(kind="heard", text="example"), dict(kind="say", id="example", n=9, text="example"),
                   dict(kind="asking", id="example", digest="fake-digest", tool="test-tool", sentence="example",
-                       expires_in=10), dict(kind="earcon", name="example"), dict(kind="flush"),
+                       expires_in=10), dict(kind="earcon", name="example"), dict(kind="flush", n=42),
                   dict(kind="error", reason="example"), dict(kind="notice", title="example", text="example")]
         down = [(wire.EVENT, event) for event in events]
         down += [(wire.AUDIO_OUT, (9, wire.FIRST | wire.LAST, 16000, b"\x00\x01")), (wire.PONG, b"example!")]
@@ -605,21 +684,19 @@ class DaemonTests(unittest.TestCase):
         with urlopen(f"http://127.0.0.1:{instance.port}/v3/status", timeout=3) as result:
             return json.load(result)["voice"]["link"]
 
-    def test_placeholder_does_not_read_the_key_or_bind(self):
+    def test_missing_key_leaves_the_link_unbound(self):
         self.key.return_value.unlink()
         instance = self.daemon()
-        with patch.object(transport, "_load_key", side_effect=AssertionError("pairing file read")):
-            instance.start()
+        instance.start()
         self.assertIsNone(instance._voice_link.address)
         self.assertEqual(self.status(instance), {"listening": False, "connected": False,
-                                                 "reason": "session_unavailable"})
+                                                 "reason": "key_missing"})
 
     def test_bind_failure_keeps_daemon_running(self):
         sock = self.enterContext(socket.socket())
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
         instance = self.daemon(voice_link_port=sock.getsockname()[1])
-        self.enterContext(patch.object(instance, "_new_voice_session", side_effect=Session))
         with self.assertLogs(transport.LOG, "WARNING") as got:
             instance.start()
         self.assertEqual(got.records[0].message, "Voice link could not bind its port.")
@@ -640,7 +717,7 @@ class DaemonTests(unittest.TestCase):
         self.enterContext(patch.object(instance, "_start_phone", side_effect=start_phone))
         self.enterContext(patch.object(instance, "_new_voice_session", side_effect=new_session))
         instance.start()
-        self.assertEqual(order, ["phone", "link"])
+        self.assertEqual(order, ["phone"])
         peer = Helper(self.enterContext(ExitStack()), instance._voice_link.address).authenticate()
         peer.send(wire.PING, b"12345678")
         self.assertEqual(peer.read(), (wire.PONG, b"12345678"))
@@ -654,12 +731,26 @@ class DaemonTests(unittest.TestCase):
             raise RuntimeError(DISTINCT_WORDS)
 
         self.enterContext(patch.object(instance._voice_link, "close", side_effect=broken_close))
-        self.enterContext(patch.object(instance._voice_turns, "close", side_effect=lambda: order.append("turns")))
-        self.enterContext(patch.object(instance._voice_brain, "close", side_effect=lambda: order.append("brain")))
+        def failing_close(component, label):
+            close = component.close
+
+            def broken():
+                order.append(label)
+                close()
+                raise RuntimeError(DISTINCT_WORDS)
+
+            self.enterContext(patch.object(component, "close", side_effect=broken))
+
+        failing_close(instance._voice_session, "session")
+        failing_close(instance._voice_turns, "turns")
+        failing_close(instance._voice_brain, "brain")
         with self.assertLogs("jarvis.v3.daemon", "WARNING") as got:
             instance.stop()
-        self.assertEqual(got.records[0].message, "Could not close the voice link at stop.")
-        self.assertEqual(order, ["phone", "link", "link close", "turns", "brain"])
+        self.assertEqual([record.message for record in got.records], [
+            "Could not close the voice link at stop.", "Could not close voice session at stop.",
+            "Could not close voice turns at stop.", "Could not close voice brain at stop.",
+        ])
+        self.assertEqual(order, ["phone", "link", "link close", "session", "turns", "brain"])
         self.assertIsNone(instance._server)
         peer.disconnected()
 

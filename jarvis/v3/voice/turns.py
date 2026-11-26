@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 import logging
+from math import isfinite
 import re
 from threading import Lock
 import time
@@ -15,6 +16,7 @@ from .sentences import MIN_SENTENCE as MIN_SENTENCE, Sentences
 
 
 FRESH_AFTER_S = 600
+MAX_APPROVAL_WINDOW_S = 600
 LOOKAHEAD_SENTENCES = 2
 TRACE_LIMIT = 200
 ERROR_SENTENCE = "Something went wrong with that."
@@ -41,6 +43,11 @@ def _command_words(text):
     return " ".join(words.lower().split())
 
 
+def is_stop_word(text):
+    command = _command_words(text)
+    return command in _QUIET or command in _CANCEL
+
+
 def _approval_sentence(item):
     # The card has already redacted each display field. Only use its title
     # and the target labels, keeping bodies, briefs and messages out of speech.
@@ -62,6 +69,8 @@ class _VoiceTurn:
     tools: list = field(default_factory=list)
     approvals: set = field(default_factory=set)
     pending_audio: set = field(default_factory=set)
+    last_sentence_id: str | None = None
+    replied: bool = False
     sentences: Sentences = field(default_factory=Sentences)
     streamed: list = field(default_factory=list)
     lookahead: deque[str] = field(default_factory=deque)
@@ -74,6 +83,11 @@ class _VoiceTurn:
     first_ack_s: float | None = None
     first_say_s: float | None = None
     end_s: float | None = None
+    speech_ended_at: float | None = None
+    silence_ms: int | None = None
+    decode_ms: float | None = None
+    first_audio_ms: float | None = None
+    asking: bool = False
 
 
 class VoiceTurns:
@@ -81,6 +95,7 @@ class VoiceTurns:
         self._brain = brain
         self._clock = clock
         self._on_event = on_event
+        self._listeners = []
         self._lock = Lock()
         self._incoming = {}
         self._turn = None
@@ -92,6 +107,22 @@ class VoiceTurns:
         self._acked_turn = None
         self._spoken_turn = None
         self._unsubscribe = brain.subscribe(self._brain_event)
+
+    def subscribe(self, callback):
+        with self._lock:
+            self._listeners.append(callback)
+
+        def unsubscribe():
+            with self._lock:
+                if callback in self._listeners:
+                    self._listeners.remove(callback)
+
+        return unsubscribe
+
+    def warm(self):
+        warm = getattr(self._brain, "warm", None)
+        if warm is not None:
+            warm()
 
     @contextmanager
     def _update(self):
@@ -130,24 +161,31 @@ class VoiceTurns:
                     if turn.first_say_s is None:
                         turn.first_say_s = self._clock() - turn.heard_at
                     self._spoken_turn = turn.turn
+                    turn.last_sentence_id = fields["id"]
                     turn.sentence_count += 1
                     turn.sentence_chars += len(fields["text"])
                     if fields.pop("code_built"):
                         turn.code_built_sentences.append(fields["text"])
                 elif kind == "asking":
                     turn = self._turn
-                    if (self._closed or turn is None or turn.turn != turn_id
-                            or fields["id"] in turn.approvals or not any(
-                                item["id"] == fields["id"] and item["digest"] == fields["digest"]
-                                for item in pending)):
+                    card = next((item for item in pending
+                                 if item["id"] == fields["id"] and item["digest"] == fields["digest"]), None)
+                    if (self._closed or turn is None or turn.muted or turn.turn != turn_id
+                            or fields["id"] in turn.approvals or card is None):
                         continue
+                    remaining = card.get("expires_in", 0)
+                    if type(remaining) is int or (type(remaining) is float and isfinite(remaining)):
+                        fields["expires_in"] = min(max(remaining, 0), MAX_APPROVAL_WINDOW_S)
                     turn.approvals.add(fields["id"])
-            try:
-                self._on_event(kind, **fields)
-            except Exception:
-                LOG.warning("A voice event callback failed.")
-                if kind == "say":
-                    self.spoken(fields["id"])
+                    turn.asking = True
+                listeners = tuple(self._listeners)
+            for callback in (self._on_event, *listeners):
+                try:
+                    callback(kind, **fields)
+                except Exception:
+                    LOG.warning("A voice event callback failed.")
+                    if kind == "say":
+                        self.spoken(fields["id"])
 
     def _state_to(self, state):
         if self._state != state:
@@ -195,7 +233,7 @@ class VoiceTurns:
         self._trace.appendleft(turn)
         self._state_to("thinking")
 
-    def heard(self, text):
+    def heard(self, text, *, speech_ended_at=None, silence_ms=None, decode_ms=None):
         text = " ".join(text.split())
         words = _command_words(text)
         command = _NAME.sub("", words)
@@ -222,7 +260,9 @@ class VoiceTurns:
         with self._lock:
             if self._closed:
                 return
-            self._incoming[input_id] = _VoiceTurn(text=text, heard_at=self._clock())
+            self._incoming[input_id] = _VoiceTurn(text=text, heard_at=self._clock(),
+                                                speech_ended_at=speech_ended_at, silence_ms=silence_ms,
+                                                decode_ms=decode_ms)
         try:
             self._brain.send(text, steer=True, input_id=input_id, fresh_after=FRESH_AFTER_S)
         except (ValueError, RuntimeError):
@@ -232,6 +272,29 @@ class VoiceTurns:
 
     def interrupt(self):
         self._interrupt(cancel=False)
+
+    def can_interrupt(self):
+        """Whether this request can still produce speech, including between sentences."""
+        with self._lock:
+            turn = self._turn
+            return (any(not item.muted for item in self._incoming.values())
+                    or (turn is not None and not turn.muted and (turn.end_s is None or bool(turn.pending_audio))))
+
+    def has_audio(self, sentence_id):
+        with self._lock:
+            return self._turn is not None and sentence_id in self._turn.pending_audio
+
+    def is_asking(self, approval_id):
+        with self._lock:
+            turn = self._turn
+            return turn is not None and turn.asking and not turn.muted and approval_id in turn.approvals
+
+    def answered(self, sentence_id):
+        """Check whether this was the last sentence of a completed, unmuted reply."""
+        with self._lock:
+            turn = self._turn
+            return (turn is not None and turn.replied and not turn.muted
+                    and not turn.pending_audio and turn.last_sentence_id == sentence_id)
 
     def _interrupt(self, *, cancel):
         try:
@@ -260,15 +323,23 @@ class VoiceTurns:
                 if turn.end_s is not None and not turn.pending_audio:
                     self._state_to("idle")
 
+    def first_audio(self, sentence_id, at):
+        with self._lock:
+            turn = self._turn
+            if (turn is not None and (sentence_id in turn.pending_audio or sentence_id in turn.approvals)
+                    and turn.first_audio_ms is None and turn.speech_ended_at is not None):
+                turn.first_audio_ms = (at - turn.speech_ended_at) * 1000
+
     def _brain_event(self, event):
         kind = event["kind"]
         turn_id = event["turn"]
         pending = ()
-        if kind in ("steer", "approval_pending"):
+        if kind in ("steer", "approval_pending", "tool_end"):
             with self._lock:
                 current = self._turn
                 relevant = event.get("input_id") in self._incoming or (
                     current is not None and current.turn == turn_id and current.end_s is None
+                    and (kind != "tool_end" or current.asking)
                 )
             if relevant:
                 pending = self._brain.pending_approvals(turn_id)
@@ -307,6 +378,9 @@ class VoiceTurns:
                     turn.first_ack_s = self._clock() - turn.heard_at
                     self._emit("ack")
             elif kind == "tool_end":
+                if turn.asking and not pending:
+                    turn.asking = False
+                    self._emit("approval_end")
                 turn.tools.append({"name": event["name"], "outcome": event["outcome"]})
                 turn.changed_state |= event["changes_state"] and event["outcome"] == "ok"
                 turn.reported = False
@@ -328,13 +402,20 @@ class VoiceTurns:
 
     def _end(self, turn, event):
         kind = event["kind"]
+        if turn.asking:
+            turn.asking = False
+            self._emit("approval_end")
         if kind == "error":
             self._emit("error")
+        if kind == "stopped" and turn.pending_audio:
+            turn.pending_audio.clear()
+            self._emit("speech_stop")
         if not turn.muted:
             if kind == "error":
                 self._say(turn, _ERROR_AFTER_WRITE if turn.changed_state else ERROR_SENTENCE,
                           code_built=True)
             elif kind == "reply":
+                turn.replied = True
                 # A reply without a final model step can be a code-built
                 # message from the brain when it exhausts its step budget.
                 if not turn.ended_without_tools:
@@ -358,6 +439,8 @@ class VoiceTurns:
                  "tools": deepcopy(turn.tools), "approval_asked": bool(turn.approvals),
                  "sentence_count": turn.sentence_count, "sentence_chars": turn.sentence_chars,
                  "code_built_sentences": list(turn.code_built_sentences),
+                 "silence_ms": turn.silence_ms, "decode_ms": turn.decode_ms,
+                 "first_audio_ms": turn.first_audio_ms,
                  "first_ack_s": turn.first_ack_s, "first_say_s": turn.first_say_s, "end_s": turn.end_s}
                 for turn in self._trace
             ]

@@ -140,7 +140,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             "data_dir": directory,
             "jobs": {} if scheduler is None else scheduler.status(),
             "phone": {"bound": False, "host_configured": False} if phone_status is None else phone_status(),
-            "voice": {"brain": "claude", "state": "idle", "turns": 0} if voice_status is None else voice_status(),
+            "voice": {"brain": "claude", "state": "resting", "turns": 0} if voice_status is None else voice_status(),
         }
 
     class Handler(BaseHTTPRequestHandler):
@@ -366,7 +366,7 @@ class Daemon:
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
-        self._voice_brain, self._voice_turns = self._new_voice()
+        self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
         self._executor = None
         self._executor_lock = threading.Lock()
         self._executor_stop = threading.Event()
@@ -522,14 +522,36 @@ class Daemon:
 
     def _new_voice(self):
         from .voice.claude_brain import ClaudeVoiceBrain
+        from .voice.engines import KokoroVoice, pick_transcriber
+        from .voice.session import VoiceSession
         from .voice.turns import VoiceTurns
 
         brain = ClaudeVoiceBrain(self._data_dir, approvals=self._chat.approvals, work=self._chat.work,
                                  calendar=self._chat._calendar)
-        return brain, VoiceTurns(brain, on_event=lambda *_args, **_fields: None)
+        discard = lambda *_args, **_fields: None
+        turns = VoiceTurns(brain, on_event=discard)
+        work = self._chat.work
+        names = lambda: () if work is None else (project.name for project in work.projects())
+        setting = config.V3_VOICE
+        fast = KokoroVoice(device="cpu") if setting in ("auto", "kokoro-cpu") else None
+        best = KokoroVoice(device="cuda") if setting in ("auto", "kokoro-gpu") else None
+        session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names)
+        return brain, turns, session
+
+    def _voice_status(self):
+        # A status request may already be in flight as the daemon shuts down.
+        brain, session, link = self._voice_brain, self._voice_session, self._voice_link
+        status = {"brain": "claude", "state": "idle", "turns": 0} if brain is None else brain.status()
+        status["brain_state"] = status.pop("state")
+        status.update({"state": "resting"} if session is None else session.status())
+        status["link"] = (link.status() if link is not None else
+                          {"listening": False, "connected": False, "reason": "not_started"})
+        return status
 
     def _new_voice_session(self, *, on_event, on_audio):
-        return None  # Wire in the voice session here when it lands.
+        session = self._voice_session
+        session.attach(on_event, on_audio)
+        return session
 
     def _start_voice_link(self):
         from .voice.link import VoiceLink
@@ -539,13 +561,6 @@ class Daemon:
             port = 0
         link = self._voice_link = VoiceLink(self._new_voice_session, port=port)
         link.start()
-
-    def _voice_status(self):
-        brain, link = self._voice_brain, self._voice_link
-        status = {"brain": "claude", "state": "idle", "turns": 0} if brain is None else brain.status()
-        status["link"] = ({"listening": False, "connected": False, "reason": "not_started"}
-                          if link is None else link.status())
-        return status
 
     def start(self) -> None:
         with self._lock:
@@ -560,7 +575,7 @@ class Daemon:
             if self._chat is None:
                 self._chat = self._new_chat()
             if self._voice_brain is None:
-                self._voice_brain, self._voice_turns = self._new_voice()
+                self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
                                       get_feed=self._get_feed, voice_status=self._voice_status)
@@ -602,12 +617,13 @@ class Daemon:
                     LOG.warning("Could not close the voice link at stop.")
                 self._voice_link = None
             if self._voice_brain is not None:
-                for label, component in (("voice turns", self._voice_turns), ("voice brain", self._voice_brain)):
+                for label, component in (("voice session", self._voice_session), ("voice turns", self._voice_turns),
+                                         ("voice brain", self._voice_brain)):
                     try:
                         component.close()
                     except Exception:
                         LOG.warning("Could not close %s at stop.", label)
-                self._voice_turns = self._voice_brain = None
+                self._voice_session = self._voice_turns = self._voice_brain = None
             if self._server is None:
                 return
             self._stop_jobs()

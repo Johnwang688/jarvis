@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
 from claude_agent_sdk._internal.sdk_mcp_bridge import SdkMcpBridge
 
 from a6c1_acceptance_check import Cal, CREATE, EVENTS, NOW
@@ -254,6 +254,19 @@ class VoiceBrainCheck(unittest.TestCase):
 
     def approval_states(self):
         return [json.loads(line)["state"] for line in self.log.read_text().splitlines()]
+
+    def test_transport_version_override_accepts_both_sdk_signatures(self):
+        async def check():
+            client = brain_module._voice_client(ClaudeAgentOptions(cli_path="/example/bin/claude"))
+            check_version = client._custom_transport._check_claude_version
+            for args in ((), ({"HOME": "/example"},)):
+                with self.subTest(argument_count=len(args)):
+                    try:
+                        await check_version(*args)
+                    except TypeError as error:
+                        self.fail(f"SDK transport rejected a supported version-check call: {error}")
+
+        asyncio.run(check())
 
     def test_automatic_vault_write_emits_auto_and_voice_speaks_the_confirmation(self):
         policy.set_auto(config.V3_POLICY_FILE, True)
@@ -953,13 +966,18 @@ class VoiceBrainCheck(unittest.TestCase):
         self.assertIs(instance._voice_brain.approvals, instance._chat.approvals)
         self.assertIsNone(instance._voice_brain._thread)
         self.assertEqual(instance._voice_brain._listener_threads, set())
+        self.assertIsNone(instance._voice_session._worker)
         from urllib.request import urlopen
 
         with urlopen(f"http://127.0.0.1:{instance.port}/v3/status") as response:
-            self.assertEqual(json.load(response)["voice"], {
-                "brain": "claude", "state": "idle", "turns": 0,
-                "link": {"listening": False, "connected": False, "reason": "session_unavailable"},
-            })
+            status = json.load(response)["voice"]
+            self.assertEqual((status["brain"], status["brain_state"], status["state"], status["turns"]),
+                             ("claude", "idle", "resting", 0))
+            self.assertIsNone(status["transcriber"]["name"])
+            self.assertIn("name", status["voice"])
+            self.assertFalse(status["gpu_warm"])
+            self.assertEqual(status["counters"], dict(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0))
+            self.assertEqual(status["link"], {"listening": False, "connected": False, "reason": "key_missing"})
         brain = instance._voice_brain
         instance.stop()
         self.assertEqual(brain.status()["state"], "closed")

@@ -603,8 +603,8 @@ class SpeakingCheck(unittest.TestCase):
             raise RuntimeError("fake synthesis failure")
         return self.pcm, 16_000
 
-    def on_audio(self, id, samples, rate, first):
-        self.audio.add((id, samples, rate, first))
+    def on_audio(self, id, samples, rate, first, last):
+        self.audio.add((id, samples, rate, first, last))
         if id in self.audio_holds and not self.audio_holds[id].wait(TIMEOUT):
             raise TimeoutError("test did not release sink")
 
@@ -635,12 +635,12 @@ class SpeakingCheck(unittest.TestCase):
         first_play.set()
         self.done.wait_for(5)
         self.assertEqual(self.done.rows, [1, 2, 3, 4, 5])
-        self.assertEqual([id for id, _, _, _ in self.audio.rows], [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5])
+        self.assertEqual([row[0] for row in self.audio.rows], [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5])
         for offset in range(0, 15, 3):
             chunks = self.audio.rows[offset:offset + 3]
-            self.assertEqual([first for _, _, _, first in chunks], [True, False, False])
-            self.assertTrue(all(len(pcm) / rate <= 0.2 for _, pcm, rate, _ in chunks))
-            np.testing.assert_array_equal(np.concatenate([pcm for _, pcm, _, _ in chunks]), self.pcm)
+            self.assertEqual([row[3:] for row in chunks], [(True, False), (False, False), (False, True)])
+            self.assertTrue(all(len(pcm) / rate <= 0.2 for _, pcm, rate, _, _ in chunks))
+            np.testing.assert_array_equal(np.concatenate([row[1] for row in chunks]), self.pcm)
         self.assertAlmostEqual(self.speaking.timings()[1], 65)
 
     def test_stop_mid_sentence_drops_queued_and_inflight_work(self):
@@ -673,7 +673,7 @@ class SpeakingCheck(unittest.TestCase):
         self.done.wait_for(1)
         self.assertEqual(self.done.rows, [2])
         self.assertEqual(self.engine_calls.rows, ["first", "second", "new sentence"])
-        self.assertEqual([id for id, _, _, _ in self.audio.rows], [1, 2, 2, 2])
+        self.assertEqual([row[0] for row in self.audio.rows], [1, 2, 2, 2])
 
     def test_failed_sentence_is_reported_and_skipped(self):
         self.speaking.say("bad", "fail")
