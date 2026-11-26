@@ -27,6 +27,7 @@ MAX_QUEUED_AUDIO_S = 2
 MAX_QUEUED_EVENTS = 256
 _HEADER = struct.Struct(">BII")
 _SPEECH = struct.Struct(">IBI")
+_FLUSH_NUMBER = struct.Struct(">I")
 MAC_BYTES = 8
 UINT32_MAX = 2**32 - 1
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
@@ -202,6 +203,14 @@ def _id(value):
     return isinstance(value, str) or type(value) is int
 
 
+def _flush_number(value):
+    return type(value) is int and 1 <= value <= UINT32_MAX
+
+
+def _approval_duration(value):
+    return type(value) in (int, float) and 0 <= value <= 600
+
+
 def _event(value):
     kind = value.get("kind")
     _require(isinstance(kind, str) and kind in _EVENT_TEXT)
@@ -213,8 +222,10 @@ def _event(value):
         _require(_id(value.get("id")))
     if kind == "say":
         _require(type(value.get("n")) is int and 0 <= value["n"] <= UINT32_MAX)
-    if kind == "asking":
-        _require(type(value.get("expires_in")) in (int, float))
+    if kind == "asking" and "expires_in" in value:
+        _require(_approval_duration(value["expires_in"]))
+    if kind == "flush":
+        _require(_flush_number(value.get("n")))
     return value
 
 
@@ -236,6 +247,8 @@ def _json_payload(kind, value):
 def encode_event(kind, **fields):
     value = {key: field[:MAX_TEXT] if isinstance(field, str) else field for key, field in fields.items()}
     value["kind"] = kind
+    if kind == "asking" and not _approval_duration(value.get("expires_in")):
+        value.pop("expires_in", None)
     data = _json_bytes(_event(value))
     if len(data) <= MAX_CONTROL:
         return data
@@ -281,8 +294,8 @@ def encode_payload(kind, value):
         _require(type(value) is bool if kind == KEY else type(value) is int and 0 <= value <= 255)
         payload = bytes((value,))
     elif kind == FLUSHED:
-        _require(value is None)
-        payload = b""
+        _require(_flush_number(value))
+        payload = _FLUSH_NUMBER.pack(value)
     else:
         payload = value
         _require(kind in (PING, PONG) and isinstance(payload, bytes) and len(payload) == 8)
@@ -310,7 +323,9 @@ def decode_payload(kind, payload):
         _require(len(payload) == 1)
         return payload[0]
     if kind == FLUSHED:
-        _require(not payload)
-        return None
+        _require(len(payload) == _FLUSH_NUMBER.size)
+        (number,) = _FLUSH_NUMBER.unpack(payload)
+        _require(_flush_number(number))
+        return number
     _require(kind in (PING, PONG) and len(payload) == 8)
     return payload

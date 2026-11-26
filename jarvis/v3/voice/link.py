@@ -1,6 +1,7 @@
 """Paired loopback transport for a v3 voice session."""
 
 from collections import deque
+from dataclasses import dataclass
 from inspect import getattr_static
 import logging
 import math
@@ -88,6 +89,12 @@ class _Reader:
         return self._take(size)
 
 
+@dataclass
+class _Sentence:
+    index: int
+    last_sent_at: float | None = None
+
+
 class _Peer:
     def __init__(self, sock):
         self.sock = sock
@@ -103,6 +110,7 @@ class _Peer:
         self._chunks = 0
         self._controls = 0
         self._sentences = {}
+        self._writing_last = None
         self._next_index = 0
         self._live_until = None
 
@@ -127,7 +135,7 @@ class _Peer:
         if self._controls >= wire.MAX_QUEUED_EVENTS:
             self.abort()
         else:
-            self._queue.append((kind, payload, 0.0))
+            self._queue.append((kind, payload, 0.0, None))
             self._controls += 1
             self._changed.notify()
 
@@ -145,16 +153,46 @@ class _Peer:
                 if ident in self._sentences or len(self._sentences) >= wire.MAX_QUEUED_EVENTS:
                     self.abort()
                     return
-                self._sentences[ident] = self._next_index
+                self._sentences[ident] = _Sentence(self._next_index)
                 fields["n"] = self._next_index
                 self._next_index += 1
             elif kind == "flush":
                 self._sentences.clear()
+                kept = deque()
+                for frame in self._queue:
+                    if frame[0] == wire.AUDIO_OUT:
+                        self._audio_s -= frame[2]
+                        self._chunks -= 1
+                    else:
+                        kept.append(frame)
+                self._queue = kept
+                self._audio_s = max(0.0, self._audio_s)
             self._control(wire.EVENT, wire.encode_event(kind, **fields))
 
-    def played(self, ident):
+    def on_event(self, kind, **fields):
+        if kind == "ignored":
+            return  # The session reports ignored speech in its status counters.
+        try:
+            self.event(kind, fields)
+        except Exception:
+            LOG.warning("Voice link could not encode a session event.")
+            if kind != "asking":
+                self.abort()
+
+    def played(self, ident, received_at):
         with self._changed:
-            self._sentences.pop(ident, None)
+            sentence = self._sentences.get(ident)
+            if sentence is None or sentence.last_sent_at is None or received_at < sentence.last_sent_at:
+                return False
+            del self._sentences[ident]
+            return True
+
+    def on_audio(self, ident, pcm, rate, first, last=None):
+        try:
+            self.audio(ident, pcm, as_index(rate), first, last)
+        except Exception:
+            LOG.warning("Voice link could not encode session audio.")
+            self.abort()
 
     def audio(self, ident, pcm, rate, first, last):
         # NumPy is not needed to import the daemon or start an idle listener.
@@ -168,20 +206,24 @@ class _Peer:
                 raise wire.ProtocolError("Invalid session PCM.")
             size = wire.audio_chunk_samples(rate)
             samples = len(pcm)
+            if last is None:
+                # Four-argument callers may hand off full 200 ms fragments
+                # or a whole sentence. Explicit flags also cover exact-size endings.
+                last = samples != rate * wire.CHUNK_MS // 1000
             count = (samples + size - 1) // size
             if (self._audio_s + samples / rate > wire.MAX_QUEUED_AUDIO_S + 1e-12
                     or self._chunks + count > _MAX_CHUNKS):
                 self.abort()
                 return
-            index = self._sentences[ident]
+            sentence = self._sentences[ident]
             for offset in range(0, samples, size):
                 chunk = pcm[offset:offset + size].astype("<i2", copy=False)
                 flags = (wire.FIRST if first and offset == 0 else 0)
                 if last and offset + len(chunk) == samples:
                     flags |= wire.LAST
-                payload = wire.encode_payload(wire.AUDIO_OUT, (index, flags, rate, chunk.tobytes()))
+                payload = wire.encode_payload(wire.AUDIO_OUT, (sentence.index, flags, rate, chunk.tobytes()))
                 duration = len(chunk) / rate
-                self._queue.append((wire.AUDIO_OUT, payload, duration))
+                self._queue.append((wire.AUDIO_OUT, payload, duration, sentence if flags & wire.LAST else None))
                 self._audio_s += duration
                 self._chunks += 1
             self._changed.notify()
@@ -202,7 +244,13 @@ class _Peer:
                 if not poller.poll(min(100, remaining_ms)):
                     continue  # Observe close/overflow even if the socket is full.
             try:
-                sent = self.sock.send(remaining)
+                # Sample before the nonblocking write so even an immediate reply
+                # is later. Publish the time only when the whole frame is sent.
+                with self._changed:
+                    at = time.monotonic() if self._writing_last is not None else None
+                    sent = self.sock.send(remaining)
+                    if at is not None and sent == len(remaining):
+                        self._writing_last.last_sent_at = at
             except BlockingIOError:
                 continue
             if sent == 0:
@@ -221,7 +269,7 @@ class _Peer:
                         self._changed.wait(remaining)
                     if self.closed.is_set():
                         return
-                    kind, payload, duration = self._queue.popleft()
+                    kind, payload, duration, self._writing_last = self._queue.popleft()
                 self.send(frames.encode(kind, payload))
                 with self._changed:
                     if duration:
@@ -237,11 +285,11 @@ class _Peer:
 
 
 class VoiceLink:
-    """A single reusable session, with its calls serialized across helpers.
+    """Serialize access to the voice session across authenticated helpers.
 
-    A factory receives ``on_event`` and ``on_audio`` keyword callbacks. Returning
-    None disables the listener. An existing session object can use the public
-    callbacks directly. Session stop must quiesce its own work before returning.
+    The factory receives callbacks bound to each peer and may return a reusable
+    session with a detach method. A session supplied directly can use the public
+    callbacks and must stop emitting before its replacement helper starts.
     """
 
     def __init__(self, session_factory, *, port=None, key_path=None):
@@ -272,11 +320,11 @@ class VoiceLink:
     def status(self):
         with self._lock:
             peer = self._active
-            connected = peer is not None and not peer.closed.is_set()
+            connected = peer is not None and peer.version is not None and not peer.closed.is_set()
             status = {"listening": self._server is not None, "connected": connected}
             if self._reason:
                 status["reason"] = self._reason
-            if connected and peer.version is not None:
+            if connected:
                 status["helper_version"] = peer.version
             if connected and peer.level is not None:
                 status["level"] = peer.level
@@ -291,11 +339,6 @@ class VoiceLink:
         with self._lifecycle:
             if self._server is not None:
                 return True
-            session = self._factory
-            if callable(session) and (isinstance(session, type) or getattr_static(session, "feed", None) is None):
-                session = session(on_event=self.on_event, on_audio=self.on_audio)
-            if session is None:
-                return self._unavailable("session_unavailable")
             try:
                 key = _load_key(self._key_path)
             except FileNotFoundError:
@@ -318,7 +361,7 @@ class VoiceLink:
             acceptor = threading.Thread(target=self._accept, args=(server, key), name="jarvis-voice-link",
                                         daemon=True)
             with self._lock:
-                self._server, self._session, self._acceptor = server, session, acceptor
+                self._server, self._acceptor = server, acceptor
                 self.address, self._reason = server.getsockname(), None
                 try:
                     acceptor.start()
@@ -401,12 +444,21 @@ class VoiceLink:
             if self._active is not peer:
                 return
             self._active = None
+            session, self._session = self._session, None
         peer.abort()
         peer.interrupt()
+        if session is None:
+            return
         try:
-            self._session.stop()
+            session.stop()
         except Exception:
             LOG.warning("Voice link could not stop its session.")
+        try:
+            detach = getattr(session, "detach", None)
+            if detach is not None:
+                detach()
+        except Exception:
+            LOG.warning("Voice link could not detach its session.")
 
     def _activate(self, peer):
         with self._dispatch:
@@ -422,7 +474,13 @@ class VoiceLink:
                 self._active = peer
                 self._pending -= 1
                 peer.pending = False
-            self._session.start()
+            session = self._factory
+            if callable(session) and (isinstance(session, type) or getattr_static(session, "feed", None) is None):
+                session = session(on_event=peer.on_event, on_audio=peer.on_audio)
+            self._session = session
+            if session is None:
+                return False
+            session.start()
             return True
 
     def _serve(self, peer, key):
@@ -484,10 +542,10 @@ class VoiceLink:
         elif kind == wire.KEY:
             self._session.key(value)
         elif kind == wire.PLAYED:
-            peer.played(value["id"])
-            self._session.played(value["id"])
+            if peer.played(value["id"], now):
+                self._session.played(value["id"])
         elif kind == wire.FLUSHED:
-            self._session.playback_stopped()
+            self._session.playback_stopped(value)
         elif kind == wire.CLICK:
             with self._lock:
                 self._clicks += 1
@@ -506,19 +564,11 @@ class VoiceLink:
         with self._lock:
             peer = self._active if self._server is not None else None
         if peer is not None:
-            try:
-                peer.event(kind, fields)
-            except Exception:
-                LOG.warning("Voice link could not encode a session event.")
-                peer.abort()
+            peer.on_event(kind, **fields)
 
-    def on_audio(self, id, pcm_int16, sample_rate, first, *, last=True):
-        """Queue one complete PCM sentence, or a fragment with explicit ``last``."""
+    def on_audio(self, id, pcm_int16, sample_rate, first, last=None):
+        """Queue PCM with the sentence boundary supplied by the sender."""
         with self._lock:
             peer = self._active if self._server is not None else None
         if peer is not None:
-            try:
-                peer.audio(id, pcm_int16, as_index(sample_rate), first, last)
-            except Exception:
-                LOG.warning("Voice link could not encode session audio.")
-                peer.abort()
+            peer.on_audio(id, pcm_int16, sample_rate, first, last)

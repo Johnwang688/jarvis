@@ -1126,6 +1126,8 @@ V3_TRANSCRIBER = os.environ.get("JARVIS_V3_TRANSCRIBER") or "auto"
 V3_VOICE = os.environ.get("JARVIS_V3_VOICE") or "auto"
 V3_KOKORO_SPEED = _env_number("JARVIS_V3_KOKORO_SPEED", 1.35, 0.8, 2.0)
 V3_END_SILENCE_MS = int(_env_number("JARVIS_V3_END_SILENCE_MS", 500, 300, 1500))
+V3_FOLLOW_UP_S = _env_number("JARVIS_V3_FOLLOW_UP_S", 8, 0, 60)
+V3_FOLLOW_LEVEL_DB = _env_number("JARVIS_V3_FOLLOW_LEVEL_DB", -12, -60, 60)
 
 
 # Speaker verification (voice rework V12, plan 3.4, decisions V-2, V-12, V-14,

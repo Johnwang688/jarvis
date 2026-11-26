@@ -82,9 +82,9 @@ def _voice_client(options):
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
     class Transport(SubprocessCLITransport):
-        async def _check_claude_version(self):
-            # Preflight already enforced the floor with the isolated environment.
-            # The SDK's extra version probe would inherit the entire daemon environment.
+        async def _check_claude_version(self, *_args, **_kwargs):
+            # Preflight enforces the floor with the isolated environment. The SDK's
+            # skip flag is process-wide, so skip its redundant probe for this client only.
             pass
 
     async def empty_stream():

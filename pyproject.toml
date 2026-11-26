@@ -17,7 +17,8 @@ dependencies = [
     # The phone's Web Push (jarvis/v2/push.py, phone design PH-8): encryption
     # and VAPID signing. Imported only when a push is sent or subscribed.
     "pywebpush>=2.5.0,<3",
-    "claude-agent-sdk>=0.2.153,<0.3",
+    # The SDK transport internals used by the isolated voice client can change between patch releases.
+    "claude-agent-sdk>=0.2.153,<0.2.160",
 ]
 
 [project.optional-dependencies]

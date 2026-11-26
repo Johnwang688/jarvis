@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import islice
 from operator import index
-from threading import Condition, RLock, Thread
+from threading import Condition, Thread, current_thread
 from typing import Hashable
 
 from .engines import Voice
@@ -30,27 +30,32 @@ class _Sentence:
 class Speaking:
     """One synthesis worker, one ordered audio delivery worker.
 
-    The sink may exert backpressure by holding ``on_audio`` until it can take
+    ``on_audio(id, pcm, rate, first, last)`` receives one chunk at a time.
+    The sink may exert backpressure by holding the callback until it can take
     another chunk. ``stop()`` waits for an audio callback on the delivery
     thread to finish. A callback can also stop its own remaining delivery.
     A chunk already handed to the sink belongs to the caller. Failed sentences
     are recorded in ``failures()`` and optionally reported through ``on_error``.
     """
 
-    def __init__(self, voice: Voice, *, on_audio, on_done, clock=time.monotonic, on_error=None):
+    def __init__(self, voice: Voice, *, on_audio, on_done, clock=time.monotonic, on_error=None,
+                 keep_history=True):
         self._voice = voice
         self._on_audio = on_audio
         self._on_done = on_done
         self._on_error = on_error
         self._clock = clock
         self._changed = Condition()
-        self._audio_callback = RLock()
+        self._handing_off = None
         self._queue = deque()
         self._closed = False
+        self._keep_history = keep_history
         self._first_audio_ms = {}
         self._failed = []
-        Thread(target=self._prepare, name="voice-synthesize", daemon=True).start()
-        Thread(target=self._deliver, name="voice-audio", daemon=True).start()
+        self._workers = (Thread(target=self._prepare, name="voice-synthesize", daemon=True),
+                         Thread(target=self._deliver, name="voice-audio", daemon=True))
+        for worker in self._workers:
+            worker.start()
 
     def say(self, id: Hashable, text: str) -> None:
         queued_at = self._clock()
@@ -60,14 +65,15 @@ class Speaking:
             self._queue.append(_Sentence(id, text, queued_at))
             self._changed.notify_all()
 
-    def stop(self) -> list[Hashable]:
+    def stop(self, *, wait=True) -> list[Hashable]:
         """Return the IDs dropped from the current handoff, synthesis and queue."""
         with self._changed:
             dropped = [sentence.id for sentence in self._queue]
+            handing_off = self._handing_off
             self._queue.clear()
             self._changed.notify_all()
-        with self._audio_callback:
-            pass  # Wait for any handoff that passed the queue check.
+            if wait and handing_off is not None and current_thread() is not self._workers[1]:
+                self._changed.wait_for(lambda: self._handing_off is not handing_off)
         return dropped
 
     def timings(self) -> dict[Hashable, float]:
@@ -123,7 +129,7 @@ class Speaking:
                 if not self._queue or self._queue[0] is not sentence:
                     continue  # stop() removed it, possibly during a callback
                 self._queue.popleft()
-                if not success:
+                if not success and self._keep_history:
                     self._failed.append(sentence.id)
                 self._changed.notify_all()
             callback = self._on_done if success else self._on_error
@@ -139,15 +145,22 @@ class Speaking:
         for offset in range(0, len(samples), chunk_samples):
             try:
                 chunk = samples[offset:offset + chunk_samples]
-                with self._audio_callback:
-                    with self._changed:
-                        if not self._queue or self._queue[0] is not sentence:
-                            return False
-                        if offset == 0:
-                            self._first_audio_ms[sentence.id] = (self._clock() - sentence.queued_at) * 1000
-                    self._on_audio(sentence.id, chunk, rate, offset == 0)
             except Exception:
                 return False
+            with self._changed:
+                if not self._queue or self._queue[0] is not sentence:
+                    return False
+                if offset == 0 and self._keep_history:
+                    self._first_audio_ms[sentence.id] = (self._clock() - sentence.queued_at) * 1000
+                self._handing_off = sentence
+            try:
+                self._on_audio(sentence.id, chunk, rate, offset == 0, offset + len(chunk) == len(samples))
+            except Exception:
+                return False
+            finally:
+                with self._changed:
+                    self._handing_off = None
+                    self._changed.notify_all()
         return True
 
     def close(self) -> None:
@@ -156,3 +169,8 @@ class Speaking:
             self._closed = True
             self._queue.clear()
             self._changed.notify_all()
+
+    def join(self) -> None:
+        for worker in self._workers:
+            if worker is not current_thread():
+                worker.join()
