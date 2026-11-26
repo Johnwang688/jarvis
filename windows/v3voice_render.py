@@ -149,7 +149,10 @@ def state_from_event(previous, event):
         return show("problem", _clean(event.get("reason")) or PROBLEM_TEXT)
     elif kind == "notice" and "text" in event:
         title = _clean(event.get("title"))
-        label = f"Finished · {title}" if title else LABELS["finished"]
+        if title in ("Finished", "Failed", "Stopped", "Waiting on you"):
+            label = title
+        else:
+            label = f"Finished · {title}" if title else LABELS["finished"]
         return show("finished", _clean(event.get("text")), label=label)
     return previous
 

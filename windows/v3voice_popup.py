@@ -25,6 +25,7 @@ LLMHF_INJECTED = 0x01
 LLMHF_LOWER_IL_INJECTED = 0x02
 _INJECTED = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
 _FRAME_SECONDS = 1 / 30
+_NOTICE_SECONDS = 5
 _ANIMATED = ("listening", "working", "speaking")
 _STATIC = ("resting", "finished", "problem")
 _WINDOW_STYLE = 0x00080000 | 0x00000008 | 0x08000000 | 0x00000080
@@ -274,6 +275,7 @@ class Popup:
         self._countdown = None
         self._revision = 0
         self._click_until = None
+        self._notice = None
         self._closed = False
         self._lock = threading.RLock()
         self._thread = self._active = None
@@ -295,6 +297,8 @@ class Popup:
                 return
             if type(state.kind) is not str or state.kind not in ("hidden", "resting", *drawing.LABELS):
                 state = drawing.PopupState()
+            if state.kind == "hidden":
+                self._notice = None
             if type(state.t) not in (int, float) or not -(2**53) <= state.t <= 2**53:
                 state = replace(state, t=0.0)
             if state.kind in _STATIC:
@@ -313,11 +317,21 @@ class Popup:
                     self._countdown = monotonic() + expires_in, expires_in
             self._state = state
             self._revision += 1
-            if self._active is not None:
-                try:
-                    self._active.wake()
-                except (OSError, ctypes.ArgumentError) as error:
-                    self.error = error
+            self._wake()
+
+    def notice(self, state):
+        """Show a temporary notice above the current state without replacing it."""
+        with self._lock:
+            if not self._closed:
+                self._notice = state, monotonic() + _NOTICE_SECONDS
+                self._wake()
+
+    def _wake(self):
+        if self._active is not None:
+            try:
+                self._active.wake()
+            except (OSError, ctypes.ArgumentError) as error:
+                self.error = error
 
     def close(self):
         with self._lock:
@@ -362,14 +376,17 @@ class Popup:
             with self._lock:
                 self._active = api
             start = monotonic()
-            deadline, last_revision, answered = None, -1, -1
+            deadline, last_revision, answered, last_notice = None, -1, -1, None
             while True:
                 with self._lock:
                     if self._closed:
                         break
                     state, revision, countdown = self._state, self._revision, self._countdown
                     click_until = self._click_until
-                now = monotonic()
+                    now = monotonic()
+                    if self._notice is not None and self._notice[1] <= now:
+                        self._notice = None
+                    notice = self._notice
                 timeout = None
                 if state.kind == "hidden":
                     if self._shown is not None:
@@ -377,7 +394,8 @@ class Popup:
                         api.watch_mouse(False)
                         api.hide()
                 else:
-                    if revision != last_revision or (deadline is not None and now >= deadline):
+                    if (revision != last_revision or notice is not last_notice
+                            or (deadline is not None and now >= deadline)):
                         expires_at = None
                         if countdown is not None:
                             expires_at, duration = countdown
@@ -402,7 +420,19 @@ class Popup:
                         same_target = self._shown is not None and self._shown[0] == target
                         if not same_target:
                             self._shown = self._pressed = None
-                        api.paint(position, frame.size, premultiplied_bgra(frame))
+                        paint_at = position
+                        if notice is not None:
+                            banner = drawing.render(notice[0], scale=scale, font_paths=self._fonts)
+                            gap = round(8 * scale)
+                            width = max(frame.width, banner.width)
+                            height = frame.height + gap + banner.height
+                            stacked = Image.new("RGBA", (width, height))
+                            offset = (width - frame.width) // 2
+                            stacked.paste(banner, ((width - banner.width) // 2, 0))
+                            stacked.paste(frame, (offset, banner.height + gap))
+                            paint_at = position[0] - offset, position[1] - banner.height - gap
+                            frame = stacked
+                        api.paint(paint_at, frame.size, premultiplied_bgra(frame))
                         painted_at = self._shown[2] if same_target else api.painted_at
                         self._shown = target, state, painted_at
                         if enabled:
@@ -412,9 +442,12 @@ class Popup:
                             deadline = min(deadline, expires_at)
                         if click_until is not None and now < click_until:
                             deadline = click_until if deadline is None else min(deadline, click_until)
+                        if notice is not None:
+                            deadline = notice[1] if deadline is None else min(deadline, notice[1])
                     if deadline is not None:
                         timeout = max(0, deadline - monotonic())
                 last_revision = revision
+                last_notice = notice
                 pending, self._pending = self._pending, None
                 if pending is not None and self._shown is not None:
                     target, action = pending

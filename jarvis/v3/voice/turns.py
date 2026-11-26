@@ -259,7 +259,7 @@ class VoiceTurns:
         self._trace.appendleft(turn)
         self._state_to("thinking")
 
-    def heard(self, text, *, speech_ended_at=None, silence_ms=None, decode_ms=None):
+    def heard(self, text, *, speech_ended_at=None, silence_ms=None, decode_ms=None, prefix=None):
         text = " ".join(text.split())
         words = _command_words(text)
         command = _NAME.sub("", words)
@@ -290,7 +290,8 @@ class VoiceTurns:
                                                 speech_ended_at=speech_ended_at, silence_ms=silence_ms,
                                                 decode_ms=decode_ms)
         try:
-            self._brain.send(text, steer=True, input_id=input_id, fresh_after=FRESH_AFTER_S)
+            prompt = text if prefix is None else f"{prefix}\n\n{text}"
+            self._brain.send(prompt, steer=True, input_id=input_id, fresh_after=FRESH_AFTER_S)
         except (ValueError, RuntimeError):
             with self._update():
                 if self._incoming.pop(input_id, None) is not None and not self._closed:

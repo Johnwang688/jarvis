@@ -32,6 +32,7 @@ from jarvis import config, untrusted
 
 from . import t3_client
 from ._paths import open_directory
+from .work_status import FINAL as _FINAL_STATUSES, category as work_category
 
 
 _REGISTRY_LIMIT = 256 * 1024
@@ -78,7 +79,6 @@ DELEGATE_PROMPT = (
 )
 _DELEGATE_ORIGINS = frozenset({"desk", "voice", "phone"})
 _STATUS_FIELDS = _EVENT_FIELDS | {"status", "waiting_on_owner"}
-_FINAL_STATUSES = t3_client.SETTLED - {"waiting"} | {"gone"}
 _UNKNOWN_THREAD = "That is not a thread Jarvis started."
 _WRONG_THREAD = "T3 returned a different thread than requested."
 
@@ -115,6 +115,7 @@ class Thread:
     relay_sha256: str | None = None
     delegated: bool = False
     origin: str | None = None
+    noticed_categories: frozenset[str] = frozenset()
 
 
 def _checked(call, *args, **kwargs):
@@ -473,9 +474,15 @@ def _fold(lines):
             if row["kind"] == "fallback":
                 threads[thread_id] = replace(thread, fallback_status=thread.fallback_status or row["status"])
             else:
+                categories = thread.noticed_categories
+                if thread.delegated:
+                    category = work_category(row["status"], row["waiting_on_owner"])
+                    if category != "running":
+                        categories = categories | {category}
                 threads[thread_id] = replace(
                     thread, status=row["status"], waiting_on_owner=row["waiting_on_owner"], updated_at=at,
                     settled_once=thread.settled_once or row["status"] in _FINAL_STATUSES,
+                    noticed_categories=categories,
                 )
     return threads
 

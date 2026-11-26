@@ -216,6 +216,10 @@ class Helper:
                 self._client.close()
             elif kind == "earcon":
                 self._playback.earcon(event["name"])
+            elif kind == "notice":
+                notice = self._render.state_from_event(self._display, event)
+                if notice is not self._display:
+                    self._popup.notice(notice)
             elif kind == "flush":
                 self._sentences.clear()
                 self._interrupted.clear()

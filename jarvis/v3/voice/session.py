@@ -3,15 +3,18 @@
 from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import re
 from threading import Condition, Event, Thread, current_thread
 import time
+from unicodedata import category
 from uuid import uuid4
 
-from jarvis import config
+from jarvis import config, untrusted
+from jarvis.v2.quiet import QuietHours
 
+from ..work_watch import Notice
 from .approving import ANSWER_DECODE_GRACE_S, ANSWER_WINDOW_S, answer_decision
 from .engines import EngineChoice, EngineUnavailable, KokoroVoice
 from .hearing import FRAME_MS, Hearing
@@ -27,6 +30,15 @@ FOLLOW_LEVEL_DB = config.V3_FOLLOW_LEVEL_DB
 ECHO_TAIL_S = 0.3
 PLAYED_GRACE_S = 2
 APPROVAL_POLL_S = 0.1
+MAX_PENDING_NOTICES = 3
+NOTICE_CONTEXT_S = 60
+_NOTICE_WORDS = {
+    "finished": ("Finished", "finished"),
+    "failed": ("Failed", "failed"),
+    "stopped": ("Stopped", "stopped"),
+    "waiting": ("Waiting on you", "is waiting on you"),
+}
+_NOTICE_QUOTES = str.maketrans({quote: "'" for quote in '"“”„‟«»‘’‚‛‹›'})
 ANSWER_WORDS = ("yes", "no", "approve", "deny", "allow", "reject", "cancel")
 PROMPT_NAMES = ("Codex", "Claude", "Chrome", "VS Code")
 _LEAD_IN = {"ok", "okay", "hey"}
@@ -108,6 +120,7 @@ class _Playback:
     seconds_sent: float = 0
     deadline: float | None = None
     delivered: bool = False
+    notice: Notice | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +145,7 @@ class VoiceSession:
 
     def __init__(self, turns, *, transcriber, voices, names, on_event=None, on_audio=None,
                  clock=time.monotonic, on_answer=None, approving=None, detector=None,
-                 follow_up_s=None, follow_level_db=None):
+                 follow_up_s=None, follow_level_db=None, quiet=None):
         self._turns = turns
         self._transcriber = _LocalTranscriber(transcriber)
         self._fast, self._best = voices
@@ -143,12 +156,14 @@ class VoiceSession:
         self.on_answer = (approving.heard if approving is not None else
                           on_answer if on_answer is not None else lambda _text: False)
         self._clock = clock
+        self._quiet = QuietHours(config.V2_DATA_DIR).is_quiet if quiet is None else quiet
         self._detector = detector
         self._follow_up_s = FOLLOW_UP_S if follow_up_s is None else follow_up_s
         follow_db = FOLLOW_LEVEL_DB if follow_level_db is None else follow_level_db
         self._follow_ratio = 10 ** (follow_db / 10)
         self._changed = Condition()
         self._mailbox = deque()
+        self._pending_notices = 0
         self._active = False
         self._closed = False
         self._generation = self._running_generation = 0
@@ -161,7 +176,8 @@ class VoiceSession:
         if self._voice is None:
             self._voice_reason = "no voice configured"
         self._choice = None
-        self._counters = Counter(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0)
+        self._counters = Counter(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0,
+                                 announced=0, announced_quietly=0, announcements_dropped=0)
         # Input and acknowledgement handlers share these under _changed.
         self._handed_audio = {}  # Sentence ID to whether its last chunk was handed out.
         self._flushed = {}  # Sentence ID to its playback deadline.
@@ -184,6 +200,7 @@ class VoiceSession:
         self._exchange_power = None
         self._approval_fields = None
         self._approval_poll_at = 0
+        self._notice_follow = None
 
     def attach(self, on_event, on_audio):
         """Set the sinks for the next helper before starting capture."""
@@ -193,6 +210,18 @@ class VoiceSession:
     def detach(self):
         """Release the disconnected helper's callbacks."""
         self.attach(None, None)
+
+    def announce(self, notice: Notice):
+        """Hand a work notice to the link worker without waiting for playback."""
+        with self._changed:
+            if not self._active or self._on_event is None:
+                self._counters["announcements_dropped"] += 1
+                return
+            # Overflow uses the worker for link events too, but cannot become speech.
+            overflow = self._pending_notices >= MAX_PENDING_NOTICES
+            if not overflow:
+                self._pending_notices += 1
+            self._queue(self._generation, "notice", notice, overflow)
 
     def start(self):
         """Bring up capture and begin first-use warm-up off the caller's thread."""
@@ -351,6 +380,8 @@ class VoiceSession:
     def _discard_input(self):
         self._active = False
         self._hearing.reset()
+        self._counters["announcements_dropped"] += sum(action == "notice" for _, action, _ in self._mailbox)
+        self._pending_notices = 0
         self._mailbox = deque(message for message in self._mailbox if message[0] is None)
 
     def _close_voices(self):
@@ -429,6 +460,8 @@ class VoiceSession:
                         self._changed.wait(self._next_timeout(now))
                         continue
                     generation, action, args = self._mailbox.popleft()
+                    if action == "notice" and not args[1]:
+                        self._pending_notices -= 1
                     current = generation is None or (self._active and generation == self._generation)
                 try:
                     if current:
@@ -479,6 +512,8 @@ class VoiceSession:
             self._publish_state()
         elif action == "hearing":
             self._handle_hearing(*args)
+        elif action == "notice":
+            self._announce(*args)
         elif action == "turn":
             self._handle_turn(*args)
         elif action == "audio":
@@ -514,6 +549,7 @@ class VoiceSession:
         self._capture = None
         self._woken.clear()
         self._end_conversation()
+        self._notice_follow = None
         self._exchange_power = None
         self._turn_state = "idle"
         self._clear_approval()
@@ -660,6 +696,7 @@ class VoiceSession:
         if active and (request is not None or stop):
             self._barge()
         from_wake = self._wake_from <= capture.started_at < self._wake_until
+        starts_exchange = request is not None or fields["keyed"] or from_wake
         if request is not None:
             self._exchange_power = capture.power or None
             if not _WORD.search(request):
@@ -677,11 +714,13 @@ class VoiceSession:
             text = request
         elif fields["keyed"]:
             self._exchange_power = fields.get("power", capture.power) or None
+        notice_prefix = self._notice_prefix(capture.started_at) if starts_exchange and not stop else None
+        self._notice_follow = None
         if stop:
             self._end_conversation()
         else:
             self._wake_from = self._wake_until = 0
-            self._may_follow = request is not None or fields["keyed"] or from_wake
+            self._may_follow = starts_exchange
             if self._may_follow:
                 self._follow_until = 0
             # Suspend admission while this turn runs. A continuation can
@@ -699,7 +738,8 @@ class VoiceSession:
             self._clear_approval()
         try:
             self._turns.heard(text, speech_ended_at=fields["speech_ended_at"],
-                              silence_ms=fields["silence_ms"], decode_ms=fields["decode_ms"])
+                              silence_ms=fields["silence_ms"], decode_ms=fields["decode_ms"],
+                              prefix=notice_prefix)
         except Exception:
             self._turn_state = "idle"
             self._error("turn_failed")
@@ -781,10 +821,50 @@ class VoiceSession:
             self._flush()
         self._publish_state()
 
-    def _queue_sentence(self, id, text, *, approval_id=None):
+    def _announce(self, notice, overflow):
+        with self._changed:
+            attached = self._active and self._on_event is not None
+            flushing = self._pending_flush is not None
+        if not attached or overflow:
+            self._count("announcements_dropped")
+        if not attached:
+            return
+        title = " ".join("".join(char for char in untrusted.strip_invisible(notice.title)
+                                 if char.isspace() or category(char) not in {"Cf", "Cs"}).split())
+        title = title.translate(_NOTICE_QUOTES)[:60].rstrip()
+        notice = replace(notice, title=title or "a background task")
+        label, phrase = _NOTICE_WORDS["failed" if notice.failed else notice.category]
+        quiet = overflow or flushing or self._state != "resting" or self._turns.can_interrupt()
+        if not quiet:
+            try:
+                quiet = self._quiet()
+            except OSError:
+                quiet = True
+                LOG.warning("Quiet hours could not be checked for a work announcement.")
+        self._event("notice", title=label, text=notice.title)
+        if quiet:
+            self._count("announced_quietly")
+            self._event("earcon", name="notice")
+        else:
+            self._count("announced")
+            self._notice_follow = None
+            self._queue_sentence(uuid4().hex, f'Your task "{notice.title}" {phrase}.', notice=notice)
+
+    def _notice_prefix(self, started_at):
+        if self._notice_follow is None:
+            return None
+        notice, at = self._notice_follow
+        if not at <= started_at < at + NOTICE_CONTEXT_S:
+            return None
+        phrase = ("is waiting on him" if notice.category == "waiting" else
+                  "failed" if notice.failed else notice.category)
+        return (f'[Jarvis just told the owner: task "{notice.title}" {phrase}. '
+                f'Thread id: {notice.thread_id}.]')
+
+    def _queue_sentence(self, id, text, *, approval_id=None, notice=None):
         if id in self._playback:
             return
-        self._playback[id] = _Playback(approval_id)
+        self._playback[id] = _Playback(approval_id, notice=notice)
         self._publish_state()
         self._event("say", id=id, text=text)
         self._speaking.say(id, text)
@@ -793,7 +873,8 @@ class VoiceSession:
         item = self._playback.get(id)
         if item is None:
             return
-        if not (self._turns.is_asking(item.approval_id) if item.approval_id is not None
+        if item.notice is None and not (
+                self._turns.is_asking(item.approval_id) if item.approval_id is not None
                 else self._turns.has_audio(id)):
             return
         now = self._clock()
@@ -850,7 +931,10 @@ class VoiceSession:
                             voice_allowed=self._approval_fields["voice_allowed"] and remaining > 0,
                             expires_in=remaining,
                             click_expires_in=pending["expires_in"]))
-        if item.approval_id is None:
+        if item.notice is not None:
+            if not (failed or timed_out):
+                self._notice_follow = item.notice, at
+        elif item.approval_id is None:
             if not self._playback:
                 self._answer_finished = None if failed else (id, at)
             self._turns.spoken(id)

@@ -437,6 +437,29 @@ class Window(unittest.TestCase):
                 self.assertEqual(received, [decision])
                 self.assertFalse(fake.watch)
 
+    def test_notice_leaves_the_approval_target_and_deadline_in_place(self):
+        fake = FakeWin32()
+        received = []
+        state = SAMPLES["asking"]
+        with patch.object(popup, "monotonic", return_value=100.0) as now:
+            with closing(popup.Popup(received.append, win32=fake)) as window:
+                window.set(state, expires_in=10)
+                position, size, _ = fake.until("paint")
+                left, top, right, bottom = dict(drawing._layout(state, 1.5, 470, ()).buttons)["deny"]
+                x, y = position[0] + (left + right) // 2, position[1] + (top + bottom) // 2
+                fake.mouse((0, popup.WM_LBUTTONDOWN, x, y))
+                fake.sync()
+                window.notice(SAMPLES["finished"])
+                paint_at, stacked, _ = fake.until("paint", lambda row: row[1][1] > size[1])
+                self.assertEqual(paint_at[1] + stacked[1], position[1] + size[1])
+                fake.mouse((0, popup.WM_LBUTTONUP, x, y))
+                fake.sync()
+                self.assertEqual(received, [{"id": state.id, "digest": state.digest, "decision": "deny"}])
+                now.return_value += 6
+                fake.wake()
+                self.assertEqual(fake.until("paint", lambda row: row[1] == size)[0], position)
+                self.assertEqual(window._countdown, (110.0, 10))
+
     @unittest.skipIf(os.name == "nt", "The default adapter opens a native window on Windows")
     def test_off_windows_default_is_inert(self):
         window = popup.Popup()
