@@ -31,6 +31,7 @@ from .feed import Feed
 from .index import Index
 from .owner_routes import FEED_LOCK_TIMEOUT
 from .policy import Policy
+from .t3_client import RUNNING
 from .tools.feed import FeedTools
 from .tools.memory import MemoryTools
 from .tools.session_search import session_search
@@ -43,6 +44,8 @@ V3_TOOLS = TOOL_NAMES
 _ALL_GATED = GATED_TOOLS | WORK_GATED | PC_GATED
 SUMMARY_CHARS = 200
 WORK_SHOW_LIMIT = 24_000
+MESSAGE_WINDOW_S = 72 * 60 * 60
+MESSAGE_LIST_LIMIT = 8
 AUTO_PER_TURN = 6
 DELEGATE_PER_TURN = 3
 _DELEGATE_TURN_ERROR = "Only 3 tasks may be handed off per turn."
@@ -63,6 +66,7 @@ _CHAT_PROMPT = (
     "owner-requested task within this chat's capabilities. Post a brief only when the "
     "owner asks for one. This chat can post to the owner's batch feed.\n\n"
     + config.V3_PC_PARAGRAPH + "\n\n" + config.V3_DELEGATE_PARAGRAPH
+    + "\n\n" + config.V3_MESSAGES_PARAGRAPH
 )
 _REGISTRATION = Lock()
 _POLICY_KINDS = {
@@ -417,6 +421,79 @@ def work_threads(project: Annotated[str, "Limit to this registered project."] = 
                       "the coding-thread ledger")
 
 
+def _recent_messages(work, now):
+    threads = (thread for thread in work.threads()
+               if thread.message and 0 <= now - thread.started_at <= MESSAGE_WINDOW_S)
+    return sorted(threads, key=lambda thread: thread.started_at, reverse=True)[:MESSAGE_LIST_LIMIT]
+
+
+def _message_age(seconds):
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        count, unit = int(seconds // 60), "minute"
+    elif seconds < 86400:
+        count, unit = int(seconds // 3600), "hour"
+    elif seconds < 172800:
+        return "yesterday"
+    else:
+        count, unit = int(seconds // 86400), "day"
+    return f"{count} {unit}{'s' if count != 1 else ''} ago"
+
+
+def _message_state(status, waiting):
+    if status in {"failed", "interrupted", "cancelled"}:
+        return "not delivered"
+    if waiting or status == "waiting":
+        return "waiting on you"
+    if status == "started" or status in RUNNING:
+        return "sending"
+    if status in {"completed", "idle", "exported"}:
+        return "delivered"
+    return "unknown"
+
+
+@_work_tool
+def message_list() -> str:
+    """List up to eight recent messages from Jarvis, newest first, with their numbers."""
+    turn = _TURN.get()
+    now = turn.clock()
+    rows = []
+    for number, thread in enumerate(_recent_messages(turn.work, now), 1):
+        age = _message_age(now - thread.started_at)
+        state = _message_state(thread.status, thread.waiting_on_owner)
+        rows.append(card_text(f"{number}. {thread.title} ({thread.project}, {age}, {state})", limit=None))
+    return _reference("\n".join(rows) or "No messages in the last three days.", "the message-thread ledger")
+
+
+@_work_tool
+def message_read(number: Annotated[int, "Message number from message_list, with 1 newest."]) -> str:
+    """Read the original Jarvis email from a numbered message thread."""
+    from .messages import relay_sha256
+
+    turn = _TURN.get()
+    threads = _recent_messages(turn.work, turn.clock())
+    if not threads:
+        return "Error: No valid message numbers. No messages in the last three days."
+    if type(number) is not int or not 1 <= number <= len(threads):
+        return f"Error: Message number must be an integer from 1 to {len(threads)}."
+    thread = threads[number - 1]
+    # show returns the most recent N messages. The relay can predate many
+    # follow-ups, so ask for all history within the T3 client's output cap.
+    state = turn.work.show(thread.thread_id, messages=2**31 - 1)
+    for index, (role, body) in enumerate(state.messages):
+        if role != "assistant" or relay_sha256(body) != thread.relay_sha256:
+            continue
+        later = sum(role in {"user", "assistant"} for role, _ in state.messages[index + 1:])
+        notes = [f"The thread has {later} later message{'s' if later != 1 else ''} in T3."] if later else []
+        return untrusted.fence_chat(card_text(body, limit=None), "a T3 message thread", WORK_SHOW_LIMIT,
+                                    notes=notes)
+    if _message_state(state.status, state.waiting_on_owner) == "sending":
+        return "That message has not been delivered in T3 yet."
+    project = card_text(thread.project, limit=None)
+    return f"That message's text is not available here. It is in T3 under {project}."
+
+
 @_work_tool
 def work_show(
     thread_id: Annotated[str, "ID of a coding thread Jarvis started."],
@@ -731,7 +808,7 @@ _WRAPPERS = {fn.__name__: fn for fn in (
     vault_list, vault_read, vault_search, index_search, skill_view, skill_names,
     calendar_list, calendar_free, brief_post,
 )}
-_WORK_WRAPPERS = {fn.__name__: fn for fn in (work_projects, work_threads, work_show)}
+_WORK_WRAPPERS = {fn.__name__: fn for fn in (work_projects, work_threads, work_show, message_list, message_read)}
 _GATED_WRAPPERS = {fn.__name__: fn for fn in (
     vault_add, vault_patch, vault_archive, calendar_create, calendar_update, calendar_delete,
     work_start, work_send, delegate, app_open, folder_open, link_open,

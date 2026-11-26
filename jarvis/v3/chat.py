@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 CALENDAR_TOOLS = frozenset({"calendar_list", "calendar_free"})
 CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_delete"})
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
-WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})
+WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show", "message_list", "message_read"})
 WORK_GATED = frozenset({"work_start", "work_send", "delegate"})
 PC_GATED = frozenset({"app_open", "folder_open", "link_open"})
 # Results that never carry text written outside this session. Thread titles and learned

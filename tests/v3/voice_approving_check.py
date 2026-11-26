@@ -236,6 +236,9 @@ class ApprovalAnswers(BrokerFixture):
             self.assertNotIn("approv", name)
             self.assertNotIn("approving", tool.func.__module__)
             self.assertIsNot(tool.func, ApprovalBroker.answer)
+        for name in ("message_list", "message_read"):
+            self.assertFalse(registry[name].dangerous)
+            self.assertNotIn(name, fastpath._ALL_GATED)
         guide = (Path(__file__).resolve().parents[2] / "AGENTS.md").read_bytes()
         for pinned in (b"Speech never authorizes an approval.", b"Dictation is not speaker-verified (owner)."):
             self.assertIn(pinned, guide)
@@ -347,6 +350,7 @@ class VoiceApprovalFlow(BrokerFixture):
         self.assertEqual(self.session.status()["counters"]["voice_approvals"], 1)
         allowed = self.factory.clients[0].options.allowed_tools
         self.assertIn("mcp__jarvis__vault_add", allowed)
+        self.assertTrue({"mcp__jarvis__message_list", "mcp__jarvis__message_read"}.isdisjoint(allowed))
         self.assertFalse(any("approv" in name for name in allowed))
 
     def test_spoken_stop_denies_without_going_to_the_brain(self):
