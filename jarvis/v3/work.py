@@ -1,4 +1,4 @@
-"""Owner-registered projects and a ledger of coding threads started by Jarvis.
+"""Owner-registered projects and a ledger of T3 threads started by Jarvis.
 
 Limits, by design:
 - The registry names a folder by its path. A different folder later put at
@@ -11,10 +11,11 @@ Limits, by design:
 """
 
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import fcntl
 import hashlib
 import io
+from itertools import chain
 import json
 import os
 from pathlib import Path
@@ -57,7 +58,11 @@ _PROJECT_FIELDS = {"path", "provider", "model", "base"}
 _PLAN_FIELDS = _PROJECT_FIELDS | {"project", "title", "brief", "branch"}
 _EVENT_FIELDS = {"v", "kind", "thread_id", "at"}
 _START_FIELDS = _EVENT_FIELDS | {"run_id", "project", "title", "branch", "brief_sha256"}
+_GENERAL_PROJECT = "jarvis"
+_MESSAGE_PROVIDER = "codex"
+_MESSAGE_MODEL = "gpt-6.2-sol"
 _STATUS_FIELDS = _EVENT_FIELDS | {"status", "waiting_on_owner"}
+_FINAL_STATUSES = t3_client.SETTLED - {"waiting"} | {"gone"}
 _UNKNOWN_THREAD = "That is not a thread Jarvis started."
 _WRONG_THREAD = "T3 returned a different thread than requested."
 
@@ -86,6 +91,12 @@ class Thread:
     status: str
     waiting_on_owner: bool
     updated_at: float
+    message: bool = False
+    notice_key: str | None = None
+    settled_once: bool = False
+    fallback_status: str | None = None
+    fallback: dict | None = field(default=None, repr=False)
+    relay_sha256: str | None = None
 
 
 def _checked(call, *args, **kwargs):
@@ -146,13 +157,17 @@ def _project(name, path, provider, model, base):
     )
 
 
-def _title(value):
+def _title(value, *, message=False):
     if not isinstance(value, str) or any(
         char in _BIDI_CONTROLS or unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"}
         for char in value
     ):
         raise WorkError("Invalid thread title.")
+    if message and value.strip() and 4 <= len(value) <= 80:
+        return value
     title = value.strip()
+    if message:
+        raise WorkError("Message subject must be 4 to 80 characters.")
     if not 1 <= len(title) <= 80:
         raise WorkError("Thread title must be 1 to 80 characters.")
     return _checked(t3_client._arg, title)
@@ -285,6 +300,23 @@ class Registry:
                 return project
         raise WorkError("Unknown work project.")
 
+    def message_project(self, name) -> tuple[Project, bool]:
+        projects = {project.name: project for project in self.list()}
+        project = projects.get(name) or projects.get(_GENERAL_PROJECT)
+        if project is not None:
+            return project, False
+        return self.builtin_message_project(), True
+
+    def builtin_message_project(self) -> Project:
+        # The built-in is available only to message delivery. Keep the
+        # work registry's prohibition on registering v3 state for coding.
+        path = (self.path.parent.parent / "messages").absolute()
+        with open_directory(path, create=True) as directory:
+            info = os.fstat(directory)
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise WorkError("The Jarvis message project directory must be private.")
+        return Project(_GENERAL_PROJECT, str(path), _MESSAGE_PROVIDER, _MESSAGE_MODEL, None)
+
     def add(self, name, path, *, provider, model, base=None) -> Project:
         project = _project(name, _resolve_path(path), provider, model, base)
         try:
@@ -306,12 +338,25 @@ class Registry:
             with self._locked(fcntl.LOCK_EX) as directory:
                 projects = self._read(directory)
                 if projects.pop(name, None) is None:
+                    if name == _GENERAL_PROJECT:
+                        raise WorkError("The built-in Jarvis project cannot be removed.")
                     raise WorkError("Unknown work project.")
                 self._replace(directory, projects)
         except FileNotFoundError:
+            if name == _GENERAL_PROJECT:
+                raise WorkError("The built-in Jarvis project cannot be removed.") from None
             raise WorkError("Unknown work project.") from None
         except OSError:
             raise WorkError("Project registry could not be updated safely.") from None
+
+
+def _fallback_fields(fields, *, replay=False):
+    from .feed import FeedError, _fields
+
+    try:
+        return _fields(fields, replay=replay)
+    except FeedError:
+        raise WorkError("Invalid work notice fallback.") from None
 
 
 def _event(row):
@@ -322,24 +367,41 @@ def _event(row):
     if type(at) not in (int, float) or not -sys.float_info.max <= at <= sys.float_info.max:
         raise WorkError("Invalid work ledger time.")
     _checked(t3_client._arg, row.get("thread_id"))
-    if kind == "start" and row.keys() == _START_FIELDS:
+    if (kind == "start"
+            and _START_FIELDS <= row.keys() <= _START_FIELDS | {"message", "notice_key", "fallback", "relay_sha256"}):
         _checked(t3_client._arg, row["run_id"])
         _name(row["project"])
         digest = row["brief_sha256"]
-        if (_title(row["title"]) == row["title"]
+        message = row.get("message", False)
+        notice = row.get("notice_key")
+        relay_digest = row.get("relay_sha256")
+        if (type(message) is bool
+                and (not message or row["branch"] is None)
+                and ("notice_key" not in row
+                     or (message and isinstance(notice, str) and _SHA256.fullmatch(notice)))
+                and ("relay_sha256" not in row or (message and isinstance(relay_digest, str)
+                                                   and _SHA256.fullmatch(relay_digest)))
+                and _title(row["title"], message=message) == row["title"]
                 and isinstance(digest, str) and _SHA256.fullmatch(digest) is not None):
             if row["branch"] is not None:
                 _checked(t3_client._arg, row["branch"])
+            if "fallback" in row:
+                if not message:
+                    raise WorkError("Invalid work ledger event.")
+                _fallback_fields(row["fallback"], replay=True)
             return row
     if kind == "status" and row.keys() == _STATUS_FIELDS and type(row["waiting_on_owner"]) is bool:
         _checked(t3_client._arg, row["status"])
         return row
+    if (kind == "fallback" and row.keys() == _EVENT_FIELDS | {"status"}
+            and isinstance(row["status"], str) and row["status"] in _FINAL_STATUSES):
+        return row
     raise WorkError("Invalid work ledger event.")
 
 
-def _fold(raw):
+def _fold(lines):
     threads = {}
-    for line in io.BytesIO(raw):
+    for line in lines:
         try:
             row = _event(json.loads(line.decode("utf-8"), object_pairs_hook=_unique_object))
         except (ValueError, RecursionError, WorkError):
@@ -349,39 +411,58 @@ def _fold(raw):
             threads.setdefault(thread_id, Thread(
                 thread_id, row["project"], row["title"], at, row["branch"], row["brief_sha256"],
                 "started", False, at,
+                row.get("message", False), row.get("notice_key"),
+                fallback=row.get("fallback"), relay_sha256=row.get("relay_sha256"),
             ))
         elif thread_id in threads:
-            threads[thread_id] = replace(
-                threads[thread_id], status=row["status"], waiting_on_owner=row["waiting_on_owner"],
-                updated_at=at,
-            )
+            thread = threads[thread_id]
+            if row["kind"] == "fallback":
+                threads[thread_id] = replace(thread, fallback_status=thread.fallback_status or row["status"])
+            else:
+                threads[thread_id] = replace(
+                    thread, status=row["status"], waiting_on_owner=row["waiting_on_owner"], updated_at=at,
+                    settled_once=thread.settled_once or row["status"] in _FINAL_STATUSES,
+                )
     return threads
 
 
 class Ledger:
     def __init__(self, path):
         self.path = Path(path)
+        self.recovery_path = self.path.with_name("message-starts.jsonl")
+        self._unpersisted = {}
 
-    def _read(self):
+    def _read_file(self, path):
         try:
-            with _directory(self.path) as directory, _file(directory, self.path.name, os.O_RDONLY) as fd:
+            with _directory(path) as directory, _file(directory, path.name, os.O_RDONLY) as fd:
                 fcntl.flock(fd, fcntl.LOCK_SH)
-                return _fold(_read(fd, _LEDGER_LIMIT))
+                return _read(fd, _LEDGER_LIMIT)
         except FileNotFoundError:
-            return {}
+            return b""
         except OSError:
             raise WorkError("Work ledger could not be read safely.") from None
 
-    def _append(self, row):
+    def _starts_to_recover(self):
+        return self._read_file(self.recovery_path), self._unpersisted.copy()
+
+    def _read(self):
+        recovered, pending = self._starts_to_recover()
+        return _fold(chain(io.BytesIO(recovered), pending.values(), io.BytesIO(self._read_file(self.path))))
+
+    def _append(self, row, *, path=None):
         _event(row)
         raw = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
         starting = row["kind"] == "start"
-        flags = os.O_RDWR | os.O_APPEND | (os.O_CREAT if starting else 0)
+        path = self.path if path is None else path
+        recovered, pending = (b"", {}) if starting else self._starts_to_recover()
+        flags = os.O_RDWR | os.O_APPEND | (os.O_CREAT if starting or recovered or pending else 0)
         try:
-            with _directory(self.path, create=starting) as directory, _file(directory, self.path.name, flags) as fd:
+            with _directory(path, create=starting) as directory, _file(directory, path.name, flags) as fd:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                if not starting and row["thread_id"] not in _fold(_read(fd, _LEDGER_LIMIT)):
-                    raise WorkError(_UNKNOWN_THREAD)
+                if not starting:
+                    events = chain(io.BytesIO(recovered), pending.values(), io.BytesIO(_read(fd, _LEDGER_LIMIT)))
+                    if row["thread_id"] not in _fold(events):
+                        raise WorkError(_UNKNOWN_THREAD)
                 size = os.fstat(fd).st_size
                 if size and os.pread(fd, 1, size - 1) != b"\n":
                     # A damaged tail must not absorb the next valid event.
@@ -392,6 +473,8 @@ class Ledger:
                     os.ftruncate(fd, size)
                     raise WorkError("Work ledger append was incomplete.")
                 os.fsync(fd)
+                if path == self.recovery_path:
+                    os.fsync(directory)
         except FileNotFoundError:
             if not starting:
                 raise WorkError(_UNKNOWN_THREAD) from None
@@ -399,9 +482,35 @@ class Ledger:
         except OSError:
             raise WorkError("Work ledger could not be updated safely.") from None
 
-    def record_start(self, *, thread_id, run_id, project, title, branch, brief_sha256, at) -> None:
-        self._append(dict(v=1, kind="start", thread_id=thread_id, run_id=run_id, project=project,
-                          title=title, branch=branch, brief_sha256=brief_sha256, at=at))
+    @contextmanager
+    def _delivery_lock(self, name):
+        with _directory(self.path, create=True) as directory:
+            with _file(directory, name, os.O_RDWR | os.O_CREAT) as fd:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+
+    def message_delivery(self):
+        return self._delivery_lock("messages.lock")
+
+    def notice_delivery(self):
+        return self._delivery_lock("notices.lock")
+
+    def record_start(self, *, message=False, notice_key=None, **fields) -> None:
+        if message:
+            fields["message"] = True
+        if notice_key is not None:
+            fields["notice_key"] = notice_key
+        self._append(dict(v=1, kind="start", **fields))
+
+    def recover_message_start(self, **fields) -> None:
+        row = dict(v=1, kind="start", **fields)
+        try:
+            self._append(row, path=self.recovery_path)
+        except (WorkError, OSError):
+            self._unpersisted[row["thread_id"]] = json.dumps(row).encode("ascii")
+
+    def record_fallback(self, thread_id, *, status, at) -> None:
+        self._append(dict(v=1, kind="fallback", thread_id=thread_id, status=status, at=at))
 
     def record_status(self, thread_id, *, status, waiting_on_owner, at) -> None:
         self._append(dict(v=1, kind="status", thread_id=thread_id, status=status,
@@ -465,7 +574,6 @@ class WorkService:
         if title != plan["title"]:
             raise WorkError("Invalid work start plan.")
         brief = plan["brief"]
-        brief_sha256 = hashlib.sha256(_message(brief)).hexdigest()
         branch = plan["branch"]
         options = {}
         if branch is not None:
@@ -474,11 +582,58 @@ class WorkService:
                     or not _valid_suffix(branch[len(prefix):])):
                 raise WorkError("Invalid work branch in start plan.")
             options = {"worktree": project.base, "branch": branch}
+        return self._start(project, title, brief, branch, options, guard=guard)
+
+    def message_delivery(self):
+        return self._ledger.message_delivery()
+
+    def _message_target(self, project, builtin):
+        if not builtin:
+            try:
+                if _resolve_path(project.path) != project.path:
+                    return None
+            except WorkError:
+                return None
+        return _checked(self._t3.project_at, project.path)
+
+    def start_message(self, message, *, at, notice_key=None, fallback=None) -> Thread:
+        from .messages import Message, relay_sha256, thread_prompt
+
+        if notice_key is not None and not (isinstance(notice_key, str) and _SHA256.fullmatch(notice_key)):
+            raise WorkError("Invalid work notice key.")
+        project, builtin = self._registry.message_project(message.project)
+        target = self._message_target(project, builtin)
+        if target is None and not builtin:
+            if message.project == project.name:
+                message = Message(message.subject, f"About {project.name}:\n\n{message.body}")
+            if project.name != _GENERAL_PROJECT:
+                project, builtin = self._registry.message_project(None)
+                target = self._message_target(project, builtin)
+            if target is None and not builtin:
+                project, builtin = self._registry.builtin_message_project(), True
+                target = self._message_target(project, builtin)
+        if target is None and builtin:
+            _checked(self._t3.project_add, project.path, title="Jarvis")
+            target = _checked(self._t3.project_at, project.path)
+        if target is None:
+            raise WorkError("T3 could not confirm the exact Jarvis message project.")
+
+        project = replace(project, provider=_MESSAGE_PROVIDER, model=_MESSAGE_MODEL)
+        mark = {"message": True, "relay_sha256": relay_sha256(f"Subject: {message.subject}\n\n{message.body}")}
+        if notice_key is not None:
+            mark["notice_key"] = notice_key
+        if fallback is not None:
+            mark["fallback"] = _fallback_fields(fallback)
+        return self._start(project, _title(message.subject, message=True), thread_prompt(message), None, {},
+                           at=at, target=target, mark=mark)
+
+    def _start(self, project, title, brief, branch, options, *, guard=None, at=None, target=None, mark=None):
+        brief_sha256 = hashlib.sha256(_message(brief)).hexdigest()
         if guard is not None:
             guard()
-        run = _checked(self._t3.start, project.path, brief, provider=project.provider,
+        run = _checked(self._t3.start, target if target is not None else project.path, brief, provider=project.provider,
                        model=project.model, title=title, **options)
-        at = self._clock()
+        at = self._clock() if at is None else at
         thread_id, run_id = run.thread_id, run.run_id
         if not all(isinstance(value, str) and _T3_ID.fullmatch(value) for value in (thread_id, run_id)):
             raise WorkError("T3 started work but returned an invalid thread id.")
@@ -488,12 +643,18 @@ class WorkService:
             pass
         else:
             raise WorkError("T3 returned the id of a thread Jarvis already recorded.")
+        fields = dict(thread_id=thread_id, run_id=run_id, project=project.name, title=title, branch=branch,
+                      brief_sha256=brief_sha256, at=at, **(mark or {}))
         try:
-            self._ledger.record_start(thread_id=thread_id, run_id=run_id, project=project.name,
-                                      title=title, branch=branch, brief_sha256=brief_sha256, at=at)
+            self._ledger.record_start(**fields)
         except (WorkError, OSError):
-            raise WorkError(f"Could not record the start of T3 thread {thread_id}.") from None
-        return Thread(thread_id, project.name, title, float(at), branch, brief_sha256, "started", False, float(at))
+            if mark is None:
+                raise WorkError(f"Could not record the start of T3 thread {thread_id}.") from None
+            # T3 already accepted the message. Keep the start for the cap and
+            # watcher even when the main ledger could not append the event.
+            self._ledger.recover_message_start(**fields)
+        return Thread(thread_id, project.name, title, float(at), branch, brief_sha256, "started", False,
+                      float(at), **(mark or {}))
 
     def threads(self, project=None) -> list[Thread]:
         return self._ledger.threads(project)

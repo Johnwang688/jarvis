@@ -1,13 +1,16 @@
 """Exercise the T3 client with fake executables in a temporary HOME."""
 
 import json
+from datetime import datetime, timezone
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,6 +47,25 @@ class Client(unittest.TestCase):
         self.assertEqual(caught.exception.kind, kind)
         self.assertEqual(len(str(caught.exception).splitlines()), 1)
         return str(caught.exception)
+
+    def test_project_at_reads_only_exact_active_roots(self):
+        path = self.home / "userdata" / "statev2.sqlite"
+        path.parent.mkdir()
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("CREATE TABLE projection_projects (project_id, workspace_root, deleted_at, archived_at)")
+            db.executemany("INSERT INTO projection_projects VALUES (?, ?, ?, ?)", [
+                ("parent-id", "/home/user", None, None),
+                ("active-id", "/home/user/active", None, None),
+                ("archived-id", "/home/user/archived", None, "2030-01-01"),
+                ("deleted-id", "/home/user/deleted", "2030-01-01", None),
+            ])
+
+        client = T3()
+        with patch.object(t3_client.subprocess, "Popen") as popen:
+            self.assertEqual(client.project_at("/home/user/active"), "active-id")
+            for root in ("/home/user/active/child", "/home/user/archived", "/home/user/deleted"):
+                self.assertIsNone(client.project_at(root))
+            popen.assert_not_called()
 
     def test_stdout_cap_accepts_exactly_the_limit(self):
         self.fake("os.write(1, b'[]' + b' ' * 8190)")
@@ -104,6 +126,13 @@ class Client(unittest.TestCase):
     def test_non_utf8_output(self):
         self.fake("os.write(1, b'\"\\xff\"')")
         self.error("shape", T3().list, ".")
+
+    def test_show_reads_optional_settlement_time(self):
+        at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        for stamp, expected in ((at.isoformat(), at.timestamp()), (None, None), ("2030-01-01", None)):
+            with self.subTest(stamp=stamp):
+                self.result({**SHOW, "thread": {**THREAD, "settledAt": stamp}})
+                self.assertEqual(T3().show("t:1").settled_at, expected)
 
     def test_wait_clock_jumps(self):
         self.result({**SHOW, "thread": {**THREAD, "status": "running"}})

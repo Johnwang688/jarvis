@@ -204,11 +204,12 @@ class ExecutorActions(unittest.TestCase):
         daemon = Daemon(port=0, data_dir=self.data, phone_host=None)
         job = daemon._scheduler._jobs["evening-wrap"]
         with (patch.object(daily_briefs.time, "time", self.clock),
-              patch.object(daily_briefs, "_model_summary", return_value=""),
+              patch.object(daily_briefs, "_model_text", return_value="") as writer,
               patch("jarvis.v3.learning_digest.summary_line", return_value=None)):
             job.run()
             self.instant += timedelta(days=1)
             job.run()
+        self.assertIn("1 calendar.block, 1 vault.update", writer.call_args_list[0].args[0])
         digests = sorted((row for row in self.feed.briefs("open") if row["kind"] == "digest"),
                          key=lambda row: row["created"])
         today, next_day = digests

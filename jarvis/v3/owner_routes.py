@@ -143,6 +143,7 @@ def _work_snapshot(body, get_work):
                 "thread_id": thread.thread_id,
                 "project": thread.project,
                 "title": thread.title,
+                "message": thread.message,
                 "status": thread.status,
                 "waiting_on_owner": thread.waiting_on_owner,
                 "started_at": thread.started_at,

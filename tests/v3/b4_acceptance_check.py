@@ -1,6 +1,6 @@
 """Orchestrator-owned acceptance tests for B4 (implementers: do not edit; if one is wrong, stop and say why).
 
-Contract: the morning brief and the evening wrap-up, one "digest" brief per run, assembled in code; a model writes only the summary.
+Contract: the morning digest and evening wrap-up share the daily work claim and input assembly.
   jarvis/v3/daily_briefs.py
     JOB = "brief" (budget cap 4/day); MODEL = "haiku"; MAX_LINES = 8; RANK = 3 (>= 3: a digest is batched, never pushed)
     MORNING = "07:15"; EVENING = "21:00"; zone America/Chicago; quiet hours are fixed at 23:00-07:00 (owner rule)
@@ -27,17 +27,15 @@ Contract: the morning brief and the evening wrap-up, one "digest" brief per run,
       commitments, other briefs. Notes come last and are always kept: items are cut to MAX_LINES - notes.
     build_prompt(digest) -> str     jarvis/v3/prompts/daily_brief.md, then the lines fenced as untrusted data (titles only).
     run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitments=None, mail=None, activity=None,
-        run_job=claude_jobs.run_job) -> Result(outcome, brief_id=None, lines=0, summary="none", note="")
-      outcome "posted" | "already" (this day and kind was claimed before) | "quiet" (inside 23:00-07:00: nothing posted, no claim) | "error".
-      Posts exactly one brief: feed.post({"kind": "digest", "rank": RANK, "ask": digest.ask, "why_now": <summary or fallback>,
-      "context": digest.lines}, actor="jarvis"). The claim for (local day, which) is written durably to state_dir (default
-      config.V3_DIR / "daily-briefs", 0700, files 0600) BEFORE the post, so a crash or a failed post never yields a second digest.
+        run_job=claude_jobs.run_job, messages=None) -> Result(outcome, brief_id=None, lines=0, summary="none", note="")
+      outcome "posted" | "sent" | "already" (the day and kind were claimed) | "quiet" (the delivery window closed) | "error".
+      Morning posts one digest with the summary and context. Evening sends one T3 email, with a numbered email if the model fails
+      and a digest if delivery fails. The (local day, which) claim is written to private state before delivery.
       Model: only when items > 0. budget.admit(JOB, ...) then run_job(JOB, prompt, model=MODEL, tools=(), cwd=<empty private folder>,
-      timeout <= 300), no MCP servers: the model has no tools and acts on nothing. why_now = one_line(job text, 200); summary "model".
-      Budget refused (budget.skip is recorded), job failed or raised: the same ask and lines are posted with a fallback why_now;
-      summary "fallback". No item: summary "none", no job, still one calm brief. Each run appends one line to state_dir/log.jsonl:
+      timeout <= 300), with no tools or MCP servers. Morning uses one_line(job text, 200) for why_now. Evening validates the email.
+      Budget or model failures use the code-built copy. An empty day needs no job. Each run appends one line to state_dir/log.jsonl:
       exactly {"ts", "day", "which", "outcome", "lines", "summary", "note"}; never a title or brief text.
-    The brief answers no brief, runs no proposal, pushes nothing and sends nothing outward.
+    The daily job answers no brief, runs no proposal and pushes nothing.
   jarvis/v3/jobs.py default_jobs(): "morning-brief" and "evening-wrap", each due = daily_briefs.due(now, last_run=..., which=...);
     run = daily_briefs.run(which, feed=<the feed job's Feed>, budget=<Budget>, calendar=None unless Google grants calendar, ...) with
     the real runner chosen inside daily_briefs; outcome "error" raises. daily_briefs is imported lazily (agentd starts light).
@@ -52,7 +50,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from jarvis import config
@@ -60,6 +58,7 @@ from jarvis.v3 import daily_briefs, jobs
 from jarvis.v3.budget import Budget
 from jarvis.v3.claude_jobs import JobResult
 from jarvis.v3.feed import Feed
+from jarvis.v3.messages import Result as MessageResult
 
 REPO = Path(__file__).resolve().parents[2]
 CHICAGO = ZoneInfo("America/Chicago")
@@ -143,8 +142,9 @@ class Base(unittest.TestCase):
                 "mail": None if mail is None else source(mail, c["mail"]),
                 "activity": None if activity is None else source(activity, c["activity"])}
 
-    def run_it(self, which, model, srcs, feed=None, budget=None):
-        return daily_briefs.run(which, feed=feed or self.feed, budget=budget or self.budget, now=self.now, state_dir=self.state, run_job=model, **srcs)
+    def run_it(self, which, model, srcs, feed=None, budget=None, messages=None):
+        return daily_briefs.run(which, feed=feed or self.feed, budget=budget or self.budget, now=self.now,
+                                state_dir=self.state, run_job=model, messages=messages, **srcs)
 
     def log(self):
         path = self.state / "log.jsonl"
@@ -294,10 +294,12 @@ class Run(Base):
         self.assertEqual(self.run_it("morning", again, srcs).outcome, "already")
         self.assertEqual((again.jobs, len(self.digests())), ([], 1))
         self.now = at(15, 21, 5)
-        evening = self.run_it("evening", Model(), self.sources([]))
-        self.assertEqual(evening.outcome, "posted")
-        refs = [line["ref"] for line in self.feed.get(evening.brief_id)["context"]]
-        self.assertEqual(refs, [f"brief:{d}"])                           # the morning digest is not digested again
+        messages = Mock(**{"send.return_value": MessageResult("sent")})
+        evening = self.run_it("evening", Model(), self.sources([]), messages=messages)
+        self.assertEqual(evening.outcome, "sent")
+        email = messages.send.call_args.args[0]
+        self.assertIn("1. " + self.feed.get(d)["ask"], email.body)
+        self.assertNotIn("2. ", email.body)                             # the morning digest is not digested again
 
     def test_fallbacks_still_post_the_same_lines(self):
         self.decision("Move the dentist to Friday?", 3)
@@ -327,7 +329,9 @@ class Run(Base):
 
     def test_quiet_hours_and_crash_never_double_post(self):
         self.now = at(15, 23, 30)
-        self.assertEqual(self.run_it("evening", Model(), self.sources([])).outcome, "quiet")
+        messages = Mock()
+        self.assertEqual(self.run_it("evening", Model(), self.sources([]), messages=messages).outcome, "quiet")
+        messages.send.assert_not_called()
         self.assertEqual(self.digests(), [])
         self.now = at(16, 7, 30)
         crashing = self.make_feed(crash=True)

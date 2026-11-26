@@ -34,6 +34,21 @@ afterEach(() => {
 const mount = () => act(async () => { root.render(<WorkPanel />); });
 const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
+it("shows message threads above coding threads with their project, state and age", async () => {
+  fetchWork.mockResolvedValueOnce(Response.json({ ...snapshot, threads: [
+    { ...thread, message: false },
+    { ...thread, thread_id: "fixture-message", project: "jarvis", message: true,
+      title: "Evening wrap-up", status: "waiting" },
+  ] }));
+  await mount();
+  const groups = [...host.querySelectorAll(".work-project")];
+  expect(groups.map((group) => group.querySelector("h3")?.textContent)).toEqual(["Messages from Jarvis", "alpha"]);
+  expect([...groups[0].querySelector("li")!.children].map((item) => item.textContent))
+    .toEqual(["Evening wrap-up", "jarvis", "waiting on you", "5 s ago"]);
+  expect(groups[1].querySelector(".work-title")?.textContent).toBe(thread.title);
+  expect(host.querySelector("button, a, input")).toBeNull();
+});
+
 it("coalesces visibility changes during a poll into one immediate recheck", async () => {
   let finish!: (response: Response) => void;
   fetchWork.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

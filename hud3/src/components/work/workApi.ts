@@ -8,6 +8,7 @@ export interface WorkThread {
   thread_id: string;
   project: string;
   title: string;
+  message?: boolean;
   status: string;
   waiting_on_owner: boolean;
   started_at: number;
@@ -34,10 +35,11 @@ function isProject(value: unknown): value is WorkProject {
 
 function isThread(value: unknown): value is WorkThread {
   if (!record(value)) return false;
-  const { thread_id, project, title, status, waiting_on_owner, started_at, updated_at } = value;
+  const { thread_id, project, title, message, status, waiting_on_owner, started_at, updated_at } = value;
   return typeof thread_id === "string" && thread_id.length >= 1 && thread_id.length <= 256
     && typeof project === "string" && projectName.test(project)
     && typeof title === "string" && title.length >= 1 && title.length <= 200
+    && (message === undefined || typeof message === "boolean")
     && typeof status === "string" && threadStatus.test(status)
     && typeof waiting_on_owner === "boolean"
     && typeof started_at === "number" && Number.isFinite(started_at)

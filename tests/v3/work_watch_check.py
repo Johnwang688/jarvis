@@ -3,14 +3,13 @@
 from dataclasses import replace
 import json
 from pathlib import Path
-import sys
 import tempfile
-from types import ModuleType
 import unittest
 from unittest.mock import patch
 
 from jarvis import config
-from jarvis.v3 import feed, jobs, t3_client, work_watch
+from jarvis.v3 import feed, jobs, t3_client, work, work_watch
+from jarvis.v3.messages import MessageService
 from w2_acceptance_check import Clock, FakeFeed, FakeLedger, FakeT3, thread
 
 
@@ -144,9 +143,7 @@ class Wiring(unittest.TestCase):
         self.ledger = FakeLedger([thread("th-1", "running")])
         self.t3 = FakeT3()
         self.t3.set("th-1", "running")
-        work = ModuleType("jarvis.v3.work")
-        self.Ledger = self.enterContext(patch.object(work, "Ledger", create=True, return_value=self.ledger))
-        self.enterContext(patch.dict(sys.modules, {"jarvis.v3.work": work}))
+        self.Ledger = self.enterContext(patch.object(work, "Ledger", return_value=self.ledger))
         self.enterContext(patch.object(config, "V3_DIR", self.root))
         self.T3 = self.enterContext(patch.object(t3_client, "T3", return_value=self.t3))
         self.Watcher = self.enterContext(patch.object(work_watch, "Watcher", wraps=work_watch.Watcher))
@@ -169,7 +166,12 @@ class Wiring(unittest.TestCase):
         self.Ledger.assert_called_once_with(self.path)
         self.T3.assert_called_once_with(timeout=15)
         self.Feed.assert_called_once_with(self.root / "feed")
-        self.Watcher.assert_called_once_with(ledger=self.ledger, t3=self.t3, feed=self.Feed.return_value)
+        self.Watcher.assert_called_once()
+        args = self.Watcher.call_args.kwargs
+        self.assertIs(args["ledger"], self.ledger)
+        self.assertIs(args["t3"], self.t3)
+        self.assertIs(args["feed"], self.Feed.return_value)
+        self.assertIsInstance(args["messages"], MessageService)
         self.assertEqual(self.t3.calls, [("th-1", 0), ("th-1", 0)])
 
     def test_unreadable_ledger_raises_only_fixed_text(self):

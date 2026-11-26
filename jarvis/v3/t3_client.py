@@ -1,7 +1,11 @@
-"""Client for the documented T3 thread CLI. Returned text is untrusted data."""
+"""Client for T3 threads and exact project lookup. Returned text is untrusted data."""
 
+from contextlib import closing
+from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import os
+import re
 import selectors
 import signal
 import stat
@@ -9,7 +13,6 @@ import subprocess
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass, field
 from pathlib import Path
 
 RUNNING = frozenset({"queued", "preparing", "starting", "running"})
@@ -19,6 +22,7 @@ SETTLED = frozenset({
 _STDOUT_CAP = 8 * 1024 * 1024
 _IO_CHUNK = 64 * 1024
 _ENV_KEEP = ("PATH", "HOME", "T3CODE_HOME", "LANG")
+_PROJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
 class T3Error(Exception):
@@ -27,6 +31,7 @@ class T3Error(Exception):
         "arguments": "Invalid T3 CLI arguments.",
         "failed": "T3 CLI command failed.",
         "shape": "T3 CLI returned an unsupported JSON response. Check the installed T3 version.",
+        "project_state": "T3 project state is unavailable or unsupported.",
         "timeout": "T3 CLI timed out.",
     }
 
@@ -52,6 +57,8 @@ class State:
     provider: str
     model: str
     messages: list[tuple[str, str]] = field(repr=False)
+    settled_at: float | None = None
+    run_count: int | None = None
 
 
 def _executable(path: Path) -> os.stat_result:
@@ -92,9 +99,9 @@ def resolve(*, home=None, env=None) -> Path:
     return _resolve(home, os.environ if env is None else env)[0]
 
 
-def _arg(value, limit=256) -> str:
+def _arg(value, limit=256, *, allow_dash=False) -> str:
     if (not isinstance(value, str) or not value.strip() or len(value) > limit
-            or value.startswith("-")
+            or (not allow_dash and value.startswith("-"))
             or any(unicodedata.category(c) in {"Cc", "Cs", "Zl", "Zp"} for c in value)
             or len(value.encode("utf-8")) > limit):
         raise T3Error("arguments")
@@ -224,6 +231,18 @@ def _run(data, waiting: bool) -> Run:
     return Run(thread, run, "waiting" if waiting else status)
 
 
+def _settled_at(row):
+    value = row.get("settledAt")
+    if isinstance(value, str):
+        try:
+            instant = datetime.fromisoformat(value)
+            if instant.tzinfo is not None:
+                return instant.timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return None
+
+
 def _state(row, messages, *, waiting=False, listed=False) -> State:
     status = _field(row, "status", str)
     # The list shape does not include the pending request count.
@@ -233,7 +252,8 @@ def _state(row, messages, *, waiting=False, listed=False) -> State:
     return State(
         _field(row, "threadId", str), status, waiting or status == "waiting" or pending > 0,
         pending, _field(row, "title", str), _field(row, "providerInstanceId", str),
-        _field(row, "model", str), messages,
+        _field(row, "model", str), messages, _settled_at(row),
+        _field(row, "runCount", int) if "runCount" in row else None,
     )
 
 
@@ -280,10 +300,46 @@ class T3:
         if code != 0:
             raise T3Error("failed")
 
+    def project_at(self, path) -> str | None:
+        """Read the exact active project id from T3's local project projection.
+
+        The thread CLI resolves enclosing projects and even other git checkouts.
+        Its list output omits the workspace root, including for empty projects.
+        """
+        root = _project(path)
+        base = (os.environ.get("T3CODE_HOME") or "").strip() or "~/.t3"
+        import sqlite3  # at first use: the daemon must start without loading it
+        try:
+            database = Path(base).expanduser().absolute() / "userdata" / "statev2.sqlite"
+            if not database.is_file():
+                return None
+            uri = database.as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=min(self._timeout, 1))) as db:
+                db.execute("PRAGMA trusted_schema=OFF")
+                rows = db.execute(
+                    "SELECT project_id FROM projection_projects "
+                    "WHERE workspace_root = ? AND deleted_at IS NULL AND archived_at IS NULL LIMIT 2",
+                    (root,),
+                ).fetchall()
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            raise T3Error("project_state") from None
+        if not rows:
+            return None
+        if len(rows) != 1 or not isinstance(rows[0][0], str) or not _PROJECT_ID.fullmatch(rows[0][0]):
+            raise T3Error("project_state")
+        return rows[0][0]
+
     def start(self, project, message, *, provider, model, title=None, worktree=None, branch=None) -> Run:
-        """Start a thread. The title is visible in the process list, so omit private text."""
+        """Start a thread. The title is visible in the local process list."""
         args = ["--provider", _arg(provider), "--model", _arg(model)]
-        for flag, value in (("--title", title), ("--worktree", worktree), ("--branch", branch)):
+        if title is not None:
+            title = _arg(title, limit=320, allow_dash=True)
+            if title.startswith("-"):
+                # Keep an initial dash in a subject from being parsed as a flag.
+                args.append("--title=" + title)
+            else:
+                args.extend(("--title", title))
+        for flag, value in (("--worktree", worktree), ("--branch", branch)):
             if value is not None:
                 args.extend((flag, _arg(value)))
         return _run(*self._call("start", *args, _project(project), "-", message=_message(message)))
