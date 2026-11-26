@@ -1,9 +1,15 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { span } from "../../Status";
 import { useVoice } from "./useVoice";
 import { controlHelper, STATES, type VoiceSetting, type VoiceSettings, type VoiceTurn } from "./voiceApi";
 
 const MIC_TEST_MS = 10_000;
+const NUMBER_SETTINGS = [
+  { name: "follow_up_s", id: "voice-follow", label: "Follow-up (seconds)", step: "any",
+    invalid: "Enter the follow-up time in seconds." },
+  { name: "end_silence_ms", id: "voice-end-silence", label: "Wait after you stop (ms)", step: 50,
+    invalid: "Enter the wait in milliseconds.", hint: "Shorter replies sooner, but may cut you off if you pause." },
+] as const;
 
 function seconds(value: number | null, divisor = 1) {
   return value == null ? "—" : `${(value / divisor).toFixed(1)} s`;
@@ -54,29 +60,25 @@ function Settings({ settings, saving, save }: {
   save: (name: VoiceSetting, value: number) => Promise<void>;
 }) {
   const [speed, setSpeed] = useState<number>();
-  const [followUp, setFollowUp] = useState<string>();
+  const [drafts, setDrafts] = useState<Partial<Record<VoiceSetting, string>>>({});
   const [error, setError] = useState<{ name: VoiceSetting; message: string }>();
 
-  async function commit(name: VoiceSetting, value: number) {
+  async function commit(name: VoiceSetting, value: number, invalid = "Enter a speech speed.") {
     if (saving) return;
     setError(undefined);
     try {
-      if (!Number.isFinite(value)) throw new Error("Enter the follow-up time in seconds.");
+      if (!Number.isFinite(value)) throw new Error(invalid);
       await save(name, value);
     } catch (error) {
       setError({ name, message: error instanceof Error ? error.message : "Voice setting was refused." });
     } finally {
       if (name === "speed") setSpeed(undefined);
-      else setFollowUp(undefined);
+      else setDrafts((previous) => ({ ...previous, [name]: undefined }));
     }
   }
 
   function releaseSpeed(input: HTMLInputElement) {
     if (speed !== undefined) void commit("speed", input.valueAsNumber);
-  }
-
-  function releaseFollowUp(input: HTMLInputElement) {
-    if (followUp !== undefined) void commit("follow_up_s", input.valueAsNumber);
   }
 
   return (
@@ -94,16 +96,33 @@ function Settings({ settings, saving, save }: {
         onKeyUp={(event) => releaseSpeed(event.currentTarget)}
         onBlur={(event) => releaseSpeed(event.currentTarget)} />
       {error?.name === "speed" && <p id="voice-setting-error" className="voice-error" role="status">{error.message}</p>}
-      <label htmlFor="voice-follow">Follow-up (seconds)</label>
-      <input id="voice-follow" type="number" min={settings.follow_up_s.min} max={settings.follow_up_s.max}
-        step="any" value={followUp ?? settings.follow_up_s.value} readOnly={saving}
-        aria-describedby={error?.name === "follow_up_s" ? "voice-setting-error" : undefined}
-        onChange={(event) => setFollowUp(event.currentTarget.value)}
-        onBlur={(event) => releaseFollowUp(event.currentTarget)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") releaseFollowUp(event.currentTarget);
-        }} />
-      {error?.name === "follow_up_s" && <p id="voice-setting-error" className="voice-error" role="status">{error.message}</p>}
+      {NUMBER_SETTINGS.map((field) => {
+        const { name, id, label, step, invalid } = field;
+        const setting = settings[name];
+        const hint = "hint" in field ? field.hint : undefined;
+        const message = error?.name === name ? error.message : undefined;
+        const describedBy = [hint && `${id}-hint`, message && "voice-setting-error"].filter(Boolean).join(" ");
+        function release(input: HTMLInputElement) {
+          if (drafts[name] !== undefined) void commit(name, input.valueAsNumber, invalid);
+        }
+        return (
+          <Fragment key={name}>
+            <label htmlFor={id}>{label}</label>
+            <input id={id} type="number" min={setting.min} max={setting.max} step={step}
+              value={drafts[name] ?? setting.value} readOnly={saving} aria-describedby={describedBy || undefined}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setDrafts((previous) => ({ ...previous, [name]: value }));
+              }}
+              onBlur={(event) => release(event.currentTarget)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") release(event.currentTarget);
+              }} />
+            {hint && <p id={`${id}-hint`} className="voice-setting-hint">{hint}</p>}
+            {message && <p id="voice-setting-error" className="voice-error" role="status">{message}</p>}
+          </Fragment>
+        );
+      })}
     </fieldset>
   );
 }

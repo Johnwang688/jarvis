@@ -171,6 +171,7 @@ class _Utterance:
     frames: list
     pre_roll_frames: int
     voice_end: int
+    end_silence_ms: int
     capture: Capture | None = None
     keyed_during_capture: bool = False
     echo_start: int | None = None
@@ -241,9 +242,8 @@ class Hearing:
         self._detector = detector
         self._capture_details = capture_details
         self._prefer_cancelled = prefer_cancelled
-        cutoff = END_SILENCE_MS if end_silence_ms is None else end_silence_ms
-        self._end_silence_ms = max(300, min(1500, cutoff))
         self._changed = Condition()
+        self.set_end_silence_ms(END_SILENCE_MS if end_silence_ms is None else end_silence_ms)
         self._notifying = False
         self._closed = False
         self._before = deque(maxlen=PRE_ROLL_MS // FRAME_MS)
@@ -262,6 +262,10 @@ class Hearing:
     def speech_active(self) -> bool:
         with self._changed:
             return self._active is not None
+
+    def set_end_silence_ms(self, value: int) -> None:
+        with self._changed:
+            self._end_silence_ms = max(300, min(1500, value))
 
     def _get_detector(self) -> Detector:
         if self._detector is None:
@@ -326,7 +330,7 @@ class Hearing:
                 utterance.speech_ended_at = pair.at
                 utterance.head_result = None
             utterance.previous_speech = speech
-            if (utterance.silence_ms >= self._end_silence_ms
+            if (utterance.silence_ms >= utterance.end_silence_ms
                     or len(utterance.frames) * FRAME_MS >= MAX_UTTERANCE_MS):
                 self._before.extend(utterance.frames[utterance.voice_end:])
                 self._end(utterance)
@@ -364,14 +368,14 @@ class Hearing:
                     self._emit("speech_end", **self._details(utterance))
 
     def _pending_onset(self):
-        return any(speech for _, speech in self._onset)
+        return any(speech for _, speech, _ in self._onset)
 
     def _start_key(self, context):
         self._before.clear()
         self._onset.clear()
         self._keyed = True
         capture = Capture(self._clock(), context, 0, keyed=True)
-        self._active = _Utterance([], 0, 0, capture)
+        self._active = _Utterance([], 0, 0, self._end_silence_ms, capture)
         self._emit("speech_start", **self._details(self._active))
 
     def _end(self, utterance):
@@ -388,23 +392,24 @@ class Hearing:
     def _listen_for_onset(self, frame, speech):
         if len(self._onset) == START_WINDOW_MS // FRAME_MS:
             self._before.append(self._onset.popleft()[0])
-        self._onset.append((frame, speech))
-        if sum(detected for _, detected in self._onset) * FRAME_MS < START_SPEECH_MS:
+        self._onset.append((frame, speech, self._end_silence_ms))
+        if sum(detected for _, detected, _ in self._onset) * FRAME_MS < START_SPEECH_MS:
             return
 
         # Keep pre-roll measured from the first detected speech in the window.
         while not self._onset[0][1]:
             self._before.append(self._onset.popleft()[0])
-        first = self._onset[0][0]
-        frames = [*self._before, *(frame for frame, _ in self._onset)]
+        # The first speech frame owns the setting even while onset is being confirmed.
+        first, _, end_silence_ms = self._onset[0]
+        frames = [*self._before, *(frame for frame, _, _ in self._onset)]
         capture = None
         if self._capture_details:
-            voiced = [frame.cancelled for frame, speech in self._onset if speech]
+            voiced = [frame.cancelled for frame, speech, _ in self._onset if speech]
             power = sum(map(self._power, voiced)) / len(voiced)
             capture = Capture(first.at, first.context, power, keyed=False)
         before = len(self._before)
         echo_start = next((i for i in range(before, len(frames)) if frames[i].echo), None)
-        self._active = _Utterance(frames, before, len(frames), capture, echo_start=echo_start,
+        self._active = _Utterance(frames, before, len(frames), end_silence_ms, capture, echo_start=echo_start,
                                   speech_ended_at=frame.at, speech_onset=first)
         if self._key_down:
             self._keyed = self._active.keyed_during_capture = True

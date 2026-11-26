@@ -323,9 +323,10 @@
   margin: 0;
 }
 .voice-settings legend { padding-inline-end: 6px; }
-.voice-settings :is(input[type="range"], .voice-error) { grid-column: 1 / -1; }
+.voice-settings :is(input[type="range"], .voice-error, .voice-setting-hint) { grid-column: 1 / -1; }
 .voice-settings input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
 .voice-settings input[type="number"] { width: 5em; }
+.voice-setting-hint { color: var(--text-muted); }
 .voice-speed-value { color: var(--accent-hi); font: 11px var(--mono); }
 .voice-mic meter { flex: 1; min-width: 0; width: 75px; }
 .voice-mic meter::-webkit-meter-optimum-value { background: var(--accent); }

@@ -552,7 +552,8 @@ class Daemon:
         best = KokoroVoice(device="cuda", speed=speed) if setting in ("auto", "kokoro-gpu") else None
         approving = VoiceApproving(self._chat.approvals, clock=time.monotonic)
         session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names,
-                               approving=approving, follow_up_s=self._voice_settings.follow_up_s)
+                               approving=approving, follow_up_s=self._voice_settings.follow_up_s,
+                               end_silence_ms=self._voice_settings.end_silence_ms)
         return brain, turns, session
 
     def _voice_status(self):

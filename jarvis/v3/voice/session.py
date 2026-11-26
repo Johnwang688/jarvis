@@ -145,7 +145,7 @@ class VoiceSession:
 
     def __init__(self, turns, *, transcriber, voices, names, on_event=None, on_audio=None,
                  clock=time.monotonic, on_answer=None, approving=None, detector=None,
-                 follow_up_s=None, follow_level_db=None, quiet=None):
+                 follow_up_s=None, follow_level_db=None, quiet=None, end_silence_ms=None):
         self._turns = turns
         self._transcriber = _LocalTranscriber(transcriber)
         self._fast, self._best = voices
@@ -158,6 +158,7 @@ class VoiceSession:
         self._clock = clock
         self._quiet = QuietHours(config.V2_DATA_DIR).is_quiet if quiet is None else quiet
         self._detector = detector
+        self._end_silence_ms = end_silence_ms
         self._follow_up_s = FOLLOW_UP_S if follow_up_s is None else follow_up_s
         follow_db = FOLLOW_LEVEL_DB if follow_level_db is None else follow_level_db
         self._follow_ratio = 10 ** (follow_db / 10)
@@ -235,6 +236,7 @@ class VoiceSession:
                 return
             self._hearing = Hearing(self._transcriber, names=self._decode_names, clock=self._clock,
                                     detector=self._detector, capture_details=True, on_event=self._hearing_event,
+                                    end_silence_ms=self._end_silence_ms,
                                     prefer_cancelled=lambda mode: mode.answer_until is not None)
             self._speaking = Speaking(_SentenceVoice(self._synthesize), clock=self._clock,
                                       keep_history=False, on_audio=self._handoff,
@@ -395,6 +397,9 @@ class VoiceSession:
                 if voice is not None:
                     voice.speed = settings.speed
             self._follow_up_s = settings.follow_up_s
+            self._end_silence_ms = settings.end_silence_ms
+            if self._hearing is not None:
+                self._hearing.set_end_silence_ms(settings.end_silence_ms)
 
     def status(self):
         with self._changed:

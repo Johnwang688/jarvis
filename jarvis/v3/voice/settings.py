@@ -1,4 +1,4 @@
-"""The owner's persistent speech speed and follow-up duration."""
+"""The owner's persistent voice settings."""
 
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -15,7 +15,7 @@ from .._paths import open_directory
 LOG = logging.getLogger(__name__)
 FILENAME = "settings.json"
 MAX_BYTES = 4096
-RANGES = {"speed": (0.8, 2.0), "follow_up_s": (0, 30)}
+RANGES = {"speed": (0.8, 2.0), "follow_up_s": (0, 30), "end_silence_ms": (300, 1000)}
 _NOFOLLOW = os.O_NOFOLLOW | os.O_NONBLOCK
 
 
@@ -23,14 +23,21 @@ _NOFOLLOW = os.O_NOFOLLOW | os.O_NONBLOCK
 class VoiceSettings:
     speed: float
     follow_up_s: float
+    end_silence_ms: int
 
     def patched(self, body):
         if not isinstance(body, dict) or body.keys() - RANGES.keys():
-            raise ValueError("Expected speed and/or follow_up_s.")
+            raise ValueError(f"Expected a subset of: {', '.join(RANGES)}.")
         for name, value in body.items():
             low, high = RANGES[name]
             if type(value) not in (int, float) or not low <= value <= high:
                 raise ValueError(f"{name} must be a number from {low} to {high}.")
+        if "end_silence_ms" in body:
+            value = body["end_silence_ms"]
+            if int(value) != value:
+                low, high = RANGES["end_silence_ms"]
+                raise ValueError(f"end_silence_ms must be an integer from {low} to {high}.")
+            body = {**body, "end_silence_ms": int(value)}
         return replace(self, **body)
 
     def snapshot(self):
@@ -39,7 +46,9 @@ class VoiceSettings:
 
 
 def defaults():
-    return VoiceSettings(config.V3_KOKORO_SPEED, min(config.V3_FOLLOW_UP_S, RANGES["follow_up_s"][1]))
+    low, high = RANGES["end_silence_ms"]
+    return VoiceSettings(config.V3_KOKORO_SPEED, min(config.V3_FOLLOW_UP_S, RANGES["follow_up_s"][1]),
+                         max(low, min(high, config.V3_END_SILENCE_MS)))
 
 
 def _directory(data_dir, *, create=False):
@@ -60,10 +69,19 @@ def load(data_dir):
                 raw = stream.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES:
             raise ValueError
-        return fallback.patched(json.loads(raw.decode("utf-8")))
+        saved = json.loads(raw.decode("utf-8"))
+        if not isinstance(saved, dict) or saved.keys() - RANGES.keys():
+            raise ValueError
     except (OSError, ValueError, RecursionError):
         LOG.info("Voice settings could not be loaded. Using defaults.")
         return fallback
+    # One bad value falls back alone; it must not discard the others.
+    for name, value in saved.items():
+        try:
+            fallback = fallback.patched({name: value})
+        except ValueError:
+            LOG.info("A saved voice setting was invalid. Using its default.")
+    return fallback
 
 
 def save(data_dir, settings):

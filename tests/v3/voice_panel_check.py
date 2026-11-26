@@ -16,7 +16,7 @@ import phone_auth_check
 from phone_listener_check import HOST, ORIGIN, request as phone_request
 import voice_wiring_check
 from voice_link_check import HELLO, KEY_TEXT, Helper, until
-from voice_session_check import Detector, Rows, Transcriber
+from voice_session_check import Detector, QUIET, RAW, Rows, Transcriber
 from voice_wiring_check import CHUNK, RATE, REPLY
 
 from jarvis import config, llm
@@ -24,6 +24,7 @@ from jarvis.v3 import phone_auth, phone_routes
 from jarvis.v3.daemon import Daemon
 from jarvis.v3.voice import settings, wire
 from jarvis.v3.voice.engines import EngineChoice, KokoroVoice
+from jarvis.v3.voice.hearing import FRAME_MS
 from jarvis.v3.voice.session import ECHO_TAIL_S, VoiceSession
 
 
@@ -36,6 +37,7 @@ BAD = (
     {"speed": float("inf")}, {"speed": 0.79}, {"speed": 2.01},
     {"follow_up_s": -0.01}, {"follow_up_s": 30.01},
     {"speed": 1.7, "follow_up_s": -1},
+    *({"end_silence_ms": value} for value in (299, 1001, 350.5, True, "400", float("nan"))),
 )
 TRACE_FIELDS = {
     "heard_at", "text", "tools", "approval_asked", "sentence_count", "silence_ms", "decode_ms",
@@ -49,18 +51,35 @@ class SettingsCheck(unittest.TestCase):
         self.path = self.root / "voice/settings.json"
 
     def test_defaults_round_trip_and_modes(self):
-        with patch.multiple(config, V3_KOKORO_SPEED=1.35, V3_FOLLOW_UP_S=8):
+        with patch.multiple(config, V3_KOKORO_SPEED=1.35, V3_FOLLOW_UP_S=8, V3_END_SILENCE_MS=500):
             with self.assertLogs(settings.LOG, level="INFO"):
-                self.assertEqual(settings.load(self.root), settings.VoiceSettings(1.35, 8))
-        for speed, follow in ((0.8, 0), (2.0, 30), (1.65, 12.5)):
-            chosen = settings.defaults().patched({"speed": speed, "follow_up_s": follow})
+                self.assertEqual(settings.load(self.root), settings.VoiceSettings(1.35, 8, 500))
+        for configured, expected in ((200, 300), (1500, 1000)):
+            with patch.object(config, "V3_END_SILENCE_MS", configured):
+                self.assertEqual(settings.defaults().end_silence_ms, expected)
+        for speed, follow, silence in ((0.8, 0, 300), (2.0, 30, 1000), (1.65, 12.5, 800)):
+            chosen = settings.defaults().patched({"speed": speed, "follow_up_s": follow, "end_silence_ms": silence})
             settings.save(self.root, chosen)
             self.assertEqual(settings.load(self.root), chosen)
             self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
+    def test_legacy_and_partial_files_supply_defaults(self):
+        with patch.multiple(config, V3_KOKORO_SPEED=1.35, V3_FOLLOW_UP_S=8, V3_END_SILENCE_MS=500):
+            settings.save(self.root, settings.defaults())
+            for raw, expected in (
+                ('{"speed":1.5,"follow_up_s":12}', settings.VoiceSettings(1.5, 12, 500)),
+                ('{"follow_up_s":14}', settings.VoiceSettings(1.35, 14, 500)),
+                ('{"end_silence_ms":400.0}', settings.VoiceSettings(1.35, 8, 400)),
+            ):
+                with self.subTest(raw=raw):
+                    self.path.write_text(raw, encoding="utf-8")
+                    loaded = settings.load(self.root)
+                    self.assertEqual(loaded, expected)
+                    self.assertIs(type(loaded.end_silence_ms), int)
+
     def test_invalid_patch_and_failed_replace_leave_old_file(self):
-        original = settings.VoiceSettings(1.35, 8)
+        original = settings.VoiceSettings(1.35, 8, 500)
         settings.save(self.root, original)
         previous = self.path.read_bytes()
         for patch_body in (*BAD, []):
@@ -68,7 +87,7 @@ class SettingsCheck(unittest.TestCase):
                 original.patched(patch_body)
         with patch.object(settings.os, "replace", side_effect=OSError("fixture rename failure")):
             with self.assertRaises(OSError):
-                settings.save(self.root, settings.VoiceSettings(1.7, 12))
+                settings.save(self.root, settings.VoiceSettings(1.7, 12, 300))
         self.assertEqual(self.path.read_bytes(), previous)
         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
@@ -83,7 +102,10 @@ class SettingsCheck(unittest.TestCase):
                     self.path.write_bytes(raw)
                 with self.assertLogs(settings.LOG, level="INFO") as log:
                     self.assertEqual(settings.load(self.root), settings.defaults())
-                self.assertEqual(log.records[0].getMessage(), "Voice settings could not be loaded. Using defaults.")
+                one_value = raw in (b'{"speed":true}', b'{"follow_up_s":NaN}')
+                self.assertEqual(log.records[0].getMessage(),
+                                 "A saved voice setting was invalid. Using its default." if one_value
+                                 else "Voice settings could not be loaded. Using defaults.")
         with patch.object(settings.os, "open", side_effect=PermissionError("fixture permission")):
             with self.assertLogs(settings.LOG, level="INFO"):
                 self.assertEqual(settings.load(self.root), settings.defaults())
@@ -101,14 +123,14 @@ class SettingsCheck(unittest.TestCase):
         self.path.symlink_to(target)
         with self.assertLogs(settings.LOG, level="INFO"):
             self.assertEqual(settings.load(self.root), settings.defaults())
-        chosen = settings.VoiceSettings(1.5, 10)
+        chosen = settings.VoiceSettings(1.5, 10, 500)
         settings.save(self.root, chosen)
         self.assertEqual(target.read_bytes(), before)
         self.assertFalse(self.path.is_symlink())
         self.assertEqual(settings.load(self.root), chosen)
 
     def test_data_directory_may_have_a_linked_parent(self):
-        chosen = settings.VoiceSettings(1.5, 10)
+        chosen = settings.VoiceSettings(1.5, 10, 500)
         settings.save(self.root, chosen)
         alias = self.root.parent / "fixture-parent"
         alias.symlink_to(self.root.parent, target_is_directory=True)
@@ -153,7 +175,8 @@ class PanelCheck(unittest.TestCase):
         self.asr = Transcriber()
         self.syntheses = Rows()
         self.enterContext(patch.multiple(config, V3_VOICE="kokoro-cpu", V3_KOKORO_SPEED=1.35,
-                                         V3_FOLLOW_UP_S=8, voice_link_key=lambda: self.key))
+                                         V3_FOLLOW_UP_S=8, V3_END_SILENCE_MS=500,
+                                         voice_link_key=lambda: self.key))
         self.enterContext(patch.object(llm, "chat", side_effect=AssertionError("live model call")))
         self.enterContext(patch("jarvis.v3.voice.claude_brain.ClaudeVoiceBrain", Brain))
         self.enterContext(patch("jarvis.v3.voice.engines.pick_transcriber",
@@ -198,8 +221,8 @@ class PanelCheck(unittest.TestCase):
         with ExitStack() as stack:
             helper = Helper(stack, self.daemon._voice_link.address).authenticate()
             self.state(helper, "resting")
-            self.assertEqual(self.update({"speed": 1.75, "follow_up_s": 13}), (
-                200, {"settings": settings.VoiceSettings(1.75, 13).snapshot()},
+            self.assertEqual(self.update({"speed": 1.75, "follow_up_s": 13, "end_silence_ms": 800}), (
+                200, {"settings": settings.VoiceSettings(1.75, 13, 800).snapshot()},
             ))
             text = "Check the next sentence."
             self.asr.lines.append(text)
@@ -223,9 +246,40 @@ class PanelCheck(unittest.TestCase):
             self.assertAlmostEqual(session._follow_until - session._follow_from, 13 - ECHO_TAIL_S)
         self.daemon.stop()
         self.start()
-        self.assertEqual(self.request()[1]["settings"], settings.VoiceSettings(1.75, 13).snapshot())
+        self.assertEqual(self.request()[1]["settings"], settings.VoiceSettings(1.75, 13, 800).snapshot())
         self.assertEqual(self.daemon._voice_session._fast.speed, 1.75)
         self.assertEqual(self.daemon._voice_session._follow_up_s, 13)
+
+    def test_end_silence_updates_between_utterances_only(self):
+        self.start()
+        self.assertEqual(self.update({"end_silence_ms": 300})[0], 200)
+        session = self.daemon._voice_session
+        self.asr.lines.extend([""] * 3)
+        session.start()
+        hearing = session._hearing
+        def speak(frames=10):
+            for _ in range(frames):
+                session.feed(RAW)
+
+        def require_silence(ms):
+            self.assertIs(session._hearing, hearing)
+            for elapsed in range(0, ms, FRAME_MS):
+                self.assertTrue(hearing.speech_active(), elapsed)
+                session.feed(QUIET)
+            self.assertFalse(hearing.speech_active(), ms)
+
+        speak()
+        self.assertEqual(self.update({"end_silence_ms": 800})[0], 200)
+        require_silence(300)
+
+        speak(1)
+        self.assertFalse(hearing.speech_active(), "Onset should still be pending")
+        self.assertEqual(self.update({"end_silence_ms": 300})[0], 200)
+        speak(9)
+        require_silence(800)
+
+        speak()
+        require_silence(300)
 
     def test_reply_projects_latest_twenty_and_helper_fields(self):
         self.start()
@@ -253,7 +307,11 @@ class PanelCheck(unittest.TestCase):
         self.assertEqual(reply["helper"], {"connected": True, "listening": True, "version": HELLO["version"],
                                            "canceller": True, "level": 67})
         self.assertEqual(reply["brain"], {"name": "fixture", "state": "idle", "turns": 23})
-        self.assertEqual(reply["settings"], settings.VoiceSettings(1.35, 8).snapshot())
+        self.assertEqual(reply["settings"], {
+            "speed": {"value": 1.35, "min": 0.8, "max": 2.0},
+            "follow_up_s": {"value": 8, "min": 0, "max": 30},
+            "end_silence_ms": {"value": 500, "min": 300, "max": 1000},
+        })
         self.assertEqual(len(reply["turns"]), 20)
         for index, row in zip(range(22, 2, -1), reply["turns"], strict=True):
             self.assertEqual(set(row), TRACE_FIELDS)
@@ -270,7 +328,9 @@ class PanelCheck(unittest.TestCase):
     def test_post_validation_has_no_side_effect_and_partial_updates_merge(self):
         self.start()
         self.assertEqual(self.update({"speed": 1.6})[0], 200)
-        self.assertEqual(self.update({"follow_up_s": 0})[1]["settings"], settings.VoiceSettings(1.6, 0).snapshot())
+        self.assertEqual(self.update({"follow_up_s": 0})[1]["settings"], settings.VoiceSettings(1.6, 0, 500).snapshot())
+        self.assertEqual(self.update({"end_silence_ms": 1000})[1]["settings"],
+                         settings.VoiceSettings(1.6, 0, 1000).snapshot())
         path = self.data / "voice/settings.json"
         previous = path.read_bytes()
         for body in (*BAD, b'{"speed":1e309}', b"[]", b"null"):
@@ -283,7 +343,7 @@ class PanelCheck(unittest.TestCase):
         with patch.object(settings.os, "replace", side_effect=OSError("fixture rename failure")):
             self.assertEqual(self.update({"speed": 2})[0], 503)
         self.assertEqual(path.read_bytes(), previous)
-        self.assertEqual(self.update({})[1]["settings"], settings.VoiceSettings(1.6, 0).snapshot())
+        self.assertEqual(self.update({})[1]["settings"], settings.VoiceSettings(1.6, 0, 1000).snapshot())
 
     def test_owner_only_and_phone_has_no_voice_trace(self):
         self.start(phone=True)

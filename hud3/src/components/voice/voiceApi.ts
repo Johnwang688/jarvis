@@ -11,7 +11,7 @@ interface Setting {
   max: number;
 }
 
-export type VoiceSettings = Record<"speed" | "follow_up_s", Setting>;
+export type VoiceSettings = Record<"speed" | "follow_up_s" | "end_silence_ms", Setting>;
 export type VoiceSetting = keyof VoiceSettings;
 
 export interface VoiceTurn {
@@ -61,7 +61,8 @@ async function request(route: Route, options: RequestInit) {
 export async function readVoice(signal: AbortSignal): Promise<VoiceSnapshot> {
   const data = await request("voice", { signal });
   if (!data || !Object.hasOwn(STATES, data.state) || !data.helper || !data.transcriber
-      || !data.voice || !data.settings?.speed || !data.settings?.follow_up_s || !Array.isArray(data.turns)) {
+      || !data.voice || !data.settings?.speed || !data.settings?.follow_up_s
+      || !data.settings?.end_silence_ms || !Array.isArray(data.turns)) {
     throw new Error("Voice status could not be read.");
   }
   return data;

@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from ..work import GENERAL_WORKSPACE
 from .brain import VoiceBrain
-from .sentences import MIN_SENTENCE as MIN_SENTENCE, Sentences
+from .sentences import MIN_SENTENCE as MIN_SENTENCE, Sentences, split_opening
 
 
 FRESH_AFTER_S = 600
@@ -96,6 +96,7 @@ class _VoiceTurn:
     sentences: Sentences = field(default_factory=Sentences)
     streamed: list = field(default_factory=list)
     lookahead: deque[str] = field(default_factory=deque)
+    opened: bool = False
     ended_without_tools: bool = False
     changed_state: bool = False
     reported: bool = False
@@ -229,13 +230,19 @@ class VoiceTurns:
         turn.lookahead.extend(turn.sentences.feed(text, final=final))
         keep = 0 if final else LOOKAHEAD_SENTENCES - int(turn.sentences.has_fragment)
         while len(turn.lookahead) > keep:
-            self._say(turn, turn.lookahead.popleft())
+            sentence = turn.lookahead.popleft()
+            # The opening sentence of a reply step goes to speech clause first.
+            # It is released exactly when the whole sentence would have been.
+            for part in (sentence,) if turn.opened else split_opening(sentence):
+                self._say(turn, part)
+            turn.opened = True
 
     @staticmethod
     def _reset_sentences(turn):
         turn.streamed.clear()
         turn.sentences = Sentences()
         turn.lookahead.clear()
+        turn.opened = False
 
     def _finish(self, turn):
         turn.end_s = self._clock() - turn.heard_at
