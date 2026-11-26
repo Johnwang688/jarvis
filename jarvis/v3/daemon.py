@@ -100,7 +100,8 @@ def _decode_route_body(data: bytes) -> dict:
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None, proposals=None,
-                    phone_status=None, get_feed=None, voice_status=None) -> type[BaseHTTPRequestHandler]:
+                    phone_status=None, get_feed=None, voice_status=None,
+                    voice_helper=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -239,7 +240,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
         def _run_route(self, body):
             try:
                 status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir, get_work=get_work,
-                                                  get_proposals=get_proposals)
+                                                  get_proposals=get_proposals, voice_helper=voice_helper)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:
@@ -562,6 +563,23 @@ class Daemon:
         link = self._voice_link = VoiceLink(self._new_voice_session, port=port)
         link.start()
 
+    def _voice_helper(self, action):
+        from .voice.installation import HelperUnavailable
+
+        link = self._voice_link
+        if link is None:
+            return 503, {"message": "The voice link is unavailable."}
+        if action == "stop":
+            if link.request_quit():
+                return 200, {"message": "Asked the Windows voice helper to quit."}
+            return 200, {"message": "No Windows voice helper is connected."}
+        try:
+            started = link.launch_helper()
+        except HelperUnavailable as error:
+            return 409, {"message": str(error)}
+        message = "Started the Windows voice helper." if started else "The Windows voice helper is already starting or connected."
+        return 200, {"message": message}
+
     def start(self) -> None:
         with self._lock:
             if self._server is not None:
@@ -578,7 +596,8 @@ class Daemon:
                 self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
-                                      get_feed=self._get_feed, voice_status=self._voice_status)
+                                      get_feed=self._get_feed, voice_status=self._voice_status,
+                                      voice_helper=self._voice_helper)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:

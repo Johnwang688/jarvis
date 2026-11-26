@@ -45,11 +45,15 @@ class Route:
     with_data_dir: bool = field(default=False, kw_only=True)
     with_work: bool = field(default=False, kw_only=True)
     with_proposals: bool = field(default=False, kw_only=True)
+    with_voice_helper: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
             chat: ChatService | None = None, *, data_dir: Path | None = None,
             get_work: Callable[[], tuple[Registry, Ledger]] | None = None,
-            get_proposals: Callable[[], ProposalStore] | None = None) -> tuple[int, object]:
+            get_proposals: Callable[[], ProposalStore] | None = None,
+            voice_helper: Callable | None = None) -> tuple[int, object]:
+        if self.with_voice_helper:
+            return self.handler(body, voice_helper)
         if self.with_work:
             return self.handler(body, get_work)
         if self.with_data_dir:
@@ -297,9 +301,18 @@ def _learned(body, data_dir, *, action):
         return refused
 
 
+def _voice_helper(body, control):
+    if not isinstance(body, dict) or set(body) != {"action"} or body["action"] not in ("start", "stop"):
+        return 400, {"error": "Invalid action."}
+    if control is None:
+        return 503, {"message": "The voice link is unavailable."}
+    return control(body["action"])
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
+    ("POST", "/v3/owner/voice/helper"): Route(_voice_helper, with_voice_helper=True),
     ("GET", "/v3/owner/work"): Route(_work_snapshot, with_work=True),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),
