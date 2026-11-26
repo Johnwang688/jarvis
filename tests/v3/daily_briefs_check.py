@@ -21,6 +21,7 @@ from jarvis.v3.claude_jobs import JobResult
 from jarvis.v3.daemon import Daemon
 from jarvis.v3.feed import Feed
 from jarvis.v3.index import Index
+from jarvis.v3.messages import Result as DeliveryResult
 from jarvis.v3.tools.calendar import CalendarTools
 
 CHICAGO = ZoneInfo("America/Chicago")
@@ -62,10 +63,13 @@ class DailyBriefs(unittest.TestCase):
                              usage=lambda: [{"name": "5h", "used_percent": 10,
                                              "resets_at": NOW.timestamp() + 3600}])
         self.runner = Mock(return_value=JobResult("brief", "haiku", ok=True, outcome="ok", text="The lab opens today."))
+        self.messages = Mock()
+        self.messages.send.return_value = DeliveryResult("refused")
         self.enterContext(patch.object(briefs.claude_jobs, "resolve_cli", side_effect=AssertionError("unexpected CLI lookup")))
 
     def run_brief(self, *, now=NOW, **overrides):
-        options = {"feed": self.feed, "budget": self.budget, "run_job": self.runner, **overrides}
+        options = {"feed": self.feed, "budget": self.budget, "run_job": self.runner,
+                   "messages": self.messages, **overrides}
         return briefs.run("morning", now=now.timestamp(), state_dir=self.state, **options)
 
     def seed(self):
@@ -202,9 +206,9 @@ class DailyBriefs(unittest.TestCase):
         ])
         prompt = self.runner.call_args.args[1]
         self.assertEqual([json.loads(line) for line in prompt.splitlines() if line.startswith("{")], [
-            {"label": "Report due", "time": due.isoformat()},
-            {"label": "Calendar lab", "time": NOW.isoformat()},
-            {"label": "Lab opens today."},
+            {"item": "Calendar lab", "source": "calendar", "time": NOW.isoformat()},
+            {"item": "Report due", "source": "commitment", "time": due.isoformat()},
+            {"item": "Lab opens today.", "source": "brief"},
         ])
 
     def test_non_list_source_yields_a_note(self):
@@ -215,6 +219,7 @@ class DailyBriefs(unittest.TestCase):
             {"label": "Mail unavailable", "ref": "jarvis:mail"},
         ])
         self.runner.assert_not_called()
+        self.messages.send.assert_not_called()
 
     def test_unavailable_budget_ledger_still_posts(self):
         self.seed()
@@ -241,21 +246,98 @@ class DailyBriefs(unittest.TestCase):
         self.assertEqual((result.outcome, result.summary), ("posted", "fallback"))
         self.assertEqual(self.budget.used()["jobs"]["brief"], 1)
 
-    def test_model_token_is_redacted_in_feed(self):
+    def test_model_token_is_redacted_in_email_and_feed(self):
         self.seed()
         fake = "ghp_" + "Fake" * 9
         key_tail = "ZmFrZS1tb2RlbC1saW5l"
-        text = f"Lab update\n{fake}\n{key_tail}\n-----END PRIVATE KEY-----"
+        text = f"Subject: Lab update\n\nA short note.\n{fake}\n{key_tail}\n-----END PRIVATE KEY-----"
         self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=text)
         result = self.run_brief()
         self.assertEqual((result.outcome, result.summary), ("posted", "model"))
         why = self.feed.get(result.brief_id)["why_now"]
-        self.assertIn("Lab update", why)
-        self.assertNotIn("\n", why)
-        for content in (why, (self.root / "feed" / "briefs.jsonl").read_text(),
+        self.assertEqual(why, "The items are listed in context.")
+        message = self.messages.send.call_args.args[0]
+        self.assertEqual(message.subject, "Lab update")
+        for content in (message.body, why, (self.root / "feed" / "briefs.jsonl").read_text(),
                         (self.state / "state.json").read_text(), (self.state / "log.jsonl").read_text()):
             self.assertNotIn(fake, content)
             self.assertNotIn(key_tail, content)
+
+    def test_morning_sends_one_model_email_with_the_card_as_fallback(self):
+        self.seed()
+        draft = "Subject: Today at the lab\n\nCheck the schedule first. Reply if I should help."
+        self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=draft)
+        self.messages.send.return_value = DeliveryResult("sent")
+        self.assertEqual(self.run_brief(now=NOW.replace(hour=6)).outcome, "quiet")
+        self.messages.send.assert_not_called()
+        result = self.run_brief()
+        self.assertEqual((result.outcome, result.summary), ("sent", "model"))
+        self.assertEqual(self.run_brief().outcome, "already")
+        self.runner.assert_called_once()
+        self.assertEqual(self.runner.call_args.kwargs["tools"], ())
+        self.messages.send.assert_called_once()
+        message, = self.messages.send.call_args.args
+        self.assertEqual((message.subject, message.body), ("Today at the lab", draft.split("\n\n")[1]))
+        self.assertEqual(self.messages.send.call_args.kwargs["fallback"], {
+            "kind": "digest", "rank": 3, "ask": "Morning brief · 1 item",
+            "why_now": "The items are listed in context.",
+            "context": [{"label": "Lab opens today.", "ref": f"brief:{self.feed.batch()[0]['id']}"},
+                        {"label": "Calendar not connected", "ref": "jarvis:calendar"}],
+        })
+        self.assertEqual([row["kind"] for row in self.feed.briefs()], ["news"])
+
+    def test_morning_bad_and_copied_drafts_use_numbered_email_with_overflow(self):
+        title = "The example planning session begins after the engineering team arrives"
+        events = [{"id": f"fake-event-{i}", "title": f"{title} {i}", "start": NOW + timedelta(minutes=i)}
+                  for i in reversed(range(9))]
+        self.messages.send.return_value = DeliveryResult("sent")
+        for offset, draft in enumerate(("Invalid email.", f"Subject: Today's plan\n\n{title} 0")):
+            with self.subTest(draft=draft):
+                self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=draft)
+                result = self.run_brief(now=NOW + timedelta(days=offset), calendar=lambda *_: events)
+                self.assertEqual((result.outcome, result.summary), ("sent", "fallback"))
+                message = self.messages.send.call_args.args[0]
+                self.assertEqual(message.subject, "Morning brief")
+                self.assertEqual(message.body.splitlines(), [
+                    "Here is what is on today. I suggest starting with the first one.", "",
+                    *(f"{i + 1}. {title} {i}." for i in range(6)),
+                    'And three more: reply "more" and I will list them.', "",
+                    "Reply with the numbers you want me to start on.",
+                ])
+                self.assertNotIn(f"{title} 6", self.runner.call_args.args[1])
+        self.assertEqual(self.runner.call_count, 2)
+        self.assertEqual(self.feed.briefs(), [])
+
+    def test_unsent_morning_posts_one_card_without_another_model_call(self):
+        self.seed()
+        draft = "Subject: Today at the lab\n\nCheck the schedule first. Reply if I should help."
+        self.runner.return_value = JobResult("brief", "haiku", ok=True, outcome="ok", text=draft)
+        for offset, outcome in enumerate(("refused", "failed")):
+            with self.subTest(outcome=outcome):
+                self.messages.send.return_value = DeliveryResult(outcome)
+                result = self.run_brief(now=NOW + timedelta(days=offset))
+                self.assertEqual((result.outcome, result.summary), ("posted", "model"))
+                self.assertEqual(self.feed.get(result.brief_id)["why_now"], "The items are listed in context.")
+        self.assertEqual(self.runner.call_count, 2)
+        self.assertEqual(self.messages.send.call_count, 2)
+        self.assertEqual(sum(row["kind"] == "digest" for row in self.feed.briefs()), 2)
+
+    def test_morning_reaching_quiet_hours_during_model_keeps_its_claim(self):
+        self.seed()
+        clock = Mock(return_value=NOW.timestamp())
+
+        def model(*args, **kwargs):
+            clock.return_value = NOW.replace(hour=23).timestamp()
+            return self.runner(*args, **kwargs)
+
+        with patch.object(briefs, "time", Mock(time=clock)):
+            result = briefs.run("morning", feed=self.feed, budget=self.budget, state_dir=self.state,
+                                run_job=model, messages=self.messages)
+        self.assertEqual(result.outcome, "quiet")
+        self.assertEqual(self.run_brief().outcome, "already")
+        self.runner.assert_called_once()
+        self.messages.send.assert_not_called()
+        self.assertEqual([row["kind"] for row in self.feed.briefs()], ["news"])
 
 
 class Wiring(unittest.TestCase):

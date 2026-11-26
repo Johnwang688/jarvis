@@ -1,4 +1,4 @@
-"""Post a daily learning digest from store metadata and logs.
+"""Deliver a daily learning digest from store metadata and logs.
 
 Skill lines carry skill-ledger IDs. A later hud3 panel will use them for
 rollback, pin and lock buttons that call the owner routes. The digest has
@@ -11,8 +11,7 @@ Vault inventory caps the scan at 16,000 directory entries and 8 KiB of
 frontmatter per entry. A memory archived and re-added at the same ref between
 snapshots produces neither an add nor an archive. Flags are counted separately.
 
-Like B4, the digest checks quiet hours immediately before calling the feed.
-The feed acquires its own lock afterward, so its write can cross 23:00.
+Like B4, the digest checks quiet hours immediately before delivery.
 """
 
 from contextlib import contextmanager, suppress
@@ -35,6 +34,7 @@ from jarvis.v2.quiet import parse_hhmm
 
 from ._paths import open_directory
 from .feed import FeedError, _ref, _text, _unique_keys
+from .messages import Message, MessageService, clean_source
 
 DIGEST_AT = "20:30"
 MAX_LINES = 12
@@ -48,6 +48,7 @@ _LEDGER_LIMIT = 16 * 1024 * 1024
 _LOG_LIMIT = 1024 * 1024
 _CURSOR_SAMPLE = 256
 _STATE_LIMIT = 2 * 1024 * 1024
+_EMAIL_MAX_ITEMS = 7
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _OFFSETS = {"curator", "flags", "reviewer"}
 _SOURCE_FIELDS = {"curator.jsonl": ("skill", "change", "idle_days"), ".flags.jsonl": ("name", "rule"),
@@ -134,8 +135,10 @@ def _day(value):
 
 def _last_brief(value, day):
     return value is None or (
-        isinstance(value, dict) and value.keys() == {"day", "id", "items"}
-        and _day(value["day"]) and value["day"] <= day and _id(value["id"]) and _count(value["items"])
+        isinstance(value, dict) and value.keys() in ({"day", "items"}, {"day", "id", "items"})
+        and _day(value["day"]) and value["day"] <= day and _count(value["items"])
+        # Only a sent email is saved without an id, and an email has items.
+        and (_id(value["id"]) if "id" in value else value["items"] > 0)
     )
 
 
@@ -373,8 +376,11 @@ def _spend(rows):
         elif outcome in ("skipped-budget", "skipped-usage"):
             skipped += 1
     if runs or skipped:
-        return [{"label": f"Reviewer: {runs} runs, {tokens_in} in / {tokens_out} out tokens, {skipped} skipped",
-                 "ref": "jarvis:reviewer"}]
+        line = {"label": f"Reviewer: {runs} runs, {tokens_in} in / {tokens_out} out tokens, {skipped} skipped",
+                "ref": "jarvis:reviewer"}
+        sentence = (f"The reviewer used {tokens_in} input and {tokens_out} output tokens across "
+                    f"{runs} {'run' if runs == 1 else 'runs'} and skipped {skipped}.")
+        return [(line, sentence)]
     return []
 
 
@@ -395,7 +401,22 @@ def _item_count(items):
     return f"{items} {'item' if items == 1 else 'items'}"
 
 
-def _claim_and_post(directory, day, feed, store, vault, reviewer_dir, in_window):
+def _email(items, spend):
+    count = len(items)
+    change = "change" if count == 1 else "changes"
+    lines = [f"I made {count} {change} to my skills and memory since the last digest.", ""]
+    for number, item in enumerate(items[:_EMAIL_MAX_ITEMS], 1):
+        label = untrusted.one_line(clean_source(item["label"])) or "(name withheld)"
+        lines.append(f"{number}. {label}")
+    if count > _EMAIL_MAX_ITEMS:
+        lines.append(f"And {count - _EMAIL_MAX_ITEMS} more.")
+    if spend:
+        lines.extend(["", *(sentence for _, sentence in spend)])
+    lines.extend(("", "Reply here if any of these should be undone or changed."))
+    return Message("What I learned today", "\n".join(lines))
+
+
+def _claim_and_post(directory, day, feed, store, vault, reviewer_dir, in_window, messages):
     try:
         saved = _read_state(directory)
     except (ValueError, RecursionError):
@@ -421,10 +442,11 @@ def _claim_and_post(directory, day, feed, store, vault, reviewer_dir, in_window)
     if not in_window():
         return Result("quiet")
     count = len(items)
+    visible = items
     if count + len(spend) > MAX_LINES:
         keep = MAX_LINES - 1 - len(spend)
-        items = items[:keep] + [{"label": f"+{count - keep} more", "ref": "jarvis:learning"}]
-    lines = items + spend if count else []
+        visible = items[:keep] + [{"label": f"+{count - keep} more", "ref": "jarvis:learning"}]
+    lines = visible + [line for line, _ in spend] if count else []
     if not baseline and not count:
         positions = {key: saved[key] for key in positions}
     claim = dict(positions, day=day, items=count, lines=len(lines), last_brief=saved["last_brief"])
@@ -433,6 +455,21 @@ def _claim_and_post(directory, day, feed, store, vault, reviewer_dir, in_window)
         return Result("baseline" if baseline else "empty")
     fields = {"kind": "digest", "rank": RANK, "ask": f"Learning digest · {_item_count(count)}",
               "why_now": f"{_item_count(count)} since the previous digest.", "context": lines}
+    # Any failure to build or send the email leaves the card below.
+    try:
+        message = _email(items, spend)
+    except Exception:
+        message = None
+    if message is not None:
+        if not in_window():
+            return Result("quiet")
+        try:
+            sent = messages.send(message, fallback=fields).outcome == "sent"
+        except Exception:
+            sent = False
+        if sent:
+            _write_state(directory, dict(claim, last_brief={"day": day, "items": count}))
+            return Result("sent", items=count, lines=len(lines))
     if not in_window():
         return Result("quiet")
     try:
@@ -445,16 +482,17 @@ def _claim_and_post(directory, day, feed, store, vault, reviewer_dir, in_window)
     return Result("posted", brief_id, count, len(lines))
 
 
-def run(*, feed, now=None, state_dir=None, store=None, vault=None, reviewer_dir=None) -> Result:
-    """Persist the day and source positions before posting to the owner feed."""
-    started_at = time.time() if now is None else now
+def run(*, feed, now=None, state_dir=None, store=None, vault=None, reviewer_dir=None, messages=None) -> Result:
+    """Persist the day and source positions before delivering the digest."""
+    clock = time.time if now is None else lambda: now
+    started_at = clock()
     local = datetime.fromtimestamp(started_at, _CHICAGO)
     day = local.date().isoformat()
     if not _WAKE <= local.time() < _NIGHT:
         return Result("quiet")
 
     def in_window():
-        current = datetime.fromtimestamp(time.time(), _CHICAGO) if now is None else local
+        current = datetime.fromtimestamp(clock(), _CHICAGO)
         return current.date() == local.date() and _WAKE <= current.time() < _NIGHT
 
     from .skill_store import SkillStore
@@ -463,6 +501,11 @@ def run(*, feed, now=None, state_dir=None, store=None, vault=None, reviewer_dir=
     store = SkillStore() if store is None else store
     vault = Vault() if vault is None else vault
     review = Path(config.V3_DIR / "reviewer" if reviewer_dir is None else reviewer_dir)
+    if messages is None:
+        from .t3_client import T3
+        from .work import WorkService
+
+        messages = MessageService(WorkService(t3=T3(timeout=15)), clock=clock)
     try:
         with open_directory(_state_path(state_dir), create=True) as directory:
             _check_directory(directory)
@@ -472,7 +515,7 @@ def run(*, feed, now=None, state_dir=None, store=None, vault=None, reviewer_dir=
                 result = Result("already")
             else:
                 try:
-                    result = _claim_and_post(directory, day, feed, store, vault, review, in_window)
+                    result = _claim_and_post(directory, day, feed, store, vault, review, in_window, messages)
                 except (OSError, ValueError, RecursionError):
                     result = Result("error")
             with suppress(OSError, ValueError):
@@ -492,5 +535,6 @@ def summary_line(*, now=None, state_dir=None):
         return None
     last = None if saved is None else saved["last_brief"]
     if last is not None and last["day"] == day:
-        return {"label": f"Learning digest: {_item_count(last['items'])}", "ref": f"brief:{last['id']}"}
+        ref = f"brief:{last['id']}" if "id" in last else "jarvis:learning"
+        return {"label": f"Learning digest: {_item_count(last['items'])}", "ref": ref}
     return None

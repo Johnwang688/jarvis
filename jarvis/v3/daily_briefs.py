@@ -41,13 +41,12 @@ _CHICAGO = ZoneInfo("America/Chicago")
 _WAKE, _NIGHT = wall_time(7), wall_time(23)
 _HEADINGS = {"morning": "Morning brief", "evening": "Evening wrap-up"}
 _PROMPT = Path(__file__).with_name("prompts") / "daily_brief.md"
-_EVENING_PROMPT = _PROMPT.with_name("evening_message.md")
 _DEFAULT_RUN_JOB = claude_jobs.run_job
 _STATE = "state.json"
 _LOG = "log.jsonl"
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _STATE_LIMIT = 1024
-_EVENING_MAX_ITEMS = 6
+_EMAIL_MAX_ITEMS = 6
 _COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
                 "nine", "ten", "eleven", "twelve")
 
@@ -374,7 +373,7 @@ def _model_text(prompt, directory, path, budget, run_job, check_window):
     return job.text if job.ok and job.outcome == "ok" else ""
 
 
-def _email_items(digest):
+def _email_items(which, digest):
     rows = []
     for line, when, rank in zip(digest.lines, digest.times, digest.ranks, strict=True):
         source = line["ref"].split(":", 1)[0]
@@ -382,14 +381,18 @@ def _email_items(digest):
         if when is not None:
             row["time"] = when
         priority = rank if rank is not None else (4 if source in {"calendar", "commitment"} else 9)
+        if which == "morning" and source == "calendar":
+            # Assembly already sorted calendar events by their start instant.
+            priority = 0
         rows.append((priority, row))
     return [row for _, row in sorted(rows, key=lambda entry: entry[0])]
 
 
-def _email_prompt(items, body_limit):
+def _email_prompt(which, items, body_limit):
     rows = "\n".join(json.dumps(item, ensure_ascii=False) for item in items)
-    prompt = _EVENING_PROMPT.read_text(encoding="utf-8").strip().format(body_limit=body_limit)
-    return prompt + "\n\n" + untrusted.fence(rows, "evening items")
+    path = _PROMPT.with_name(f"{which}_message.md")
+    prompt = path.read_text(encoding="utf-8").strip().format(body_limit=body_limit)
+    return prompt + "\n\n" + untrusted.fence(rows, f"{which} items")
 
 
 def _email_reply(text, items):
@@ -400,76 +403,74 @@ def _email_reply(text, items):
     copied = {span for item in items for span in _spans(item["item"])}
     if any(not _safe(value) or any(span in copied for span in _spans(value))
            for value in (message.subject, message.body)):
-        raise ValueError("The evening email copied source text or contained unsafe text.")
+        raise ValueError("The brief email copied source text or contained unsafe text.")
     return message
 
 
-def _fallback_email(items, overflow=""):
+def _fallback_email(which, items, overflow=""):
+    subject = _HEADINGS[which]
     if not items:
-        return Message("Evening wrap-up", "There are no items to review tonight.\n\n"
+        return Message(subject, "There are no items to review tonight.\n\n"
                        "Reply if there is something you would like me to pick up.")
-    lines = ["Here are the items from today. I suggest starting with the first one.", ""]
+    opening = "Here is what is on today." if which == "morning" else "Here are the items from today."
+    lines = [opening + " I suggest starting with the first one.", ""]
     for index, row in enumerate(items, start=1):
-        item = row["item"]
+        # The model path scans its own words. Here the source text itself is sent.
+        item = row["item"] if _safe(row["item"]) else "Item text omitted."
         punctuation = "" if item.endswith((".", "?", "!")) else "."
         lines.append(f"{index}. {item}{punctuation}")
-    lines.extend(("", "Reply with the numbers you want me to start on."))
-    body = "\n".join(lines) + overflow
-    return Message("Evening wrap-up", body)
+    body = "\n".join(lines)
+    reply = "\n\nReply with the numbers you want me to start on."
+    body += overflow + reply if which == "morning" else reply + overflow
+    return Message(subject, body)
 
 
-def _evening_email(digest, model):
+def _brief_email(which, digest, model):
     if not digest.items:
-        return _fallback_email([]), "none"
-    items = _email_items(digest)[:_EVENING_MAX_ITEMS]
-    remaining = digest.items - _EVENING_MAX_ITEMS
+        return _fallback_email(which, []), "none"
+    items = _email_items(which, digest)[:_EMAIL_MAX_ITEMS]
+    remaining = digest.items - _EMAIL_MAX_ITEMS
     overflow = ""
     if remaining > 0:
         count = _COUNT_WORDS[remaining] if remaining < len(_COUNT_WORDS) else str(remaining)
         overflow = f'\nAnd {count} more: reply "more" and I will list them.'
     try:
-        message = _email_reply(model(_email_prompt(items, MAX_BODY - len(overflow))), items)
+        message = _email_reply(model(_email_prompt(which, items, MAX_BODY - len(overflow))), items)
         if overflow:
             message = replace(message, body=message.body + overflow)
         return message, "model"
     except _DigestWindowClosed:
         raise
     except Exception:
-        return _fallback_email(items, overflow), "fallback"
+        return _fallback_email(which, items, overflow), "fallback"
 
 
 def _post(directory, path, which, now, feed, budget, run_job, sources, check_window, messages):
-    evening = which == "evening"
-    digest = assemble(which, now=now, feed=feed, include_all=evening, **sources)
+    digest = assemble(which, now=now, feed=feed, include_all=True, **sources)
     check_window()
-    model = partial(_model_text, directory=directory, path=path, budget=budget,
-                    run_job=run_job, check_window=check_window)
-    why_now, summary = "There are no items to review.", "none"
-    lines = digest.lines
-    if evening:
-        notes = lines[digest.items:]
-        lines = lines[:min(digest.items, MAX_LINES - len(notes))] + notes
-        if digest.items:
-            why_now = "The items are listed in context."
+    summary = "none"
+    notes = digest.lines[digest.items:]
+    lines = digest.lines[:min(digest.items, MAX_LINES - len(notes))] + notes
+    why_now = "The items are listed in context." if digest.items else "There are no items to review."
     fields = {"kind": "digest", "rank": RANK, "ask": digest.ask, "why_now": why_now, "context": lines}
-    if evening:
+    if digest.items or which == "evening":
+        model = partial(_model_text, directory=directory, path=path, budget=budget,
+                        run_job=run_job, check_window=check_window)
+        # Any failure to build or send the email leaves the card below.
         try:
-            message, summary = _evening_email(digest, model)
-        except ValueError:
-            summary = "fallback"
-        else:
-            check_window()
-            if messages.send(message, fallback=fields).outcome == "sent":
-                return Result("sent", lines=len(digest.lines), summary=summary)
-    elif digest.items:
-        try:
-            text = _display_line(model(build_prompt(digest)), 200)
+            message, summary = _brief_email(which, digest, model)
         except _DigestWindowClosed:
             raise
         except Exception:
-            text = ""
-        why_now, summary = (text, "model") if text else ("The items are listed in context.", "fallback")
-        fields["why_now"] = why_now
+            summary = "fallback"
+        else:
+            check_window()
+            try:
+                sent = messages.send(message, fallback=fields).outcome == "sent"
+            except Exception:
+                sent = False
+            if sent:
+                return Result("sent", lines=len(digest.lines), summary=summary)
     check_window()
     try:
         brief = feed.post(fields, actor="jarvis")
@@ -500,7 +501,7 @@ def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitm
     path = Path(config.V3_DIR / "daily-briefs" if state_dir is None else state_dir).absolute()
     sources = {"calendar": calendar, "commitments": commitments, "mail": mail, "activity": activity,
                "learning": learning}
-    if which == "evening" and messages is None:
+    if messages is None:
         from .t3_client import T3
         from .work import WorkService
 
