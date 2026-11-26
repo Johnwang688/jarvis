@@ -264,6 +264,25 @@ class TestAudio(unittest.TestCase):
         self.assertLessEqual(float(mixed.max()), 1)
         self.assertGreater(float(mixed.max() - mixed.min()), 0.01)
 
+    def test_notice_is_mixed_with_loud_audio_without_clipping(self):
+        devices = FakeDevices()
+        played = Queue()
+        playback = audio.Playback(devices, played=played.put, flushed=lambda: None)
+        self.addCleanup(playback.close)
+        playback.earcon("ack")
+        ack = playback._earcon.copy()
+        playback.earcon("notice")
+        notice = playback._earcon.copy()
+        self.assertFalse(np.array_equal(ack, notice))
+        self.assertGreater(float(np.max(np.abs(notice))), 0)
+        pcm = np.full(5760, 32767, dtype="<i2").tobytes()
+        playback.put(1, wire.FIRST | wire.LAST, 48000, pcm)
+        playback.start()
+        self.assertEqual(played.get(timeout=1), 1)
+        mixed = np.concatenate(devices.writes[:12])
+        self.assertLessEqual(float(np.max(np.abs(mixed))), 1)
+        self.assertGreater(float(np.ptp(mixed)), 0.01)
+
     def test_flush_discards_in_flight_remainder_and_device_buffer_before_ack(self):
         devices = FakeDevices()
         entered, resume = threading.Event(), threading.Event()
@@ -656,6 +675,7 @@ class FakePopup:
     def __init__(self, *, on_click):
         self._on_click = on_click
         self.states = []
+        self.notices = []
         self.closed = False
 
     def click(self, decision):
@@ -664,6 +684,9 @@ class FakePopup:
 
     def set(self, state, *, expires_in):
         self.states.append((state, expires_in))
+
+    def notice(self, state):
+        self.notices.append(state)
 
     def close(self):
         self.closed = True
@@ -708,6 +731,10 @@ class TestMain(unittest.TestCase):
 
         helper._event(event)
         helper._click(valid)
+        helper._event({"kind": "notice", "title": "Failed", "text": "Fixture task"})
+        self.assertEqual(helper._popup.notices[-1].label, "Failed")
+        self.assertEqual(helper._popup.notices[-1].line, "Fixture task")
+        self.assertEqual(helper._popup.states[-1][0].kind, "asking")
         helper._send_clicks()
         transport.send.assert_called_once_with(wire.CLICK, valid)
 

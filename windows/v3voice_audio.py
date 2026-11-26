@@ -529,9 +529,9 @@ class Playback:
             callback()
 
     def earcon(self, name):
-        frequencies = {"start": (520, 660), "stop": (440, 330)}
+        frequencies = {"start": (520, 660), "stop": (440, 330), "notice": (740, 740)}
         first, second = frequencies.get(name, (440, 554))
-        sound = tone(0.12, first, second, 0.05)
+        sound = tone(0.12, first, second, 0.03 if name == "notice" else 0.05)
         with self._lock:
             self._earcon = sound
 

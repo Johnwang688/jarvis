@@ -12,15 +12,16 @@ from dataclasses import dataclass
 import hashlib
 from itertools import islice
 import json
+import logging
 import time
 
 from . import t3_client
+from .work_status import FINAL, FINISHED as _FINISHED, category as _category
 
 
 MAX_PER_RUN = 12
 BUDGET_S = 60
 GONE_AFTER_S = 3 * 86400
-_FINISHED = frozenset({"completed", "idle", "exported"})
 _STOPPED = {
     "failed": "failed",
     "interrupted": "was interrupted",
@@ -28,10 +29,18 @@ _STOPPED = {
     "rolled_back": "was rolled back",
     "gone": "is no longer",
 }
-FINAL = _FINISHED.union(_STOPPED)
 _T3_STATUSES = t3_client.RUNNING | t3_client.SETTLED
 _RANKS = {"waiting": 2, "stopped": 3, "finished": 4}
 _PHRASES = {"waiting": "is waiting on you", "finished": "finished"}
+LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Notice:
+    thread_id: str
+    title: str
+    category: str
+    failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,14 +50,6 @@ class Result:
     recorded: int
     posted: int
     errors: int
-
-
-def _category(status, waiting):
-    if status in _FINISHED:
-        return "finished"
-    if status in _STOPPED:
-        return "stopped"
-    return "waiting" if waiting else "running"
 
 
 def _notice_key(thread, status, waiting):
@@ -80,7 +81,7 @@ def _brief(thread, status, waiting, category, *, titled=True):
 
 class Watcher:
     def __init__(self, *, ledger, t3, feed, clock=time.time,
-                 max_per_run=MAX_PER_RUN, budget_s=BUDGET_S, messages=None):
+                 max_per_run=MAX_PER_RUN, budget_s=BUDGET_S, messages=None, announce=None):
         self._ledger = ledger
         self._t3 = t3
         self._feed = feed
@@ -88,6 +89,7 @@ class Watcher:
         self._max_per_run = max_per_run
         self._budget_s = budget_s
         self._messages = messages
+        self._announce = announce
         self._cursor = None
 
     def _observe(self, thread):
@@ -206,10 +208,13 @@ class Watcher:
         # Finish polling before writing so an unavailable T3 leaves the
         # feed and ledger untouched even if its binary vanished mid-run.
         for thread, status, waiting, settled_at in changes:
+            notice = None
             try:
-                lock = self._ledger.notice_delivery() if self._messages is not None else nullcontext()
+                locked = self._messages is not None or (
+                    self._announce is not None and getattr(thread, "delegated", False))
+                lock = self._ledger.notice_delivery() if locked else nullcontext()
                 with lock:
-                    if self._messages is not None:
+                    if locked:
                         thread = self._ledger.get(thread.thread_id)
                         if (status, waiting) == (thread.status, thread.waiting_on_owner):
                             continue
@@ -221,9 +226,18 @@ class Watcher:
                           and not (self._messages is not None and status in FINAL and thread.settled_once)):
                         self._notify(thread, status, waiting, category, settled_at)
                         posted += 1
+                        if (self._announce is not None and getattr(thread, "delegated", False)
+                                and category not in thread.noticed_categories):
+                            notice = Notice(thread.thread_id, thread.title, category, failed=status == "failed")
                     self._ledger.record_status(thread.thread_id, status=status,
                                                waiting_on_owner=waiting, at=self._clock())
                     recorded += 1
             except Exception:
                 errors += 1
+                continue
+            if notice is not None:
+                try:
+                    self._announce(notice)
+                except Exception:
+                    LOG.warning("A work announcement could not be queued.")
         return Result("ok", polled, recorded, posted, errors)

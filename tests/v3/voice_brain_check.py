@@ -1004,6 +1004,7 @@ class VoiceBrainCheck(unittest.TestCase):
             self.assertIn("name", status["voice"])
             self.assertFalse(status["gpu_warm"])
             self.assertEqual(status["counters"], dict(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0,
+                                                     announced=0, announced_quietly=0, announcements_dropped=0,
                                                      voice_approvals=0, voice_denials=0, popup_answers=0,
                                                      ignored_answers=0))
             self.assertEqual(status["link"], {"listening": False, "connected": False, "reason": "key_missing"})

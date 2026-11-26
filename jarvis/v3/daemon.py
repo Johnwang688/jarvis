@@ -385,7 +385,8 @@ class Daemon:
         if jobs is None:
             jobs = default_jobs(feed_root=self._data_dir / "feed", chats_root=self._chats_root,
                                 index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite",
-                                executor=self._sweep_executor, executor_activity=self._executor_activity)
+                                executor=self._sweep_executor, executor_activity=self._executor_activity,
+                                announce=self._announce_work if self._voice_session is not None else None)
         self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json",
                                     idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
@@ -526,6 +527,11 @@ class Daemon:
         return ChatService(self._chats_root, approvals=ApprovalBroker(log=self._data_dir / "approvals.jsonl"),
                            work=WorkService(registry=Registry(root / "projects.json"),
                                             ledger=Ledger(root / "threads.jsonl")))
+
+    def _announce_work(self, notice):
+        session = self._voice_session
+        if session is not None:
+            session.announce(notice)
 
     def _new_voice(self):
         from .voice.approving import VoiceApproving

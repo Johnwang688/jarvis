@@ -400,7 +400,8 @@ def _find_cli(name):
 
 
 def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_root=None,
-                 signals_dir=None, find_cli=None, executor=None, executor_activity=None):
+                 signals_dir=None, find_cli=None, executor=None, executor_activity=None,
+                 announce=None):
     """Build the daemon jobs without opening their stores or contacting providers.
 
     The Gmail grant check and OAuth refresh read the file separately.
@@ -593,7 +594,8 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
 
             ledger, t3 = Ledger(path), T3(timeout=15)
             messages = MessageService(WorkService(ledger=ledger, t3=t3), clock=time.time)
-            work_watcher = Watcher(ledger=ledger, t3=t3, feed=get_feed(), messages=messages)
+            work_watcher = Watcher(ledger=ledger, t3=t3, feed=get_feed(), messages=messages,
+                                   announce=announce)
         if work_watcher.run().outcome == "error":
             raise RuntimeError("Work watch failed.")
 
