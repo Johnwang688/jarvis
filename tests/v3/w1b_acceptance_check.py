@@ -354,18 +354,20 @@ class Static(unittest.TestCase):
         from jarvis.v3 import chat, fastpath
         fastpath.register_tools()
         fastpath.register_tools()
-        self.assertEqual((chat.WORK_TOOLS, chat.WORK_GATED), (frozenset(READS), frozenset(GATED)))
+        gated = GATED | {"delegate"}
+        self.assertEqual((chat.WORK_TOOLS, chat.WORK_GATED), (frozenset(READS), frozenset(gated)))
         self.assertEqual((len(chat.GATED_TOOLS), len(fastpath.V3_TOOLS)), (6, 10))
         self.assertFalse(WORK & (chat.GATED_TOOLS | chat.TOOL_NAMES))
         schemas = {"work_projects": (set(), set()), "work_threads": ({"project"}, set()), "work_show": ({"thread_id", "messages"}, {"thread_id"}),
-                   "work_start": ({"project", "title", "brief", "worktree"}, {"project", "title", "brief"}), "work_send": ({"thread_id", "message"}, {"thread_id", "message"})}
+                   "work_start": ({"project", "title", "brief", "worktree"}, {"project", "title", "brief"}), "work_send": ({"thread_id", "message"}, {"thread_id", "message"}),
+                   "delegate": ({"task", "project"}, {"task"})}
         defaults = set(tools.default_names())
         for name, (props, required) in schemas.items():
             entry = tools.REGISTRY[name]
-            self.assertEqual(entry.dangerous, name in GATED, name)
+            self.assertEqual(entry.dangerous, name in gated, name)
             self.assertTrue(name in tools.EXPLICIT_ONLY and name not in defaults, name)
             self.assertEqual((set(entry.schema["properties"]), set(entry.schema["required"])), (props, required), name)
-            if name in GATED:
+            if name in gated:
                 self.assertFalse(name in tools.PARALLEL_SAFE or tools.parallelizable(name), name)
 
     def test_agentd_builds_the_real_work_service_and_stays_light(self):

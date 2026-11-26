@@ -645,6 +645,10 @@ class VoiceBrainCheck(unittest.TestCase):
         self.events.wait("reply", turn=turn)
 
     def test_every_gated_tool_uses_the_tainted_level(self):
+        class DelegatingWork(Work):
+            def plan_delegate(self, task, project=None):
+                return dict(project=project, named=True, title=task, task=task, path="/example/fixture")
+
         self.token.touch()
         Vault(self.data / "vault").add(**ENTRY)
         gated = {
@@ -656,11 +660,12 @@ class VoiceBrainCheck(unittest.TestCase):
             "vault_archive": {"name": "example"},
             "work_start": {"project": "fixture", "title": "Fixture run", "brief": "Run the fixture."},
             "work_send": {"thread_id": "42", "message": "Run the fixture."},
+            "delegate": {"project": "fixture", "task": "Run the fixture."},
         }
         self.assertEqual(set(gated), chat.GATED_TOOLS | chat.WORK_GATED)
         fake_calendar = Cal()
-        self.start(work=Work(), calendar=lambda approve=None: CalendarTools(request=fake_calendar, now=lambda: NOW,
-                                                                            approve=approve))
+        self.start(work=DelegatingWork(), calendar=lambda approve=None: CalendarTools(
+            request=fake_calendar, now=lambda: NOW, approve=approve))
         with patch.object(t3_client, "resolve", return_value="/example/bin/t3"):
             self.factory.scripts.append(script(("", [("vault_read", {"name": "example"})]), ("", tuple(gated.items()))))
             turn = self.send()

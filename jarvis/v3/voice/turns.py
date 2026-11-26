@@ -12,6 +12,7 @@ import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from ..work import GENERAL_WORKSPACE
 from .brain import VoiceBrain
 from .sentences import MIN_SENTENCE as MIN_SENTENCE, Sentences
 
@@ -41,6 +42,7 @@ _TARGETS = {
 _SPOKEN = {
     "app_open": ("App", "Open {}"),
     "folder_open": ("Project", "Open the folder for {}"),
+    "delegate": ("Project", "Hand this to Sol in {}"),
     "link_open": ("URL", "Open a link to {}"),
 }
 LOG = logging.getLogger(__name__)
@@ -64,6 +66,8 @@ def _approval_sentence(item):
     if item["tool"] in _SPOKEN:
         label, words = _SPOKEN[item["tool"]]
         value = " ".join(str(rows.get(label) or "").split())
+        if item["tool"] == "delegate" and value == GENERAL_WORKSPACE:
+            return "Hand this to Sol. Approve?"
         if item["tool"] == "link_open":
             try:
                 value = urlsplit(value).hostname or ""
@@ -98,6 +102,7 @@ class _VoiceTurn:
     code_built_sentences: list = field(default_factory=list)
     sentence_count: int = 0
     sentence_chars: int = 0
+    delegate_reminders: int = 0
     first_ack_s: float | None = None
     first_say_s: float | None = None
     end_s: float | None = None
@@ -412,6 +417,8 @@ class VoiceTurns:
             elif kind == "delta" and not turn.muted:
                 turn.streamed.append(event["text"])
                 self._feed(turn, event["text"])
+            elif kind == "delegate_reminder":
+                turn.delegate_reminders += 1
             elif kind == "step_end" and not turn.muted:
                 turn.ended_without_tools = not event["has_tools"]
                 if turn.ended_without_tools:
@@ -465,6 +472,7 @@ class VoiceTurns:
                 {"turn": turn.turn, "heard_at": turn.heard_at, "text": turn.text,
                  "tools": deepcopy(turn.tools), "approval_asked": bool(turn.approvals),
                  "sentence_count": turn.sentence_count, "sentence_chars": turn.sentence_chars,
+                 "delegate_reminders": turn.delegate_reminders,
                  "code_built_sentences": list(turn.code_built_sentences),
                  "silence_ms": turn.silence_ms, "decode_ms": turn.decode_ms,
                  "first_audio_ms": turn.first_audio_ms,

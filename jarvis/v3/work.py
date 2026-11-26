@@ -12,6 +12,7 @@ Limits, by design:
 
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, time as local_time, timedelta
 import fcntl
 import hashlib
 import io
@@ -59,8 +60,23 @@ _PLAN_FIELDS = _PROJECT_FIELDS | {"project", "title", "brief", "branch"}
 _EVENT_FIELDS = {"v", "kind", "thread_id", "at"}
 _START_FIELDS = _EVENT_FIELDS | {"run_id", "project", "title", "branch", "brief_sha256"}
 _GENERAL_PROJECT = "jarvis"
+_WORKSPACE_PROJECT = "jarvis-workspace"
+GENERAL_WORKSPACE = "General workspace"
 _MESSAGE_PROVIDER = "codex"
 _MESSAGE_MODEL = "gpt-6.2-sol"
+_DELEGATE_PROVIDER = "codex"
+_DELEGATE_MODEL = "gpt-6.2-sol"
+DELEGATE_MODEL_LABEL = "GPT-6.2 Sol"
+DELEGATE_TASK_LIMIT = 4_000
+DELEGATE_DAILY_LIMIT = 12
+DELEGATE_DAY_ERROR = "Only 12 tasks may be handed off per day."
+DELEGATE_PROMPT = (
+    "The owner asked Jarvis for this task. Jarvis handed it to you to do in the background. "
+    "Do the task. If something you need is missing or the task is unsafe or unclear, stop and say "
+    "what you need instead of guessing. Finish with a short, plain summary of what you did and "
+    "what, if anything, is left."
+)
+_DELEGATE_ORIGINS = frozenset({"desk", "voice", "phone"})
 _STATUS_FIELDS = _EVENT_FIELDS | {"status", "waiting_on_owner"}
 _FINAL_STATUSES = t3_client.SETTLED - {"waiting"} | {"gone"}
 _UNKNOWN_THREAD = "That is not a thread Jarvis started."
@@ -97,6 +113,8 @@ class Thread:
     fallback_status: str | None = None
     fallback: dict | None = field(default=None, repr=False)
     relay_sha256: str | None = None
+    delegated: bool = False
+    origin: str | None = None
 
 
 def _checked(call, *args, **kwargs):
@@ -177,6 +195,27 @@ def _message(value):
     if not isinstance(value, str) or len(value) > _TEXT_LIMIT:
         raise WorkError("Work text must be 1 to 16,000 characters.")
     return _checked(t3_client._message, value)
+
+
+def _shown_whole(value, what):
+    # A card shows cleaned text. The agent must get exactly what the card showed.
+    if untrusted.strip_invisible(value) != value:
+        raise WorkError(f"The {what} has characters that cannot be shown. Write it in plain text.")
+
+
+def _delegation_task(value):
+    if not isinstance(value, str) or not 1 <= len(value.strip()) <= DELEGATE_TASK_LIMIT:
+        raise WorkError("Task must be 1 to 4,000 characters after trimming.")
+    _message(value)
+    _shown_whole(value, "task")
+    first_line = " ".join(value.strip().splitlines()[0].split())
+    if len(first_line) > 60:
+        prefix = first_line[:60]
+        if first_line[60] != " ":
+            # A first word longer than the limit (a link, a path) is cut where it stands.
+            prefix = prefix.rpartition(" ")[0] or prefix
+        first_line = prefix.rstrip()
+    return _title(first_line)
 
 
 def _slug(title):
@@ -308,14 +347,23 @@ class Registry:
         return self.builtin_message_project(), True
 
     def builtin_message_project(self) -> Project:
-        # The built-in is available only to message delivery. Keep the
-        # work registry's prohibition on registering v3 state for coding.
-        path = (self.path.parent.parent / "messages").absolute()
-        with open_directory(path, create=True) as directory:
-            info = os.fstat(directory)
-            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-                raise WorkError("The Jarvis message project directory must be private.")
-        return Project(_GENERAL_PROJECT, str(path), _MESSAGE_PROVIDER, _MESSAGE_MODEL, None)
+        path = self._builtin_path(self.path.parent.parent / "messages", "Jarvis message project", create=True)
+        return Project(_GENERAL_PROJECT, path, _MESSAGE_PROVIDER, _MESSAGE_MODEL, None)
+
+    def builtin_workspace(self, *, create=False) -> Project:
+        path = self._builtin_path(self.path.parent / "workspace", "Jarvis workspace", create=create)
+        return Project(_WORKSPACE_PROJECT, path, _DELEGATE_PROVIDER, _DELEGATE_MODEL, None)
+
+    @staticmethod
+    def _builtin_path(path, label, *, create):
+        # Keep these directories outside the owner-managed project registry.
+        path = path.absolute()
+        if create:
+            with open_directory(path, create=True) as directory:
+                info = os.fstat(directory)
+                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise WorkError(f"The {label} directory must be private.")
+        return str(path)
 
     def add(self, name, path, *, provider, model, base=None) -> Project:
         project = _project(name, _resolve_path(path), provider, model, base)
@@ -367,14 +415,19 @@ def _event(row):
     if type(at) not in (int, float) or not -sys.float_info.max <= at <= sys.float_info.max:
         raise WorkError("Invalid work ledger time.")
     _checked(t3_client._arg, row.get("thread_id"))
-    if (kind == "start"
-            and _START_FIELDS <= row.keys() <= _START_FIELDS | {"message", "notice_key", "fallback", "relay_sha256"}):
+    if (kind == "start" and _START_FIELDS <= row.keys() <= _START_FIELDS | {
+        "message", "notice_key", "fallback", "relay_sha256", "delegated", "origin",
+    }):
         _checked(t3_client._arg, row["run_id"])
         _name(row["project"])
         digest = row["brief_sha256"]
         message = row.get("message", False)
         notice = row.get("notice_key")
         relay_digest = row.get("relay_sha256")
+        if "delegated" in row or "origin" in row:
+            origin = row.get("origin")
+            if row.get("delegated") is not True or message or not isinstance(origin, str) or origin not in _DELEGATE_ORIGINS:
+                raise WorkError("Invalid delegation in work ledger.")
         if (type(message) is bool
                 and (not message or row["branch"] is None)
                 and ("notice_key" not in row
@@ -413,6 +466,7 @@ def _fold(lines):
                 "started", False, at,
                 row.get("message", False), row.get("notice_key"),
                 fallback=row.get("fallback"), relay_sha256=row.get("relay_sha256"),
+                delegated=row.get("delegated", False), origin=row.get("origin"),
             ))
         elif thread_id in threads:
             thread = threads[thread_id]
@@ -495,6 +549,16 @@ class Ledger:
     def notice_delivery(self):
         return self._delivery_lock("notices.lock")
 
+    def delegation(self):
+        return self._delivery_lock("delegation.lock")
+
+    def check_delegate_day(self, at):
+        day = datetime.fromtimestamp(at).date()
+        start = datetime.combine(day, local_time.min).timestamp()
+        end = datetime.combine(day + timedelta(days=1), local_time.min).timestamp()
+        if sum(t.delegated and start <= t.started_at < end for t in self._read().values()) >= DELEGATE_DAILY_LIMIT:
+            raise WorkError(DELEGATE_DAY_ERROR)
+
     def record_start(self, *, message=False, notice_key=None, **fields) -> None:
         if message:
             fields["message"] = True
@@ -502,7 +566,7 @@ class Ledger:
             fields["notice_key"] = notice_key
         self._append(dict(v=1, kind="start", **fields))
 
-    def recover_message_start(self, **fields) -> None:
+    def recover_start(self, **fields) -> None:
         row = dict(v=1, kind="start", **fields)
         try:
             self._append(row, path=self.recovery_path)
@@ -551,9 +615,12 @@ class WorkService:
         return project
 
     def plan_start(self, project, title, brief, *, worktree=True) -> dict:
-        registered = self.current_project(project)
+        return self._plan_start(self.current_project(project), title, brief, worktree)
+
+    def _plan_start(self, registered, title, brief, worktree):
         title = _title(title)
         _message(brief)
+        _shown_whole(brief, "brief")
         branch = None
         if registered.base is not None and worktree:
             suffix = self._token(2)
@@ -568,7 +635,9 @@ class WorkService:
         before T3 is asked: it raises to stop a start that is no longer wanted."""
         if type(plan) is not dict or plan.keys() != _PLAN_FIELDS:
             raise WorkError("Invalid work start plan.")
-        project = self.current_project(plan["project"])
+        return self._start_plan(plan, self.current_project(plan["project"]), guard=guard)
+
+    def _start_plan(self, plan, project, **kwargs):
         if any(plan[key] != getattr(project, key) for key in _PROJECT_FIELDS):
             raise WorkError("Registered project changed since the work was planned.")
         title = _title(plan["title"])
@@ -583,19 +652,70 @@ class WorkService:
                     or not _valid_suffix(branch[len(prefix):])):
                 raise WorkError("Invalid work branch in start plan.")
             options = {"worktree": project.base, "branch": branch}
-        return self._start(project, title, brief, branch, options, guard=guard)
+        return self._start(project, title, brief, branch, options, **kwargs)
+
+    def _delegate_project(self, name):
+        if name is None:
+            return self._registry.builtin_workspace()
+        names = [project.name for project in self.projects()]
+        if name not in names:
+            raise WorkError(f"Unknown work project. Registered projects: {', '.join(names) or 'none'}.")
+        return replace(self.current_project(name), provider=_DELEGATE_PROVIDER, model=_DELEGATE_MODEL)
+
+    def plan_delegate(self, task, project=None):
+        title = _delegation_task(task)
+        registered = self._delegate_project(project)
+        plan = self._plan_start(registered, title, f"{DELEGATE_PROMPT}\n\n{task}", True)
+        self._ledger.check_delegate_day(self._clock())
+        return dict(plan, task=task, named=project is not None)
+
+    def start_delegate(self, preview, *, origin, guard=None):
+        if (type(preview) is not dict or preview.keys() != _PLAN_FIELDS | {"task", "named"}
+                or type(preview["named"]) is not bool or origin not in _DELEGATE_ORIGINS):
+            raise WorkError("Invalid delegation plan.")
+        task = preview["task"]
+        plan = {key: preview[key] for key in _PLAN_FIELDS}
+        if plan["title"] != _delegation_task(task) or plan["brief"] != f"{DELEGATE_PROMPT}\n\n{task}":
+            raise WorkError("Invalid delegation plan.")
+        with self._ledger.delegation():
+            at = self._clock()
+            self._ledger.check_delegate_day(at)
+            name = plan["project"] if preview["named"] else None
+            project = self._delegate_project(name)
+            if (plan["project"] != project.name or plan["path"] != project.path
+                    or (plan["branch"] is None) != (project.base is None)):
+                raise WorkError("Invalid delegation plan.")
+            target = None
+            if name is None:
+                if guard is not None:
+                    guard()
+                workspace = self._registry.builtin_workspace(create=True)
+                target = self._confirm_builtin_project(workspace, title="Jarvis workspace",
+                                                       label="Jarvis workspace", guard=guard)
+            return self._start_plan(plan, project, guard=guard, at=at, target=target,
+                                    mark={"delegated": True, "origin": origin})
 
     def message_delivery(self):
         return self._ledger.message_delivery()
 
-    def _message_target(self, project, builtin):
-        if not builtin:
-            try:
-                if _resolve_path(project.path) != project.path:
-                    return None
-            except WorkError:
+    def _message_target(self, project):
+        try:
+            if _resolve_path(project.path) != project.path:
                 return None
+        except WorkError:
+            return None
         return _checked(self._t3.project_at, project.path)
+
+    def _confirm_builtin_project(self, project, *, title, label, guard=None):
+        target = _checked(self._t3.project_at, project.path)
+        if target is None:
+            if guard is not None:
+                guard()
+            _checked(self._t3.project_add, project.path, title=title)
+            target = _checked(self._t3.project_at, project.path)
+        if target is None:
+            raise WorkError(f"T3 could not confirm the exact {label}.")
+        return target
 
     def start_message(self, message, *, at, notice_key=None, fallback=None) -> Thread:
         from .messages import Message, relay_sha256, thread_prompt
@@ -603,19 +723,17 @@ class WorkService:
         if notice_key is not None and not (isinstance(notice_key, str) and _SHA256.fullmatch(notice_key)):
             raise WorkError("Invalid work notice key.")
         project, builtin = self._registry.message_project(message.project)
-        target = self._message_target(project, builtin)
+        target = None if builtin else self._message_target(project)
         if target is None and not builtin:
             if message.project == project.name:
                 message = Message(message.subject, f"About {project.name}:\n\n{message.body}")
             if project.name != _GENERAL_PROJECT:
                 project, builtin = self._registry.message_project(None)
-                target = self._message_target(project, builtin)
+                target = None if builtin else self._message_target(project)
             if target is None and not builtin:
                 project, builtin = self._registry.builtin_message_project(), True
-                target = self._message_target(project, builtin)
-        if target is None and builtin:
-            _checked(self._t3.project_add, project.path, title="Jarvis")
-            target = _checked(self._t3.project_at, project.path)
+        if builtin:
+            target = self._confirm_builtin_project(project, title="Jarvis", label="Jarvis message project")
         if target is None:
             raise WorkError("T3 could not confirm the exact Jarvis message project.")
 
@@ -651,9 +769,9 @@ class WorkService:
         except (WorkError, OSError):
             if mark is None:
                 raise WorkError(f"Could not record the start of T3 thread {thread_id}.") from None
-            # T3 already accepted the message. Keep the start for the cap and
+            # T3 already accepted the work. Keep the start for the cap and
             # watcher even when the main ledger could not append the event.
-            self._ledger.recover_message_start(**fields)
+            self._ledger.recover_start(**fields)
         return Thread(thread_id, project.name, title, float(at), branch, brief_sha256, "started", False,
                       float(at), **(mark or {}))
 
