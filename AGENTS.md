@@ -159,6 +159,9 @@ Money, credentials, gate and policy changes, and other kinds barred by the
 voice rule need a click or the phone passkey. Pop-up clicks remain available
 until the card expires. v2's speech rule is unchanged.
 
+The GPU voice environment under v3's data is protected state: the daemon runs
+its interpreter. `jarvis voice setup` installs it and asks like any `jarvis` command.
+
 ## Phone
 
 The phone's only door is the remote listener (8408, loopback, behind `tailscale

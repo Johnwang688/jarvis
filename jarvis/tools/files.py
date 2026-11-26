@@ -62,6 +62,9 @@ SELF_PROTECTED = frozenset(
         "jarvis/v3/voice/link.py",
         "jarvis/v3/voice/settings.py",
         "jarvis/v3/voice/wire.py",
+        # The daemon launches this worker with an owner-provisioned interpreter.
+        "jarvis/v3/voice/gpu_voice.py",
+        "jarvis/v3/voice/kokoro_worker.py",
         "jarvis/v3/pc.py",
         "jarvis/v2/voice_chat.py",
         "jarvis/v2/voice_intent.py",
@@ -648,6 +651,8 @@ def _v3_paths() -> set[Path]:
         # it proposed and was approved to do: the owner's commands and the
         # daemon write these, never an agent's write tool.
         Path(config.V3_DIR) / "work", Path(config.V3_DIR) / "proposals",
+        # Owner provisioning installs code that the daemon executes.
+        Path(config.V3_DIR) / "voice-gpu",
         home / ".claude.json", home / ".claude" / "settings.json", home / ".claude" / "settings.local.json",
         home / ".codex" / "config.toml", home / ".codex" / "hooks.json")}
 

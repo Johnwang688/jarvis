@@ -178,7 +178,7 @@ class VoiceSession:
             self._voice_reason = "no voice configured"
         self._choice = None
         self._counters = Counter(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0,
-                                 announced=0, announced_quietly=0, announcements_dropped=0)
+                                 announced=0, announced_quietly=0, announcements_dropped=0, voice_fallbacks=0)
         # Input and acknowledgement handlers share these under _changed.
         self._handed_audio = {}  # Sentence ID to whether its last chunk was handed out.
         self._flushed = {}  # Sentence ID to its playback deadline.
@@ -286,7 +286,17 @@ class VoiceSession:
             voice = self._voice
         if voice is None:
             raise EngineUnavailable("no voice configured")
-        result = voice.synthesize(text)
+        try:
+            result = voice.synthesize(text)
+        except Exception:
+            with self._changed:
+                if self._closed or voice is not self._best or self._fast is None or self._fast is voice:
+                    raise
+                self._voice = self._fast
+                self._gpu_warm = False
+                self._voice_reason = "best voice failed during speech"
+                self._counters["voice_fallbacks"] += 1
+            return self._fast.synthesize(text)
         if voice is self._best and self._fast is None:
             with self._changed:
                 self._gpu_warm = True
@@ -489,11 +499,14 @@ class VoiceSession:
             self._unsubscribe()
             self._hearing.close()
             self._speaking.close()
+            # A pipe-backed voice can cancel a pending warm-up or sentence here.
+            _close(self._best)
             self._hearing.join()
             self._speaking.join()
             for warm in self._warmers:
                 warm.join()
-            self._close_voices()
+            if self._fast is not self._best:
+                _close(self._fast)
             with self._changed:
                 self._mailbox.clear()
 

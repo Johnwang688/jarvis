@@ -1124,6 +1124,8 @@ V3_WHISPER_MODEL_DIR = Path(os.environ.get("JARVIS_V3_WHISPER_MODEL") or
                             Path.home() / ".cache" / "jarvis-stt" / "large-v3-turbo")
 V3_TRANSCRIBER = os.environ.get("JARVIS_V3_TRANSCRIBER") or "auto"
 V3_VOICE = os.environ.get("JARVIS_V3_VOICE") or "auto"
+V3_VOICE_GPU_PYTHON = Path(os.environ.get("JARVIS_V3_VOICE_GPU_PYTHON") or
+                           V3_DIR / "voice-gpu/venv/bin/python").expanduser()
 V3_KOKORO_SPEED = _env_number("JARVIS_V3_KOKORO_SPEED", 1.35, 0.8, 2.0)
 V3_END_SILENCE_MS = int(_env_number("JARVIS_V3_END_SILENCE_MS", 500, 300, 1500))
 V3_FOLLOW_UP_S = _env_number("JARVIS_V3_FOLLOW_UP_S", 8, 0, 60)

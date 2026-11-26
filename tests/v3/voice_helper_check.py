@@ -1006,6 +1006,7 @@ class TestCLI(unittest.TestCase):
 
         with patch("jarvis.voice_link_setup.windows_folder_closed", return_value=True), \
                 patch("jarvis.desktop_setup._find_python", return_value="python.exe"), \
+                patch.object(installation, "_setup_gpu") as gpu_setup, \
                 patch.object(installation.subprocess, "run", side_effect=convert) as commands, \
                 redirect_stdout(output):
             self.wsl_key.write_bytes(FAKE_KEY)
@@ -1015,6 +1016,7 @@ class TestCLI(unittest.TestCase):
             self.win_key.write_bytes(FAKE_KEY)
             args = build_parser().parse_args(["voice", "setup"])
             self.assertEqual(args.func(args), 0)
+        self.assertEqual(gpu_setup.call_count, 2)
         cmd = (self.bridge / "run-jarvis-voice.cmd").read_bytes()
         self.assertIn(b'"C:\\Example Path\\python.exe" "C:\\Example Path\\v3voice_main.py"'
                       b' 127.0.0.1 12345 "C:\\Example Path\\voice-link.key"\r\n', cmd)
