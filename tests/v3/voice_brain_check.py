@@ -956,7 +956,10 @@ class VoiceBrainCheck(unittest.TestCase):
         from urllib.request import urlopen
 
         with urlopen(f"http://127.0.0.1:{instance.port}/v3/status") as response:
-            self.assertEqual(json.load(response)["voice"], {"brain": "claude", "state": "idle", "turns": 0})
+            self.assertEqual(json.load(response)["voice"], {
+                "brain": "claude", "state": "idle", "turns": 0,
+                "link": {"listening": False, "connected": False, "reason": "session_unavailable"},
+            })
         brain = instance._voice_brain
         instance.stop()
         self.assertEqual(brain.status()["state"], "closed")

@@ -59,6 +59,8 @@ SELF_PROTECTED = frozenset(
         # VA-2 will type into any app: code holding the owner's microphone,
         # keyboard and pairing is authorization code.
         "jarvis/v2/voice_link.py",
+        "jarvis/v3/voice/link.py",
+        "jarvis/v3/voice/wire.py",
         "jarvis/v2/voice_chat.py",
         "jarvis/v2/voice_intent.py",
         "jarvis/v2/voice_model.py",
