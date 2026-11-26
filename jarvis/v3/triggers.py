@@ -15,6 +15,7 @@ from base64 import urlsafe_b64encode
 from collections import Counter, deque
 from contextlib import contextmanager, suppress
 from datetime import date, datetime, time as wall_time, timedelta, timezone
+from email.utils import parseaddr
 import fcntl
 import hashlib
 import json
@@ -59,6 +60,10 @@ _SOURCE_FOR_PREFIX = {"calendar": "calendar", "school": "schoolwork", "gh": "git
                       "commitment": "commitments", "mail": "mail"}
 _EXCLUDED_LABELS = {"SPAM", "TRASH", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL",
                     "CATEGORY_UPDATES", "CATEGORY_FORUMS"}
+_AUTOMATED = re.compile(
+    r"^(?:noreply|no-reply|no_reply|no\.reply|donotreply|do-not-reply|do_not_reply|"
+    r"mailer-daemon|postmaster|bounce|bounces)", re.IGNORECASE,
+)
 _C3_FIELDS = {
     "calendar": {"title": (str,), "start": (str,), "end": (str,), "status": (str,),
                  "all_day": (int,), "attendees": (int,), "owner_event": (int,),
@@ -74,8 +79,9 @@ _TEXT_FIELDS = {
     "schoolwork": ("title", "course", "state"),
     "github": ("title", "checks", "review_decision"),
     "commitments": ("who", "what"),
-    "mail": ("title", "labels"),
+    "mail": ("title", "labels", "from"),
 }
+_SIGNAL_TEXT_FIELDS = ("untrusted_title", "untrusted_from")
 _KEY_SUFFIXES = {
     "calendar.changed": re.compile(r":[0-9a-f]{16}$"),
     "school.due_within_72h": re.compile(
@@ -201,12 +207,12 @@ def _digest_snapshot(source, snapshot):
 
 def _checkpoint_record(row, *, recovering=False):
     fields = row["summary_fields"]
-    if "untrusted_title" not in fields:
-        return row
     # The digest is useful for the checkpoint's recorded observation only.
     # On replay, missing log rows retain their structured fields and cursor.
-    title = "" if recovering else _digest_text(fields["untrusted_title"])
-    return dict(row, summary_fields=dict(fields, untrusted_title=title))
+    return dict(row, summary_fields={
+        key: ("" if recovering else _digest_text(value)) if key in _SIGNAL_TEXT_FIELDS else value
+        for key, value in fields.items()
+    })
 
 
 def _candidate(kind, source, item_id, fields, *, suffix=""):
@@ -328,8 +334,12 @@ def _mail(current, now):
         if (item["from_owner"] == 0 and "INBOX" in labels
                 and not _EXCLUDED_LABELS.intersection(labels) and now - item["ts"] >= 3600):
             mid = item["id"]
+            sender = item.get("from", "")
+            local, sep, domain = parseaddr(sender)[1].rpartition("@")
             fields = {"message": _line(mid), "thread": _line(item["thread"]),
-                      "received": _stamp(item["ts"]), "untrusted_title": _line(item["title"])}
+                      "received": _stamp(item["ts"]), "untrusted_title": _line(item["title"]),
+                      "untrusted_from": _line(sender),
+                      "automated": bool(sep and domain and _AUTOMATED.match(local))}
             yield _candidate("mail.needs_reply", "gmail", mid, fields)
 
 
@@ -440,14 +450,16 @@ def _mail_items(index, now):
         meta = json.loads(row["meta_json"])
         mid, title, ts = row["ref"], row["title"], row["ts"]
         thread, owner, labels = meta["thread"], meta["from_owner"], meta["labels"]
+        sender = meta.get("from", "")
         if (type(mid) is not str or type(title) is not str or type(thread) is not str
+                or type(sender) is not str
                 or type(owner) is not int or owner not in (0, 1)
                 or type(ts) not in (int, float) or not math.isfinite(ts)
                 or not isinstance(labels, list) or any(type(label) is not str for label in labels)):
             raise ValueError("Invalid mail metadata.")
         _stamp(ts)
         yield {"id": mid, "thread": thread or mid, "from_owner": owner, "ts": ts,
-               "labels": labels, "title": title}
+               "labels": labels, "title": title, "from": sender}
 
 
 def _json(value, *, ensure_ascii=True):
@@ -585,6 +597,8 @@ def _read_tail(fd):
                     or not _valid_key(row["dedupe_key"]) or row["kind"] != _kind(row["dedupe_key"])
                     or row["source"] != _key_source(row["dedupe_key"])
                     or type(row["source_ref"]) is not str or type(row["summary_fields"]) is not dict
+                    or type(row["summary_fields"].get("untrusted_from", "")) is not str
+                    or type(row["summary_fields"].get("automated", False)) is not bool
                     or row["tainted"] is not True):
                 continue
             _instant(row["created"])
