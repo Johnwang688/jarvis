@@ -143,6 +143,8 @@ class Base(unittest.TestCase):
                 "activity": None if activity is None else source(activity, c["activity"])}
 
     def run_it(self, which, model, srcs, feed=None, budget=None, messages=None):
+        if messages is None:
+            messages = Mock(**{"send.return_value": MessageResult("refused")})
         return daily_briefs.run(which, feed=feed or self.feed, budget=budget or self.budget, now=self.now,
                                 state_dir=self.state, run_job=model, messages=messages, **srcs)
 
@@ -261,14 +263,14 @@ class Run(Base):
         d = self.decision("Move the dentist to Friday?", 3)
         srcs = self.sources(EVENTS)
         expected = daily_briefs.assemble("morning", now=self.now, feed=self.feed, **srcs)
-        model = Model("A long summary line " * 30 + "\nsecond line")
+        model = Model("Subject: This morning\n\nCheck the schedule first. Reply if I should help.")
         out = self.run_it("morning", model, srcs)
         self.assertEqual((out.outcome, out.summary, out.lines), ("posted", "model", 3))
         brief = self.feed.get(out.brief_id)
         self.assertEqual((brief["kind"], brief["actor"], brief["route"], brief["state"], brief["proposal_id"]), ("digest", "jarvis", "batch", "open", None))
         self.assertGreaterEqual(brief["rank"], 3)
         self.assertEqual((brief["ask"], brief["context"]), (expected.ask, expected.lines))
-        self.assertTrue(0 < len(brief["why_now"]) <= 200 and "\n" not in brief["why_now"])
+        self.assertEqual(brief["why_now"], "The items are listed in context.")
         (job,) = model.jobs
         self.assertEqual((job["name"], job["model"]), ("brief", "haiku"))
         self.assertEqual(list(job.get("tools", ())), [])

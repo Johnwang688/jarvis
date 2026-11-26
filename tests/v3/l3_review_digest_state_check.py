@@ -6,11 +6,12 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from jarvis.v3 import learning_digest
 from jarvis.v3.feed import Feed
+from jarvis.v3.messages import Result as DeliveryResult
 from jarvis.v3.skill_store import SkillStore
 from jarvis.v3.vault import Vault
 
@@ -25,10 +26,12 @@ class DigestStateCheck(unittest.TestCase):
         return self.run_digest(feed, now=now.timestamp()), feed
 
     def run_digest(self, feed, *, now=None):
+        messages = Mock()
+        messages.send.return_value = DeliveryResult("refused")
         return learning_digest.run(
             feed=feed, now=now, state_dir=self.root / "digest",
             store=SkillStore(self.root / "skills", ledger=self.root / "ledger", links=[], owner_roots=[]),
-            vault=Vault(self.root / "vault"), reviewer_dir=self.root / "reviewer",
+            vault=Vault(self.root / "vault"), reviewer_dir=self.root / "reviewer", messages=messages,
         )
 
     def add_memory(self, name):

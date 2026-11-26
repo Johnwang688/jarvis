@@ -299,7 +299,7 @@ class Delivery(unittest.TestCase):
         for size, expected in ((limit, "model"), (limit + 1, "fallback")):
             with self.subTest(size=size):
                 draft = "Subject: Tomorrow’s agenda\n\n" + prose[:size]
-                message, summary = daily_briefs._evening_email(digest, Mock(return_value=draft))
+                message, summary = daily_briefs._brief_email("evening", digest, Mock(return_value=draft))
                 self.assertEqual(summary, expected)
                 self.assertTrue(message.body.endswith(footer))
                 self.assertLessEqual(len(message.body), 1800)

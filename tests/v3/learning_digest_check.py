@@ -9,11 +9,12 @@ from pathlib import Path
 import tempfile
 from threading import Event
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from jarvis.v3 import daemon, learning_digest, skill_store
 from jarvis.v3.feed import Feed
+from jarvis.v3.messages import Result as DeliveryResult
 from jarvis.v3.tools.skills import SkillTools
 from jarvis.v3.vault import Vault
 
@@ -38,12 +39,88 @@ class DigestCheck(unittest.TestCase):
         self.state = self.root / "digest"
         self.reviewer = self.root / "reviewer"
         self.feed = Feed(self.root / "feed")
+        self.messages = Mock()
+        self.messages.send.return_value = DeliveryResult("refused")
         self.ledger = self.root / "skill-ledger" / "ledger.jsonl"
 
     def run_digest(self, day, *, feed=None):
         return learning_digest.run(feed=self.feed if feed is None else feed, now=at(day),
                                    state_dir=self.state, store=self.store,
-                                   vault=self.vault, reviewer_dir=self.reviewer)
+                                   vault=self.vault, reviewer_dir=self.reviewer, messages=self.messages)
+
+    def test_email_text_and_state_for_one_three_and_nine_changes(self):
+        self.messages.send.return_value = DeliveryResult("sent")
+        self.assertEqual(self.run_digest(1).outcome, "baseline")
+        self.assertEqual(self.run_digest(2).outcome, "empty")
+        self.messages.send.assert_not_called()
+        self.assertEqual(self.feed.briefs(), [])
+        for day, count, change in ((3, 1, "change"), (4, 3, "changes"), (5, 9, "changes")):
+            with self.subTest(count=count):
+                rows = [{"label": f"Example change {i}", "ref": f"skill-ledger:{i:032x}"}
+                        for i in range(1, count + 1)]
+                rows[0]["label"] = "Example\nchange 1"
+                if count > 1:
+                    rows[1]["label"] = "# Unsafe heading"
+                spend = learning_digest._spend([{"outcome": "ok", "input_tokens": 12, "output_tokens": 4}])
+                with patch.object(learning_digest, "_collect", side_effect=lambda saved, *_: (
+                        {key: saved[key] for key in ("ledger", "memory", "offsets")}, rows, spend)):
+                    result = self.run_digest(day)
+                self.assertEqual((result.outcome, result.brief_id, result.items), ("sent", None, count))
+                message, = self.messages.send.call_args.args
+                self.assertEqual(message.subject, "What I learned today")
+                expected = [f"I made {count} {change} to my skills and memory since the last digest.", ""]
+                expected.extend(f"{i}. " + ("(name withheld)" if i == 2 else f"Example change {i}")
+                                for i in range(1, min(count, 7) + 1))
+                if count == 9:
+                    expected.append("And 2 more.")
+                expected.extend(("", "The reviewer used 12 input and 4 output tokens across 1 run and skipped 0.",
+                                 "", "Reply here if any of these should be undone or changed."))
+                self.assertEqual(message.body, "\n".join(expected))
+                fields = self.messages.send.call_args.kwargs["fallback"]
+                self.assertEqual(fields["context"], rows + [spend[0][0]])
+                state = json.loads((self.state / "state.json").read_bytes())
+                self.assertEqual(state["last_brief"], {"day": f"2030-01-0{day}", "items": count})
+                self.assertEqual(learning_digest.summary_line(now=at(day), state_dir=self.state), {
+                    "label": f"Learning digest: {count} {'item' if count == 1 else 'items'}",
+                    "ref": "jarvis:learning",
+                })
+                self.assertEqual(self.run_digest(day).outcome, "already")
+        self.assertEqual(self.messages.send.call_count, 3)
+        self.assertEqual(self.feed.briefs(), [])
+
+    def test_unsent_email_posts_the_card_and_preserves_legacy_state(self):
+        self.assertEqual(self.run_digest(1).outcome, "baseline")
+        for day, outcome in ((2, "refused"), (3, "failed")):
+            with self.subTest(outcome=outcome):
+                self.add_memory(f"example-change-{day}")
+                self.messages.send.return_value = DeliveryResult(outcome)
+                result = self.run_digest(day)
+                self.assertEqual(result.outcome, "posted")
+                state = json.loads((self.state / "state.json").read_bytes())
+                self.assertEqual(state["last_brief"], {"day": f"2030-01-0{day}", "id": result.brief_id, "items": 1})
+                self.assertEqual(learning_digest.summary_line(now=at(day), state_dir=self.state), {
+                    "label": "Learning digest: 1 item", "ref": f"brief:{result.brief_id}",
+                })
+        self.assertEqual(len(self.feed.briefs()), 2)
+
+    def test_invalid_email_still_posts_the_card(self):
+        self.assertEqual(self.run_digest(1).outcome, "baseline")
+        self.add_memory("example-change")
+        with patch.object(learning_digest, "Message", side_effect=ValueError("Invalid fixture message.")):
+            self.assertEqual(self.run_digest(2).outcome, "posted")
+        self.messages.send.assert_not_called()
+        self.assertEqual(len(self.feed.briefs()), 1)
+
+    def test_email_checkpoint_rejects_invalid_dates_counts_and_old_ids(self):
+        self.assertEqual(self.run_digest(1).outcome, "baseline")
+        path = self.state / "state.json"
+        base = json.loads(path.read_bytes())
+        record = {"day": "2030-01-01", "items": 1}
+        for bad in ({"id": None}, {"id": "fake-id"}, {"extra": True},
+                    {"day": "2030-01-02"}, {"items": True}, {"items": -1}):
+            with self.subTest(bad=bad):
+                path.write_text(json.dumps(dict(base, last_brief=record | bad)))
+                self.assertIsNone(learning_digest.summary_line(now=at(1), state_dir=self.state))
 
     def make_skill(self, name):
         result = self.agent.skill_manage("create", name, description=DESCRIPTION, body=BODY)
