@@ -202,6 +202,10 @@ class ClaudeVoiceBrain:
         """Connect without asking the model anything. May raise a fixed reason code."""
         with self._lock:
             self._start_worker()
+            if self._active is not None or self._queue:
+                # A turn connects for itself. Waiting behind it would wait for
+                # its approval card too, and hold up whoever asked to warm.
+                return
             if self._warming is None:
                 self._warming = Future()
             waiting = self._warming
@@ -372,6 +376,11 @@ class ClaudeVoiceBrain:
                     elif self._closed:
                         break
                 if turn is not None:
+                    if waiting is not None:
+                        # The turn makes the connection the warm-up was for.
+                        with self._lock:
+                            self._warming = None
+                        waiting.set_result(None)
                     if (turn.fresh_after is not None and session.last_end is not None
                             and turn.submitted - session.last_end >= turn.fresh_after):
                         await self._disconnect(session)

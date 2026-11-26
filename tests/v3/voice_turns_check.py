@@ -226,17 +226,19 @@ class VoiceTurnsCheck(unittest.TestCase):
             {"name": "vault_add", "outcome": "refused"}, {"name": "get_datetime", "outcome": "failed"},
         ])
 
-    def test_spoken_steer_can_announce_a_card_opened_by_a_typed_request(self):
+    def test_spoken_steer_does_not_announce_a_card_opened_by_a_typed_request(self):
         broker = ApprovalBroker()
         self.start(reply(None, VAULT_ADD), reply("I skipped the sample vault entry."), broker=broker)
         self.chat.send("This request is typed.")
         self.wait_chat("approval_pending")
         self.assertEqual(self.events, [])
         self.voice.heard("Tell me whether you added it.")
-        (ask,) = self.wait_for("asking")
-        self.assertIn("facts/fixture", ask["sentence"])
-        broker.answer(ask["id"], ask["digest"], "deny")
+        self.wait_chat("steer")
+        self.assertEqual(self.of_kind("asking"), [])
+        (typed,) = broker.pending()
+        broker.answer(typed["id"], typed["digest"], "deny")
         self.wait_chat("reply")
+        self.assertEqual(self.of_kind("asking"), [])
         self.assertEqual(self.texts(), ["I skipped the sample vault entry."])
 
     def test_cancel_records_an_in_flight_tool_result_without_speaking_it(self):
@@ -469,6 +471,30 @@ class VoiceTurnsCheck(unittest.TestCase):
         self.assertFalse(hasattr(daemon, "_voice"))
         self.assertEqual(daemon._chat._listeners, {})
         daemon.stop()
+
+
+class ApprovalSentenceTests(unittest.TestCase):
+    def sentence(self, tool, preview):
+        from jarvis.v3.approval_card import build_card
+        from jarvis.v3.voice.turns import _approval_sentence
+
+        return _approval_sentence({"tool": tool, "card": build_card(tool, {}, preview)})
+
+    def test_pc_tools_name_what_is_opened(self):
+        self.assertEqual(self.sentence("app_open", {"key": "chrome", "app": "Chrome"}),
+                         "Open Chrome. Approve?")
+        self.assertEqual(self.sentence("folder_open", {"project": "sample", "path": "/home/user/sample"}),
+                         "Open the folder for sample. Approve?")
+        self.assertEqual(
+            self.sentence("link_open", {"url": "https://docs.example.invalid/a/b?token=fake-token"}),
+            "Open a link to docs.example.invalid. Approve?")
+
+    def test_a_pc_card_without_its_target_falls_back_to_the_title(self):
+        from jarvis.v3.voice.turns import _approval_sentence
+
+        for tool, title in (("app_open", "Open an app"), ("link_open", "Open a link")):
+            card = {"title": title, "rows": [{"label": "URL", "value": "not a link"}]}
+            self.assertEqual(_approval_sentence({"tool": tool, "card": card}), f"{title}. Approve?")
 
 
 if __name__ == "__main__":

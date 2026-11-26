@@ -9,6 +9,7 @@ from math import isfinite
 import re
 from threading import Lock
 import time
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .brain import VoiceBrain
@@ -35,6 +36,13 @@ _TARGETS = {
     "work_start": ("Project", "Thread title"),
     "work_send": ("Thread", "In project"),
 }
+# The PC tools are asked about in plain words: the app's name, the project,
+# or the link's host (a whole address is not something to listen to).
+_SPOKEN = {
+    "app_open": ("App", "Open {}"),
+    "folder_open": ("Project", "Open the folder for {}"),
+    "link_open": ("URL", "Open a link to {}"),
+}
 LOG = logging.getLogger(__name__)
 
 
@@ -53,6 +61,16 @@ def _approval_sentence(item):
     # and the target labels, keeping bodies, briefs and messages out of speech.
     card = item["card"]
     rows = {row["label"]: row["value"] for row in card["rows"]}
+    if item["tool"] in _SPOKEN:
+        label, words = _SPOKEN[item["tool"]]
+        value = " ".join(str(rows.get(label) or "").split())
+        if item["tool"] == "link_open":
+            try:
+                value = urlsplit(value).hostname or ""
+            except ValueError:
+                value = ""
+        if value:
+            return f"{words.format(value.rstrip('.!?'))}. Approve?"
     targets = [rows[label] for label in _TARGETS.get(item["tool"], ()) if rows.get(label)]
     target = " ".join(", ".join(targets).split()).rstrip(".!?")
     title = card["title"].rstrip(".!?")
@@ -87,7 +105,8 @@ class _VoiceTurn:
     silence_ms: int | None = None
     decode_ms: float | None = None
     first_audio_ms: float | None = None
-    asking: bool = False
+    asking: str | None = None
+    voice_origin: bool = False
 
 
 class VoiceTurns:
@@ -177,7 +196,7 @@ class VoiceTurns:
                     if type(remaining) is int or (type(remaining) is float and isfinite(remaining)):
                         fields["expires_in"] = min(max(remaining, 0), MAX_APPROVAL_WINDOW_S)
                     turn.approvals.add(fields["id"])
-                    turn.asking = True
+                    turn.asking = fields["id"]
                 listeners = tuple(self._listeners)
             for callback in (self._on_event, *listeners):
                 try:
@@ -229,6 +248,8 @@ class VoiceTurns:
                 self._finish(previous)
         turn.turn = event["turn"]
         turn.steer = event["seq"] if event["kind"] == "steer" else None
+        turn.voice_origin = (turn.steer is None or (
+            previous is not None and previous.turn == turn.turn and previous.voice_origin))
         self._turn = turn
         self._trace.appendleft(turn)
         self._state_to("thinking")
@@ -287,7 +308,8 @@ class VoiceTurns:
     def is_asking(self, approval_id):
         with self._lock:
             turn = self._turn
-            return turn is not None and turn.asking and not turn.muted and approval_id in turn.approvals
+            return (approval_id is not None and turn is not None and turn.asking == approval_id
+                    and not turn.muted)
 
     def answered(self, sentence_id):
         """Check whether this was the last sentence of a completed, unmuted reply."""
@@ -357,10 +379,11 @@ class VoiceTurns:
             ):
                 turn.turn = turn_id
                 turn.steer = None
+                turn.voice_origin = len(event["inputs"]) == 1
             if turn.turn != turn_id:
                 return
             for item in pending:
-                if item["id"] not in turn.approvals:
+                if turn.voice_origin and item["id"] not in turn.approvals:
                     self._state_to("thinking")
                     self._emit("asking", turn=turn_id, id=item["id"], digest=item["digest"],
                                tool=item["tool"], sentence=_approval_sentence(item))
@@ -379,7 +402,7 @@ class VoiceTurns:
                     self._emit("ack")
             elif kind == "tool_end":
                 if turn.asking and not pending:
-                    turn.asking = False
+                    turn.asking = None
                     self._emit("approval_end")
                 turn.tools.append({"name": event["name"], "outcome": event["outcome"]})
                 turn.changed_state |= event["changes_state"] and event["outcome"] == "ok"
@@ -403,7 +426,7 @@ class VoiceTurns:
     def _end(self, turn, event):
         kind = event["kind"]
         if turn.asking:
-            turn.asking = False
+            turn.asking = None
             self._emit("approval_end")
         if kind == "error":
             self._emit("error")
@@ -421,7 +444,11 @@ class VoiceTurns:
                 if not turn.ended_without_tools:
                     self._feed(turn, event["text"], final=True)
                 if turn.tools and not turn.reported:
-                    if any(tool["outcome"] != "ok" for tool in turn.tools):
+                    if turn.approvals and not turn.changed_state and any(
+                        tool["outcome"] == "refused" for tool in turn.tools
+                    ):
+                        sentence = "Nothing was done."
+                    elif any(tool["outcome"] != "ok" for tool in turn.tools):
                         sentence = "That did not work."
                     elif turn.changed_state:
                         sentence = "Done."

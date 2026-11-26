@@ -22,6 +22,7 @@ APPROVALS = ("asking", "needs_click")
 RESTING_TEXT = 'Say “Jarvis” · or hold Right Ctrl'
 SPEAKING_HINT = 'Say “stop” or press the key to interrupt'
 ASKING_HINT = 'Say “yes” or “no”, or click a button.'
+WAITING_HINT = 'Click a button, or wait for the prompt.'
 CLICK_HINT = 'Voice can’t approve this one. Click here or use your phone.'
 FINISHED_HINT = 'Ask “what happened?” for more'
 PROBLEM_TEXT = 'The microphone isn’t available.'
@@ -49,6 +50,7 @@ class PopupState:
     t: float = 0.0
     id: str = ""
     digest: str = ""
+    click_live: bool | None = None
 
 
 def _clean(value):
@@ -74,7 +76,8 @@ def valid_duration(seconds):
 
 
 def buttons_enabled(state):
-    return state.kind in APPROVALS and state.buttons is True and _fraction(state.expires) > 0
+    live = _fraction(state.expires) > 0 if state.click_live is None else state.click_live
+    return state.kind in APPROVALS and state.buttons is True and live
 
 
 _EVENT_TEXT = {
@@ -125,15 +128,23 @@ def state_from_event(previous, event):
         return show("speaking", message)
     elif kind == "asking":
         remaining = event.get("expires_in", 0)
+        click_remaining = event.get("click_expires_in", remaining)
         voice_allowed = event.get("voice_allowed")
+        waiting = event.get("voice_waiting", False)
         if (type(remaining) not in (int, float)
+                or type(click_remaining) not in (int, float) or type(waiting) is not bool
                 or ("voice_allowed" in event and type(voice_allowed) is not bool)):
             return previous
         click_only = voice_allowed is False or (voice_allowed is not True and previous.kind == "needs_click")
         kind = "needs_click" if click_only else "asking"
         sentence = _clean(event.get("sentence")) or _clean(event.get("tool"))
-        return show(kind, sentence, buttons=valid_duration(remaining),
-                    card_id=event.get("id", ""), digest=event.get("digest", ""))
+        state = show(kind, sentence, buttons=valid_duration(click_remaining),
+                     card_id=event.get("id", ""), digest=event.get("digest", ""))
+        if "click_expires_in" in event:
+            state = replace(state, click_live=state.buttons, expires=float(valid_duration(remaining)))
+        if waiting and not click_only:
+            state = replace(state, sub=WAITING_HINT)
+        return state
     elif kind == "error":
         return show("problem", _clean(event.get("reason")) or PROBLEM_TEXT)
     elif kind == "notice" and "text" in event:

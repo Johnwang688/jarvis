@@ -273,6 +273,7 @@ class Popup:
         self._state = drawing.PopupState()
         self._countdown = None
         self._revision = 0
+        self._click_until = None
         self._closed = False
         self._lock = threading.RLock()
         self._thread = self._active = None
@@ -283,7 +284,7 @@ class Popup:
             self._thread = threading.Thread(target=self._run, args=(api,), name="Jarvis voice popup", daemon=True)
             self._thread.start()
 
-    def set(self, state, *, expires_in=None):
+    def set(self, state, *, expires_in=None, click_expires_in=None):
         """Publish a state, optionally animating its approval from link seconds.
 
         Each approval publication supersedes the previous click target, even if
@@ -302,9 +303,12 @@ class Popup:
                 if state == self._state:
                     return
             self._countdown = None
+            self._click_until = None
+            if state.kind in drawing.APPROVALS and drawing.valid_duration(click_expires_in):
+                self._click_until = monotonic() + click_expires_in
             if state.kind in drawing.APPROVALS and expires_in is not None:
                 if not drawing.valid_duration(expires_in):
-                    state = replace(state, expires=0, buttons=False)
+                    state = replace(state, expires=0, buttons=state.buttons and self._click_until is not None)
                 elif drawing.buttons_enabled(state):
                     self._countdown = monotonic() + expires_in, expires_in
             self._state = state
@@ -348,7 +352,9 @@ class Popup:
         with self._lock:
             return (not self._closed and target[0] == self._revision
                     and drawing.buttons_enabled(state)
-                    and (self._countdown is None or monotonic() < self._countdown[0]))
+                    and (self._click_until is None or monotonic() < self._click_until)
+                    and (self._click_until is not None or self._countdown is None
+                         or monotonic() < self._countdown[0]))
 
     def _run(self, api):
         try:
@@ -362,6 +368,7 @@ class Popup:
                     if self._closed:
                         break
                     state, revision, countdown = self._state, self._revision, self._countdown
+                    click_until = self._click_until
                 now = monotonic()
                 timeout = None
                 if state.kind == "hidden":
@@ -376,6 +383,11 @@ class Popup:
                             expires_at, duration = countdown
                             left = max(0, (expires_at - now) / duration)
                             state = replace(state, expires=left)
+                            if not left and click_until is not None and state.kind == "asking":
+                                state = replace(state, kind="needs_click", label=drawing.LABELS["needs_click"],
+                                                sub=drawing.CLICK_HINT)
+                        if click_until is not None and now >= click_until:
+                            state = replace(state, click_live=False)
                         timed = expires_at is not None and now < expires_at
                         animated = state.kind in _ANIMATED or timed
                         if animated:
@@ -398,6 +410,8 @@ class Popup:
                         deadline = now + _FRAME_SECONDS if animated else None
                         if timed:
                             deadline = min(deadline, expires_at)
+                        if click_until is not None and now < click_until:
+                            deadline = click_until if deadline is None else min(deadline, click_until)
                     if deadline is not None:
                         timeout = max(0, deadline - monotonic())
                 last_revision = revision

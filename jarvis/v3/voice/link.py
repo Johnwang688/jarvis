@@ -576,6 +576,9 @@ class VoiceLink:
         elif kind == wire.CLICK:
             with self._lock:
                 self._clicks += 1
+            click = getattr(self._session, "click", None)
+            if click is not None:
+                click(value["id"], value["digest"], value["decision"])
         elif kind == wire.PING:
             peer.pong(value)
         elif kind == wire.LEVEL:

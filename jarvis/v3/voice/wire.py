@@ -224,6 +224,12 @@ def _event(value):
         _require(type(value.get("n")) is int and 0 <= value["n"] <= UINT32_MAX)
     if kind == "asking" and "expires_in" in value:
         _require(_approval_duration(value["expires_in"]))
+    if kind == "asking":
+        if "click_expires_in" in value:
+            _require(_approval_duration(value["click_expires_in"]))
+        for field in ("voice_allowed", "voice_waiting"):
+            if field in value:
+                _require(type(value[field]) is bool)
     if kind == "flush":
         _require(_flush_number(value.get("n")))
     return value

@@ -8,9 +8,11 @@ import logging
 import re
 from threading import Condition, Event, Thread, current_thread
 import time
+from uuid import uuid4
 
 from jarvis import config
 
+from .approving import ANSWER_DECODE_GRACE_S, ANSWER_WINDOW_S, answer_decision
 from .engines import EngineChoice, EngineUnavailable, KokoroVoice
 from .hearing import FRAME_MS, Hearing
 from .speaking import Speaking
@@ -24,6 +26,7 @@ FOLLOW_UP_S = config.V3_FOLLOW_UP_S
 FOLLOW_LEVEL_DB = config.V3_FOLLOW_LEVEL_DB
 ECHO_TAIL_S = 0.3
 PLAYED_GRACE_S = 2
+APPROVAL_POLL_S = 0.1
 ANSWER_WORDS = ("yes", "no", "approve", "deny", "allow", "reject", "cancel")
 PROMPT_NAMES = ("Codex", "Claude", "Chrome", "VS Code")
 _LEAD_IN = {"ok", "okay", "hey"}
@@ -100,7 +103,7 @@ def _close(engine):
 
 @dataclass
 class _Playback:
-    approval: bool
+    approval_id: str | None
     ends_at: float | None = None
     seconds_sent: float = 0
     deadline: float | None = None
@@ -116,7 +119,7 @@ class _SentenceVoice:
 class _CaptureMode:
     generation: int
     asking: str | None
-    answer_ready: bool
+    answer_until: float | None
     echo: bool
 
 
@@ -128,7 +131,7 @@ class VoiceSession:
     """
 
     def __init__(self, turns, *, transcriber, voices, names, on_event=None, on_audio=None,
-                 clock=time.monotonic, on_answer=None, detector=None,
+                 clock=time.monotonic, on_answer=None, approving=None, detector=None,
                  follow_up_s=None, follow_level_db=None):
         self._turns = turns
         self._transcriber = _LocalTranscriber(transcriber)
@@ -136,7 +139,9 @@ class VoiceSession:
         self._names = names
         self._on_event = on_event
         self._on_audio = on_audio
-        self.on_answer = on_answer if on_answer is not None else lambda _text: False
+        self._approving = approving
+        self.on_answer = (approving.heard if approving is not None else
+                          on_answer if on_answer is not None else lambda _text: False)
         self._clock = clock
         self._detector = detector
         self._follow_up_s = FOLLOW_UP_S if follow_up_s is None else follow_up_s
@@ -163,7 +168,7 @@ class VoiceSession:
         self._flush_number = 0
         self._pending_flush = None
         self._echo_until = self._echo_frames = 0
-        self._asking = self._answer_after = None
+        self._asking = self._answer_after = self._answer_until = None
         self._unsubscribe = turns.subscribe(lambda kind, **fields: self._post("turn", kind, fields))
 
         # These fields are owned by the worker.
@@ -177,6 +182,8 @@ class VoiceSession:
         self._answer_finished = None
         self._may_follow = False
         self._exchange_power = None
+        self._approval_fields = None
+        self._approval_poll_at = 0
 
     def attach(self, on_event, on_audio):
         """Set the sinks for the next helper before starting capture."""
@@ -198,7 +205,8 @@ class VoiceSession:
             if self._worker is not None:
                 return
             self._hearing = Hearing(self._transcriber, names=self._decode_names, clock=self._clock,
-                                    detector=self._detector, capture_details=True, on_event=self._hearing_event)
+                                    detector=self._detector, capture_details=True, on_event=self._hearing_event,
+                                    prefer_cancelled=lambda mode: mode.answer_until is not None)
             self._speaking = Speaking(_SentenceVoice(self._synthesize), clock=self._clock,
                                       keep_history=False, on_audio=self._handoff,
                                       on_done=lambda id: self._post("delivered", id),
@@ -273,8 +281,9 @@ class VoiceSession:
 
     def _capture_mode(self, now, echo):
         asking = self._asking if self._running_generation == self._generation else None
-        ready = asking is not None and not echo and self._answer_after is not None and now >= self._answer_after
-        return _CaptureMode(self._generation, asking, ready, echo)
+        ready = (asking is not None and not echo and self._answer_after is not None
+                 and self._answer_after <= now < self._answer_until)
+        return _CaptureMode(self._generation, asking, self._answer_until if ready else None, echo)
 
     def key(self, down: bool):
         """Capture one utterance from press through release."""
@@ -293,7 +302,13 @@ class VoiceSession:
             at = self._clock()
             del self._handed_audio[id]
             self._update_echo(at)
+            if self._asking == id:
+                self._answer_after = at + ECHO_TAIL_S
+                self._answer_until = at + ANSWER_WINDOW_S
             self._queue(self._generation, "played", id, at)
+
+    def click(self, id, digest, decision):
+        self._post("click", id, digest, decision)
 
     def playback_stopped(self, number):
         """Acknowledge a flush and start the acoustic tail from that point."""
@@ -357,6 +372,8 @@ class VoiceSession:
             if state == "unavailable":
                 status["reason"] = "transcriber_unavailable"
             hearing = self._hearing
+        if self._approving is not None:
+            status["counters"].update(self._approving.status())
         status["detector"] = hearing.detector_status() if hearing is not None else "microphone link has not started"
         return status
 
@@ -463,6 +480,11 @@ class VoiceSession:
             self._delivered(*args)
         elif action == "played":
             self._complete(*args)
+        elif action == "click" and self._approving is not None:
+            if not self._turns.is_asking(self._asking):
+                self._end_approval()
+            if self._approving.click(*args):
+                self._end_approval()
         elif action == "audio_error":
             self._complete(args[0], self._clock(), failed=True)
         elif action == "transcriber":
@@ -487,8 +509,8 @@ class VoiceSession:
         self._end_conversation()
         self._exchange_power = None
         self._turn_state = "idle"
+        self._clear_approval()
         with self._changed:
-            self._asking = self._answer_after = None
             self._echo_until = self._echo_frames = 0
             self._handed_audio.clear()
             self._flushed.clear()
@@ -499,9 +521,15 @@ class VoiceSession:
         deadlines = [value for value in (self._wake_until, self._follow_until) if value > now]
         deadlines.extend(item.deadline for item in self._playback.values() if item.delivered)
         deadlines.extend(self._flushed.values())
+        if self._approval_fields is not None:
+            deadlines.append(self._approval_poll_at)
         return max(0, min(deadlines) - now) if deadlines else None
 
     def _expire(self, now):
+        if self._approval_fields is not None and now >= self._approval_poll_at:
+            self._approval_poll_at = now + APPROVAL_POLL_S
+            if not self._turns.is_asking(self._asking) or self._approving.pending() is None:
+                self._end_approval()
         for id, item in tuple(self._playback.items()):
             if item.delivered and now >= item.deadline:
                 self._complete(id, now, timed_out=True)
@@ -524,6 +552,8 @@ class VoiceSession:
                 state = "resting"
             elif self._choice is not None and self._choice.engine is None:
                 state, reason = "unavailable", "transcriber_unavailable"
+            elif self._approval_fields is not None:
+                state = "asking"
             elif self._key_down or (self._capture is not None and (
                     self._capture in self._woken or self._admitted(self._capture))):
                 state = "listening"
@@ -591,14 +621,30 @@ class VoiceSession:
         request = _wake_request(text)
         stop = is_stop_word(text if request is None else request)
         active = bool(self._playback) or self._turns.can_interrupt()
-        if (not stop and capture.context.answer_ready and capture.context.asking == self._asking
-                and not fields["uncancelled_echo"] and self._turns.is_asking(self._asking)):
+        captured_answer = (self._approving is not None and capture.context.asking is not None
+                           and answer_decision(text) is not None)
+        started_at, mode = fields["speech_onset"] or (None, capture.context)
+        if ((self._approving is not None or not stop) and started_at is not None
+                and mode.answer_until is not None and self._clock() <= mode.answer_until + ANSWER_DECODE_GRACE_S
+                and mode.asking == capture.context.asking == self._asking and not fields["uncancelled_echo"]
+                and self._turns.is_asking(self._asking)):
             try:
-                if self.on_answer(text):
+                answer_timing = {"started_at": started_at} if self._approving is not None else {}
+                if self.on_answer(text, **answer_timing):
+                    if self._approving is not None:
+                        if self._approving.take_needs_click():
+                            self._queue_sentence(uuid4().hex, "That one needs a click.",
+                                                 approval_id=self._asking)
+                        elif self._approving.pending() is None:
+                            self._end_approval()
                     return
             except Exception:
                 self._error("answer_hook_failed")
                 return
+        elif captured_answer:
+            self._approving.ignore()
+        if captured_answer and (not stop or mode.answer_until is not None):
+            return  # A late or repeated answer belongs to this capture's card.
         stop_interrupt = stop and (active or capture.context.echo or fields["uncancelled_echo"])
         if request is None and not stop_interrupt and not self._ordinary_admission(capture, fields):
             self._withdraw_wake(capture)
@@ -643,8 +689,7 @@ class VoiceSession:
             self._exchange = True
             self._answer_finished = None
             self._turn_state = "thinking"
-            with self._changed:
-                self._asking = self._answer_after = None
+            self._clear_approval()
         try:
             self._turns.heard(text, speech_ended_at=fields["speech_ended_at"],
                               silence_ms=fields["silence_ms"], decode_ms=fields["decode_ms"])
@@ -671,8 +716,7 @@ class VoiceSession:
         if kind == "state":
             self._turn_state = fields["state"]
             if self._turn_state == "idle":
-                with self._changed:
-                    self._asking = self._answer_after = None
+                self._clear_approval()
                 self._open_follow_up()
             self._publish_state()
         elif kind == "say":
@@ -687,18 +731,28 @@ class VoiceSession:
                 return
             for id in self._flush():
                 self._turns.spoken(id)
+            self._clear_approval()
+            if self._approving is not None:
+                fields["voice_allowed"] = self._approving.ask(fields)
+                pending = self._approving.pending()
+                if pending is None:
+                    self._approving.clear()
+                    self._publish_state()
+                    return
+                if not fields["voice_allowed"]:
+                    fields["sentence"] = fields["sentence"].removesuffix("Approve?") + "This one needs a click."
+                fields["click_expires_in"] = pending["expires_in"]
+                fields["expires_in"] = ANSWER_WINDOW_S
+                fields["voice_waiting"] = True
+                self._approval_fields = fields
+                self._approval_poll_at = self._clock() + APPROVAL_POLL_S
             with self._changed:
                 self._asking = fields["id"]
-                self._answer_after = None
             self._publish_state()
             self._event("asking", **fields)
-            self._queue_sentence(fields["id"], fields["sentence"], approval=True)
+            self._queue_sentence(fields["id"], fields["sentence"], approval_id=fields["id"])
         elif kind == "approval_end":
-            with self._changed:
-                self._asking = self._answer_after = None
-            if any(item.approval for item in self._playback.values()):
-                self._flush()
-            self._publish_state()
+            self._end_approval()
         elif kind == "error":
             self._turn_state = "idle"
             self._error("turn_failed")
@@ -707,10 +761,23 @@ class VoiceSession:
             self._turn_state = "idle"
             self._publish_state()
 
-    def _queue_sentence(self, id, text, *, approval=False):
+    def _clear_approval(self):
+        if self._approving is not None:
+            self._approving.clear()
+        with self._changed:
+            self._approval_fields = None
+            self._asking = self._answer_after = self._answer_until = None
+
+    def _end_approval(self):
+        self._clear_approval()
+        if any(item.approval_id is not None for item in self._playback.values()):
+            self._flush()
+        self._publish_state()
+
+    def _queue_sentence(self, id, text, *, approval_id=None):
         if id in self._playback:
             return
-        self._playback[id] = _Playback(approval)
+        self._playback[id] = _Playback(approval_id)
         self._publish_state()
         self._event("say", id=id, text=text)
         self._speaking.say(id, text)
@@ -719,7 +786,8 @@ class VoiceSession:
         item = self._playback.get(id)
         if item is None:
             return
-        if not (self._turns.is_asking(id) if item.approval else self._turns.has_audio(id)):
+        if not (self._turns.is_asking(item.approval_id) if item.approval_id is not None
+                else self._turns.has_audio(id)):
             return
         now = self._clock()
         previous = max((row.ends_at or now for row in self._playback.values()), default=now)
@@ -764,10 +832,18 @@ class VoiceSession:
             self._error("speech_failed")
         else:
             self._count("playback_timeouts" if timed_out else "played")
-            if item.approval and self._asking == id:
-                with self._changed:
-                    self._answer_after = at + ECHO_TAIL_S
-        if not item.approval:
+        if item.approval_id == self._asking == id and self._approving is not None:
+            confirmed = not (failed or timed_out)
+            if confirmed:
+                self._approving.prompt_finished(id, at)
+            pending = self._approving.pending()
+            if pending is not None:
+                remaining = max(0, at + ANSWER_WINDOW_S - self._clock()) if confirmed else 0
+                self._event("asking", **dict(self._approval_fields, voice_waiting=False,
+                            voice_allowed=self._approval_fields["voice_allowed"] and remaining > 0,
+                            expires_in=remaining,
+                            click_expires_in=pending["expires_in"]))
+        if item.approval_id is None:
             if not self._playback:
                 self._answer_finished = None if failed else (id, at)
             self._turns.spoken(id)
@@ -816,8 +892,7 @@ class VoiceSession:
 
     def _barge(self):
         self._end_conversation()
-        with self._changed:
-            self._asking = self._answer_after = None
+        self._clear_approval()
         self._flush(force=True)
         self._turns.interrupt()
 
