@@ -344,7 +344,7 @@ class Executor(Worker):
                     claim = self._store.transition_at(proposal["id"]).timestamp()
                     digest = hashlib.sha256(_message(plan["brief"])).hexdigest()
                     matches = [thread for thread in self._work.threads(plan["project"])
-                               if thread.started_at > claim and thread.title == plan["title"]
+                               if not thread.message and thread.started_at > claim and thread.title == plan["title"]
                                and thread.brief_sha256 == digest]
             except Exception:
                 matches = []

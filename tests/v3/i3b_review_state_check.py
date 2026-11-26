@@ -67,7 +67,8 @@ class StateReview(unittest.TestCase):
             item["action"]["project"] = self.register(f"fixture-{index}").name
             items.append(item)
         self.assertEqual(self.run_planner(self.recorded(reply(*items))).posted, 3)
-        self.assertEqual(len(self.store.proposals("briefed")), 3)
+        self.assertEqual(len(self.store.proposals("briefed")), 1)
+        self.assertEqual(len(self.store.proposals("messaged")), 2)
 
 
 if __name__ == "__main__":

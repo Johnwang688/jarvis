@@ -17,7 +17,7 @@ from jarvis.v3.budget import Budget
 from jarvis.v3.claude_jobs import JobResult
 from jarvis.v3.feed import Feed
 from jarvis.v3.proposals import ProposalStore
-from jarvis.v3.t3_client import State
+from jarvis.v3.t3_client import Run, State
 from jarvis.v3.tools.calendar import CalendarTools
 from jarvis.v3.vault import Vault
 from jarvis.v3.work import Ledger, Registry, WorkService
@@ -71,6 +71,19 @@ class FakeT3:
     def __init__(self):
         self.reads = []
         self.messages = []
+        self.projects = set()
+        self.starts = []
+
+    def project_at(self, path):
+        return path if path in self.projects else None
+
+    def project_add(self, path, *, title):
+        self.projects.add(path)
+
+    def start(self, path, prompt, **options):
+        self.starts.append((path, prompt, options))
+        number = len(self.starts)
+        return Run(f"fake-start-{number}", f"fake-run-{number}", "queued")
 
     def show(self, thread_id, *, messages):
         self.reads.append((thread_id, messages))
@@ -109,6 +122,7 @@ class PlannerCheck(unittest.TestCase):
     def register(self, name):
         path = self.root / name
         path.mkdir()
+        self.t3.projects.add(str(path))
         return self.registry.add(name, path, provider="codex", model="test-model", base="main")
 
     def signal(self, kind="gh.ci_failed", source="github", *, title="Review CI", age=310, fields=None):
@@ -138,9 +152,9 @@ class PlannerCheck(unittest.TestCase):
         return Mock(side_effect=[JobResult("planner", "sonnet", ok=True, outcome="ok", text=text)
                                  for text in texts])
 
-    def run_planner(self, runner):
+    def run_planner(self, runner, *, messages=None):
         return planner.run(store=self.store, feed=self.feed, budget=self.budget,
-                           work=self.work, now=self.now, run_job=runner)
+                           work=self.work, now=self.now, run_job=runner, messages=messages)
 
     def inputs(self, *, calendar=None, vault=None, excerpts=None):
         return planner.assemble(signals=triggers.read_signals(), ledger=self.ledger, registry=self.registry,
@@ -159,8 +173,14 @@ class PlannerCheck(unittest.TestCase):
                            and item["basis"] == [basis(identifier)])
                 self.assertEqual(row["kind"], expected)
                 self.assertTrue(row["tainted"])
-                self.assertEqual(self.feed.get(row["brief_id"])["proposal_id"],
-                                 f"{row['id']}:{row['action_sha256']}")
+                if expected in {"ask", "thread.start"}:
+                    self.assertEqual(row["state"], "messaged")
+                    self.assertIsNone(row["brief_id"])
+                    self.assertTrue(self.ledger.get(row["result"]["thread_id"]).message)
+                else:
+                    self.assertEqual(self.feed.get(row["brief_id"])["proposal_id"],
+                                     f"{row['id']}:{row['action_sha256']}")
+                    self.store.mark(row["id"], "dismissed")
                 if row["action"] is not None:
                     action = row["action"]
                     self.assertEqual(action["tool"], {"thread.start": "work_start",
@@ -173,8 +193,6 @@ class PlannerCheck(unittest.TestCase):
                 if expected == "calendar.block":
                     self.assertEqual(row["dedupe_key"], f"calendar.block:{kind}:{self.next_seq - 1}")
                     self.assertEqual(row["brief"]["default"]["at"], iso(self.now + 3600))
-                row_id = row["id"]
-                self.store.mark(row_id, "dismissed")
                 self.now += 1800
 
     def test_02_tainted_low_level_is_raised_by_policy(self):
@@ -266,7 +284,8 @@ class PlannerCheck(unittest.TestCase):
         self.assertEqual(outcome, planner.Result("ok", 1))
         row, = self.store.proposals()
         self.assertEqual((row["kind"], row["tainted"], row["action"]), ("ask", True, None))
-        self.assertEqual(self.feed.get(row["brief_id"])["kind"], "news")
+        self.assertEqual(row["state"], "messaged")
+        self.assertNotIn("DO NOT START UNTIL THE OWNER AGREES", self.t3.starts[0][1])
 
     def test_11_excerpt_instructions_cannot_become_a_mail_action(self):
         thread = self.thread()
@@ -426,6 +445,7 @@ class PlannerCheck(unittest.TestCase):
             self.assertEqual(self.run_planner(self.recorded(reply(item))).posted, 0)
         self.assertIn("L3", logs.output[0])
         self.assertEqual(self.store.proposals(), [])
+        self.assertEqual(self.t3.starts, [])
 
     def test_calendar_rejects_past_and_outside_fourteen_days(self):
         ref = basis(self.signal())
@@ -457,7 +477,7 @@ class PlannerCheck(unittest.TestCase):
 
     def test_recovers_a_stored_proposal_after_feed_post_failure(self):
         ref = basis(self.signal())
-        text = reply(proposal(ref, "thread.start"))
+        text = reply(proposal(ref, "calendar.block"))
         with (patch.object(self.feed, "post", side_effect=OSError("fixture failed to post")),
               self.assertLogs(planner.LOG, "WARNING")):
             self.assertEqual(self.run_planner(self.recorded(text)).outcome, "error")
