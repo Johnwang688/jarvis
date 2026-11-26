@@ -724,22 +724,47 @@ def _argument_error(raw, entry):
     return None
 
 
-class _ChatAgent(Agent):
-    def _dispatch_one(self, call):
-        name = _call_name(call)
-        if name not in (runtime.current_tools() or ()):
-            return super()._dispatch_one(call)
-        turn = _TURN.get()
+def dispatch_chat_tool(name, raw_arguments, approve):
+    """Dispatch under the caller's bound toolset and turn, with a call-scoped grant."""
+    if name not in (runtime.current_tools() or ()):
+        return tools.dispatch(name, raw_arguments, approve=approve)
+    turn = _TURN.get()
+    if name in _ALL_GATED:
+        turn.grant = None
+    try:
+        error = _argument_error(raw_arguments, tools.REGISTRY[name])
+        if error is not None:
+            return tools.ToolResult(error)
+        return tools.dispatch(name, raw_arguments, approve=approve)
+    finally:
         if name in _ALL_GATED:
             turn.grant = None
-        try:
-            error = _argument_error(_call_args(call), tools.REGISTRY[name])
-            if error is not None:
-                return tools.ToolResult(error)
-            return super()._dispatch_one(call)
-        finally:
-            if name in _ALL_GATED:
-                turn.grant = None
+
+
+def chat_tool_end(name, detail, offered, turn, record_outside_text, emit, *, shown_name):
+    # Record provenance before the next approval can see the result.
+    if not turn.outside_text() and name not in CLEAN_RESULT_TOOLS:
+        record_outside_text()
+    ok = offered and not detail.startswith(_NOT_OK)
+    summary = detail[:SUMMARY_CHARS] if ok else _TOOL_FAILED
+    if ok and name in WORK_TOOLS:
+        summary = "Read coding work information."
+    if name == "brief_post" and detail == _BRIEF_LIMIT_ERROR:
+        summary = "Only two briefs may be posted per turn."
+    refused = not offered or detail.startswith(("Refused", "The user declined"))
+    emit("tool_end", name=shown_name, ok=ok, summary=summary,
+         outcome="ok" if ok else "refused" if refused else "failed",
+         changes_state=name in _ALL_GATED or name == "brief_post")
+    if turn.auto_action is not None and turn.auto_action["tool"] == name:
+        if ok:
+            emit("auto", **turn.auto_action)
+        turn.auto_action = None
+    return ok
+
+
+class _ChatAgent(Agent):
+    def _dispatch_one(self, call):
+        return dispatch_chat_tool(_call_name(call), _call_args(call), self.approve)
 
 
 class _TurnSession:
@@ -876,24 +901,8 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                 emit(kind, name=shown_name)
             else:
                 # The loop emits each tool group's results before it can dispatch a gated call.
-                if not meta["outside_text"] and name not in CLEAN_RESULT_TOOLS:
-                    record_outside_text(session.session)
-                offered = name in names
-                ok = offered and not detail.startswith(_NOT_OK)
-                summary = detail[:SUMMARY_CHARS] if ok else _TOOL_FAILED
-                if ok and name in WORK_TOOLS:
-                    summary = "Read coding work information."
-                if name == "brief_post" and detail == _BRIEF_LIMIT_ERROR:
-                    summary = "Only two briefs may be posted per turn."
-                refused = not offered or detail.startswith(("Refused", "The user declined"))
-                outcome = "ok" if ok else "refused" if refused else "failed"
-                emit(kind, name=shown_name, ok=ok, summary=summary, outcome=outcome,
-                     changes_state=name in _ALL_GATED or name == "brief_post")
-                if turn.auto_action is not None and turn.auto_action["tool"] == name:
-                    # A run that failed keeps its failed tool row: "ran" is only said of what ran.
-                    if ok:
-                        emit("auto", **turn.auto_action)
-                    turn.auto_action = None
+                chat_tool_end(name, detail, name in names, turn,
+                              lambda: record_outside_text(session.session), emit, shown_name=shown_name)
 
     turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
                       lambda: meta["outside_text"],
