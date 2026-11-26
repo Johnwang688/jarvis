@@ -4,6 +4,7 @@ from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -22,9 +23,11 @@ from ._paths import open_directory
 MAX_TEXT = 16_000
 MAX_INBOX = 8
 EVENT_LIMIT = 256
+LISTENER_QUEUE_LIMIT = 256
 HISTORY_LIMIT = 50
 HISTORY_MESSAGE_LIMIT = 64_000
 ERROR_MESSAGE = "The chat turn could not complete."
+LOG = logging.getLogger(__name__)
 CALENDAR_TOOLS = frozenset({"calendar_list", "calendar_free"})
 CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_delete"})
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
@@ -192,6 +195,7 @@ class ChatService:
         self._selected = False
         self._seq = 0
         self._events = deque(maxlen=EVENT_LIMIT)
+        self._listeners = {}
         self._finished_turns = deque(maxlen=EVENT_LIMIT)
         self._prompt = None
         self._delivered = []
@@ -202,6 +206,69 @@ class ChatService:
         self._draft = ""
         self._last_error = None
         self._last_activity = None
+
+    def subscribe(self, callback):
+        """Receive ordered event dictionaries with session and turn IDs.
+
+        Streaming deltas and other listener-only notifications have no
+        polling sequence number. Each listener runs on its own thread outside
+        the chat lock. Unsubscribing discards queued events. A callback already
+        in progress may finish.
+        """
+        ready = threading.Condition(self._lock)
+        with self._lock:
+            if self._closed.is_set():
+                raise ChatBusy("Chat is closed.")
+            self._listeners[ready] = deque()
+            try:
+                threading.Thread(target=self._listen, args=(ready, callback),
+                                 name="jarvis-v3-chat-listener", daemon=True).start()
+            except RuntimeError:
+                self._unsubscribe(ready)
+                raise
+
+        def unsubscribe():
+            with self._lock:
+                self._unsubscribe(ready)
+
+        return unsubscribe
+
+    def _unsubscribe(self, ready):
+        pending = self._listeners.pop(ready, None)
+        if pending is not None:
+            pending.clear()
+        ready.notify()
+
+    def _listen(self, ready, callback):
+        while True:
+            with ready:
+                ready.wait_for(lambda: ready not in self._listeners or self._listeners[ready])
+                pending = self._listeners.get(ready)
+                if pending is None:
+                    return
+                row = pending.popleft()
+            event = deepcopy(row)
+            with self._lock:
+                if ready not in self._listeners:
+                    return
+            try:
+                callback(event)
+            except BaseException:
+                with self._lock:
+                    self._unsubscribe(ready)
+                LOG.warning("A chat event listener failed and was removed.")
+                return
+
+    def _publish(self, row, **fields):
+        if self._listeners:
+            event = {**row, **fields, "turn": self._turn_id, "session_id": self._session_id}
+            for ready, pending in tuple(self._listeners.items()):
+                if len(pending) >= LISTENER_QUEUE_LIMIT:
+                    self._unsubscribe(ready)
+                    LOG.warning("A chat event listener overflowed and was removed.")
+                else:
+                    pending.append(event)
+                    ready.notify()
 
     @contextmanager
     def _directory(self, *, create=False):
@@ -320,10 +387,11 @@ class ChatService:
             return {"session_id": self._session_id,
                     "approvals": [] if self.approvals is None else self.approvals.pending()}
 
-    def _emit(self, kind, *, stamp=None, **fields):
+    def _emit(self, kind, *, stamp=None, listener_fields=None, **fields):
         self._seq += 1
         row = {"seq": self._seq, "t": self._clock() if stamp is None else stamp, "kind": kind, **fields}
         self._events.append(row)
+        self._publish(row, **(listener_fields or {}))
         return row
 
     def events(self, after):
@@ -333,28 +401,32 @@ class ChatService:
                     "events": [deepcopy(row) for row in self._events if row["seq"] > after],
                     "approvals": self._approval_count()}
 
-    def send(self, text, *, steer=True) -> dict:
+    def send(self, text, *, steer=True, input_id=None, fresh_after=None) -> dict:
+        """Accept a message with optional listener correlation and idle rollover."""
         if (not isinstance(text, str) or len(text) > MAX_TEXT or not text.strip()
                 or "\0" in text or re.search(r"[\ud800-\udfff]", text)):
             raise ValueError("Invalid chat message.")
         with self._lock:
             if self._closed.is_set() or self._state == "stopping":
                 raise ChatBusy("Chat is stopping or closed.")
+            fresh = fresh_after is not None and self._idle_seconds() >= fresh_after
             self._last_activity = self._clock()
             if self._state == "running":
                 if len(self._inbox) + len(self._queued) + len(self._pending_followup) >= MAX_INBOX:
                     raise ChatInboxFull("The chat steering queue is full.")
                 if steer:
-                    self._inbox.append(self._emit("steer", text=text))
+                    row = self._emit("steer", text=text, listener_fields={"input_id": input_id})
+                    self._inbox.append(dict(row, input_id=input_id))
                     return {"state": "running", "steered": True}
-                self._queued.append(self._emit("steer", text=text, queued=True))
+                self._queued.append(self._emit("steer", text=text, queued=True,
+                                               listener_fields={"input_id": input_id}))
                 return {"state": "running", "steered": False}
 
             with self._directory(create=True) as root_fd:
                 self._select(root_fd)
-                sid = self._session_id or self._new_session(root_fd)
+                sid = self._reset_session(root_fd) if fresh else (self._session_id or self._new_session(root_fd))
             inputs = [text]
-            self._begin(inputs, waiting=[])
+            self._begin(inputs, waiting=[], input_id=input_id)
             self._worker = threading.Thread(target=self._run, args=(sid, inputs),
                                             name="jarvis-v3-chat", daemon=True)
             try:
@@ -365,9 +437,9 @@ class ChatService:
                 raise
             return {"state": "running", "steered": False}
 
-    def _begin(self, inputs, *, waiting):
+    def _begin(self, inputs, *, waiting, input_id=None):
         self._stop.clear()
-        self._turn_id = uuid4().hex if self.approvals is not None else None
+        self._turn_id = uuid4().hex
         self._taken = 0
         self._delivered = []
         self._pending_followup = waiting
@@ -375,7 +447,8 @@ class ChatService:
         self._last_error = None
         self._state = "running"
         fields = {"inputs": [{key: row[key] for key in ("seq", "text")} for row in waiting]} if waiting else {}
-        self._prompt = self._emit("user", text="\n\n".join(inputs), **fields)
+        self._prompt = self._emit("user", text="\n\n".join(inputs),
+                                  listener_fields={"input_id": input_id}, **fields)
 
     def _complete_turn(self, saved):
         if self._prompt is not None:
@@ -394,7 +467,8 @@ class ChatService:
             if self._stop.is_set():
                 return []
             self._taken = len(self._inbox)
-            return [row["text"] for row in self._inbox]
+            return [(row["text"], None, "") if row["input_id"] is not None else row["text"]
+                    for row in self._inbox]
 
     def _admit_completion(self):
         with self._lock:
@@ -405,16 +479,32 @@ class ChatService:
             self._taken = 0
             self._pending_followup = []
             self._delivered.extend(delivered)
+            if delivered:
+                self._publish({"kind": "steering_delivered", "inputs": [row["seq"] for row in delivered]})
             return [row["text"] for row in delivered]
 
     def _on_event(self, kind, **fields):
         with self._lock:
-            if self._stop.is_set() or self._closed.is_set():
+            if self._closed.is_set():
+                return
+            if self._stop.is_set():
+                # A tool may already be returning when Stop is requested.
+                # Listeners can account for it without adding to HUD replay.
+                if kind == "tool_end":
+                    self._publish({"kind": kind, **fields})
                 return
             if kind == "delta":
                 self._draft += fields["text"]
+                self._publish({"kind": kind, **fields})
+            elif kind in ("approval_pending", "step_end"):
+                self._publish({"kind": kind, **fields})
             else:
-                self._emit(kind, **fields)
+                listener_fields = {key: fields.pop(key) for key in ("outcome", "changes_state")
+                                   if key in fields}
+                self._emit(kind, listener_fields=listener_fields, **fields)
+
+    def pending_approvals(self, turn):
+        return [] if self.approvals is None else self.approvals.pending(turn_id=turn)
 
     @contextmanager
     def _tool_write(self, *, allow_stopped=False):
@@ -532,27 +622,36 @@ class ChatService:
             if self._state != "idle" or self._closed.is_set():
                 raise ChatBusy("Chat is not idle.")
             with self._directory(create=True) as root_fd:
-                sid = self._new_session(root_fd)
-            self._inbox.clear()
-            self._queued.clear()
-            self._events.clear()
-            self._finished_turns.clear()
+                sid = self._reset_session(root_fd)
             return {"session_id": sid}
+
+    def _reset_session(self, root_fd):
+        sid = self._new_session(root_fd)
+        self._inbox.clear()
+        self._queued.clear()
+        self._events.clear()
+        self._finished_turns.clear()
+        return sid
 
     def idle_seconds(self):
         with self._lock:
-            if self._state in ("running", "stopping"):
-                return 0.0
-            if self._last_activity is None:
-                return math.inf
-            return max(0.0, self._clock() - self._last_activity)
+            return self._idle_seconds()
+
+    def _idle_seconds(self):
+        if self._state in ("running", "stopping"):
+            return 0.0
+        if self._last_activity is None:
+            return math.inf
+        return max(0.0, self._clock() - self._last_activity)
 
     def close(self, grace_s=5.0):
         with self._lock:
             self._closed.set()
+            for ready in tuple(self._listeners):
+                self._unsubscribe(ready)
             self._request_stop()
             worker = self._worker
-        if worker is not None:
+        if worker is not None and worker is not threading.current_thread():
             worker.join(grace_s)
         with self._lock:
             if self._state == "stopping":

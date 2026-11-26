@@ -168,9 +168,10 @@ class _CalendarGrant:
 
 
 class ChatApprover:
-    def __init__(self, broker, turn):
+    def __init__(self, broker, turn, *, on_pending=None):
         self._broker = broker
         self._turn = turn
+        self._on_pending = on_pending
 
     def __call__(self, tool, args):
         turn = self._turn
@@ -220,6 +221,7 @@ class ChatApprover:
                 name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
                 verdict=verdict, preview=preview, cancelled=turn.stop,
                 on_approved=lambda id, signature: receipt.append((id, signature)),
+                on_pending=self._on_pending,
             )
             if allowed is not True or not receipt or turn.stop():
                 return False
@@ -813,6 +815,11 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
             raise llm.Cancelled()
         return result
 
+    def complete_step(model, messages, **kwargs):
+        result = complete(model, messages, **kwargs)
+        emit("step_end", text=result.text, has_tools=bool(result.tool_calls))
+        return result
+
     def on_event(kind, data):
         if kind == "delta":
             emit("delta", text=data)
@@ -834,7 +841,10 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                     summary = "Read coding work information."
                 if name == "brief_post" and detail == _BRIEF_LIMIT_ERROR:
                     summary = "Only two briefs may be posted per turn."
-                emit(kind, name=shown_name, ok=ok, summary=summary)
+                refused = not offered or detail.startswith(("Refused", "The user declined"))
+                outcome = "ok" if ok else "refused" if refused else "failed"
+                emit(kind, name=shown_name, ok=ok, summary=summary, outcome=outcome,
+                     changes_state=name in _ALL_GATED or name == "brief_post")
 
     turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
                       lambda: meta["outside_text"],
@@ -842,11 +852,12 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
     agent = _ChatAgent(
         model=models.tier("orchestrator"), system=config.SYSTEM_PROMPT + _CHAT_PROMPT,
         tool_names=names, max_steps=config.FAST_STEPS,
-        approve=deny_all if approvals is None else ChatApprover(approvals, turn),
+        approve=deny_all if approvals is None else ChatApprover(
+            approvals, turn, on_pending=lambda: emit("approval_pending")),
         on_event=on_event, should_stop=stop, session=session,
         policy=ContextPolicy(spill_dir=_NO_SPILL),
     )
-    agent.completion = complete
+    agent.completion = complete_step
     agent._summarize = partial(_summarize_with, complete)
     agent.take_steering = take_steering
 

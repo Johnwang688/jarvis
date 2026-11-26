@@ -40,6 +40,18 @@ class PolicyGrid(unittest.TestCase):
             "owner_event": (False, True, MISSING),
             "money": (False, True, MISSING),
         }
+        if hasattr(main, "OWNER_REQUEST"):
+            # The baseline already carries the owner-request change, so the two policies must
+            # agree on every cell: any difference is a policy change that needs its own grid.
+            for configured in (False, True):
+                if configured:
+                    policy.set_rule(path, "thread.start", "L3")
+                    policy.set_rule(path, "calendar.event_change", "L2", when={"attendees": 1})
+                for kind, values in product(kinds, product(*axes.values())):
+                    proposal = {"kind": kind, **{key: value for key, value in zip(axes, values) if value is not MISSING}}
+                    self.assertEqual(after.explain(proposal), before.explain(proposal), (configured, proposal))
+            print("Policy grid differing cells: 0 (the baseline already has the owner-request level).", flush=True)
+            return
         differences = []
         archive_differences = 0
         for configured in (False, True):
