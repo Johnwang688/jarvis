@@ -354,10 +354,11 @@ def _prepare_data_dir(path: Path) -> None:
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
                  hud_dir: Path | None = None, *, jobs=None, chat=None, work=None, proposals=None,
-                 phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST):
+                 phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST, voice_link_port=None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._phone_host = config.remote_host() if phone_host is _CONFIGURED_PHONE_HOST else phone_host
         self._requested_phone_port = phone_port
+        self._requested_voice_link_port = voice_link_port
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._work = work
@@ -383,6 +384,7 @@ class Daemon:
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
         self._phone_server = None
+        self._voice_link = None
         self._lock = threading.Lock()
 
     @property
@@ -526,6 +528,25 @@ class Daemon:
                                  calendar=self._chat._calendar)
         return brain, VoiceTurns(brain, on_event=lambda *_args, **_fields: None)
 
+    def _new_voice_session(self, *, on_event, on_audio):
+        return None  # Wire in the voice session here when it lands.
+
+    def _start_voice_link(self):
+        from .voice.link import VoiceLink
+
+        port = self._requested_voice_link_port
+        if port is None and self._requested_port == 0:
+            port = 0
+        link = self._voice_link = VoiceLink(self._new_voice_session, port=port)
+        link.start()
+
+    def _voice_status(self):
+        brain, link = self._voice_brain, self._voice_link
+        status = {"brain": "claude", "state": "idle", "turns": 0} if brain is None else brain.status()
+        status["link"] = ({"listening": False, "connected": False, "reason": "not_started"}
+                          if link is None else link.status())
+        return status
+
     def start(self) -> None:
         with self._lock:
             if self._server is not None:
@@ -542,7 +563,7 @@ class Daemon:
                 self._voice_brain, self._voice_turns = self._new_voice()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
-                                      get_feed=self._get_feed, voice_status=self._voice_brain.status)
+                                      get_feed=self._get_feed, voice_status=self._voice_status)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
@@ -570,9 +591,16 @@ class Daemon:
             self.address = server.server_address
             self._server = server
             self._start_phone(handler.phone_services)
+            self._start_voice_link()
 
     def stop(self) -> None:
         with self._lock:
+            if self._voice_link is not None:
+                try:
+                    self._voice_link.close()
+                except Exception:
+                    LOG.warning("Could not close the voice link at stop.")
+                self._voice_link = None
             if self._voice_brain is not None:
                 for label, component in (("voice turns", self._voice_turns), ("voice brain", self._voice_brain)):
                     try:
