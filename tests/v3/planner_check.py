@@ -317,6 +317,8 @@ class PlannerCheck(unittest.TestCase):
 
     def test_13_all_untrusted_sources_are_fenced_and_model_has_no_tools(self):
         self.signal(title="Signal headline", fields={"repo": "Nested signal text."})
+        self.signal("mail.needs_reply", "mail", title="Fixture mail",
+                    fields={"untrusted_from": "Fixture Sender <user@example.com>", "automated": False})
         thread = self.thread(title="Ledger headline")
         self.t3.messages = [("assistant", "a" * 2100 + "untrusted web content\n" * 60 + "T3 assistant report.")]
         Vault().add("projects", "demo", "Demo", "Vault project detail.", "fixture")
@@ -332,7 +334,7 @@ class PlannerCheck(unittest.TestCase):
         fences = re.findall(r"\[untrusted web content ([0-9a-f]{8}) from ([^\n]+)\]\n(.*?)\n"
                             r"\[end of web content \1\]", prompt, re.DOTALL)
         for phrase in ("Signal headline", "Nested signal text.", "Ledger headline", "T3 assistant report.",
-                       "Vault project detail.", "Calendar headline"):
+                       "Vault project detail.", "Calendar headline", "Fixture Sender <user@example.com>"):
             with self.subTest(phrase=phrase):
                 self.assertEqual(sum(phrase in body for _, _, body in fences), 1)
                 self.assertEqual(prompt.count(phrase), 1)

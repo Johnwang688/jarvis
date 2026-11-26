@@ -13,7 +13,8 @@ that I3 will turn into proposals. No model, no network of its own, no proposals,
       "tainted"}: pure (no I/O apart from calling busy). previous/current are snapshot envelopes ({"version": 1, "source", ..., "items"});
       previous None = first run: edge kinds (calendar.changed, school.assignment_new) emit nothing, level kinds (all others) do.
       Every candidate is tainted True (other people's text, or rows a model extracted). summary_fields hold ids, counts, times and
-      flags, plus "untrusted_title": untrusted.one_line(title, cap=120) where the kind has a title; never a body, sender or note.
+      flags, plus "untrusted_title": untrusted.one_line(title, cap=120) where the kind has a title and a bounded untrusted mail
+      sender for CTX1. No bodies, recipients or notes.
       calendar.changed  ids in previous or current whose items differ; skipped when the item (current, else previous) has jarvis == 1 or
         its end is not after now (timed "...Z" instants; an all-day date is midnight in Chicago). change "added" | "removed" | "moved"
         (start, end or all_day differ) | "updated"; fields event, change, start, end, all_day, attendees, owner_event, recurring,
@@ -30,12 +31,13 @@ that I3 will turn into proposals. No model, no network of its own, no proposals,
         fields commitment, due, direction, overdue (due before the Chicago date of now), untrusted_title (the "what"; never "who"). key "commitment.due_soon:<id>:<due>".
       mail.needs_reply  (a heuristic candidate; the planner confirms) per thread, its newest item (ts, then id) when from_owner == 0,
         "INBOX" in labels, no label in SPAM/TRASH/CATEGORY_PROMOTIONS/CATEGORY_SOCIAL/CATEGORY_UPDATES/CATEGORY_FORUMS, and
-        now - ts >= 3600. fields message, thread, received (UTC "%Y-%m-%dT%H:%M:%SZ"), untrusted_title. key "mail.needs_reply:<id>".
+        now - ts >= 3600. fields message, thread, received (UTC "%Y-%m-%dT%H:%M:%SZ"), untrusted_title, untrusted_from,
+        automated. key "mail.needs_reply:<id>".
       source_ref "<calendar|schoolwork|github|commitments|gmail>:<item id>".
     Snapshots I2 builds itself each tick, written with signals.write into signals_dir: "commitments" (items {"id", "who", "what", "due":
       "YYYY-MM-DD"|None, "direction", "state"} from commitments()) and "mail" (items {"id", "thread", "from_owner", "ts", "labels",
-      "title"} from index.documents_between(since=now - 7 days, until=now) rows of source "gmail"; meta_json gives from_owner, thread
-      (the ref when empty) and labels; never a body, sender or recipient).
+      "title", "from"} from index.documents_between(since=now - 7 days, until=now) rows of source "gmail"; meta_json gives from_owner,
+      thread (the ref when empty), labels and sender. No body or recipient.
     Triggers(*, root=None, signals_dir=None, sources=SOURCES, post, index=None, commitments=None, busy=None, clock=time.time)
       root default config.V3_TRIGGERS_DIR and signals_dir default config.V3_SIGNALS_DIR, both read at call time.
       tick() -> {"emitted": int, "blocked_config": {source: reason}}. Per listed source: pre-flight, evaluate, drop candidates whose
@@ -79,6 +81,7 @@ REPO = Path(__file__).resolve().parents[2]
 NOW = 1_800_000_000.0                      # 2027-01-15T08:00:00Z, 02:00 in Chicago; tomorrow is 2027-01-16
 CHI = ZoneInfo("America/Chicago")
 PLANTED = "ghp" + "_" + "I2x7" * 9
+SENDER = "Example Sender <alerts@example.invalid>"
 RECORD = {"seq", "id", "kind", "source", "source_ref", "summary_fields", "dedupe_key", "tainted", "created"}
 CANDIDATE = {"kind", "source_ref", "summary_fields", "dedupe_key", "tainted"}
 
@@ -137,7 +140,7 @@ class FakeIndex:
         self.rows, self.fail = [], False
 
     def add(self, mid, thread, ts, from_owner=0, labels=("INBOX",), title="Lunch Friday?"):
-        meta = {"untrusted": 1, "from_owner": from_owner, "thread": thread, "from": "Sam <sam@example.org>", "to": "user@example.com",
+        meta = {"untrusted": 1, "from_owner": from_owner, "thread": thread, "from": SENDER, "to": "user@example.com",
                 "labels": list(labels)}
         self.rows.append({"id": mid * 2, "source": "gmail", "ref": mid, "title": title, "ts": ts, "meta_json": json.dumps(meta)})
 
@@ -191,10 +194,15 @@ class Base(unittest.TestCase):
         self.assertIs(row["tainted"], True)
         self.assertTrue(row["dedupe_key"].startswith(row["kind"] + ":"), row)
         self.assertRegex(row["source_ref"], r"^(calendar|schoolwork|github|commitments|gmail):.+")
-        text = json.dumps(row["summary_fields"])
+        fields = dict(row["summary_fields"])
+        text = json.dumps(fields)
         self.assertLessEqual(len(text), 2048)
-        for bad in (PLANTED, "sam@example.org", "user@example.com", "\\n"):
+        for bad in (PLANTED, "user@example.com", "\\n"):
             self.assertNotIn(bad, text)
+        if row["kind"] == "mail.needs_reply":
+            self.assertIn(fields.pop("untrusted_from"), ("", SENDER))
+            self.assertIs(fields["automated"], False)
+        self.assertNotIn("alerts@example.invalid", json.dumps(fields))
         stack = list(row["summary_fields"].values())
         while stack:
             value = stack.pop()
@@ -390,8 +398,10 @@ class Store(Base):
         self.assertEqual(signals.read("commitments", directory=self.sig)["items"][0],
                          {"id": "c-0000000a", "who": "Sam", "what": "send the slides", "due": "2027-01-17", "direction": "owner-owes", "state": "open"})
         [item] = signals.read("mail", directory=self.sig)["items"]
-        self.assertEqual((set(item), item["id"], item["thread"], item["from_owner"]), ({"id", "thread", "from_owner", "ts", "labels", "title"}, "m1", "t1", 0))
-        self.assertEqual([r["source_ref"] for r in self.log() if r["kind"] == "mail.needs_reply"], ["gmail:m1"])
+        self.assertEqual(set(item), {"id", "thread", "from_owner", "ts", "labels", "title", "from"})
+        self.assertEqual((item["id"], item["thread"], item["from_owner"], item["from"]), ("m1", "t1", 0, SENDER))
+        [record] = [r for r in self.log() if r["kind"] == "mail.needs_reply"]
+        self.assertEqual((record["source_ref"], record["summary_fields"]["untrusted_from"]), ("gmail:m1", SENDER))
         self.rows, self.index.fail = ValueError("Commitments line 3: bad"), True
         self.assertEqual(self.tick(("commitments", "mail"), at=NOW + 60)["blocked_config"], {"commitments": "unreadable", "mail": "unreadable"})
         self.assertEqual(sorted(p["ask"] for p in self.posts.ok), sorted([triggers.BLOCKED_ASK["commitments"], triggers.BLOCKED_ASK["mail"]]))
