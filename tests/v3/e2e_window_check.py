@@ -13,6 +13,7 @@ import re
 from secrets import token_urlsafe
 import tempfile
 from threading import Event
+import time
 import unittest
 from unittest.mock import patch
 
@@ -119,6 +120,18 @@ class Window(unittest.TestCase):
         self.feed = Feed(self.data / "feed")
         self.vault = Vault(self.data / "vault")
         self.approval_log = self.data / "approvals.jsonl"
+
+    def seed_messages(self, statuses, *, offset=0):
+        from jarvis.v3.work import Ledger
+
+        ledger = Ledger(self.data / "work" / "threads.jsonl")
+        now = time.time()
+        for n, status in enumerate(statuses, start=offset):
+            thread_id = f"fixture-message-{n}"
+            ledger.record_start(thread_id=thread_id, run_id=f"fixture-run-{n}", project="jarvis",
+                                title=f"Fixture message {n}", branch=None, brief_sha256="a" * 64,
+                                at=now - (n + 1) * 60, message=True)
+            ledger.record_status(thread_id, status=status, waiting_on_owner=status == "waiting", at=now)
 
     def start_daemon(self, *steps, approval_timeout=120, approval_clock=None):
         from a6b1_acceptance_check import Model
@@ -446,6 +459,40 @@ class Window(unittest.TestCase):
         recent = self.feed_panel.get_by_role("region", name="Recent")
         self.expect(recent.get_by_role("article", name=decision).get_by_text("Approved", exact=True)).to_be_visible()
         self.assertEqual(Feed(self.feed.root).get(brief["id"])["state"], "approved")
+
+    def test_messages_are_read_only_in_the_feed_and_use_the_status_palette(self):
+        self.seed_messages(("waiting", "failed", "completed"))
+        self.feed.post({
+            "kind": "decision", "rank": 2, "ask": "Review the fixture?", "why_now": "The fixture is ready.",
+            "default": {"action": "none", "at": None},
+        })
+        self.start_daemon()
+        self.open_window()
+
+        def with_failed_job(route):
+            answer = route.fetch()
+            jobs = {"fixture-job": {"last_run": time.time(), "last_outcome": "error", "failures": 1}}
+            route.fulfill(response=answer, json=answer.json() | {"jobs": jobs})
+
+        self.page.route(self.origin + "/v3/status", with_failed_job)
+        messages = self.feed_panel.get_by_role("region", name="Messages", exact=True)
+        self.expect(messages.locator(".work-title")).to_have_text([f"Fixture message {n}" for n in range(3)])
+        t3 = self.page.get_by_role("region", name="T3", exact=True)
+        self.expect(t3.locator(".work-row")).to_have_count(0)
+        self.expect(t3.get_by_text("Fixture message", exact=False)).to_have_count(0)
+        self.expect(messages.locator("button,a,input,select,textarea,iframe,summary,[tabindex],[contenteditable]")).to_have_count(0)
+        self.page.keyboard.press("Tab")
+        self.expect(self.feed_panel.get_by_role("button", name="Decisions", exact=True)).to_be_focused()
+        messages.get_by_text("Fixture message 0", exact=True).click()
+        self.expect(messages.locator(":focus")).to_have_count(0)
+
+        amber = self.feed_panel.locator(".feed-waiting")
+        error = self.page.locator('.agent-jobs [data-state="failed"] .agent-job-state')
+        self.expect(amber).to_be_visible()
+        self.expect(error).to_be_visible(timeout=WAIT_MS)
+        color = "el => getComputedStyle(el).color"
+        self.expect(messages.get_by_text("waiting on you", exact=True)).to_have_css("color", amber.evaluate(color))
+        self.expect(messages.get_by_text("not delivered", exact=True)).to_have_css("color", error.evaluate(color))
 
     def test_hostile_reply_and_brief_are_literal_text(self):
         self.start_daemon(self.reply(HOSTILE_TEXT))

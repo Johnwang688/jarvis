@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WorkPanel } from "../src/components/work/WorkPanel";
+import { useWork } from "../src/components/work/useWork";
 
 const now = Date.UTC(2030, 0, 2, 12);
 const thread = {
@@ -31,10 +32,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const mount = () => act(async () => { root.render(<WorkPanel />); });
+function PollingWorkPanel() {
+  return <WorkPanel work={useWork()} />;
+}
+
+const mount = () => act(async () => { root.render(<PollingWorkPanel />); });
 const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
-it("shows message threads above coding threads with their project, state and age", async () => {
+it("keeps project threads and excludes message threads from T3", async () => {
   fetchWork.mockResolvedValueOnce(Response.json({ ...snapshot, threads: [
     { ...thread, message: false },
     { ...thread, thread_id: "fixture-message", project: "jarvis", message: true,
@@ -42,10 +47,10 @@ it("shows message threads above coding threads with their project, state and age
   ] }));
   await mount();
   const groups = [...host.querySelectorAll(".work-project")];
-  expect(groups.map((group) => group.querySelector("h3")?.textContent)).toEqual(["Messages from Jarvis", "alpha"]);
+  expect(groups.map((group) => group.querySelector("h3")?.textContent)).toEqual(["alpha"]);
   expect([...groups[0].querySelector("li")!.children].map((item) => item.textContent))
-    .toEqual(["Evening wrap-up", "jarvis", "waiting on you", "5 s ago"]);
-  expect(groups[1].querySelector(".work-title")?.textContent).toBe(thread.title);
+    .toEqual([thread.title, "running", "5 s ago"]);
+  expect(host.textContent).not.toContain("Evening wrap-up");
   expect(host.querySelector("button, a, input")).toBeNull();
 });
 

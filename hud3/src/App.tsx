@@ -5,6 +5,7 @@ import { Jobs, StatusView, useDaemonStatus } from "./Status";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { FeedPanel } from "./components/feed/FeedPanel";
 import { WorkPanel } from "./components/work/WorkPanel";
+import { useWork } from "./components/work/useWork";
 import { VoicePanel } from "./components/voice/VoicePanel";
 
 function Panel({ id, title, children }: { id: string; title: string; children: ReactNode }) {
@@ -28,6 +29,7 @@ function bootAllowed(): boolean {
 
 export default function App() {
   const status = useDaemonStatus();
+  const work = useWork();
   const [approvals, setApprovals] = useState(0);
   const [boot] = useState(bootAllowed);
   return (
@@ -42,14 +44,14 @@ export default function App() {
         </section>
       </header>
       <div className="agent-grid">
-        <FeedPanel />
+        <FeedPanel work={work} />
         <ChatPanel onApprovalsChange={setApprovals} />
         <div className="agent-rail">
           <VoicePanel />
           <Panel id="cron" title="Cron">
             <Jobs status={status} />
           </Panel>
-          <WorkPanel />
+          <WorkPanel work={work} />
           <Panel id="vault" title="Vault">
             <p>Saved memories will appear here.</p>
           </Panel>

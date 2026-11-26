@@ -327,7 +327,7 @@ class VoiceWindow(unittest.TestCase):
         self.snapshot["turns"] = [dict(turn, heard_at=turn["heard_at"] - n, text=transcript) for n in range(20)]
         self.open()
         self.expect(self.page.locator(".agent-jobs li")).to_have_count(20)
-        self.expect(self.page.locator(".work-list li")).to_have_count(50)
+        self.expect(self.page.locator(".work-list li")).to_have_count(47)
         self.expect(self.panel.locator(".voice-transcript")).to_have_css("text-overflow", "ellipsis")
         self.page.evaluate("() => document.fonts.ready")
 

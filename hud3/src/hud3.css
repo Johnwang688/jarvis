@@ -374,6 +374,12 @@
 
 .agent-feed h2 { margin-bottom: 0; }
 
+.feed-messages { margin-block: -5px; border-bottom: 1px solid var(--rim); font-size: 12px; }
+.feed-messages h3 { color: var(--text-2); font-size: 12px; }
+.agent-feed .feed-messages p { line-height: 1.2; }
+.feed-messages ul { list-style: none; }
+.feed-messages .work-row:last-child { border-bottom: 0; }
+
 .feed-filters, .feed-actions, .feed-feedback, .feed-chips {
   display: flex;
   flex-wrap: wrap;
