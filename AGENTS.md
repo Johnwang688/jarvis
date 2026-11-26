@@ -152,6 +152,13 @@ Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config (Browser note,
 HTTP-auth plan).
 
+Since the owner's 2026-11-25 decision, a spoken yes or a physical click on the
+v3 voice pop-up may approve the one card voice is asking about. A spoken yes
+needs no speaker check and counts within 15 seconds of confirmed playback.
+Money, credentials, gate and policy changes, and other kinds barred by the
+voice rule need a click or the phone passkey. Pop-up clicks remain available
+until the card expires. v2's speech rule is unchanged.
+
 ## Phone
 
 The phone's only door is the remote listener (8408, loopback, behind `tailscale

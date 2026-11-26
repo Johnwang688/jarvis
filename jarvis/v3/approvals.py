@@ -78,21 +78,25 @@ class ApprovalBroker:
                 os.close(fd)
 
     @staticmethod
-    def _write_row(parent, fd, item, state, stamp):
+    def _write_row(parent, fd, item, state, stamp, *, via=None, heard_words=None):
         row = {key: item[key] for key in ("id", "tool", "digest", "level", "why")}
         row.update(state=state, t=stamp)
         if state == "auto":
             row["decided_by"] = "policy"
+        if via is not None:
+            row["via"] = via
+        if via == "voice" and heard_words is not None:
+            row["heard_words"] = heard_words
         line = (json.dumps(row, allow_nan=False) + "\n").encode("ascii")
         if os.write(fd, line) != len(line):
             raise OSError("Incomplete approval log write.")
         os.fsync(fd)
         os.fsync(parent)
 
-    def _append(self, request, state, stamp):
+    def _append(self, request, state, stamp, *, via=None, heard_words=None):
         if self._log is not None:
             with self._open_log(os.O_WRONLY) as (parent, fd):
-                self._write_row(parent, fd, request.item, state, stamp)
+                self._write_row(parent, fd, request.item, state, stamp, via=via, heard_words=heard_words)
 
     def _new_item(self, tool, args, session_id, verdict, preview):
         id = self._new_id()
@@ -132,9 +136,9 @@ class ApprovalBroker:
         if len(self._finished) > _FINISHED_LIMIT:
             self._finished.popitem(last=False)
 
-    def _finish(self, request, state):
+    def _finish(self, request, state, *, via=None, heard_words=None):
         try:
-            self._append(request, state, time.time())
+            self._append(request, state, time.time(), via=via, heard_words=heard_words)
         except Exception:
             # A missing durable decision cannot grant authority.
             state = "cancelled"
@@ -193,11 +197,14 @@ class ApprovalBroker:
                     self._finish(request, "cancelled")
             return False
 
-    def pending(self, *, turn_id=None, session_id=None):
+    def pending(self, *, turn_id=None, session_id=None, approval_id=None):
         with self._changed:
             now = self._clock()
-            requests = [request for request in self._pending.values()
-                        if (turn_id is None or request.turn_id == turn_id)
+            candidates = (self._pending.values() if approval_id is None else
+                          (self._pending.get(approval_id),))
+            requests = [request for request in candidates
+                        if request is not None
+                        and (turn_id is None or request.turn_id == turn_id)
                         and (session_id is None or request.session_id == session_id)]
             for request in requests:
                 self._advance(request, now)
@@ -211,9 +218,13 @@ class ApprovalBroker:
                     items.append(item)
             return items
 
-    def answer(self, id, digest, decision):
+    def answer(self, id, digest, decision, via=None, *, heard_words=None):
         if decision not in ("approve", "deny"):
             raise ValueError("Expected approve or deny.")
+        if via not in (None, "voice", "popup"):
+            raise ValueError("Expected a known approval route.")
+        if heard_words is not None and (via != "voice" or type(heard_words) is not int or heard_words < 1):
+            raise ValueError("Expected a voice answer word count.")
         with self._changed:
             request = self._pending.get(id)
             if request is None:
@@ -227,7 +238,7 @@ class ApprovalBroker:
             if not isinstance(digest, str) or not compare_digest(digest.encode("utf-8", "surrogatepass"), expected):
                 raise ApprovalConflict("Approval digest differs.")
             state = "approved" if decision == "approve" else "denied"
-            self._finish(request, state)
+            self._finish(request, state, via=via, heard_words=heard_words)
             if request.state != state:
                 raise ApprovalConflict("Approval could not be recorded.")
             return state

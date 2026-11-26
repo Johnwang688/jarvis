@@ -522,6 +522,7 @@ class Daemon:
                                             ledger=Ledger(root / "threads.jsonl")))
 
     def _new_voice(self):
+        from .voice.approving import VoiceApproving
         from .voice.claude_brain import ClaudeVoiceBrain
         from .voice.engines import KokoroVoice, pick_transcriber
         from .voice.session import VoiceSession
@@ -536,7 +537,9 @@ class Daemon:
         setting = config.V3_VOICE
         fast = KokoroVoice(device="cpu") if setting in ("auto", "kokoro-cpu") else None
         best = KokoroVoice(device="cuda") if setting in ("auto", "kokoro-gpu") else None
-        session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names)
+        approving = VoiceApproving(self._chat.approvals, clock=time.monotonic)
+        session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names,
+                               approving=approving)
         return brain, turns, session
 
     def _voice_status(self):

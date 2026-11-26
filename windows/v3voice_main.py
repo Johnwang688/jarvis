@@ -107,11 +107,14 @@ class Helper:
             self._logger.info("Voice helper stopped.")
         return 1 if self._rejected else 0
 
-    def _publish(self, state, *, approval=None, expires=None):
-        # Popup serializes clicks with its own revisions. Disarm the old target
-        # before publishing a new revision and arm the new target afterward.
-        self._set_card(None)
-        self._popup.set(state, expires_in=expires)
+    def _publish(self, state, *, approval=None, expires=None, click_expires=None):
+        # Keep already queued clicks when the playback receipt refreshes the same card.
+        if approval is not self._target:
+            self._set_card(None)
+        if click_expires is None:
+            self._popup.set(state, expires_in=expires)
+        else:
+            self._popup.set(state, expires_in=expires, click_expires_in=click_expires)
         self._display = state
         self._set_card(approval)
 
@@ -200,12 +203,13 @@ class Helper:
 
     def _event(self, event):
         kind = event["kind"]
-        expires = None
+        expires = click_expires = None
         if kind == "asking":
             received_at = time.monotonic()
-            expires = event.get("expires_in")
+            expires = None if event.get("voice_waiting") is True else event.get("expires_in")
+            click_expires = event.get("click_expires_in")
         with self._lock:
-            if kind == "asking" or (kind == "state" and event.get("state") not in self._render.APPROVALS):
+            if kind == "state" and event.get("state") not in self._render.APPROVALS:
                 self._set_card(None)
             if kind == "quit":
                 self._set_card(None)
@@ -224,8 +228,15 @@ class Helper:
                 if state is not self._display:
                     approval = None
                     if kind == "asking" and state.buttons:
-                        approval = client.Card(state.id, state.digest, received_at + expires)
-                    self._publish(state, approval=approval, expires=expires)
+                        if (click_expires is not None and event.get("voice_waiting") is False
+                                and self._target is not None and self._target.accepts(state.id, state.digest)):
+                            approval = self._target
+                        else:
+                            lifetime = event.get("expires_in") if click_expires is None else click_expires
+                            approval = client.Card(state.id, state.digest, received_at + lifetime)
+                    self._publish(state, approval=approval, expires=expires, click_expires=click_expires)
+                elif kind == "asking":
+                    self._set_card(None)
 
     def _audio(self, index, flags, rate, data):
         with self._lock:

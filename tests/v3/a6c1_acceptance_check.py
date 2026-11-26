@@ -507,7 +507,7 @@ class Static(unittest.TestCase):
             self.assertEqual((set(entry.schema["properties"]), set(entry.schema["required"])), (props, required), name)
         self.assertFalse(getattr(fastpath.ChatApprover, "jarvis_human_backed", False))
 
-    def test_only_the_owner_route_refers_to_answer(self):
+    def test_only_the_owner_route_and_voice_approval_adapter_refer_to_answer(self):
         from jarvis.v3 import owner_routes
         self.assertTrue(owner_routes.ROUTES[("GET", "/v3/owner/approvals")].owner and owner_routes.ROUTES[("POST", ANSWER)].owner)
         users = set()
@@ -515,7 +515,7 @@ class Static(unittest.TestCase):
             if path != REPO / "jarvis" / "v3" / "approvals.py":
                 if any(isinstance(node, ast.Attribute) and node.attr == "answer" for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))):
                     users.add(path.relative_to(REPO).as_posix())
-        self.assertEqual(users, {"jarvis/v3/owner_routes.py"})
+        self.assertEqual(users, {"jarvis/v3/owner_routes.py", "jarvis/v3/voice/approving.py"})
 
     def test_agentd_stays_light(self):
         code = ("import sys\nfrom pathlib import Path\nfrom jarvis.v3 import daemon, chat, approvals\nroot = Path(sys.argv[1])\n"

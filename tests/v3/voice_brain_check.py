@@ -213,7 +213,8 @@ class VoiceBrainCheck(unittest.TestCase):
         self.data = self.home / "voice-data"
         self.token = self.home / "calendar-token.json"
         self.enterContext(patch.dict(os.environ, {"HOME": str(self.home), "OPENROUTER_API_KEY": "fake-token"}, clear=True))
-        self.enterContext(patch.multiple(config, GOOGLE_TOKEN_PATH=self.token, V3_POLICY_FILE=self.home / "absent-policy"))
+        self.enterContext(patch.multiple(config, GOOGLE_TOKEN_PATH=self.token, V3_POLICY_FILE=self.home / "absent-policy",
+                                        VOICE_LINK_KEY=str(self.home / "absent-voice-link.key")))
         self.cli = self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/claude"))
         self.version = self.enterContext(patch.object(claude_jobs, "cli_meets_floor", return_value=True))
         live = self.enterContext(patch.object(llm, "chat", side_effect=AssertionError("live completion")))
@@ -550,6 +551,26 @@ class VoiceBrainCheck(unittest.TestCase):
         self.assertNotIn("reply", self.events.kinds(turn))
         allow_result.set()
         self.events.wait("reply", turn=turn)
+
+    def test_warming_never_waits_behind_a_turn_that_is_asking(self):
+        from concurrent.futures import Future
+        from threading import Thread
+
+        self.start()
+        queued = Future()
+        with self.brain._lock:
+            self.brain._warming = queued  # a warm-up queued just before the first turn
+        self.factory.scripts.append(script((CLAIM, [VAULT_ADD]), text="The fixture note was added."))
+        turn = self.brain.send("Fixture approve", steer=False, input_id="fixture-input", fresh_after=None)
+        card = self.next_card(turn)
+        self.assertIsNone(queued.result(2))
+        during = Thread(target=self.brain.warm, daemon=True)
+        during.start()
+        during.join(2)
+        self.assertFalse(during.is_alive())
+        self.assertEqual([row["id"] for row in self.broker.pending()], [card["id"]])
+        self.broker.answer(card["id"], card["digest"], "deny")
+        self.events.wait("reply")
 
     def test_voice_turns_speak_completed_steps_and_wait_for_approval(self):
         self.start()
@@ -977,7 +998,9 @@ class VoiceBrainCheck(unittest.TestCase):
             self.assertIsNone(status["transcriber"]["name"])
             self.assertIn("name", status["voice"])
             self.assertFalse(status["gpu_warm"])
-            self.assertEqual(status["counters"], dict(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0))
+            self.assertEqual(status["counters"], dict(ignored=0, heard=0, played=0, playback_timeouts=0, errors=0,
+                                                     voice_approvals=0, voice_denials=0, popup_answers=0,
+                                                     ignored_answers=0))
             self.assertEqual(status["link"], {"listening": False, "connected": False, "reason": "key_missing"})
         brain = instance._voice_brain
         instance.stop()

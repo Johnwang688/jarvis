@@ -182,6 +182,7 @@ class _Utterance:
     ended_at: float | None = None
     head_attempted: int = 0
     head_result: _Result | None = None
+    speech_onset: _Frame | None = None
 
     @property
     def silence_ms(self) -> int:
@@ -196,6 +197,7 @@ class _Utterance:
 class _Decode:
     kind: str
     utterance: _Utterance
+    prefer_cancelled: bool
     frames: tuple = field(init=False)
     voice_end: int = field(init=False)
     echo_start: int | None = field(init=False)
@@ -205,13 +207,18 @@ class _Decode:
         self.voice_end = self.utterance.voice_end
         self.echo_start = self.utterance.echo_start
         end = len(self.utterance.frames) if self.kind == "partial" else self.utterance.decode_end
+        frames = self.utterance.frames[:end]
+        # An answer recorded with a canceller may include unpaired frames at a stream change.
+        # Keep those raw samples out of the answer decode too.
+        paired_only = self.prefer_cancelled and any(frame.has_canceller for frame in frames)
         audio = []
         self.uncancelled_echo = False
-        for i, frame in enumerate(self.utterance.frames[:end]):
+        for i, frame in enumerate(frames):
             echo = frame.echo or (self.echo_start is not None and i >= self.echo_start)
-            audio.append(frame.cancelled if echo else frame.raw)
             if echo and not frame.has_canceller and i >= self.utterance.pre_roll_frames:
                 self.uncancelled_echo = True
+            if not paired_only or frame.has_canceller:
+                audio.append(frame.cancelled if echo or paired_only else frame.raw)
         self.frames = tuple(audio)
 
 
@@ -226,13 +233,14 @@ class Hearing:
 
     def __init__(self, transcriber: Transcriber, *, names=(), on_event, clock=time.monotonic,
                  detector: Detector | None = None, end_silence_ms: int | None = None,
-                 capture_details: bool = False):
+                 capture_details: bool = False, prefer_cancelled=None):
         self._transcriber = transcriber
         self._names = names if callable(names) else tuple(names)
         self._on_event = on_event
         self._clock = clock
         self._detector = detector
         self._capture_details = capture_details
+        self._prefer_cancelled = prefer_cancelled
         cutoff = END_SILENCE_MS if end_silence_ms is None else end_silence_ms
         self._end_silence_ms = max(300, min(1500, cutoff))
         self._changed = Condition()
@@ -298,8 +306,11 @@ class Hearing:
             if self._keyed:
                 utterance = self._active
                 self._append(utterance, pair)
-                if speech and len(utterance.key_power) < START_WINDOW_MS // FRAME_MS:
-                    utterance.key_power.append(self._power(frame))
+                if speech:
+                    if utterance.speech_onset is None:
+                        utterance.speech_onset = pair
+                    if len(utterance.key_power) < START_WINDOW_MS // FRAME_MS:
+                        utterance.key_power.append(self._power(frame))
                 utterance.voice_end = len(utterance.frames)
                 if utterance.voice_end * FRAME_MS % PARTIAL_MS == 0 and self._job is None:
                     self._submit("partial", utterance)
@@ -394,7 +405,7 @@ class Hearing:
         before = len(self._before)
         echo_start = next((i for i in range(before, len(frames)) if frames[i].echo), None)
         self._active = _Utterance(frames, before, len(frames), capture, echo_start=echo_start,
-                                  speech_ended_at=frame.at)
+                                  speech_ended_at=frame.at, speech_onset=first)
         if self._key_down:
             self._keyed = self._active.keyed_during_capture = True
             self._active.key_power.append(self._power(frame.cancelled))
@@ -414,7 +425,12 @@ class Hearing:
         return float(np.var(frame, dtype=np.float64))
 
     def _submit(self, kind, utterance):
-        self._job = _Decode(kind, utterance)
+        prefer_cancelled = False
+        if self._prefer_cancelled is not None:
+            onset = utterance.speech_onset
+            context = onset.context if onset is not None else utterance.capture.context
+            prefer_cancelled = self._prefer_cancelled(context)
+        self._job = _Decode(kind, utterance, prefer_cancelled)
         self._changed.notify_all()
 
     def _schedule(self):
@@ -485,19 +501,32 @@ class Hearing:
     def _final(self, result, *, dropped=False):
         utterance = self._ended.popleft()
         audio_ms = len(utterance.frames) * FRAME_MS
-        utterance.frames.clear()
         utterance.head_result = None
         fields = {"dropped": True} if dropped else {}
         details = self._details(utterance)
         if details:
             fields.update(details, silence_ms=utterance.silence_waited_ms,
                           speech_ended_at=utterance.speech_ended_at, failed=result.failed,
-                          uncancelled_echo=result.uncancelled_echo)
+                          uncancelled_echo=result.uncancelled_echo,
+                          speech_onset=self._answer_onset(utterance))
             if utterance.key_power:
                 fields["power"] = sum(utterance.key_power) / len(utterance.key_power)
+        utterance.frames.clear()
         self._emit("final", text=result.text, audio_ms=audio_ms, decode_ms=result.decode_ms,
                    waited_ms=(self._clock() - utterance.ended_at) * 1000, **fields)
         self._emit("speech_end", **details)
+
+    @staticmethod
+    def _answer_onset(utterance):
+        onset = utterance.speech_onset
+        if (onset is None or not onset.has_canceller) and any(frame.has_canceller for frame in utterance.frames):
+            return None
+        if onset is not None:
+            return onset.at, onset.context
+        # Push-to-talk still works without VAD confirmation when there is no canceller.
+        if utterance.capture.keyed:
+            return utterance.capture.started_at, utterance.capture.context
+        return None
 
     def _emit(self, kind, **fields):
         self._events.append((kind, fields))
