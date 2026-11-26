@@ -1603,8 +1603,15 @@ V3_DELEGATE_PARAGRAPH = (
     "is done and never give up silently: either do it, or hand it off and say so in one sentence."
 )
 
+V3_MESSAGES_PARAGRAPH = (
+    "When the owner asks about messages, call `message_list`. Say how many there are and give "
+    "the subjects newest first. Lead with any waiting or undelivered messages and say their state first. "
+    "When he asks to hear one, call `message_read` and read it. To answer or see the full "
+    "thread, tell him to use T3. Never claim to open the thread."
+)
 
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
+    "When the owner asks about messages": ((("message_list", "message_read"), None),),
     "You can hand a task to a stronger agent": ((("delegate",), None),),
     "For an owner request to open something on the desk PC": (
         (("app_open", "folder_open", "link_open"), None),
@@ -1718,7 +1725,7 @@ def _original_prompt_rules() -> dict:
     paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
     paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH, FAST_LIMITS_PARAGRAPH,
                        FAST_DIRECT_PARAGRAPH, FAST_PROPOSE_PARAGRAPH, FAST_CHATS_PARAGRAPH,
-                       V3_PC_PARAGRAPH, V3_DELEGATE_PARAGRAPH))
+                       V3_PC_PARAGRAPH, V3_DELEGATE_PARAGRAPH, V3_MESSAGES_PARAGRAPH))
     result = {}
     for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
         matches = [p for p in paragraphs if p.startswith(opening)]

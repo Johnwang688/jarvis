@@ -11,10 +11,10 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from jarvis import agent, config, context, llm, runtime
-from jarvis.v3 import chat, fastpath, jobs
+from jarvis.v3 import chat, fastpath, jobs, t3_client
 from jarvis.v3.feed import Feed
 from jarvis.v3.index import Index
 from jarvis.v3.ingest.transcripts import ingest
@@ -79,6 +79,31 @@ class ChatCheck(unittest.TestCase):
     def finish(self, svc):
         self.wait_for(lambda: svc.events(0)["state"] in ("idle", "error"))
         self.assertEqual(svc.snapshot()["state"], "idle")
+
+    def test_message_tools_and_prompt_follow_work_threads_without_a_broker(self):
+        names = {"work_threads", "message_list", "message_read"}
+        work = Mock()
+        work.projects.return_value = [object()]
+        work.threads.return_value = []
+        for available in (False, True):
+            with self.subTest(available=available):
+                def request(**kwargs):
+                    offered = {entry["function"]["name"] for entry in kwargs["tools"]}
+                    self.assertEqual(offered & names, names if available else set())
+                    return reply(None, ("message_list", {})) if available else reply("No recent messages.")
+
+                model = Model(request, reply("No recent messages."))
+                svc = chat.ChatService(self.root / str(available), work=work, completion=model)
+                self.addCleanup(svc.close)
+                with patch.object(t3_client, "resolve", side_effect=None if available else t3_client.T3Error("missing"),
+                                  return_value="/example/bin/fake-t3"):
+                    self.assertEqual(set(svc.snapshot()["tools"]) & names, names if available else set())
+                    svc.send("Any messages?")
+                    self.finish(svc)
+                self.assertEqual(config.V3_MESSAGES_PARAGRAPH in model.seen[0][0]["content"], available)
+                if available:
+                    result, = [row["content"] for row in model.seen[-1] if row["role"] == "tool"]
+                    self.assertIn("No messages in the last three days.", result)
 
     def hold(self):
         entered, release = threading.Event(), threading.Event()

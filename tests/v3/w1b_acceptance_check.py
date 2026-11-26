@@ -3,7 +3,7 @@
 Contract: the v3 chat can list, read, start and message coding threads in T3 through W1a's WorkService; start and send ask the owner.
   Builds on W1a (jarvis/v3/work.py: WorkService, WorkError, Project, Thread; plan_start/start/threads/show/send) and A6c-1 (approvals).
   jarvis/v3/chat.py   light (never imports fastpath, the model stack or httpx at import)
-    WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})   WORK_GATED = frozenset({"work_start", "work_send"})
+    WORK_TOOLS includes the coding-work reads and MSG4 message reads. WORK_GATED includes work_start and work_send.
     TOOL_NAMES (the ten A6b tools) and GATED_TOOLS (the six A6c-1 tools) are unchanged; the work tools are separate sets.
     ChatService(root, *, completion=None, clock=time.time, feed_root=None, approvals=None, calendar=None, work=None)   .work: the service or None
     The work tools are offered (in the request, in snapshot()["tools"], in the bound toolset) only while ALL hold: work is not None;
@@ -51,7 +51,7 @@ from a6b1_acceptance_check import Model, reply
 from a6c1_acceptance_check import Base as A6cBase, Clock, FAKE_TOKEN, ap
 
 REPO = Path(__file__).resolve().parents[2]
-READS, GATED = {"work_projects", "work_threads", "work_show"}, {"work_start", "work_send"}
+READS, GATED = {"work_projects", "work_threads", "work_show", "message_list", "message_read"}, {"work_start", "work_send"}
 WORK = READS | GATED
 BRIEF = "Make the login page accept passkeys.\nRun the tests."
 START = {"project": "sample-app", "title": "Fix the login page", "brief": BRIEF, "worktree": True}
@@ -359,6 +359,7 @@ class Static(unittest.TestCase):
         self.assertEqual((len(chat.GATED_TOOLS), len(fastpath.V3_TOOLS)), (6, 10))
         self.assertFalse(WORK & (chat.GATED_TOOLS | chat.TOOL_NAMES))
         schemas = {"work_projects": (set(), set()), "work_threads": ({"project"}, set()), "work_show": ({"thread_id", "messages"}, {"thread_id"}),
+                   "message_list": (set(), set()), "message_read": ({"number"}, {"number"}),
                    "work_start": ({"project", "title", "brief", "worktree"}, {"project", "title", "brief"}), "work_send": ({"thread_id", "message"}, {"thread_id", "message"}),
                    "delegate": ({"task", "project"}, {"task"})}
         defaults = set(tools.default_names())
