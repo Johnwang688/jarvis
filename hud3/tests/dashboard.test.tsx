@@ -23,7 +23,11 @@ beforeEach(() => {
     if (url === "/v3/owner/voice") return json({
       state: "resting", helper: { connected: true, canceller: true },
       transcriber: { name: "fixture-asr" }, voice: { name: "fixture-voice" }, turns: [],
-      settings: { speed: { value: 1, min: 0.8, max: 2 }, follow_up_s: { value: 8, min: 0, max: 30 } },
+      settings: {
+        speed: { value: 1, min: 0.8, max: 2 },
+        follow_up_s: { value: 8, min: 0, max: 30 },
+        end_silence_ms: { value: 500, min: 300, max: 1000 },
+      },
     });
     return json(url === "/v3/status" ? status : { briefs: [], recent: [] });
   }));

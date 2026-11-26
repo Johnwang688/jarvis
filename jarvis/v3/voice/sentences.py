@@ -3,6 +3,11 @@
 import re
 
 MIN_SENTENCE = 12
+# A long opening sentence is synthesized clause first: synthesis time grows
+# with length, and the first sound is what the owner waits for.
+CLAUSE_AFTER = 56
+CLAUSE_MIN = 16
+_CLAUSE = re.compile(r"(?<=[^\W\d_])[,;:](?=\s)")
 _FENCE = re.compile(r"^\s*(?:```|~~~)")
 _URL = re.compile(r"<?\b(?:https?://|www\.)[^\s<>()]*>?", re.IGNORECASE)
 _OPEN_MARKUP = re.compile(r"!?(?:\[|<)|`|(?<!\w)(?:\*{1,2}|_{1,2}|~~)(?=\S|$)")
@@ -51,6 +56,22 @@ def _sentences(text, *, complete):
         if len(sentence) >= MIN_SENTENCE and any(char.isalnum() for char in sentence):
             yield sentence, end.end()
             start = end.end()
+
+
+def split_opening(sentence):
+    """Split one finished sentence at its first usable clause boundary.
+
+    The pieces joined by a space are the sentence. It is applied to a sentence
+    that is already being released, so it never changes what is said or when
+    it may be said, only how soon its first sound can be ready.
+    """
+    if len(sentence) >= CLAUSE_AFTER:
+        for boundary in _CLAUSE.finditer(sentence):
+            cut = boundary.end()
+            first, rest = sentence[:cut], sentence[cut:].strip()
+            if cut >= CLAUSE_MIN and len(first.split()) >= 3 and len(rest) >= MIN_SENTENCE:
+                return [first, rest]
+    return [sentence]
 
 
 class Sentences:

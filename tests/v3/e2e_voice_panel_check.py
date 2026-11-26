@@ -25,7 +25,8 @@ class VoiceWindow(unittest.TestCase):
             "gpu_warm": False, "counters": {}, "brain": {"name": "fixture", "state": "idle", "turns": 1},
             "helper": {"connected": False, "listening": True},
             "settings": {"speed": {"value": 1.35, "min": 0.8, "max": 2.0},
-                         "follow_up_s": {"value": 8, "min": 0, "max": 30}},
+                         "follow_up_s": {"value": 8, "min": 0, "max": 30},
+                         "end_silence_ms": {"value": 500, "min": 300, "max": 1000}},
             "turns": [{
                 "heard_at": NOW.timestamp() - 10, "text": MARKUP,
                 "tools": [{"name": "fake_lookup", "ok": True}, {"name": "fake_update", "ok": False}],
@@ -39,7 +40,7 @@ class VoiceWindow(unittest.TestCase):
         self.refuse_helper = False
         self.refuse_setting = False
         self.full_rail = False
-        self.confirmed_speed = None
+        self.confirmed_settings = {}
         self.errors = []
         self.addCleanup(self.assertEqual, self.errors, [])
 
@@ -88,9 +89,7 @@ class VoiceWindow(unittest.TestCase):
                 route.fulfill(status=400, json={"message": "Fixture rejected that value."})
                 return
             for name, value in body.items():
-                if name == "speed" and self.confirmed_speed is not None:
-                    value = self.confirmed_speed
-                self.snapshot["settings"][name]["value"] = value
+                self.snapshot["settings"][name]["value"] = self.confirmed_settings.get(name, value)
             route.fulfill(json={"settings": deepcopy(self.snapshot["settings"])})
         elif self.full_rail and path == "/v3/status":
             answer = route.fetch()
@@ -159,7 +158,7 @@ class VoiceWindow(unittest.TestCase):
         self.open()
         self.open_details()
         speed = self.panel.get_by_role("slider", name="Speed")
-        self.confirmed_speed = 1.6
+        self.confirmed_settings["speed"] = 1.6
         speed.scroll_into_view_if_needed()
         box = speed.bounding_box()
         x, y = box["x"], box["y"] + box["height"] / 2
@@ -188,6 +187,35 @@ class VoiceWindow(unittest.TestCase):
         self.expect(error).to_have_count(0)
         self.expect(follow).to_have_value("12.5")
         self.assertEqual(self.setting_actions[-1], {"follow_up_s": 12.5})
+
+    def test_end_silence_commits_once_and_displays_confirmed_value(self):
+        self.snapshot["settings"]["end_silence_ms"]["value"] = 525
+        self.open()
+        wait = self.panel.get_by_role("spinbutton", name="Wait after you stop (ms)")
+        self.expect(wait).to_have_count(0)
+        self.open_details()
+        self.expect(wait).to_have_value("525")
+        for attribute, value in (("min", "300"), ("max", "1000"), ("step", "50")):
+            self.expect(wait).to_have_attribute(attribute, value)
+        hint = "Shorter replies sooner, but may cut you off if you pause."
+        self.expect(self.details.get_by_text(hint, exact=True)).to_be_visible()
+        self.expect(wait).to_have_accessible_description(hint)
+
+        self.confirmed_settings["end_silence_ms"] = 650
+        wait.fill("400")
+        wait.fill("450")
+        self.assertEqual(self.setting_actions, [])
+        wait.press("Tab")
+        self.expect(wait).to_have_value("650")
+        self.assertEqual(self.setting_actions, [{"end_silence_ms": 450}])
+
+        self.refuse_setting = True
+        wait.fill("800")
+        wait.press("Enter")
+        self.expect(self.panel.get_by_text("Fixture rejected that value.", exact=True)).to_be_visible()
+        self.expect(wait).to_have_value("650")
+        wait.press("Tab")
+        self.assertEqual(self.setting_actions, [{"end_silence_ms": 450}, {"end_silence_ms": 800}])
 
     def test_recent_turns_show_literal_text_and_details(self):
         self.open()
@@ -273,6 +301,7 @@ class VoiceWindow(unittest.TestCase):
             (self.panel.locator(".voice-turn > summary"), "Fixture text"),
             (self.panel.get_by_role("slider", name="Speed"), "Speed"),
             (self.panel.get_by_role("spinbutton", name="Follow-up (seconds)"), "Follow-up (seconds)"),
+            (self.panel.get_by_role("spinbutton", name="Wait after you stop (ms)"), "Wait after you stop (ms)"),
             (self.panel.get_by_role("button", name="Mic test"), "Mic test"),
         ]
         for _ in range(30):
@@ -351,7 +380,7 @@ class VoiceWindow(unittest.TestCase):
                         self.assertGreater(client, 0, seen)
                         self.assertGreater(scroll, client, seen)
                     if expanded and (width, height) == (1100, 640):
-                        settings = self.panel.get_by_role("slider", name="Speed")
+                        settings = self.panel.get_by_role("spinbutton", name="Wait after you stop (ms)")
                         settings.scroll_into_view_if_needed()
                         self.assertGreater(self.panel.locator(".voice-details-body").evaluate("el => el.scrollTop"), 0)
                         self.expect(settings).to_be_in_viewport(ratio=1)
