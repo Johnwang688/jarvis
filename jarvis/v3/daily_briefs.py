@@ -1,4 +1,4 @@
-"""Assemble and post one digest per kind per Chicago day.
+"""Deliver one morning digest and one evening wrap-up per Chicago day.
 
 The evening wrap-up can link to the day's learning digest. The
 morning-briefing skill, voice reading, P2 commitments, I4 activity, C3
@@ -27,6 +27,8 @@ from jarvis.v2.quiet import parse_hhmm
 from . import claude_jobs
 from ._paths import open_directory
 from .feed import FeedError, _redact_text, _shape, _text, _unique_keys
+from .messages import MAX_BODY, Message, MessageService, clean_source
+from .planner import _safe, _spans
 
 JOB = "brief"
 MODEL = "haiku"
@@ -39,11 +41,15 @@ _CHICAGO = ZoneInfo("America/Chicago")
 _WAKE, _NIGHT = wall_time(7), wall_time(23)
 _HEADINGS = {"morning": "Morning brief", "evening": "Evening wrap-up"}
 _PROMPT = Path(__file__).with_name("prompts") / "daily_brief.md"
+_EVENING_PROMPT = _PROMPT.with_name("evening_message.md")
 _DEFAULT_RUN_JOB = claude_jobs.run_job
 _STATE = "state.json"
 _LOG = "log.jsonl"
 _FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK
 _STATE_LIMIT = 1024
+_EVENING_MAX_ITEMS = 6
+_COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+                "nine", "ten", "eleven", "twelve")
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,7 @@ class Digest:
     lines: list[dict[str, str]]
     items: int
     times: tuple[str | None, ...] = ()
+    ranks: tuple[int | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,7 +211,7 @@ def _activity_line(activity):
 
 
 def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, activity=None,
-             learning=None) -> Digest:
+             learning=None, include_all=False) -> Digest:
     """Select display lines and count items before the display cap."""
     _check_which(which)
     local = datetime.fromtimestamp(now, _CHICAGO)
@@ -212,12 +219,14 @@ def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, ac
     tomorrow, later = today + timedelta(days=1), today + timedelta(days=2)
     morning = which == "morning"
     notes = []
-    decisions, other = [], []
+    decisions, other, ranks = [], [], {}
     for row in _read(feed.batch, (), "Feed", notes):
         if not isinstance(row, dict) or row.get("kind") == "digest":
             continue
         if line := _item("brief", row, "ask"):
             (decisions if row.get("kind") == "decision" else other).append(line)
+            if type(row.get("rank")) is int:
+                ranks[line["ref"]] = row["rank"]
 
     opening, closing = (today, tomorrow) if morning else (tomorrow, later)
     events = _read(calendar, (opening, closing), "Calendar", notes)
@@ -246,9 +255,9 @@ def assemble(which, *, now, feed, calendar=None, commitments=None, mail=None, ac
         lines += decisions + calendar_lines + commitment_lines + other
     count = len(lines)
     ask = f"{_HEADINGS[which]} · {count} {'item' if count == 1 else 'items'}"
-    visible = lines[:MAX_LINES - len(notes)] + notes
+    visible = (lines if include_all else lines[:MAX_LINES - len(notes)]) + notes
     times = tuple(line.pop("time", None) for line in visible)
-    return Digest(ask, visible, count, times)
+    return Digest(ask, visible, count, times, tuple(ranks.get(line["ref"]) for line in visible))
 
 
 def build_prompt(digest) -> str:
@@ -340,9 +349,8 @@ def _work_directory(directory, path):
     return path
 
 
-def _model_summary(digest, directory, path, budget, run_job, check_window):
+def _model_text(prompt, directory, path, budget, run_job, check_window):
     cwd = _work_directory(directory, path / "work")
-    prompt = build_prompt(digest)
     if run_job is _DEFAULT_RUN_JOB:
         cli = claude_jobs.resolve_cli()
         if not cli or not Path(cli).is_file() or not os.access(cli, os.X_OK):
@@ -363,33 +371,115 @@ def _model_summary(digest, directory, path, budget, run_job, check_window):
     except BaseException:
         budget.release(admission)
         raise
-    return _display_line(job.text, 200) if job.ok and job.outcome == "ok" else ""
+    return job.text if job.ok and job.outcome == "ok" else ""
 
 
-def _post(directory, path, which, now, feed, budget, run_job, sources, check_window):
-    digest = assemble(which, now=now, feed=feed, **sources)
+def _email_items(digest):
+    rows = []
+    for line, when, rank in zip(digest.lines, digest.times, digest.ranks, strict=True):
+        source = line["ref"].split(":", 1)[0]
+        row = {"item": clean_source(line["label"]) or "Item text omitted.", "source": source}
+        if when is not None:
+            row["time"] = when
+        priority = rank if rank is not None else (4 if source in {"calendar", "commitment"} else 9)
+        rows.append((priority, row))
+    return [row for _, row in sorted(rows, key=lambda entry: entry[0])]
+
+
+def _email_prompt(items, body_limit):
+    rows = "\n".join(json.dumps(item, ensure_ascii=False) for item in items)
+    prompt = _EVENING_PROMPT.read_text(encoding="utf-8").strip().format(body_limit=body_limit)
+    return prompt + "\n\n" + untrusted.fence(rows, "evening items")
+
+
+def _email_reply(text, items):
+    subject, blank, body = text.partition("\n\n")
+    if not blank or not subject.startswith("Subject: "):
+        raise ValueError("Expected a subject and an email body.")
+    message = Message(subject.removeprefix("Subject: "), body)
+    copied = {span for item in items for span in _spans(item["item"])}
+    if any(not _safe(value) or any(span in copied for span in _spans(value))
+           for value in (message.subject, message.body)):
+        raise ValueError("The evening email copied source text or contained unsafe text.")
+    return message
+
+
+def _fallback_email(items, overflow=""):
+    if not items:
+        return Message("Evening wrap-up", "There are no items to review tonight.\n\n"
+                       "Reply if there is something you would like me to pick up.")
+    lines = ["Here are the items from today. I suggest starting with the first one.", ""]
+    for index, row in enumerate(items, start=1):
+        item = row["item"]
+        punctuation = "" if item.endswith((".", "?", "!")) else "."
+        lines.append(f"{index}. {item}{punctuation}")
+    lines.extend(("", "Reply with the numbers you want me to start on."))
+    body = "\n".join(lines) + overflow
+    return Message("Evening wrap-up", body)
+
+
+def _evening_email(digest, model):
+    if not digest.items:
+        return _fallback_email([]), "none"
+    items = _email_items(digest)[:_EVENING_MAX_ITEMS]
+    remaining = digest.items - _EVENING_MAX_ITEMS
+    overflow = ""
+    if remaining > 0:
+        count = _COUNT_WORDS[remaining] if remaining < len(_COUNT_WORDS) else str(remaining)
+        overflow = f'\nAnd {count} more: reply "more" and I will list them.'
+    try:
+        message = _email_reply(model(_email_prompt(items, MAX_BODY - len(overflow))), items)
+        if overflow:
+            message = replace(message, body=message.body + overflow)
+        return message, "model"
+    except _DigestWindowClosed:
+        raise
+    except Exception:
+        return _fallback_email(items, overflow), "fallback"
+
+
+def _post(directory, path, which, now, feed, budget, run_job, sources, check_window, messages):
+    evening = which == "evening"
+    digest = assemble(which, now=now, feed=feed, include_all=evening, **sources)
     check_window()
+    model = partial(_model_text, directory=directory, path=path, budget=budget,
+                    run_job=run_job, check_window=check_window)
     why_now, summary = "There are no items to review.", "none"
-    if digest.items:
+    lines = digest.lines
+    if evening:
+        notes = lines[digest.items:]
+        lines = lines[:min(digest.items, MAX_LINES - len(notes))] + notes
+        if digest.items:
+            why_now = "The items are listed in context."
+    fields = {"kind": "digest", "rank": RANK, "ask": digest.ask, "why_now": why_now, "context": lines}
+    if evening:
         try:
-            text = _model_summary(digest, directory, path, budget, run_job, check_window)
+            message, summary = _evening_email(digest, model)
+        except ValueError:
+            summary = "fallback"
+        else:
+            check_window()
+            if messages.send(message, fallback=fields).outcome == "sent":
+                return Result("sent", lines=len(digest.lines), summary=summary)
+    elif digest.items:
+        try:
+            text = _display_line(model(build_prompt(digest)), 200)
         except _DigestWindowClosed:
             raise
         except Exception:
             text = ""
         why_now, summary = (text, "model") if text else ("The items are listed in context.", "fallback")
-    fields = {"kind": "digest", "rank": RANK, "ask": digest.ask,
-              "why_now": why_now, "context": digest.lines}
+        fields["why_now"] = why_now
     check_window()
     try:
         brief = feed.post(fields, actor="jarvis")
     except Exception:
-        return Result("error", lines=len(digest.lines), summary=summary, note="The digest could not be posted.")
-    return Result("posted", brief["id"], len(digest.lines), summary)
+        return Result("error", lines=len(lines), summary=summary, note="The digest could not be posted.")
+    return Result("posted", brief["id"], len(lines), summary)
 
 
 def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitments=None,
-        mail=None, activity=None, learning=None, run_job=_DEFAULT_RUN_JOB) -> Result:
+        mail=None, activity=None, learning=None, run_job=_DEFAULT_RUN_JOB, messages=None) -> Result:
     """Claim the day before assembling the digest. Keep the claim on failure.
 
     A digest that reaches quiet hours or crosses into another day after the
@@ -410,6 +500,11 @@ def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitm
     path = Path(config.V3_DIR / "daily-briefs" if state_dir is None else state_dir).absolute()
     sources = {"calendar": calendar, "commitments": commitments, "mail": mail, "activity": activity,
                "learning": learning}
+    if which == "evening" and messages is None:
+        from .t3_client import T3
+        from .work import WorkService
+
+        messages = MessageService(WorkService(t3=T3(timeout=15)), clock=clock)
     try:
         with open_directory(path, create=True) as directory:
             _check_directory(directory)
@@ -431,7 +526,7 @@ def run(which, *, feed, budget, now=None, state_dir=None, calendar=None, commitm
                             _write_state(directory, claims)
                             claimed = True
                             result = _post(directory, path, which, started_at, feed, budget, run_job,
-                                           sources, check_window)
+                                           sources, check_window, messages)
                     except _DigestWindowClosed:
                         result = Result("quiet")
                     except Exception:

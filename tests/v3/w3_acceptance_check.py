@@ -10,7 +10,7 @@ Contract: an owner-only read of the coding threads Jarvis started, for the HUD's
              registry.list() -> [Project]  and  ledger.threads() -> [Thread]  (W1a's `jarvis/v3/work.py`; no other method is called,
              and threads() is called with no project filter). None (the default) builds W1a's own Registry and Ledger over the
              daemon's data dir, <data_dir>/work/projects.json and <data_dir>/work/threads.jsonl (lazy import: agentd start-up stays light).
-  GET /v3/owner/work -> 200 {"projects": [{"name"}], "threads": [{"thread_id", "project", "title", "status", "waiting_on_owner",
+  GET /v3/owner/work -> 200 {"projects": [{"name"}], "threads": [{"thread_id", "project", "title", "message", "status", "waiting_on_owner",
                                                                   "started_at", "updated_at"}]}
        exactly those keys, values copied from the dataclasses unchanged (status is the ledger's word; times are the floats it holds).
        projects: sorted by name, at most 32 (the registry's own limit). threads: every ledger thread, including threads of a
@@ -37,7 +37,7 @@ from jarvis.v3.work import WorkError
 
 WORK = "/v3/owner/work"
 MARKERS = ("/home/user/marker-path", "marker-provider", "marker-model", "marker-base", "jarvis/marker-branch", "ab" * 32, "marker-run")
-THREAD_KEYS = {"thread_id", "project", "title", "status", "waiting_on_owner", "started_at", "updated_at"}
+THREAD_KEYS = {"thread_id", "project", "title", "message", "status", "waiting_on_owner", "started_at", "updated_at"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,7 @@ class FakeThread:
     branch: str | None = MARKERS[4]
     brief_sha256: str = MARKERS[5]
     run_id: str = MARKERS[6]
+    message: bool = False
 
 
 class FakeRegistry:
@@ -126,7 +127,8 @@ class Base(unittest.TestCase):
 class Shape(Base):
     def test_exact_fields_and_no_leaks(self):
         self.registry.projects = [FakeProject("beta"), FakeProject("alpha", base=None)]
-        self.ledger.rows = [thread(1, status="running", waiting_on_owner=True), thread(2, project="gone", status="completed")]
+        self.ledger.rows = [thread(1, status="running", waiting_on_owner=True),
+                            thread(2, project="gone", status="completed", message=True)]
         self.start()
         resp, raw = self.get()
         self.assertEqual(resp.status, 200)
@@ -138,9 +140,9 @@ class Shape(Base):
         self.assertEqual(set(body), {"projects", "threads"})
         self.assertEqual(body["projects"], [{"name": "alpha"}, {"name": "beta"}])
         self.assertEqual(body["threads"], [
-            {"thread_id": "thread-002", "project": "gone", "title": "Fixture title 2", "status": "completed", "waiting_on_owner": False,
+            {"thread_id": "thread-002", "project": "gone", "title": "Fixture title 2", "message": True, "status": "completed", "waiting_on_owner": False,
              "started_at": 1_700_000_002.0, "updated_at": 1_700_000_502.5},
-            {"thread_id": "thread-001", "project": "alpha", "title": "Fixture title 1", "status": "running", "waiting_on_owner": True,
+            {"thread_id": "thread-001", "project": "alpha", "title": "Fixture title 1", "message": False, "status": "running", "waiting_on_owner": True,
              "started_at": 1_700_000_001.0, "updated_at": 1_700_000_501.5},
         ])
         self.assertTrue(all(set(row) == THREAD_KEYS for row in body["threads"]))

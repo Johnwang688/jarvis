@@ -576,18 +576,24 @@ def default_jobs(*, feed_root=None, index_path=None, google_token=None, chats_ro
         nonlocal work_watcher
         path = Path(config.V3_DIR) / "work" / "threads.jsonl"
         try:
-            path.lstat()
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                path.with_name("message-starts.jsonl").lstat()
         except FileNotFoundError:
             return
         except OSError:
             # Let the ledger handle unreadable paths.
             pass
         if work_watcher is None:
+            from .messages import MessageService
             from .t3_client import T3
-            from .work import Ledger
+            from .work import Ledger, WorkService
             from .work_watch import Watcher
 
-            work_watcher = Watcher(ledger=Ledger(path), t3=T3(timeout=15), feed=get_feed())
+            ledger, t3 = Ledger(path), T3(timeout=15)
+            messages = MessageService(WorkService(ledger=ledger, t3=t3), clock=time.time)
+            work_watcher = Watcher(ledger=ledger, t3=t3, feed=get_feed(), messages=messages)
         if work_watcher.run().outcome == "error":
             raise RuntimeError("Work watch failed.")
 

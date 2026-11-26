@@ -182,6 +182,7 @@ class Layout(window.Window):
         threads = [
             {"thread_id": f"thread-{n}", "project": names[n % len(names)],
              "title": f"Fixture title {n} " + "W" * 60, "status": "running",
+             "message": n < 3,
              "waiting_on_owner": n % 3 == 0, "started_at": now - n, "updated_at": now - n}
             for n in range(50)
         ]
@@ -191,6 +192,7 @@ class Layout(window.Window):
         self.page.reload(wait_until="load")
         panel = self.page.get_by_role("region", name="T3", exact=True)
         self.expect(panel.locator("li")).to_have_count(50, timeout=window.WAIT_MS)
+        self.expect(panel.get_by_role("heading").nth(1)).to_have_text("Messages from Jarvis")
         scroll_list = panel.locator(".work-list")
         controls = "button,a,input,select,textarea,iframe,details,summary,[tabindex],[contenteditable]"
         for width, height in (*SIZES, (390, 844)):
