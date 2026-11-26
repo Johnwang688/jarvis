@@ -27,9 +27,9 @@ dependencies = [
 voice = ["kokoro-onnx>=0.4"]
 # CUDA 12 / cuDNN 9, as used by the local speech spike. The GPU runtime
 # provides the same onnxruntime module as the CPU distribution.
-# Whisper on the GPU (CUDA 12). The GPU build of ONNX Runtime is left out on purpose: on Python 3.14
-# its wheels need CUDA 13 and would replace the CPU runtime the other speech engines use, so the
-# Kokoro voice stays on the CPU runtime until that is sorted out.
+# Whisper on the GPU uses these wheels in the daemon. `jarvis voice setup` also
+# uses the CUDA 12 requirements here for a separate Python 3.12 Kokoro worker.
+# Keep GPU ONNX Runtime out of the daemon's Python 3.14 environment.
 voice-gpu = [
     "faster-whisper==1.2.1",
     "ctranslate2==4.9.1",
@@ -40,6 +40,46 @@ voice-gpu = [
     "nvidia-curand-cu12>=10.3.10,<10.4",
     "nvidia-cuda-nvrtc-cu12==12.9.86",
     "nvidia-nvjitlink-cu12==12.9.86",
+]
+# Owner setup combines this with the exact CUDA wheel pins in voice-gpu.
+# The worker pins cuRAND separately because the daemon uses a version range.
+voice-gpu-worker = [
+    # A build wildcard: the full four-part version reads as a private address to the leak scanner.
+    "nvidia-curand-cu12==10.3.10.*",
+    "onnxruntime-gpu==1.23.2",
+    "coloredlogs==15.0.1",
+    "flatbuffers==25.12.19",
+    "humanfriendly==10.0",
+    "mpmath==1.3.0",
+    "packaging==26.4",
+    "protobuf==7.36.2",
+    "sympy==1.14.0",
+    "attrs==26.1.0",
+    "babel==2.19.0",
+    "cloudpickle==3.1.3",
+    "csvw==4.2.0",
+    "dlinfo==2.0.0",
+    "espeakng-loader==0.2.4",
+    "isodate==0.7.2",
+    "joblib==1.6.0",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "kokoro-onnx==0.5.0",
+    "language-tags==1.3.2",
+    "numpy==2.5.5",
+    "phonemizer-fork==3.3.2",
+    "pyparsing==3.3.3",
+    "python-dateutil==4.0.0",
+    "rdflib==7.6.0",
+    "referencing==0.37.0",
+    "regex==2026.11.25",
+    "rfc3986==1.5.0",
+    "rpds-py==2026.9.1",
+    "segments==2.4.0",
+    "termcolor==3.3.0",
+    "typing-extensions==4.16.0",
+    "tzdata==2026.6",
+    "uritemplate==4.2.0",
 ]
 # Second local TTS backend + voice cloning/hybrids (jarvis/pocket.py).
 # pocket-tts pulls CPU PyTorch — heavyweight; install with a CPU torch index

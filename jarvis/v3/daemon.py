@@ -536,7 +536,8 @@ class Daemon:
     def _new_voice(self):
         from .voice.approving import VoiceApproving
         from .voice.claude_brain import ClaudeVoiceBrain
-        from .voice.engines import KokoroVoice, pick_transcriber
+        from .voice.engines import EngineUnavailable, KokoroVoice, cuda_voice_available, pick_transcriber
+        from .voice.gpu_voice import KokoroWorkerVoice
         from .voice.session import VoiceSession
         from .voice.turns import VoiceTurns
 
@@ -548,8 +549,16 @@ class Daemon:
         names = lambda: () if work is None else (project.name for project in work.projects())
         setting = config.V3_VOICE
         speed = self._voice_settings.speed
-        fast = KokoroVoice(device="cpu", speed=speed) if setting in ("auto", "kokoro-cpu") else None
-        best = KokoroVoice(device="cuda", speed=speed) if setting in ("auto", "kokoro-gpu") else None
+        fast = KokoroVoice(device="cpu", speed=speed) if setting in ("auto", "kokoro-gpu", "kokoro-cpu") else None
+        best = None
+        if setting in ("auto", "kokoro-gpu"):
+            if cuda_voice_available():
+                best = KokoroVoice(device="cuda", speed=speed)
+            else:
+                try:
+                    best = KokoroWorkerVoice(speed=speed, data_dir=self._data_dir)
+                except EngineUnavailable:
+                    pass
         approving = VoiceApproving(self._chat.approvals, clock=time.monotonic)
         session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names,
                                approving=approving, follow_up_s=self._voice_settings.follow_up_s,

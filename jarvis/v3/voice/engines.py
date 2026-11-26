@@ -228,6 +228,27 @@ def _trim_edges(samples: ndarray, sample_rate: int) -> ndarray:
     return samples[max(0, start - margin):end + margin]
 
 
+def _kokoro_pcm(samples: ndarray, rate: int) -> ndarray:
+    import numpy as np
+
+    samples = _trim_edges(samples, rate)
+    return np.rint(np.clip(samples, -1, 1) * 32767).astype(np.int16)
+
+
+def _kokoro_speed(speed: float | None) -> float:
+    chosen = config.V3_KOKORO_SPEED if speed is None else float(speed)
+    return max(0.8, min(2.0, chosen)) if chosen == chosen else 1.35
+
+
+def cuda_voice_available() -> bool:
+    try:
+        import onnxruntime as ort
+
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
+
+
 class KokoroVoice(_Engine):
     def __init__(self, *, device: str = "auto", speed: float | None = None):
         super().__init__()
@@ -236,8 +257,7 @@ class KokoroVoice(_Engine):
         self.device = device
         self.active_device = None
         self.fallback_reason = ""
-        chosen_speed = config.V3_KOKORO_SPEED if speed is None else float(speed)
-        self.speed = max(0.8, min(2.0, chosen_speed)) if chosen_speed == chosen_speed else 1.35
+        self.speed = _kokoro_speed(speed)
 
     def _load(self):
         model = config.KOKORO_MODEL.expanduser()
@@ -300,8 +320,7 @@ class KokoroVoice(_Engine):
             samples, rate = self._get_backend().create(
                 text, voice="bm_george", speed=self.speed, lang="en-gb", trim=False,
             )
-        samples = _trim_edges(samples, rate)
-        return np.rint(np.clip(samples, -1, 1) * 32767).astype(np.int16), rate
+        return _kokoro_pcm(samples, rate), rate
 
 
 _EngineType = TypeVar("_EngineType")
