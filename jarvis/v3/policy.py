@@ -50,11 +50,15 @@ DEFAULTS: dict[str, Level] = {
     "calendar.respond": "L2",
     "calendar.event_change": "L2",
     "calendar.event_delete": "L2",
+    "vault.archive": "L2",
     "money.spend": "L2",
     "pr.merge": "L2",
     "thread.start": "L2",
     "thread.send": "L2",
     **dict.fromkeys(NEVER, "L3"),
+}
+OWNER_REQUEST: dict[str, Level] = {
+    "thread.start": "L1", "thread.send": "L1", "calendar.event_change": "L1",
 }
 _KIND = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")
 _FACT_TYPES = {"tainted": bool, "attendees": int, "owner_event": bool, "money": bool}
@@ -158,9 +162,11 @@ def _base_decision(data, kind, facts):
     if data is None:
         return Decision(level="L2", why="malformed-file")
     undecidable = None
+    has_rule = False
     for index, rule in enumerate(data["rules"]):
         if rule["kind"] != kind:
             continue
+        has_rule = True
         mistyped = False
         for name, expected in rule.get("when", {}).items():
             actual = facts.get(name, _MISSING)
@@ -178,8 +184,11 @@ def _base_decision(data, kind, facts):
             if undecidable is None or candidate["level"] > undecidable["level"]:
                 undecidable = candidate
     else:
-        decision = (Decision(level=DEFAULTS[kind], why=f"default:{kind}") if kind in DEFAULTS
-                    else Decision(level=_default_level(data), why="default-level"))
+        if not has_rule and facts.get("owner_request") is True and kind in OWNER_REQUEST:
+            decision = Decision(level=OWNER_REQUEST[kind], why=f"owner-request:{kind}")
+        else:
+            decision = (Decision(level=DEFAULTS[kind], why=f"default:{kind}") if kind in DEFAULTS
+                        else Decision(level=_default_level(data), why="default-level"))
 
     if undecidable is not None and undecidable["level"] > decision["level"]:
         return Decision(level=max("L2", undecidable["level"]), why=undecidable["why"])
@@ -211,7 +220,12 @@ def _apply_hard_rules(decision, kind, facts):
 
 
 def _decide(data, kind, facts):
-    return _apply_hard_rules(_base_decision(data, kind, facts), kind, facts)
+    base = _base_decision(data, kind, facts)
+    decision = _apply_hard_rules(base, kind, facts)
+    if base["why"].startswith("owner-request:") and decision != base:
+        # Preserve the ordinary verdict when a hard rule rules out the owner-request level.
+        return _apply_hard_rules(Decision(level=DEFAULTS[kind], why=f"default:{kind}"), kind, facts)
+    return decision
 
 
 def _example_facts(kind):

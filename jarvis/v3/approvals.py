@@ -58,7 +58,7 @@ class ApprovalBroker:
         if self._log is None:
             return
         item = request.item
-        row = {key: item[key] for key in ("id", "tool", "digest")}
+        row = {key: item[key] for key in ("id", "tool", "digest", "level", "why")}
         row.update(state=state, t=stamp)
         line = (json.dumps(row, allow_nan=False) + "\n").encode("ascii")
         with open_directory(self._log.parent, create=True) as parent:
