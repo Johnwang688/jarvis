@@ -1349,6 +1349,7 @@ CLIs' own safeguards. What follows from it:
     - an unknown kind → `default_level` when no file rule matches, with an L2 floor in either case.
   - The owner CLI writes it. **Every level asks** (H10): the
     executor needs an approval record for L0 and L1 too.
+  - Since 2026-11-25 (owner), L0 and L1 run without a card in the owner's chat when the request is the owner's and the session has read no outside text. Proposals from the planner still ask.
 - **Acceptance:**
   - [x] Table tests for every default rule.
   - [x] Hard rules can't be overridden by a file rule (a test writes a

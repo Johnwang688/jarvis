@@ -202,7 +202,7 @@ class Start(Base):
         (plan,) = self.work.plans
         self.assertEqual(plan, {"project": "sample-app", "path": "/srv/example/sample-app", "provider": "codex", "model": "example-model-1",
                                 "title": "Fix the login page", "brief": BRIEF, "base": "main", "branch": "jarvis/fix-the-login-page-0001"})
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_start", "L1", "owner-request:thread.start"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_start", "L1", "auto-off"))
         self.assertEqual(item["card"], start_card(plan, "A new worktree from main on branch jarvis/fix-the-login-page-0001"))
         self.assertEqual(item["digest"], ap().digest(item["id"], self.sid(svc), "work_start", START, plan))
         for key in plan:
@@ -335,7 +335,7 @@ class Threads(Base):
         svc = self.talk(reply(calls=[("work_send", SEND)]), reply("Sent."))
         svc.send("Tell the sync thread to add a test.")
         item = self.card_after()
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_send", "L1", "owner-request:thread.send"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_send", "L1", "auto-off"))
         rows = [("Thread", KNOWN.title), ("Thread id", "t-known"), ("In project", "sample-app"), ("Message", SEND["message"])]
         self.assertEqual(item["card"], {"title": "Send to a coding thread", "rows": [{"label": k, "value": v} for k, v in rows]})
         preview = {"thread_id": "t-known", "project": "sample-app", "title": KNOWN.title}

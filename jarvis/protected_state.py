@@ -3261,9 +3261,10 @@ _AGENT_OP_WHY = (
     "(`jarvis agentd`, unit `jarvis-agent`). Only the owner switches daemons, "
     "from their own terminal (decision A-2); Jarvis never does, asked or not")
 _POLICY_SET_PATH = ("policy", "set")
-_POLICY_CLI_WRITER = "policy_set"
+_POLICY_WRITE_PATHS = (_POLICY_SET_PATH, ("policy", "auto", "on"), ("policy", "auto", "off"))
+_POLICY_CLI_WRITERS = ("policy_set", "policy_auto")
 _POLICY_SET_WHY = (
-    "this runs the owner-only policy writer (`jarvis policy set`), which changes "
+    "this runs the owner-only policy writer (`jarvis policy set` or `jarvis policy auto on|off`), which changes "
     "Jarvis's decision-rights policy (v3 decision rights, §13)")
 OWNER_OPS: dict[tuple[str, ...], str] = {
     ("hud", "install"): (
@@ -3283,9 +3284,9 @@ OWNER_OPS: dict[tuple[str, ...], str] = {
     ("daemon2", "restart"): _RESTART_WHY,
     **{("agent", verb): _AGENT_OP_WHY.format(verb=verb)
        for verb in ("start", "install", "restart", "stop")},
-    _POLICY_SET_PATH: _POLICY_SET_WHY,
+    **dict.fromkeys(_POLICY_WRITE_PATHS, _POLICY_SET_WHY),
 }
-_LEGACY_OWNER_OPS = {path: why for path, why in OWNER_OPS.items() if path != _POLICY_SET_PATH}
+_LEGACY_OWNER_OPS = {path: why for path, why in OWNER_OPS.items() if path not in _POLICY_WRITE_PATHS}
 # A module that implements an owner op: (the op's path, the functions whose
 # call performs it). Running the module, or calling one of those from inline
 # source, is the op.
@@ -3302,17 +3303,17 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                           "_enable", "_start_v2", "_restore_source", "_write_unit")),
     "jarvis.v3.cli": (("agent", "start"),
                       ("run_daemon", "start", "stop", "restart", "install", "main", "add_commands",
-                       _POLICY_CLI_WRITER)),
+                       *_POLICY_CLI_WRITERS)),
     "jarvis.v3.hud": (("agent", "install"), ("main", "install_hud", "npm_build", "_npm", "open_window")),
-    "jarvis.v3.policy": (_POLICY_SET_PATH, ("set_rule",)),
+    "jarvis.v3.policy": (_POLICY_SET_PATH, ("set_rule", "set_auto", "_edit_file")),
 }
 
 # The policy module has no script entry point. The CLI module already has
 # owner operations of its own, so its policy writer has a separate entry.
 _POLICY_WRITERS = {f"{module}.{writer}" for module, (path, writers) in OWNER_OP_MODULES.items()
-                   for writer in writers if path == _POLICY_SET_PATH or writer == _POLICY_CLI_WRITER}
+                   for writer in writers if path == _POLICY_SET_PATH or writer in _POLICY_CLI_WRITERS}
 _LEGACY_OWNER_MODULES = {
-    module: (path, tuple(writer for writer in writers if writer != _POLICY_CLI_WRITER))
+    module: (path, tuple(writer for writer in writers if writer not in _POLICY_CLI_WRITERS))
     for module, (path, writers) in OWNER_OP_MODULES.items() if path != _POLICY_SET_PATH
 }
 
@@ -4831,7 +4832,9 @@ def _owner_path(argv: list[str], open_ended: bool, state: _Owner) -> str | None:
         options = argv[:argv.index("--")] if "--" in argv else argv
         if any(word in ("-h", "--h", "--he", "--hel", "--help") for word in options):
             return None
-        return OWNER_OPS[_POLICY_SET_PATH] if _could_spell(argv, _POLICY_SET_PATH, open_ended) else None
+        if any(_could_spell(argv, path, open_ended) for path in _POLICY_WRITE_PATHS):
+            return _POLICY_SET_WHY
+        return None
     words = [t for t in argv if not t.startswith("-")]
     for path, why in _LEGACY_OWNER_OPS.items():
         if tuple(words[:len(path)]) == path:
@@ -5061,8 +5064,8 @@ def _policy_source_invokes(source: str, state: _Owner, depth: int) -> str | None
             continue
         name = qualified(node.func)
         if name in _POLICY_WRITERS:
-            return OWNER_OPS[_POLICY_SET_PATH]
-        if argv and tuple(argv[1:3]) == _POLICY_SET_PATH:
+            return _POLICY_SET_WHY
+        if argv and argv[1:2] == ["policy"]:
             module_arg = node.args[0] if node.args else None
             runs_cli = name == "jarvis.__main__.main" or (
                 name == "runpy.run_module" and isinstance(module_arg, ast.Constant)
@@ -5654,7 +5657,8 @@ def _could_be_owner_op(command: str) -> bool:
 def _policy_set_op(command: str, *, prefilter: bool = True) -> str | None:
     if prefilter:
         flat = rules.join_continuations(command).translate(_UNQUOTE)
-        if not ("policy" in flat and ("set" in flat or "xargs" in flat or _WILD.search(flat))
+        if not ("policy" in flat and (any(word in flat for word in ("set", "auto", "_edit_file", "xargs"))
+                                     or _WILD.search(flat))
                 or "$'" in command or ("$" in flat and "=" in flat)):
             return None
     # Give policy recognition its own budget. A policy mention must not use

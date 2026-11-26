@@ -201,6 +201,31 @@ class PolicyCheck(unittest.TestCase):
             self.assertTrue(files._self_protected(config.V3_POLICY_FILE))
             self.assertTrue(permissions.denied_file(str(config.V3_POLICY_FILE)))
 
+    def test_cli_auto_round_trip_and_safe_file_defaults(self):
+        def auto(setting):
+            return subprocess.run([sys.executable, "-m", "jarvis", "policy", "auto", setting],
+                                  env=self.env, text=True, capture_output=True, timeout=15)
+
+        self.env["JARVIS_POLICY_FILE"] = str(self.path)
+        self.assertEqual(auto("status").stdout.strip(), "Automatic running is off.")
+        self.assertFalse(self.path.exists())
+        self.write({"kind": "vault.update", "level": "L1"})
+        self.assertEqual(auto("status").stdout.strip(), "Automatic running is on.")
+        for setting in ("off", "on", "off"):
+            result = auto(setting)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, auto("status").stdout)
+            self.assertIs(json.loads(self.path.read_text())["auto"], setting == "on")
+            self.assertEqual(self.decision("vault.update"), {"level": "L1", "why": "file:0"})
+        set_rule(self.path, "vault.update", "L0")
+        self.assertFalse(self.policy.auto)
+        self.write(auto="on")
+        before = self.path.read_bytes()
+        self.assertFalse(self.policy.auto)
+        self.assertEqual(auto("status").stdout.strip(), "Automatic running is off.")
+        self.assertEqual(auto("on").returncode, 1)
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_policy_writer_is_denied_through_the_shared_gate(self):
         command = "jarvis policy set mail.file L2"
         launcher = quote(str(Path(sys.executable).with_name("jarvis")))
@@ -212,6 +237,15 @@ class PolicyCheck(unittest.TestCase):
             "python -c 'from jarvis.v3.cli import policy_set as change; change(args)'",
             "python -c 'import subprocess; subprocess.run([\"jarvis\", \"policy\", \"set\", \"mail.file\", \"L2\"])'",
             "python -c 'import sys, jarvis.__main__; sys.argv = [\"jarvis\", \"policy\", \"set\", \"mail.file\", \"L2\"]; "
+            "jarvis.__main__.main()'",
+            "jarvis policy auto on", "jarvis policy auto off",
+            "uv run jarvis policy auto on", "python -m jarvis policy auto on",
+            f"{launcher} policy auto off", "env EXAMPLE=1 jarvis policy auto on",
+            "python -c 'from jarvis.v3.policy import set_auto; set_auto(None, True)'",
+            "python -c 'from jarvis.v3.policy import _edit_file; _edit_file(None)'",
+            "python -c 'from jarvis.v3.cli import policy_auto as change; change(args)'",
+            "python -c 'import subprocess; subprocess.run([\"jarvis\", \"policy\", \"auto\", \"on\"])'",
+            "python -c 'import sys, jarvis.__main__; sys.argv = [\"jarvis\", \"policy\", \"auto\", \"off\"]; "
             "jarvis.__main__.main()'",
         )
         allowlist = self.home / "allowlist.json"
@@ -240,6 +274,7 @@ class PolicyCheck(unittest.TestCase):
         for line, expected in (
             ("jarvis policy show", rules.ASK), ("jarvis policy", rules.ASK),
             ("jarvis --help", rules.ASK), ("jarvis policy set --help", rules.ASK),
+            ("jarvis policy auto status", rules.ASK), ("jarvis policy auto on --help", rules.ASK),
             ("cat policy", rules.ALLOW), ("python src/v3/policy.py", rules.ALLOW),
             ("echo jarvis policy set", rules.ALLOW),
             ("python -c 'from jarvis.v3.policy import set_rule; print(\"set_rule(None)\")'", rules.ASK),

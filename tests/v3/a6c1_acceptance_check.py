@@ -262,7 +262,7 @@ class ChatFlow(Base):
         svc = self.talk(lambda messages: (approvers.append(runtime.approver()), reply(calls=[("vault_add", ADD)]))[1], reply("Saved."))
         svc.send("Remember that I like green tea.")
         item = self.next_card()
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("vault_add", "L0", "default:vault.update"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("vault_add", "L0", "auto-off"))
         self.assertIn("The owner prefers green tea.", json.dumps(item["card"]))
         self.assertEqual((svc.snapshot()["approvals"], svc.events(0)["approvals"]), (1, 1))
         self.assertEqual(self.broker.answer(item["id"], item["digest"], "approve"), "approved")
@@ -367,7 +367,7 @@ class CalendarFlow(Base):
         svc.send("Rename my appointment.")
         item = self.next_card()
         self.assertTrue(all(part in json.dumps(item["card"]) for part in ("Dentist checkup", "Orthodontist visit")), item["card"])
-        self.assertEqual((item["level"], item["why"]), ("L1", "owner-request:calendar.event_change"))
+        self.assertEqual((item["level"], item["why"]), ("L1", "auto-off"))
         self.cal.version = 2                                         # someone edits the event after the owner saw the card
         self.broker.answer(item["id"], item["digest"], "approve")
         self.assertEqual(self.wait_idle(svc), "idle")
@@ -432,7 +432,7 @@ class Routes(Base):
         status, out = self.call("GET", "/v3/owner/approvals")
         (shown,) = out["approvals"]
         self.assertEqual((status, set(shown)), (200, KEYS))
-        self.assertEqual((shown["id"], shown["tool"], shown["level"], shown["why"]), (item["id"], "calendar_create", "L0", "default:calendar.block"))
+        self.assertEqual((shown["id"], shown["tool"], shown["level"], shown["why"]), (item["id"], "calendar_create", "L0", "auto-off"))
         self.assertIsInstance(shown["card"]["title"], str)
         self.assertTrue(all(set(row) == {"label", "value"} and all(isinstance(v, str) for v in row.values()) for row in shown["card"]["rows"]))
         self.assertNotIn(FAKE_TOKEN, json.dumps(out))

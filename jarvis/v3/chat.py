@@ -116,7 +116,10 @@ def _history(path):
                 role, body, stamp = row["role"], row["text"], row["t"]
                 if role not in _ROLES or not isinstance(body, str) or not _timestamp(stamp):
                     raise ValueError("Invalid chat log record.")
-                result.append({"role": _ROLES[role], "text": body[:HISTORY_MESSAGE_LIMIT], "t": stamp})
+                message = {"role": _ROLES[role], "text": body[:HISTORY_MESSAGE_LIMIT], "t": stamp}
+                if auto := row.get("auto"):
+                    message["auto"] = auto
+                result.append(message)
     except FileNotFoundError:
         pass
     return list(result)
@@ -192,6 +195,8 @@ class ChatService:
         self._session_id = None
         self._outside_text = False
         self._turn_id = None
+        self._phone_input = False
+        self._turn_auto = []
         self._selected = False
         self._seq = 0
         self._events = deque(maxlen=EVENT_LIMIT)
@@ -357,13 +362,14 @@ class ChatService:
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
                     "draft": self._draft, "tools": available_tools(gated=self.approvals is not None, work=self.work),
                     "history": history, "last_error": self._last_error, "outside_text": self._outside_text,
-                    "replay": self._replay(len(history)),
+                    "replay": self._replay(history),
                     "approvals": self._approval_count()}
 
-    def _replay(self, history_size):
+    def _replay(self, history):
         # Replay complete buffered turns over the corresponding suffix of
         # saved messages. An unfinished turn has no messages on disk yet.
         events = []
+        history_size = len(history)
         first = self._events[0]["seq"] if self._events else self._seq + 1
         start = self._prompt["seq"] if self._prompt is not None else self._seq + 1
         for turn_start, saved in reversed(self._finished_turns):
@@ -377,7 +383,15 @@ class ChatService:
         for row in events:
             if row["kind"] == "reply":
                 row["text"] = row["text"][:HISTORY_MESSAGE_LIMIT]
-        return {"history_prefix": history_size, "events": events}
+        replay = {"history_prefix": history_size, "events": events}
+        saved = []
+        for index, message in enumerate(history):
+            auto = message.pop("auto", [])
+            if index < history_size:
+                saved.extend(dict(event, after=index) for event in auto)
+        if saved:
+            replay["saved"] = saved
+        return replay
 
     def _approval_count(self):
         return 0 if self.approvals is None else len(self.approvals.pending())
@@ -397,11 +411,12 @@ class ChatService:
     def events(self, after):
         with self._lock:
             return {"state": self._state, "seq": self._seq, "session_id": self._session_id,
+                    "outside_text": self._outside_text,
                     "gap": bool(self._events and after < self._events[0]["seq"] - 1),
                     "events": [deepcopy(row) for row in self._events if row["seq"] > after],
                     "approvals": self._approval_count()}
 
-    def send(self, text, *, steer=True, input_id=None, fresh_after=None) -> dict:
+    def send(self, text, *, steer=True, input_id=None, fresh_after=None, phone=False) -> dict:
         """Accept a message with optional listener correlation and idle rollover."""
         if (not isinstance(text, str) or len(text) > MAX_TEXT or not text.strip()
                 or "\0" in text or re.search(r"[\ud800-\udfff]", text)):
@@ -415,18 +430,19 @@ class ChatService:
                 if len(self._inbox) + len(self._queued) + len(self._pending_followup) >= MAX_INBOX:
                     raise ChatInboxFull("The chat steering queue is full.")
                 if steer:
+                    self._phone_input |= phone
                     row = self._emit("steer", text=text, listener_fields={"input_id": input_id})
                     self._inbox.append(dict(row, input_id=input_id))
                     return {"state": "running", "steered": True}
-                self._queued.append(self._emit("steer", text=text, queued=True,
-                                               listener_fields={"input_id": input_id}))
+                row = self._emit("steer", text=text, queued=True, listener_fields={"input_id": input_id})
+                self._queued.append(dict(row, phone=phone))
                 return {"state": "running", "steered": False}
 
             with self._directory(create=True) as root_fd:
                 self._select(root_fd)
                 sid = self._reset_session(root_fd) if fresh else (self._session_id or self._new_session(root_fd))
             inputs = [text]
-            self._begin(inputs, waiting=[], input_id=input_id)
+            self._begin(inputs, waiting=[], input_id=input_id, phone=phone)
             self._worker = threading.Thread(target=self._run, args=(sid, inputs),
                                             name="jarvis-v3-chat", daemon=True)
             try:
@@ -437,9 +453,11 @@ class ChatService:
                 raise
             return {"state": "running", "steered": False}
 
-    def _begin(self, inputs, *, waiting, input_id=None):
+    def _begin(self, inputs, *, waiting, input_id=None, phone=False):
         self._stop.clear()
         self._turn_id = uuid4().hex
+        self._phone_input = phone or any(row.get("phone") for row in waiting)
+        self._turn_auto = []
         self._taken = 0
         self._delivered = []
         self._pending_followup = waiting
@@ -487,7 +505,7 @@ class ChatService:
         with self._lock:
             if self._closed.is_set():
                 return
-            if self._stop.is_set():
+            if self._stop.is_set() and kind != "auto":
                 # A tool may already be returning when Stop is requested.
                 # Listeners can account for it without adding to HUD replay.
                 if kind == "tool_end":
@@ -498,6 +516,8 @@ class ChatService:
                 self._publish({"kind": kind, **fields})
             elif kind in ("approval_pending", "step_end"):
                 self._publish({"kind": kind, **fields})
+            elif kind == "auto":
+                self._turn_auto.append(self._emit(kind, **fields))
             else:
                 listener_fields = {key: fields.pop(key) for key in ("outcome", "changes_state")
                                    if key in fields}
@@ -551,6 +571,7 @@ class ChatService:
                         take_steering=self._take_steering,
                         admit_completion=self._admit_completion, emit=self._on_event,
                         tool_write=self._tool_write, record_outside_text=self._record_outside_text,
+                        phone_input=lambda: self._phone_input,
                         turn_id=self._turn_id,
                         approvals=self.approvals, calendar=self._calendar, work=self.work,
                     )
@@ -567,9 +588,9 @@ class ChatService:
                         saved = 0
                         reply_stamp = self._clock()
                         if recorded:
-                            saved = session.save(recorded, stopped=stopped, prompt_stamp=self._prompt["t"],
-                                                 steer_stamps=[row["t"] for row in self._delivered],
-                                                 reply_stamp=reply_stamp)
+                            saved = session.save(recorded, stopped=stopped, prompt=self._prompt,
+                                                 delivered=self._delivered, reply_stamp=reply_stamp,
+                                                 auto=self._turn_auto)
                         if stopped:
                             self._finish_stopped(saved)
                             return

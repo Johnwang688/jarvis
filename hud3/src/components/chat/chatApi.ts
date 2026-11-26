@@ -17,6 +17,15 @@ export interface ChatTool {
   summary?: string;
 }
 
+export interface ChatAuto {
+  kind: "auto";
+  tool: string;
+  title: string;
+  target: string;
+  level: "L0" | "L1";
+  why: string;
+}
+
 export interface ChatSnapshot {
   state: ChatState;
   session_id: string | null;
@@ -25,7 +34,8 @@ export interface ChatSnapshot {
   tools: ChatTool[];
   history: ChatMessage[];
   approvals: number;
-  replay?: { history_prefix: number; events: ChatEvent[] };
+  outside_text: boolean;
+  replay?: { history_prefix: number; events: ChatEvent[]; saved?: (ChatAuto & { after: number })[] };
 }
 
 type SteerInput = { seq: number; text: string };
@@ -35,6 +45,7 @@ type ChatEvent = { seq: number; t?: number } & (
   | { kind: "reply"; text: string }
   | { kind: "tool_start"; name: string }
   | ({ kind: "tool_end"; ok: boolean; summary: string } & ChatTool)
+  | ChatAuto
   | { kind: "error" | "stopped"; discarded?: number[] }
 );
 
@@ -45,6 +56,7 @@ interface ChatEvents {
   gap: boolean;
   events: ChatEvent[];
   approvals: number;
+  outside_text?: boolean;
 }
 
 export type ChatAction = { route: "send"; text: string } | { route: "stop" | "new" };
@@ -78,6 +90,12 @@ function isTool(value: unknown): value is ChatTool {
     && (value.summary == null || typeof value.summary === "string");
 }
 
+function isAuto(value: unknown): value is ChatAuto {
+  return record(value) && value.kind === "auto" && typeof value.tool === "string"
+    && typeof value.title === "string" && typeof value.target === "string"
+    && (value.level === "L0" || value.level === "L1") && typeof value.why === "string";
+}
+
 function isEvent(value: unknown): value is ChatEvent {
   if (!record(value) || !isSequence(value.seq) || !isTimestamp(value.t)) return false;
   switch (value.kind) {
@@ -93,6 +111,8 @@ function isEvent(value: unknown): value is ChatEvent {
       return typeof value.name === "string";
     case "tool_end":
       return typeof value.name === "string" && typeof value.ok === "boolean" && typeof value.summary === "string";
+    case "auto":
+      return isAuto(value);
     case "error":
     case "stopped":
       return value.discarded === undefined || (Array.isArray(value.discarded) && value.discarded.every(isSequence));
@@ -139,6 +159,7 @@ export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
   // Older chat responses predate approvals.
   if (!record(value) || !isState(value.state) || !isSequence(value.seq)
     || (value.approvals !== undefined && !isSequence(value.approvals))
+    || (value.outside_text !== undefined && typeof value.outside_text !== "boolean")
     || (value.session_id !== null && typeof value.session_id !== "string")
     || typeof value.draft !== "string" || !Array.isArray(value.history) || !value.history.every(isMessage)
     || !Array.isArray(value.tools) || !value.tools.every((tool) => typeof tool === "string" || isTool(tool))) {
@@ -156,10 +177,16 @@ export async function readChat(signal: AbortSignal): Promise<ChatSnapshot> {
       || !Array.isArray(candidate.events) || !candidate.events.every(isEvent)) {
       throw new Error("Invalid chat replay");
     }
-    replay = { history_prefix: candidate.history_prefix, events: candidate.events };
+    const prefix = candidate.history_prefix;
+    const saved = candidate.saved;
+    if (saved !== undefined && (!Array.isArray(saved) || !saved.every((event) =>
+      record(event) && isSequence(event.after) && event.after < prefix && isAuto(event)))) {
+      throw new Error("Invalid saved chat replay");
+    }
+    replay = { history_prefix: prefix, events: candidate.events, saved };
   }
   return { state: value.state, seq: value.seq, session_id: value.session_id, draft: value.draft,
-    history, tools, replay, approvals: value.approvals ?? 0 };
+    history, tools, replay, approvals: value.approvals ?? 0, outside_text: value.outside_text ?? false };
 }
 
 export async function readEvents(after: number, signal: AbortSignal): Promise<ChatEvents> {
@@ -167,12 +194,13 @@ export async function readEvents(after: number, signal: AbortSignal): Promise<Ch
   if (!record(value) || !isState(value.state) || !isSequence(value.seq) || typeof value.gap !== "boolean"
     || (value.session_id != null && typeof value.session_id !== "string")
     || (value.approvals !== undefined && !isSequence(value.approvals))
+    || (value.outside_text !== undefined && typeof value.outside_text !== "boolean")
     || !Array.isArray(value.events) || (!value.gap && !value.events.every(isEvent))) {
     throw new Error("Invalid chat events");
   }
   return { state: value.state, seq: value.seq, session_id: value.session_id as string | null | undefined,
     gap: value.gap, events: value.gap ? [] : value.events,
-    approvals: value.approvals ?? 0 };
+    approvals: value.approvals ?? 0, outside_text: value.outside_text };
 }
 
 export async function writeChat(action: ChatAction, signal: AbortSignal):
