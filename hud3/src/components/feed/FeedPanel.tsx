@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { BriefCard, type BriefDraft } from "./BriefCard";
+import { FeedMessages } from "./FeedMessages";
 import { useFeed } from "./useFeed";
 import type { Brief, BriefKind } from "./feedApi";
+import type { WorkResult } from "../work/workApi";
 
 const filters = [
   ["decision", "Decisions"],
@@ -10,7 +12,7 @@ const filters = [
   ["all", "All"],
 ] as const;
 
-export function FeedPanel() {
+export function FeedPanel({ work }: { work?: WorkResult }) {
   const { snapshot, error, pending, writeErrors, write } = useFeed();
   const [filter, setFilter] = useState<BriefKind | "all">("all");
   const [drafts, setDrafts] = useState<ReadonlyMap<string, BriefDraft>>(new Map());
@@ -40,6 +42,7 @@ export function FeedPanel() {
   return (
     <section className="agent-panel agent-feed" data-panel="feed" aria-labelledby="panel-feed">
       <h2 id="panel-feed">Feed</h2>
+      <FeedMessages work={work} />
       {error && <p className="feed-error" role="status">{error}</p>}
       {!snapshot && !error && <p role="status">Loading briefs…</p>}
       {(populated || drafts.size > 0) && (

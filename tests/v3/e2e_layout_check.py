@@ -133,6 +133,32 @@ class Layout(window.Window):
         first.get_by_role("button", name="Got it").click()
         self.expect(self.feed_panel.locator(":scope > .feed-list").get_by_role("article")).to_have_count(14)
 
+    def test_messages_and_briefs_scroll_inside_the_feed(self):
+        for n in range(6):
+            self.feed.post({"kind": "news", "rank": 5, "ask": f"Fixture brief {n}", "why_now": "Fixture context."})
+        self.start_daemon()
+        self.open_window()
+        messages = self.feed_panel.get_by_role("region", name="Messages", exact=True)
+        briefs = self.feed_panel.get_by_role("article")
+        previous = 0
+        for count in (0, 3, 12):
+            if count:
+                self.seed_messages(("completed",) * (count - previous), offset=previous)
+                self.page.reload(wait_until="load")
+            previous = count
+            self.expect(messages.get_by_role("listitem")).to_have_count(count, timeout=window.WAIT_MS)
+            self.expect(briefs).to_have_count(6, timeout=window.WAIT_MS)
+            for width, height in SIZES[1:]:
+                with self.subTest(count=count, view=(width, height)):
+                    seen = self.measure(width, height, f"messages-{count}")
+                    self.assert_one_screen(seen, inside=("chat", "feed", "status", "voice", "cron", "t3", "vault", "skills"))
+                    if count == 12:
+                        self.assertGreater(seen["feed"][0], seen["feed"][1], "the feed should scroll inside its panel")
+                        briefs.last.scroll_into_view_if_needed()
+                        self.assertGreater(self.feed_panel.evaluate("el => el.scrollTop"), 0)
+                        # Allow fractional clipping when Chromium rounds the scroll offset.
+                        self.expect(briefs.last).to_be_in_viewport(ratio=0.99)
+
     def test_an_empty_window_fills_the_screen(self):
         self.start_daemon()
         self.open_window()
@@ -191,8 +217,8 @@ class Layout(window.Window):
         }))
         self.page.reload(wait_until="load")
         panel = self.page.get_by_role("region", name="T3", exact=True)
-        self.expect(panel.locator("li")).to_have_count(50, timeout=window.WAIT_MS)
-        self.expect(panel.get_by_role("heading").nth(1)).to_have_text("Messages from Jarvis")
+        self.expect(panel.locator("li")).to_have_count(47, timeout=window.WAIT_MS)
+        self.expect(self.feed_panel.get_by_role("region", name="Messages", exact=True).locator("li")).to_have_count(3)
         scroll_list = panel.locator(".work-list")
         controls = "button,a,input,select,textarea,iframe,details,summary,[tabindex],[contenteditable]"
         for width, height in (*SIZES, (390, 844)):

@@ -6,6 +6,7 @@ import { UnlockContext } from "../components/UnlockContext";
 import { ChatPanel } from "../components/chat/ChatPanel";
 import { FeedPanel } from "../components/feed/FeedPanel";
 import { WorkPanel } from "../components/work/WorkPanel";
+import { useWork } from "../components/work/useWork";
 import { postAuth, readSession, unlockPhone } from "./auth";
 
 const TABS = ["Feed", "Chat", "Work"] as const;
@@ -16,6 +17,7 @@ const endsAt = (seconds: number) => seconds ? performance.now() + seconds * 1000
 
 export function Dashboard({ initialSeconds, onSignedOut }: { initialSeconds: number; onSignedOut: () => void }) {
   const status = useDaemonStatus();
+  const work = useWork();
   const [tab, setTab] = useState<Tab>("Feed");
   const [approvals, setApprovals] = useState(0);
   const [deadline, setDeadline] = useState(() => endsAt(initialSeconds));
@@ -120,13 +122,13 @@ export function Dashboard({ initialSeconds, onSignedOut }: { initialSeconds: num
         </header>
         <div className="phone-content">
           <div role="tabpanel" id="phone-feed" aria-labelledby="tab-feed" hidden={tab !== "Feed"}>
-            <FeedPanel />
+            <FeedPanel work={work} />
           </div>
           <div role="tabpanel" id="phone-chat" aria-labelledby="tab-chat" hidden={tab !== "Chat"}>
             <ChatPanel onApprovalsChange={setApprovals} />
           </div>
           <div role="tabpanel" id="phone-work" aria-labelledby="tab-work" hidden={tab !== "Work"} className="phone-work">
-            <WorkPanel />
+            <WorkPanel work={work} />
             <section className="agent-panel" data-panel="cron" aria-labelledby="phone-jobs">
               <h2 id="phone-jobs">Scheduled jobs</h2>
               <Jobs status={status} />
