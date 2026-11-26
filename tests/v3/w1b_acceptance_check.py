@@ -25,7 +25,7 @@ Contract: the v3 chat can list, read, start and message coding threads in T3 thr
       again, so a registry change after the card can only make W1a's start() raise (-> "Error: <message>", nothing started). No grant ->
       "Error: ..." and nothing is called. The result names the new thread id.
     ChatApprover, for work_send: finds the thread with work.threads() (no T3 call); a thread id not there -> Refusal("That is not a thread Jarvis
-      started."), no card. preview = {"thread_id", "project", "title"} of that ledger thread; kind thread.start; digest over the raw arguments and
+      started."), no card. preview = {"thread_id", "project", "title"} of that ledger thread; kind thread.send; digest over the raw arguments and
       that preview. With the grant: work.send(thread_id, message, guard=<the same stop check>), the raw message. No grant -> "Error: ..." and nothing is sent.
     Tool events name the work tools by name.
   jarvis/v3/approval_card.py   build_card("work_start", args, plan) -> {"title": "Start a coding thread", "rows": Project <project> | Folder <path> |
@@ -202,7 +202,7 @@ class Start(Base):
         (plan,) = self.work.plans
         self.assertEqual(plan, {"project": "sample-app", "path": "/srv/example/sample-app", "provider": "codex", "model": "example-model-1",
                                 "title": "Fix the login page", "brief": BRIEF, "base": "main", "branch": "jarvis/fix-the-login-page-0001"})
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_start", "L2", "default:thread.start"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_start", "L1", "owner-request:thread.start"))
         self.assertEqual(item["card"], start_card(plan, "A new worktree from main on branch jarvis/fix-the-login-page-0001"))
         self.assertEqual(item["digest"], ap().digest(item["id"], self.sid(svc), "work_start", START, plan))
         for key in plan:
@@ -251,6 +251,7 @@ class Start(Base):
         self.assertLess(time.monotonic() - begun, 4)
         self.assertEqual((self.broker.pending(), self.work.t3, self.states(item["id"])), ([], [], ["pending", "cancelled"]))
         policy.set_rule(self.policy_file, "thread.start", "L3")
+        policy.set_rule(self.policy_file, "thread.send", "L3")
         svc = self.talk(reply(calls=[("work_start", START), ("work_send", SEND)]), reply("Blocked."))
         results = self.run_turn(svc)[-2:]  # this turn's two calls; earlier turns share the session
         self.assertEqual(len(results), 2)
@@ -334,7 +335,7 @@ class Threads(Base):
         svc = self.talk(reply(calls=[("work_send", SEND)]), reply("Sent."))
         svc.send("Tell the sync thread to add a test.")
         item = self.card_after()
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_send", "L2", "default:thread.start"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("work_send", "L1", "owner-request:thread.send"))
         rows = [("Thread", KNOWN.title), ("Thread id", "t-known"), ("In project", "sample-app"), ("Message", SEND["message"])]
         self.assertEqual(item["card"], {"title": "Send to a coding thread", "rows": [{"label": k, "value": v} for k, v in rows]})
         preview = {"thread_id": "t-known", "project": "sample-app", "title": KNOWN.title}

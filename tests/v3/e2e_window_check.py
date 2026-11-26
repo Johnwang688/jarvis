@@ -330,6 +330,10 @@ class Window(unittest.TestCase):
             ["Save the fixture note.", "vault_add · Running"], timeout=WAIT_MS,
         )
 
+        for label, value in (("Policy level", "L0"), ("Why asked", "default:vault.update")):
+            field = card.locator(".approval-policy .approval-field").filter(
+                has=self.page.get_by_text(label, exact=True))
+            self.expect(field.locator("dd")).to_have_text(value)
         card.get_by_text("Details", exact=True).click()
         body = card.locator("details .approval-field").filter(
             has=self.page.get_by_text("Body", exact=True)

@@ -23,7 +23,10 @@ from jarvis.tools.clock import get_datetime
 from . import vault
 from .approval_card import build_card, card_text
 from .approvals import digest
-from .chat import CALENDAR_WRITES, GATED_TOOLS, TOOL_NAMES, WORK_GATED, WORK_TOOLS, available_tools, calendar_available
+from .chat import (
+    CALENDAR_WRITES, CLEAN_RESULT_TOOLS, GATED_TOOLS, TOOL_NAMES, WORK_GATED, WORK_TOOLS,
+    available_tools, calendar_available,
+)
 from .feed import Feed
 from .index import Index
 from .owner_routes import FEED_LOCK_TIMEOUT
@@ -63,9 +66,9 @@ _POLICY_KINDS = {
     "calendar_delete": "calendar.event_delete",
     "vault_add": "vault.update",
     "vault_patch": "vault.update",
-    "vault_archive": "vault.update",
+    "vault_archive": "vault.archive",
     "work_start": "thread.start",
-    "work_send": "thread.start",
+    "work_send": "thread.send",
 }
 
 
@@ -87,6 +90,7 @@ class _TurnTools:
     tool_write: Callable
     stop: Callable
     before_request: Callable
+    outside_text: Callable[[], bool]
     calendar: Callable
     work: object = None
     posts: int = 0
@@ -178,7 +182,11 @@ class ChatApprover:
             bound = signature(_GATED_WRAPPERS[name]).bind(**args)
             bound.apply_defaults()
             call_args = bound.arguments
-            facts = {"kind": _POLICY_KINDS[name], "tainted": True}
+            kind = _POLICY_KINDS[name]
+            tainted = turn.outside_text()
+            facts = {"kind": kind, "tainted": tainted}
+            if not tainted:
+                facts["owner_request"] = True
             if name in CALENDAR_WRITES:
                 if not calendar_available():
                     return tools.Refusal("Google Calendar is not connected.")
@@ -200,6 +208,9 @@ class ChatApprover:
                 return tools.Refusal("Policy blocks this action.")
             if verdict["level"] not in ("L0", "L1", "L2"):
                 return tools.Refusal("Policy could not evaluate this action.")
+            if tainted and verdict == {"level": "L2", "why": f"default:{kind}"}:
+                # Surface the taint on chat cards that would otherwise show an L2 default.
+                verdict = {"level": "L2", "why": "hard:tainted"}
             try:
                 card = build_card(name, call_args, preview)
             except WorkError as exc:
@@ -772,7 +783,7 @@ def _enable_request_guard():
 
 
 def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
-             completion, stop, take_steering, admit_completion, emit, tool_write,
+             completion, stop, take_steering, admit_completion, emit, tool_write, record_outside_text,
              turn_id=None, approvals=None, calendar=None, work=None):
     register_tools(include_gated=approvals is not None)
     session = _TurnSession(sessions.Session(session_id, path, meta), clock)
@@ -813,6 +824,9 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
             if kind == "tool_start":
                 emit(kind, name=shown_name)
             else:
+                # The loop emits each tool group's results before it can dispatch a gated call.
+                if not meta["outside_text"] and name not in CLEAN_RESULT_TOOLS:
+                    record_outside_text(session.session)
                 offered = name in names
                 ok = offered and not detail.startswith(_NOT_OK)
                 summary = detail[:SUMMARY_CHARS] if ok else _TOOL_FAILED
@@ -823,6 +837,7 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                 emit(kind, name=shown_name, ok=ok, summary=summary)
 
     turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
+                      lambda: meta["outside_text"],
                       _default_calendar if calendar is None else calendar, work=work)
     agent = _ChatAgent(
         model=models.tier("orchestrator"), system=config.SYSTEM_PROMPT + _CHAT_PROMPT,

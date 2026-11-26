@@ -4,7 +4,7 @@ Contract: the v3 chat's six write tools ask the owner through an in-memory broke
   jarvis/v3/approvals.py   light: never imports jarvis.agent/llm/models/tools, jarvis.v3.fastpath, httpx or openai
     ApprovalBroker(*, clock=time.monotonic, timeout_s=120.0, new_id=<secrets.token_urlsafe>, log=None)
       log: path of approvals.jsonl (None: no log). Append-only, 0600, never through a link, parent created 0700 if missing. One JSON row
-           per transition, keys exactly {"id", "tool", "digest", "state", "t"} (t: time.time()); never arguments, cards or previews.
+           per transition, keys exactly {"id", "tool", "digest", "level", "why", "state", "t"} (t: time.time()); never arguments, cards or previews.
            Each request: a "pending" row written before it is listed (if it cannot be written the ask denies), then exactly one final row.
       ask(tool, args, card, *, session_id, turn_id, verdict, preview=None, cancelled=None) -> bool
            blocks the calling turn thread; True only when the owner approved. Waits in real-time slices of at most 0.1 s; expires once
@@ -158,7 +158,8 @@ class Broker(unittest.TestCase):
         self.assertEqual(self.b.answer(item["id"], item["digest"], "approve"), "approved")
         self.assertIs(self.finished(thread, out), True)
         self.assertEqual([(r["id"], r["state"]) for r in self.rows()], [(item["id"], "pending"), (item["id"], "approved")])
-        self.assertTrue(all(set(r) == {"id", "tool", "digest", "state", "t"} and r["digest"] == item["digest"] for r in self.rows()))
+        self.assertTrue(all(set(r) == {"id", "tool", "digest", "level", "why", "state", "t"}
+                            and r["digest"] == item["digest"] for r in self.rows()))
         self.assertNotIn(FAKE_TOKEN, self.log.read_text())
         self.assertEqual(stat.S_IMODE(self.log.stat().st_mode), 0o600)
 
@@ -261,7 +262,7 @@ class ChatFlow(Base):
         svc = self.talk(lambda messages: (approvers.append(runtime.approver()), reply(calls=[("vault_add", ADD)]))[1], reply("Saved."))
         svc.send("Remember that I like green tea.")
         item = self.next_card()
-        self.assertEqual((item["tool"], item["level"], item["why"]), ("vault_add", "L2", "hard:tainted"))
+        self.assertEqual((item["tool"], item["level"], item["why"]), ("vault_add", "L0", "default:vault.update"))
         self.assertIn("The owner prefers green tea.", json.dumps(item["card"]))
         self.assertEqual((svc.snapshot()["approvals"], svc.events(0)["approvals"]), (1, 1))
         self.assertEqual(self.broker.answer(item["id"], item["digest"], "approve"), "approved")
@@ -366,7 +367,7 @@ class CalendarFlow(Base):
         svc.send("Rename my appointment.")
         item = self.next_card()
         self.assertTrue(all(part in json.dumps(item["card"]) for part in ("Dentist checkup", "Orthodontist visit")), item["card"])
-        self.assertEqual((item["level"], item["why"]), ("L2", "default:calendar.event_change"))
+        self.assertEqual((item["level"], item["why"]), ("L1", "owner-request:calendar.event_change"))
         self.cal.version = 2                                         # someone edits the event after the owner saw the card
         self.broker.answer(item["id"], item["digest"], "approve")
         self.assertEqual(self.wait_idle(svc), "idle")
@@ -431,7 +432,7 @@ class Routes(Base):
         status, out = self.call("GET", "/v3/owner/approvals")
         (shown,) = out["approvals"]
         self.assertEqual((status, set(shown)), (200, KEYS))
-        self.assertEqual((shown["id"], shown["tool"], shown["level"], shown["why"]), (item["id"], "calendar_create", "L2", "hard:tainted"))
+        self.assertEqual((shown["id"], shown["tool"], shown["level"], shown["why"]), (item["id"], "calendar_create", "L0", "default:calendar.block"))
         self.assertIsInstance(shown["card"]["title"], str)
         self.assertTrue(all(set(row) == {"label", "value"} and all(isinstance(v, str) for v in row.values()) for row in shown["card"]["rows"]))
         self.assertNotIn(FAKE_TOKEN, json.dumps(out))

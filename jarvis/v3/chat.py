@@ -30,6 +30,11 @@ CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_del
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
 WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})
 WORK_GATED = frozenset({"work_start", "work_send"})
+# Results that never carry text written outside this session. Thread titles and learned
+# skill names can come from an earlier session that read outside text, so they are not here.
+CLEAN_RESULT_TOOLS = frozenset({
+    "get_datetime", "calendar_free", "work_projects", "brief_post",
+}) | GATED_TOOLS | WORK_GATED
 TOOL_NAMES = frozenset({
     "get_datetime", "vault_list", "vault_read", "vault_search", "index_search",
     "skill_view", "skill_names", "brief_post", *CALENDAR_TOOLS,
@@ -118,35 +123,39 @@ def _timestamp(value):
     return type(value) in (int, float) and -math.inf < value < math.inf
 
 
-def _valid_messages(messages):
+def _history_outside_text(messages):
+    """Return the taint of a valid transcript, or None if it cannot be resumed."""
     if not isinstance(messages, list) or not messages:
-        return False
-    pending = set()
+        return None
+    outside_text = False
+    pending = {}
     for message in messages:
         if not isinstance(message, dict):
-            return False
+            return None
         role, body = message.get("role"), message.get("content")
         if role == "tool":
             call_id = message.get("tool_call_id")
             if not isinstance(body, str) or not isinstance(call_id, str) or call_id not in pending:
-                return False
-            pending.remove(call_id)
+                return None
+            name = pending.pop(call_id)
+            if name not in CLEAN_RESULT_TOOLS or message.get("name", name) != name:
+                outside_text = True
         elif pending:
-            return False
+            return None
         elif role == "assistant" and "tool_calls" in message:
             calls = message["tool_calls"]
             if not isinstance(calls, list) or not calls or (body is not None and not isinstance(body, str)):
-                return False
+                return None
             for call in calls:
                 function = call["function"]
                 call_id = call["id"]
                 if (not isinstance(call_id, str) or call_id in pending or call["type"] != "function"
                         or not isinstance(function["name"], str) or not isinstance(function["arguments"], str)):
-                    return False
-                pending.add(call_id)
+                    return None
+                pending[call_id] = function["name"]
         elif role not in ("user", "assistant") or not isinstance(body, str):
-            return False
-    return not pending
+            return None
+    return None if pending else outside_text
 
 
 def _read_meta(path, session_id):
@@ -178,6 +187,7 @@ class ChatService:
         self._worker = None
         self._state = "idle"
         self._session_id = None
+        self._outside_text = False
         self._turn_id = None
         self._selected = False
         self._seq = 0
@@ -238,13 +248,18 @@ class ChatService:
             try:
                 with self._session(root_fd, sid) as path:
                     meta = _read_meta(path, sid)
+                    history_taint = False
                     if meta["turns"]:
-                        if not _valid_messages(json.loads((path / "messages.json").read_bytes())) or not _history(path):
+                        history_taint = _history_outside_text(json.loads((path / "messages.json").read_bytes()))
+                        if history_taint is None or not _history(path):
                             return
                     elif any((path / name).exists() for name in _SESSION_FILES[1:]):
                         # A crash may leave part of the first turn on disk.
                         return
                 self._session_id = sid
+                # Old transcripts may have lost results to compaction, Stop or a failed turn.
+                saved_taint = meta.get("outside_text", meta["turns"] > 0)
+                self._outside_text = history_taint or saved_taint is not False
             except _BAD_SESSION:
                 pass
 
@@ -254,8 +269,9 @@ class ChatService:
         now = self._clock()
         with self._session(root_fd, sid) as path, (path / "meta.json").open("x", encoding="utf-8") as meta:
             json.dump({"id": sid, "created": now, "updated": now, "turns": 0,
-                       "cost_usd": 0.0, "title": "", "surface": "v3-chat"}, meta)
+                       "cost_usd": 0.0, "title": "", "surface": "v3-chat", "outside_text": False}, meta)
         self._session_id = sid
+        self._outside_text = False
         self._selected = True
         return sid
 
@@ -273,7 +289,7 @@ class ChatService:
                     raise ChatStorageError("Chat session is unavailable.") from None
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
                     "draft": self._draft, "tools": available_tools(gated=self.approvals is not None, work=self.work),
-                    "history": history, "last_error": self._last_error,
+                    "history": history, "last_error": self._last_error, "outside_text": self._outside_text,
                     "replay": self._replay(len(history)),
                     "approvals": self._approval_count()}
 
@@ -423,19 +439,29 @@ class ChatService:
         self._emit("stopped", **self._discard_steers())
         self._complete_turn(saved)
 
+    def _record_outside_text(self, session):
+        with self._lock:
+            self._outside_text = True
+            session.meta["outside_text"] = True
+            if not self._closed.is_set():
+                session.save_meta()
+
     def _run(self, sid, inputs):
         while True:
             try:
                 from .fastpath import run_turn
 
                 with self._directory() as root_fd, self._session(root_fd, sid) as path:
+                    meta = _read_meta(path, sid)
+                    meta["outside_text"] = self._outside_text
                     session = run_turn(
-                        sid, path, _read_meta(path, sid), text="\n\n".join(inputs), data_dir=self.root.parent,
+                        sid, path, meta, text="\n\n".join(inputs), data_dir=self.root.parent,
                         feed_root=self._feed_root, clock=self._clock, completion=self._completion,
                         stop=lambda: self._stop.is_set() or self._closed.is_set(),
                         take_steering=self._take_steering,
                         admit_completion=self._admit_completion, emit=self._on_event,
-                        tool_write=self._tool_write, turn_id=self._turn_id,
+                        tool_write=self._tool_write, record_outside_text=self._record_outside_text,
+                        turn_id=self._turn_id,
                         approvals=self.approvals, calendar=self._calendar, work=self.work,
                     )
                     with self._lock:
