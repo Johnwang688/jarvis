@@ -276,7 +276,7 @@ class ExecutorChecks(unittest.TestCase):
         self.assertEqual([call[1] for call in self.t3.starts], [expected])
 
     def test_09_running_claim_recovers_only_a_matching_later_ledger_start(self):
-        for mismatch in (None, "timestamp", "project", "title", "brief_sha256", "ambiguous"):
+        for mismatch in (None, "timestamp", "project", "title", "brief_sha256", "message", "ambiguous"):
             with self.subTest(mismatch=mismatch):
                 proposal = self.add(str(mismatch))
                 self.answer(proposal)
@@ -291,6 +291,8 @@ class ExecutorChecks(unittest.TestCase):
                                        "brief_sha256": "0" * 64}[mismatch]
                 if mismatch == "timestamp":
                     event["at"] = self.clock() - 1
+                if mismatch == "message":
+                    event.update(message=True, notice_key="1" * 64, relay_sha256="2" * 64)
                 self.ledger.record_start(**event)
                 if mismatch == "ambiguous":
                     self.ledger.record_start(**{**event, "thread_id": "fake-second-match"})

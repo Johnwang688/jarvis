@@ -23,10 +23,10 @@ from jarvis.v3.proposals import Draft, ProposalError, ProposalStore, action_sha2
 
 
 _STATES = {
-    "new": {"briefed"}, "briefed": {"approved", "dismissed", "edited", "expired"},
+    "new": {"briefed", "messaged"}, "briefed": {"approved", "dismissed", "edited", "expired"},
     "approved": {"running"}, "running": {"done", "failed", "unknown"},
     "done": set(), "failed": set(), "unknown": set(),
-    "dismissed": set(), "edited": set(), "expired": set(),
+    "dismissed": set(), "edited": set(), "expired": set(), "messaged": set(),
 }
 
 
@@ -366,10 +366,95 @@ class ProposalChecks(unittest.TestCase):
         self.assertTrue(self.store.claim(pid))
         self.assertEqual(reopened.transition_at(pid), self.instant)
 
+    def test_messaged_replays_and_is_final_and_idempotent(self):
+        pid = self.store.add(self._draft())["id"]
+        self.store.message(pid, "fake-thread")
+        self.assertEqual(self._log_rows()[-1], {
+            "id": pid, "state": "messaged", "at": self.instant.isoformat(),
+            "brief_id": None, "result": {"thread_id": "fake-thread"},
+        })
+        before = self.store.path.read_bytes()
+        reopened = ProposalStore(self.store.root, clock=lambda: self.instant.timestamp())
+        self.assertEqual(reopened.get(pid)["result"], {"thread_id": "fake-thread"})
+        self.assertEqual(reopened.transition_at(pid), self.instant)
+        self.assertEqual((reopened.briefs_today(), reopened.messaged_today()), (0, 1))
+        self.instant += timedelta(days=31)
+        reopened.message(pid, "fake-thread")
+        with self.assertRaises(ProposalError):
+            reopened.message(pid, "other-thread")
+        with self.assertRaises(ProposalError):
+            reopened.brief(pid, self.feed)
+        self.assertEqual(self.feed.briefs(), [])
+        self.assertEqual(self.store.path.read_bytes(), before)
+        briefed = self._add_and_brief("briefed")
+        with self.assertRaises(ProposalError):
+            reopened.message(briefed["id"], "fake-thread")
+
+    def test_malformed_message_records_and_changed_hash_are_refused(self):
+        pid = self.store.add(self._draft())["id"]
+        before = self.store.path.read_bytes()
+        event = dict(id=pid, state="messaged", at=self.instant.isoformat(),
+                     brief_id=None, result={"thread_id": "fake-thread"})
+        for change in ({"brief_id": "1" * 32}, {"at": "yesterday"}, {"extra": None}, {"result": None},
+                       {"result": {"ref": "fake-thread"}}, {"result": {"thread_id": "invalid id"}},
+                       {"result": {"thread_id": "fake-thread", "extra": None}}):
+            with self.subTest(change=change):
+                self.store.path.write_bytes(before + json.dumps(event | change).encode() + b"\n")
+                with self.assertRaises(ProposalError):
+                    self.store.get(pid)
+        base = json.loads(before)
+        base["action"]["args"]["message"] = "Changed fake reply"
+        self.store.path.write_text(json.dumps(base) + "\n")
+        with self.assertRaisesRegex(ProposalError, "action hash differs"):
+            self.store.message(pid, "fake-thread")
+
+    def test_messaged_and_briefed_share_a_chicago_day_cap(self):
+        staged = self.store.add(self._draft("staged"))
+        old = self.store.add(self._draft("previous-chicago-day"))
+        self.store.message(old["id"], "fake-thread")
+        self.assertEqual(self.store.messaged_today(), 1)
+        self.instant += timedelta(minutes=10)  # Same UTC day, next Chicago day.
+        self.assertEqual(self.store.messaged_today(), 0)
+        waiting = self.store.add(self._draft("waiting"))
+        self.store.message(staged["id"], "fake-next-thread")
+        for i in range(proposals.CAPS["day"] - 1):
+            self._add_and_brief(str(i))
+        self.assertEqual(self.store.messaged_today(), 1)
+        self.assertEqual(self.store.briefs_today(), proposals.CAPS["day"] - 1)
+        self.assertIsNone(self.store.add(self._draft("overflow")))
+        with self.assertRaises(ProposalError):
+            self.store.message(waiting["id"], "fake-other-thread")
+        self.instant += timedelta(days=1)
+        self.store.message(waiting["id"], "fake-other-thread")
+        self.assertEqual(self.store.messaged_today(), 1)
+
+    def test_messaged_project_cap_and_dedupe_expire_from_delivery(self):
+        draft = self._draft(project="fake-project")
+        first = self.store.add(draft)
+        duplicate = self.store.add(draft)
+        self.instant += timedelta(hours=2)
+        self.store.message(first["id"], "fake-first-thread")
+        with self.assertRaises(ProposalError):
+            self.store.message(duplicate["id"], "fake-duplicate-thread")
+        self._add_and_brief("active", project=draft.project)
+        extra = self.store.add(self._draft("extra", project=draft.project))
+        self.store.message(extra["id"], "fake-extra-thread")
+        waiting = self._draft("waiting", project=draft.project)
+        self.instant += timedelta(hours=72, seconds=-1)
+        self.assertIsNone(self.store.add(waiting))
+        self.instant += timedelta(seconds=1)
+        self.assertIsNotNone(self.store.add(waiting))
+        self.instant += timedelta(days=27, seconds=-1)
+        self.assertIsNone(self.store.add(draft))
+        self.instant += timedelta(seconds=1)
+        self.assertIsNotNone(self.store.add(draft))
+
     def test_every_state_transition(self):
         def transition(pid, state, *, result=None):
             if state == "briefed":
                 self.store.brief(pid, self.feed)
+            elif state == "messaged":
+                self.store.message(pid, "fake-thread")
             elif state == "running":
                 self.assertTrue(self.store.claim(pid))
             else:
@@ -381,7 +466,7 @@ class ProposalChecks(unittest.TestCase):
             for state in path[1:]:
                 transition(pid, state)
             for state in (*_STATES, "unrecognised"):
-                if state in _STATES[current] and state not in ("briefed", "running"):
+                if state in _STATES[current] and state not in ("briefed", "messaged", "running"):
                     continue
                 with self.subTest(current=current, refused=state):
                     before = self.store.path.read_bytes()

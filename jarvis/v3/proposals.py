@@ -29,6 +29,8 @@ _LIFETIME = timedelta(hours=72)
 _LOG = "proposals.jsonl"
 _ID = re.compile(r"[0-9a-f]{32}")
 _HASH = re.compile(r"[0-9a-f]{64}")
+# Match the work ledger's T3 identifiers without loading the work client.
+_THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:%-]{0,127}")
 _HELD = {"briefed", "approved", "running"}
 _TAINT_ROW = {"label": "Based on untrusted text", "ref": "jarvis:tainted"}
 _TOOLS = {
@@ -38,7 +40,7 @@ _TOOLS = {
     "vault.update": "vault_add",
 }
 _TRANSITIONS = {
-    "new": ("briefed",),
+    "new": ("briefed", "messaged"),
     "briefed": ("approved", "dismissed", "edited", "expired"),
     "approved": ("running",),
     "running": ("done", "failed", "unknown", "approved"),
@@ -108,6 +110,10 @@ def action_sha256(proposal: Proposal) -> str:
 
 def _valid_id(value):
     return type(value) is str and _ID.fullmatch(value) is not None
+
+
+def _valid_thread_id(value):
+    return type(value) is str and _THREAD_ID.fullmatch(value) is not None
 
 
 def _unique_object(pairs):
@@ -195,8 +201,9 @@ class _Snapshot:
     rows: dict[str, Proposal] = field(default_factory=dict)
     transitioned_at: dict[str, datetime] = field(default_factory=dict)
     briefed_at: dict[str, datetime] = field(default_factory=dict)
+    messaged_at: dict[str, datetime] = field(default_factory=dict)
     approved_at: dict[str, datetime] = field(default_factory=dict)
-    dismissed_at: dict[str, datetime] = field(default_factory=dict)
+    held_at: dict[str, datetime] = field(default_factory=dict)
 
     def row(self, pid):
         if not _valid_id(pid) or pid not in self.rows:
@@ -233,9 +240,14 @@ class _Snapshot:
             self.briefed_at[pid] = at
         elif brief_id is not None:
             raise ProposalError("Invalid proposal transition record.")
-        if state == "dismissed":
+        if state == "messaged":
+            result = record["result"]
+            if type(result) is not dict or result.keys() != {"thread_id"} or not _valid_thread_id(result["thread_id"]):
+                raise ProposalError("Invalid proposal message result.")
+            self.messaged_at[pid] = at
+        if state in ("dismissed", "messaged"):
             key = row["dedupe_key"]
-            self.dismissed_at[key] = max(at, self.dismissed_at.get(key, at))
+            self.held_at[key] = max(at, self.held_at.get(key, at))
         if state == "approved":
             if row["state"] == "briefed":
                 self.approved_at[pid] = at
@@ -244,22 +256,29 @@ class _Snapshot:
         self.transitioned_at[pid] = at
         row.update(state=state, result=record["result"])
 
-    def briefs_today(self, now):
+    def _posted_today(self, times, now, *, include_revisions=False):
         today = now.astimezone(_CHICAGO).date()
-        return sum(self.rows[pid]["revision_of"] is None and at.astimezone(_CHICAGO).date() == today
-                   for pid, at in self.briefed_at.items())
+        return sum(at.astimezone(_CHICAGO).date() == today for pid, at in times.items()
+                   if include_revisions or self.rows[pid]["revision_of"] is None)
+
+    def briefs_today(self, now):
+        return self._posted_today(self.briefed_at, now)
+
+    def messaged_today(self, now):
+        return self._posted_today(self.messaged_at, now, include_revisions=True)
 
     def held(self, key, now):
-        dismissed = self.dismissed_at.get(key)
-        return ((dismissed is not None and now - dismissed < _DISMISSED_HOLD)
+        at = self.held_at.get(key)
+        return ((at is not None and now - at < _DISMISSED_HOLD)
                 or any(row["dedupe_key"] == key and row["state"] in _HELD
                        for row in self.rows.values()))
 
     def full(self, project, now):
-        if self.briefs_today(now) >= CAPS["day"]:
+        if self.briefs_today(now) + self._posted_today(self.messaged_at, now) >= CAPS["day"]:
             return True
         return project is not None and sum(
-            row["project"] == project and row["state"] == "briefed" for row in self.rows.values()
+            row["state"] == "briefed" or (row["state"] == "messaged" and now - self.messaged_at[pid] < _LIFETIME)
+            for pid, row in self.rows.items() if row["project"] == project
         ) >= CAPS["project"]
 
 
@@ -363,6 +382,8 @@ class ProposalStore:
                 row = snapshot.row(pid)
                 if row["brief_id"] is not None:
                     return row["brief_id"]
+                if row["state"] != "new":
+                    raise ProposalError("Invalid proposal state transition.")
                 now = self._now()
                 if row["revision_of"] is None and (
                     snapshot.held(row["dedupe_key"], now) or snapshot.full(row["project"], now)
@@ -383,6 +404,30 @@ class ProposalStore:
                     raise ProposalError("The feed returned a different proposal brief.")
                 self._transition(directory, fd, row, "briefed", now, brief_id=bid)
                 return bid
+        except FileNotFoundError:
+            raise ProposalError("Proposal not found.") from None
+        except OSError:
+            raise ProposalError("The proposal store could not be updated safely.") from None
+
+    def message(self, pid, thread_id) -> None:
+        if not _valid_thread_id(thread_id):
+            raise ProposalError("Invalid proposal message thread identifier.")
+        result = {"thread_id": thread_id}
+        try:
+            with self._locked(write=True) as (directory, fd, snapshot):
+                row = snapshot.row(pid)
+                if row["state"] == "messaged" and row["result"] == result:
+                    return
+                if row["state"] != "new":
+                    raise ProposalError("Invalid proposal state transition.")
+                now = self._now()
+                if row["revision_of"] is None and (
+                    snapshot.held(row["dedupe_key"], now) or snapshot.full(row["project"], now)
+                ):
+                    raise ProposalError("The proposal cannot be messaged yet.")
+                if action_sha256(row) != row["action_sha256"]:
+                    raise ProposalError("The proposal action hash differs.")
+                self._transition(directory, fd, row, "messaged", now, result=result)
         except FileNotFoundError:
             raise ProposalError("Proposal not found.") from None
         except OSError:
@@ -426,8 +471,8 @@ class ProposalStore:
             raise ProposalError("The proposal claim could not be released safely.") from None
 
     def mark(self, pid, state, *, result=None) -> None:
-        if state in ("briefed", "running"):
-            raise ProposalError("Use brief or claim for this proposal state.")
+        if state in ("briefed", "messaged", "running"):
+            raise ProposalError("Use brief, message or claim for this proposal state.")
         try:
             with self._locked(write=True) as (directory, fd, snapshot):
                 row = snapshot.row(pid)
@@ -448,6 +493,9 @@ class ProposalStore:
 
     def briefs_today(self) -> int:
         return self._snapshot().briefs_today(self._now())
+
+    def messaged_today(self) -> int:
+        return self._snapshot().messaged_today(self._now())
 
     def proposals(self, state=None) -> list[Proposal]:
         return [row for row in self._snapshot().rows.values() if state is None or row["state"] == state]

@@ -46,6 +46,8 @@ _CALENDAR_LIMIT = 64
 _COPY_SPAN = 40
 _REPLY_LIMIT = 256 * 1024
 _ITEM_LIMIT = 5
+_MESSAGE_KINDS = {"thread.start", "ask"}
+_PROPOSAL_MESSAGE_CAP = 4
 _FENCED_JSON = re.compile(r"```json[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _ITEM_FIELDS = {"kind", "basis", "level_proposed", "ask", "why_now", "because", "action"}
 _ACTION_FIELDS = {
@@ -545,11 +547,51 @@ def _request(inputs, budget, run_job, clock):
     return Result("invalid"), []
 
 
-def _post(store, feed, drafts, inputs, now):
+def _notice_key(pid):
+    return hashlib.sha256(f"proposal:{pid}".encode("ascii")).hexdigest()
+
+
+def _send_proposal(store, messages, proposal, copied):
+    from .messages import ask_message, proposal_message
+
+    if store.messaged_today() >= _PROPOSAL_MESSAGE_CAP:
+        return False
+    fields = proposal["brief"]
+    common = dict(project=proposal["project"], why_now=fields["why_now"],
+                  because=fields["recommend"]["because"], tainted=proposal["tainted"])
+    start = proposal["kind"] == "thread.start"
+    try:
+        if start:
+            plan = proposal["action"]["preview"]
+            message = proposal_message(title=plan["title"], brief=plan["brief"], **common)
+        else:
+            message = ask_message(ask=fields["ask"], **common)
+    except ValueError:
+        return False
+    if any(span in copied for text in (message.subject, message.body) for span in _spans(text)):
+        return False
+
+    notice_key = _notice_key(proposal["id"])
+    result = (messages.send_proposal(message, plan, notice_key=notice_key) if start
+              else messages.send(message, notice_key=notice_key))
+    if result.outcome != "sent":
+        return False
+    store.message(proposal["id"], result.thread.thread_id)
+    return True
+
+
+def _groups(kind, project, basis, sources):
+    origins = {project} if project is not None else {
+        source.group for ref in basis if (source := sources.get((ref["type"], ref["id"]))) is not None
+    }
+    return {(kind, origin) for origin in origins}
+
+
+def _post(store, feed, drafts, inputs, now, messages):
     run_id = uuid4().hex
     grouped = set()
     posted = 0
-    # Recover a proposal whose add committed before its brief was posted.
+    # Recover a proposal whose add committed before delivery was recorded.
     now = datetime.fromtimestamp(now, UTC)
     pending = set()
     for row in store.proposals("new"):
@@ -557,29 +599,37 @@ def _post(store, feed, drafts, inputs, now):
             continue
         default = row["brief"]["default"]
         deadline = _parse_time(default["at"]) if default else _parse_time(row["created"]) + timedelta(hours=72)
-        if deadline <= now or not _policy_allows(row["kind"], row["tainted"]):
+        can_message = row["kind"] in _MESSAGE_KINDS
+        if not can_message and deadline <= now:
             continue
-        pending.add(row["dedupe_key"])
+        if not _policy_allows(row["kind"], row["tainted"]):
+            continue
         try:
-            store.brief(row["id"], feed)
+            thread = messages.find(_notice_key(row["id"])) if can_message else None
+            if thread is None and deadline <= now:
+                continue
+            pending.add(row["dedupe_key"])
+            if thread is None:
+                store.brief(row["id"], feed)
+            else:
+                store.message(row["id"], thread.thread_id)
         except ProposalError:
-            LOG.warning("Planner could not recover a proposal brief.")
+            LOG.warning("Planner could not recover a proposal delivery.")
             continue
-        if row["project"] is not None:
-            grouped.add((row["kind"], row["project"]))
+        if row["project"] is not None or can_message:
+            grouped.update(_groups(row["kind"], row["project"], row["basis"], inputs.sources))
         posted += 1
         if posted >= CAPS["run"]:
             return posted
 
+    copied = {span for value in inputs.untrusted_text for span in _spans(value)}
     for draft in drafts:
-        origins = {draft.project} if draft.project is not None else {
-            inputs.sources[ref["type"], ref["id"]].group for ref in draft.basis
-        }
-        groups = {(draft.kind, origin) for origin in origins}
+        groups = _groups(draft.kind, draft.project, draft.basis, inputs.sources)
         if groups & grouped or draft.dedupe_key in pending:
             continue
         if proposal := store.add(draft, run=run_id):
-            store.brief(proposal["id"], feed)
+            if draft.kind not in _MESSAGE_KINDS or not _send_proposal(store, messages, proposal, copied):
+                store.brief(proposal["id"], feed)
             grouped.update(groups)
             posted += 1
             if posted >= CAPS["run"]:
@@ -587,7 +637,7 @@ def _post(store, feed, drafts, inputs, now):
     return posted
 
 
-def run(*, store, feed, budget, work, now=None, run_job=_run_job) -> Result:
+def run(*, store, feed, budget, work, now=None, run_job=_run_job, messages=None) -> Result:
     """Check for work and run at most one planner job with one JSON retry."""
     clock = time.time if now is None else lambda: now
     now = clock()
@@ -606,7 +656,9 @@ def run(*, store, feed, budget, work, now=None, run_job=_run_job) -> Result:
             if state is None:
                 state = dict(observed_since=now, last_run=None, cursor=0, statuses={})
                 _save(directory, state)
-            threads = work.threads()
+            # Jarvis's own message threads are not work to plan around. Reading
+            # them back would turn each relayed proposal into a new one.
+            threads = [thread for thread in work.threads() if not thread.message]
             statuses = {thread.thread_id: [thread.status, thread.waiting_on_owner] for thread in threads}
             batch, newest, cursor = _signal_window(state["cursor"], now)
             if not due(now, state["last_run"], DueState(newest, statuses != state["statuses"],
@@ -624,7 +676,11 @@ def run(*, store, feed, budget, work, now=None, run_job=_run_job) -> Result:
             if drafts is None:
                 return result
             if result.outcome == "ok":
-                result = replace(result, posted=_post(store, feed, drafts, inputs, clock()))
+                if messages is None:
+                    from .messages import MessageService
+
+                    messages = MessageService(work, clock=clock)
+                result = replace(result, posted=_post(store, feed, drafts, inputs, clock(), messages))
             _save(directory, dict(state, last_run=now, cursor=cursor, statuses=statuses))
             return result
     except (OSError, ValueError, RuntimeError, ProposalError, WorkError, RecursionError):

@@ -430,7 +430,8 @@ def _event(row):
             if row.get("delegated") is not True or message or not isinstance(origin, str) or origin not in _DELEGATE_ORIGINS:
                 raise WorkError("Invalid delegation in work ledger.")
         if (type(message) is bool
-                and (not message or row["branch"] is None)
+                and (not message or row["branch"] is None
+                     or ("notice_key" in row and "relay_sha256" in row and "fallback" not in row))
                 and ("notice_key" not in row
                      or (message and isinstance(notice, str) and _SHA256.fullmatch(notice)))
                 and ("relay_sha256" not in row or (message and isinstance(relay_digest, str)
@@ -644,7 +645,7 @@ class WorkService:
             raise WorkError("Invalid work start plan.")
         return self._start_plan(plan, self.current_project(plan["project"]), guard=guard)
 
-    def _start_plan(self, plan, project, **kwargs):
+    def _start_plan(self, plan, project, *, proposal=None, **kwargs):
         if any(plan[key] != getattr(project, key) for key in _PROJECT_FIELDS):
             raise WorkError("Registered project changed since the work was planned.")
         title = _title(plan["title"])
@@ -659,7 +660,13 @@ class WorkService:
                     or not _valid_suffix(branch[len(prefix):])):
                 raise WorkError("Invalid work branch in start plan.")
             options = {"worktree": project.base, "branch": branch}
-        return self._start(project, title, brief, branch, options, **kwargs)
+        prompt = None
+        if proposal is not None:
+            from .messages import proposal_prompt
+
+            title = _title(proposal.subject, message=True)
+            prompt = proposal_prompt(proposal, brief)
+        return self._start(project, title, brief, branch, options, prompt=prompt, **kwargs)
 
     def _delegate_project(self, name):
         if name is None:
@@ -724,16 +731,35 @@ class WorkService:
             raise WorkError(f"T3 could not confirm the exact {label}.")
         return target
 
-    def start_message(self, message, *, at, notice_key=None, fallback=None) -> Thread:
-        from .messages import Message, relay_sha256, thread_prompt
+    @staticmethod
+    def _message_mark(message, notice_key):
+        from .messages import relay_sha256
 
         if notice_key is not None and not (isinstance(notice_key, str) and _SHA256.fullmatch(notice_key)):
             raise WorkError("Invalid work notice key.")
+        mark = {"message": True, "relay_sha256": relay_sha256(f"Subject: {message.subject}\n\n{message.body}")}
+        if notice_key is not None:
+            mark["notice_key"] = notice_key
+        return mark
+
+    def start_proposal(self, message, plan, *, at, notice_key) -> Thread:
+        if type(plan) is not dict or plan.keys() != _PLAN_FIELDS:
+            raise WorkError("Invalid work start plan.")
+        if notice_key is None:
+            raise WorkError("Invalid work notice key.")
+        return self._start_plan(plan, self.current_project(plan["project"]), proposal=message,
+                                at=at, mark=self._message_mark(message, notice_key))
+
+    def start_message(self, message, *, at, notice_key=None, fallback=None) -> Thread:
+        from .messages import Message, thread_prompt
+
+        mark = self._message_mark(message, notice_key)
         project, builtin = self._registry.message_project(message.project)
         target = None if builtin else self._message_target(project)
         if target is None and not builtin:
             if message.project == project.name:
                 message = Message(message.subject, f"About {project.name}:\n\n{message.body}")
+                mark = self._message_mark(message, notice_key)
             if project.name != _GENERAL_PROJECT:
                 project, builtin = self._registry.message_project(None)
                 target = None if builtin else self._message_target(project)
@@ -745,19 +771,22 @@ class WorkService:
             raise WorkError("T3 could not confirm the exact Jarvis message project.")
 
         project = replace(project, provider=_MESSAGE_PROVIDER, model=_MESSAGE_MODEL)
-        mark = {"message": True, "relay_sha256": relay_sha256(f"Subject: {message.subject}\n\n{message.body}")}
-        if notice_key is not None:
-            mark["notice_key"] = notice_key
         if fallback is not None:
             mark["fallback"] = _fallback_fields(fallback)
         return self._start(project, _title(message.subject, message=True), thread_prompt(message), None, {},
                            at=at, target=target, mark=mark)
 
-    def _start(self, project, title, brief, branch, options, *, guard=None, at=None, target=None, mark=None):
-        brief_sha256 = hashlib.sha256(_message(brief)).hexdigest()
+    def _start(self, project, title, brief, branch, options, *, guard=None, at=None, target=None, mark=None,
+               prompt=None):
+        raw = _message(brief)
+        if prompt is not None:
+            # The plan's text limit applies to the brief. Hash the full text T3 receives.
+            raw = _checked(t3_client._message, prompt)
+        brief_sha256 = hashlib.sha256(raw).hexdigest()
         if guard is not None:
             guard()
-        run = _checked(self._t3.start, target if target is not None else project.path, brief, provider=project.provider,
+        run = _checked(self._t3.start, target if target is not None else project.path,
+                       brief if prompt is None else prompt, provider=project.provider,
                        model=project.model, title=title, **options)
         at = self._clock() if at is None else at
         thread_id, run_id = run.thread_id, run.run_id
