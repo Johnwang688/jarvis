@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from . import __version__
 from . import agent as agent_mod
 from . import agentbench as agentbench_mod
 from . import cadbench as cadbench_mod
@@ -869,6 +870,7 @@ def _seconds(text: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis", description="Your personal agent.")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     skills = sub.add_parser("skills", help="share skills with local CLIs")
