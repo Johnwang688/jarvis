@@ -358,6 +358,13 @@ class VoiceSession:
         if self._best is not self._fast:
             _close(self._best)
 
+    def apply_settings(self, settings):
+        with self._changed:
+            for voice in (self._fast, self._best):
+                if voice is not None:
+                    voice.speed = settings.speed
+            self._follow_up_s = settings.follow_up_s
+
     def status(self):
         with self._changed:
             state = self._state
@@ -855,7 +862,8 @@ class VoiceSession:
             id, at = self._answer_finished
             if self._turns.answered(id):
                 if self._may_follow:
-                    self._follow_until = at + self._follow_up_s
+                    with self._changed:
+                        self._follow_until = at + self._follow_up_s
                 self._follow_from = at + ECHO_TAIL_S
                 self._may_follow = False
                 self._answer_finished = None

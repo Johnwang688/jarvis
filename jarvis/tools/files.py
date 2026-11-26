@@ -60,6 +60,7 @@ SELF_PROTECTED = frozenset(
         # keyboard and pairing is authorization code.
         "jarvis/v2/voice_link.py",
         "jarvis/v3/voice/link.py",
+        "jarvis/v3/voice/settings.py",
         "jarvis/v3/voice/wire.py",
         "jarvis/v3/pc.py",
         "jarvis/v2/voice_chat.py",

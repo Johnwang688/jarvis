@@ -20,6 +20,11 @@ beforeEach(() => {
     const url = String(input instanceof Request ? input.url : input);
     calls.push(url);
     if (url === "/v3/owner/work") return json({ projects: [], threads: [] });
+    if (url === "/v3/owner/voice") return json({
+      state: "resting", helper: { connected: true, canceller: true },
+      transcriber: { name: "fixture-asr" }, voice: { name: "fixture-voice" }, turns: [],
+      settings: { speed: { value: 1, min: 0.8, max: 2 }, follow_up_s: { value: 8, min: 0, max: 30 } },
+    });
     return json(url === "/v3/status" ? status : { briefs: [], recent: [] });
   }));
   box = document.createElement("div"); document.body.append(box);
@@ -116,8 +121,21 @@ describe("the top bar", () => {
     await mount();
     const grid = box.querySelector(".agent-grid")!;
     expect([...grid.children].map((el) => (el as HTMLElement).dataset.panel ?? el.className)).toEqual(["feed", "chat", "agent-rail"]);
-    expect([...grid.querySelectorAll<HTMLElement>(".agent-rail > [data-panel]")].map((p) => p.dataset.panel)).toEqual(["cron", "t3", "vault", "skills"]);
+    expect([...grid.querySelectorAll<HTMLElement>(".agent-rail > [data-panel]")].map((p) => p.dataset.panel)).toEqual(["voice", "cron", "t3", "vault", "skills"]);
     expect(box.querySelector(".agent-top")!.contains(panel("status"))).toBe(true);
     expect(box.querySelector(".agent-top")!.contains(box.querySelector("[data-orb]"))).toBe(true);
+  });
+
+  it("keeps Voice status outside the closed details and settings disclosure", async () => {
+    await mount();
+    const voice = panel("voice");
+    const details = voice.querySelector<HTMLDetailsElement>(":scope > details")!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector(":scope > summary")?.textContent).toBe("Details and settings");
+    expect([...details.querySelector(".voice-details-body")!.children].map((el) => el.className))
+      .toEqual(["voice-engines", "voice-recent", "voice-settings", "voice-mic"]);
+    expect(voice.querySelector(":scope > .voice-top .voice-state")?.textContent).toBe("Resting");
+    expect(voice.querySelector(":scope > .voice-helper")?.textContent).toContain("echo cancelling on");
+    expect(voice.querySelector(":scope > .voice-last h3")?.textContent).toBe("Last heard");
   });
 });

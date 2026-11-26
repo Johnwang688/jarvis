@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Callable
@@ -27,6 +28,7 @@ from .approvals import ApprovalBroker
 from .chat import ChatService
 from .executor import Executor, Worker as ExecutorWorker
 from .jobs import Scheduler, default_jobs, idle_seconds
+from .voice import settings as voice_settings
 from .work import WorkService
 
 
@@ -101,7 +103,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None, proposals=None,
                     phone_status=None, get_feed=None, voice_status=None,
-                    voice_helper=None) -> type[BaseHTTPRequestHandler]:
+                    voice_helper=None, voice_panel=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -240,7 +242,8 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
         def _run_route(self, body):
             try:
                 status, payload = self._route.run(body, get_feed, chat, data_dir=data_dir, get_work=get_work,
-                                                  get_proposals=get_proposals, voice_helper=voice_helper)
+                                                  get_proposals=get_proposals, voice_helper=voice_helper,
+                                                  voice_panel=voice_panel)
                 if not isinstance(status, int) or not 200 <= status <= 599:
                     raise ValueError("invalid route status")
                 if isinstance(payload, dict) and "error" in payload:
@@ -367,6 +370,9 @@ class Daemon:
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
+        self._voice_settings_lock = threading.Lock()
+        self._voice_epoch_offset = time.time() - time.monotonic()
+        self._voice_settings = voice_settings.load(self._data_dir)
         self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
         self._executor = None
         self._executor_lock = threading.Lock()
@@ -535,11 +541,12 @@ class Daemon:
         work = self._chat.work
         names = lambda: () if work is None else (project.name for project in work.projects())
         setting = config.V3_VOICE
-        fast = KokoroVoice(device="cpu") if setting in ("auto", "kokoro-cpu") else None
-        best = KokoroVoice(device="cuda") if setting in ("auto", "kokoro-gpu") else None
+        speed = self._voice_settings.speed
+        fast = KokoroVoice(device="cpu", speed=speed) if setting in ("auto", "kokoro-cpu") else None
+        best = KokoroVoice(device="cuda", speed=speed) if setting in ("auto", "kokoro-gpu") else None
         approving = VoiceApproving(self._chat.approvals, clock=time.monotonic)
         session = VoiceSession(turns, transcriber=pick_transcriber, voices=(fast, best), names=names,
-                               approving=approving)
+                               approving=approving, follow_up_s=self._voice_settings.follow_up_s)
         return brain, turns, session
 
     def _voice_status(self):
@@ -551,6 +558,58 @@ class Daemon:
         status["link"] = (link.status() if link is not None else
                           {"listening": False, "connected": False, "reason": "not_started"})
         return status
+
+    def _voice_panel(self, body):
+        if body is not None:
+            with self._voice_settings_lock:
+                session = self._voice_session
+                if session is None:
+                    return 503, {"message": "Voice is unavailable."}
+                try:
+                    settings = self._voice_settings.patched(body)
+                except ValueError as error:
+                    return 400, {"message": str(error)}
+                if body:
+                    try:
+                        voice_settings.save(self._data_dir, settings)
+                    except OSError:
+                        return 503, {"message": "Voice settings could not be saved."}
+                    session.apply_settings(settings)
+                    self._voice_settings = settings
+                return 200, {"settings": settings.snapshot()}
+
+        with self._voice_settings_lock:
+            settings = self._voice_settings.snapshot()
+            brain, turns, session, link = (self._voice_brain, self._voice_turns,
+                                          self._voice_session, self._voice_link)
+        if session is None or brain is None or turns is None:
+            return 503, {"message": "Voice is unavailable."}
+        link_status = {} if link is None else link.status(include_canceller=True)
+        helper = {name: link_status.get(name, False) for name in ("connected", "listening")}
+        version = link_status.get("helper_version")
+        # HELLO version is peer-supplied. Accept a short release tag only.
+        if version and len(version) <= 32 and re.fullmatch(r"(?:[a-zA-Z]+-)?[0-9]+(?:\.[0-9]+){0,3}", version):
+            helper["version"] = version
+        for name in ("canceller", "level"):
+            if name in link_status:
+                helper[name] = link_status[name]
+        brain_status = brain.status()
+        status = session.status()
+        panel = {name: status[name] for name in ("state", "reason", "transcriber", "voice",
+                                                 "detector", "gpu_warm", "counters") if name in status}
+        rows = []
+        for row in turns.trace()[:20]:
+            rows.append({
+                "heard_at": self._voice_epoch_offset + row["heard_at"],
+                "text": row["text"][:300],
+                "tools": [{"name": tool["name"], "ok": tool["outcome"] == "ok"} for tool in row["tools"]],
+                "approval_asked": row["approval_asked"],
+                "sentence_count": row["sentence_count"],
+                **{name: row[name] for name in ("silence_ms", "decode_ms", "first_audio_ms", "first_say_s", "end_s")},
+            })
+        return 200, {**panel, "helper": helper, "settings": settings, "turns": rows,
+                     "brain": {"name": brain_status["brain"], "state": brain_status["state"],
+                               "turns": brain_status["turns"]}}
 
     def _new_voice_session(self, *, on_event, on_audio):
         session = self._voice_session
@@ -596,11 +655,13 @@ class Daemon:
             if self._chat is None:
                 self._chat = self._new_chat()
             if self._voice_brain is None:
-                self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
+                with self._voice_settings_lock:
+                    self._voice_settings = voice_settings.load(self._data_dir)
+                    self._voice_brain, self._voice_turns, self._voice_session = self._new_voice()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
                                       get_feed=self._get_feed, voice_status=self._voice_status,
-                                      voice_helper=self._voice_helper)
+                                      voice_helper=self._voice_helper, voice_panel=self._voice_panel)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
@@ -638,14 +699,16 @@ class Daemon:
                 except Exception:
                     LOG.warning("Could not close the voice link at stop.")
                 self._voice_link = None
-            if self._voice_brain is not None:
-                for label, component in (("voice session", self._voice_session), ("voice turns", self._voice_turns),
-                                         ("voice brain", self._voice_brain)):
+            with self._voice_settings_lock:
+                components = (("voice session", self._voice_session), ("voice turns", self._voice_turns),
+                              ("voice brain", self._voice_brain))
+                self._voice_session = self._voice_turns = self._voice_brain = None
+            for label, component in components:
+                if component is not None:
                     try:
                         component.close()
                     except Exception:
                         LOG.warning("Could not close %s at stop.", label)
-                self._voice_session = self._voice_turns = self._voice_brain = None
             if self._server is None:
                 return
             self._stop_jobs()

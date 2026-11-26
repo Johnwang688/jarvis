@@ -103,6 +103,7 @@ class _Peer:
         self.closed = threading.Event()
         self.pending = True
         self.version = None
+        self.canceller = None
         self.level = None
         self.level_times = deque()
         self._changed = threading.Condition()
@@ -320,7 +321,7 @@ class VoiceLink:
         with self._lock:
             return self._clicks
 
-    def status(self):
+    def status(self, *, include_canceller=False):
         with self._lock:
             peer = self._active
             connected = peer is not None and peer.version is not None and not peer.closed.is_set()
@@ -329,6 +330,8 @@ class VoiceLink:
                 status["reason"] = self._reason
             if connected:
                 status["helper_version"] = peer.version
+                if include_canceller:
+                    status["canceller"] = peer.canceller
             if connected and peer.level is not None:
                 status["level"] = peer.level
             return status
@@ -560,6 +563,7 @@ class VoiceLink:
         if kind == wire.HELLO:
             with self._lock:
                 peer.version = value["version"]
+                peer.canceller = value["canceller"]
         elif kind == wire.AUDIO:
             import numpy as np
 

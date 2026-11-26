@@ -110,7 +110,7 @@
 .agent-rail .agent-panel p { font-size: 12px; }
 
 /* A slot with nothing to show yet is one quiet line. */
-.agent-rail .agent-panel:not([data-panel="cron"], .work-panel) {
+.agent-rail .agent-panel:not([data-panel="cron"], .work-panel, .voice-panel) {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -118,7 +118,7 @@
   padding-block: 10px;
 }
 
-.agent-rail .agent-panel:not([data-panel="cron"], .work-panel) h2 { margin-bottom: 0; }
+.agent-rail .agent-panel:not([data-panel="cron"], .work-panel, .voice-panel) h2 { margin-bottom: 0; }
 
 /* The job list takes what the rail has left and scrolls inside its panel. */
 .agent-rail [data-panel="cron"] {
@@ -211,17 +211,136 @@
 .work-row[data-state="done"] .work-status,
 .work-row[data-state="unknown"] .work-status { color: var(--text-muted); }
 
-/* A narrower window drops the rail under the feed; the page still does not scroll. */
+.agent-rail .voice-panel {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: min-content;
+  max-height: 55%;
+  gap: 2px;
+  padding: 7px 9px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.voice-panel:has(.voice-details[open]) { height: 55%; }
+.voice-panel > * { flex: none; min-width: 0; }
+
+.voice-top, .voice-helper, .voice-last-line, .voice-mic {
+  display: flex;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+}
+
+.voice-helper, .voice-mic { flex-wrap: wrap; }
+.voice-helper { column-gap: 4px; font-size: 11px; }
+
+.voice-top { justify-content: space-between; }
+.voice-top h2 { margin: 0; }
+.voice-state {
+  padding: 2px 7px;
+  border: 1px solid var(--rim);
+  border-radius: var(--radius-btn);
+  color: var(--accent-hi);
+}
+.voice-state[data-state="resting"] { color: var(--text-muted); }
+.voice-state[data-state="asking"] { color: var(--amber); border-color: var(--amber-line); }
+.voice-state[data-state="unavailable"], .agent-rail .voice-panel .voice-error { color: var(--red); }
+.voice-helper small { color: var(--text-muted); font-size: 10px; }
+.voice-panel button, .voice-panel input[type="number"] {
+  min-height: 26px;
+  padding: 2px 7px;
+  border: 1px solid var(--rim);
+  border-radius: var(--radius-btn);
+  background: var(--glass-float);
+  color: var(--text);
+  font: inherit;
+}
+.voice-panel button, .voice-panel summary { cursor: pointer; }
+.voice-helper button { padding-inline: 5px; }
+.voice-panel button[aria-disabled="true"] { opacity: 0.65; cursor: default; }
+.voice-panel :is(button, input, summary):focus-visible {
+  outline: 2px solid var(--accent-hi);
+  outline-offset: 2px;
+}
+.voice-panel .voice-engines { font-size: 11px; }
+.voice-last h3 { font-size: 12px; white-space: nowrap; }
+.voice-last small { color: var(--text-muted); white-space: nowrap; }
+.agent-rail .voice-panel .voice-transcript {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.agent-rail .voice-panel .voice-last p { line-height: 1.35; }
+.voice-panel .voice-details[open] {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.voice-details[open]::details-content {
+  /* Keep the summary and room for a focused control above the shrink limit. */
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  contain: size;
+  min-height: 44px;
+}
+.voice-details-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 9px;
+  padding: 4px;
+  overflow-y: auto;
+}
+.voice-recent, .voice-settings { border-top: 1px solid var(--rim); }
+.voice-panel summary { padding: 4px 0; }
+.voice-details > summary { flex: none; padding-block: 2px; }
+.voice-turn { margin-inline-start: 8px; min-width: 0; }
+.voice-turn summary > span {
+  display: inline-block;
+  max-width: calc(100% - 18px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.voice-turn[open] summary > span { white-space: pre-wrap; }
+.voice-timings { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; color: var(--text-muted); }
+.voice-tools { padding-inline-start: 0; list-style: none; }
+.voice-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 8px;
+  min-inline-size: 0;
+  border-inline: 0;
+  border-bottom: 0;
+  padding: 3px 0 0;
+  margin: 0;
+}
+.voice-settings legend { padding-inline-end: 6px; }
+.voice-settings :is(input[type="range"], .voice-error) { grid-column: 1 / -1; }
+.voice-settings input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+.voice-settings input[type="number"] { width: 5em; }
+.voice-speed-value { color: var(--accent-hi); font: 11px var(--mono); }
+.voice-mic meter { flex: 1; min-width: 0; width: 75px; }
+.voice-mic meter::-webkit-meter-optimum-value { background: var(--accent); }
+
+/* At narrower widths the rail sits under the feed and needs room for all five panels. */
 @media (max-width: 1040px) {
   .agent-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
-    grid-template-rows: minmax(0, 1.4fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 2.2fr);
     grid-template-areas: "feed chat" "rail chat";
   }
 }
 
 @media (680px < width <= 1040px) {
-  .agent-rail:has(.work-list) [data-panel="cron"] { min-height: 72px; }
+  .agent-rail [data-panel="cron"] { min-height: 72px; }
 }
 
 /* Phone width is the one place the page scrolls: one column, the chat first. */
@@ -238,6 +357,8 @@
   .agent-feed { max-height: 520px; }
   .agent-rail { overflow-y: visible; }
   .agent-rail [data-panel="cron"], .agent-rail .work-panel { flex: none; }
+  .voice-panel:has(.voice-details[open]) { height: auto; }
+  .voice-details[open]::details-content { contain: none; max-height: 260px; }
   .agent-jobs { overflow-y: visible; }
 }
 

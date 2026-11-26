@@ -46,12 +46,16 @@ class Route:
     with_work: bool = field(default=False, kw_only=True)
     with_proposals: bool = field(default=False, kw_only=True)
     with_voice_helper: bool = field(default=False, kw_only=True)
+    with_voice_panel: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
             chat: ChatService | None = None, *, data_dir: Path | None = None,
             get_work: Callable[[], tuple[Registry, Ledger]] | None = None,
             get_proposals: Callable[[], ProposalStore] | None = None,
-            voice_helper: Callable | None = None) -> tuple[int, object]:
+            voice_helper: Callable | None = None,
+            voice_panel: Callable | None = None) -> tuple[int, object]:
+        if self.with_voice_panel:
+            return self.handler(body, voice_panel)
         if self.with_voice_helper:
             return self.handler(body, voice_helper)
         if self.with_work:
@@ -309,9 +313,17 @@ def _voice_helper(body, control):
     return control(body["action"])
 
 
+def _voice_panel(body, panel):
+    if panel is None:
+        return 503, {"message": "Voice is unavailable."}
+    return panel(body)
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
+    ("GET", "/v3/owner/voice"): Route(_voice_panel, with_voice_panel=True),
+    ("POST", "/v3/owner/voice/settings"): Route(_voice_panel, with_voice_panel=True),
     ("POST", "/v3/owner/voice/helper"): Route(_voice_helper, with_voice_helper=True),
     ("GET", "/v3/owner/work"): Route(_work_snapshot, with_work=True),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
