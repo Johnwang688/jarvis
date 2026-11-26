@@ -257,7 +257,93 @@ def consolidate_vault(args) -> int:
     return int(result.outcome == "error")
 
 
-def add_commands(sub):
+VOICE_ACTIONS = ("setup", "start", "stop", "status")
+
+
+def voice_helper(args) -> int:
+    if args.action == "setup":
+        from .voice.installation import setup
+
+        return setup()
+    port = config.V3_API_PORT
+    address = f"127.0.0.1:{port}"
+    connection = HTTPConnection("127.0.0.1", port, timeout=15)
+    try:
+        if args.action == "status":
+            connection.request("GET", "/v3/status", headers={"Host": address})
+        else:
+            connection.request("POST", "/v3/owner/voice/helper", json.dumps({"action": args.action}),
+                               {"Host": address, "Origin": f"http://{address}",
+                                "Content-Type": "application/json"})
+        response = connection.getresponse()
+        data = json.loads(response.read())
+        if isinstance(data, dict):
+            if (args.action == "status" and response.status == 200
+                    and data.get("service") == SERVICE_NAME and data.get("version") == "v3"
+                    and isinstance(data.get("voice"), dict)):
+                _print_voice_status(data["voice"])
+                return 0
+            if args.action != "status" and isinstance(data.get("message"), str):
+                print(data["message"])
+                return int(response.status != 200)
+    except (OSError, HTTPException, ValueError):
+        pass
+    finally:
+        connection.close()
+    print("Could not read the voice status." if args.action == "status"
+          else "The v3 daemon could not control the Windows voice helper.")
+    return 1
+
+
+def _print_voice_status(voice):
+    brain, brain_state, turns = voice.get("brain"), voice.get("brain_state"), voice.get("turns")
+    if brain == "claude" and brain_state in ("idle", "warming", "running", "stopping", "closed"):
+        print(f"The Claude voice brain is {brain_state}.")
+    state = voice.get("state")
+    if state in ("resting", "listening", "working", "speaking", "asking", "unavailable"):
+        print(f"The voice session is {state}.")
+    detector = voice.get("detector")
+    if isinstance(detector, str):
+        print(f"The speech detector reports {detector}.")
+    for engine, label in (("transcriber", "transcriber"), ("voice", "speech engine")):
+        info = voice.get(engine)
+        if isinstance(info, dict):
+            name = info.get("name")
+            print(f"The {label} is {name}." if isinstance(name, str) else f"The {label} is unavailable.")
+    if type(voice.get("gpu_warm")) is bool:
+        print("The GPU voice is warm." if voice["gpu_warm"] else "The GPU voice is not warm.")
+    if type(turns) is int:
+        print(f"Voice turns started: {turns}.")
+    link = voice.get("link")
+    if not isinstance(link, dict):
+        return
+    print("The voice link is listening." if link.get("listening") is True else "The voice link is offline.")
+    print("The Windows voice helper is connected." if link.get("connected") is True
+          else "The Windows voice helper is disconnected.")
+    reason = {
+        "not_started": "The voice link has not started.",
+        "session_unavailable": "The voice session is unavailable.",
+        "key_missing": "The voice pairing file is missing. Run jarvis voice-link setup.",
+        "key_invalid": "The voice pairing file is invalid. Run jarvis voice-link setup.",
+        "bind_failed": "The voice link could not bind its port.",
+        "start_failed": "The voice link could not start.",
+        "stopped": "The voice link has stopped.",
+    }
+    if isinstance(link.get("reason"), str) and link["reason"] in reason:
+        print(reason[link["reason"]])
+    if isinstance(link.get("helper_version"), str):
+        print(f"The Windows voice helper reports version {link['helper_version']}.")
+    if type(link.get("level")) is int:
+        print(f"Microphone level: {link['level']} out of 255.")
+
+
+def add_commands(sub, *, voice=True):
+    if voice:
+        voice_cmd = sub.add_parser("voice", help="manage the Windows voice helper")
+        voice_sub = voice_cmd.add_subparsers(dest="action", required=True)
+        for action in VOICE_ACTIONS:
+            voice_sub.add_parser(action).set_defaults(func=voice_helper)
+
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
 

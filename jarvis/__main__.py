@@ -664,6 +664,14 @@ def cmd_voice(args) -> int:
     act, never the agent's. Using a voice that already exists is the cheap
     part and stays where it was: the HUD picker and avatar.json.
     """
+    if args.action in ("setup", "start", "stop", "status"):
+        from .v3.cli import voice_helper
+
+        if args.rest or args.yes:
+            console.print(f"Usage: jarvis voice {args.action}")
+            return 1
+        return voice_helper(args)
+
     import os
     import shutil
     import subprocess
@@ -1046,7 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .v3 import cli as v3_cli
 
-    v3_cli.add_commands(sub)
+    v3_cli.add_commands(sub, voice=False)
 
     discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
     discord_sub = discord.add_subparsers(dest="action", required=True)
@@ -1098,10 +1106,10 @@ def build_parser() -> argparse.ArgumentParser:
     avatar.set_defaults(func=cmd_avatar)
 
     voicecmd = sub.add_parser(
-        "voice", help="local voices: list, clone, mix, audition (human-only)"
+        "voice", help="local voices and the Windows voice helper (human-only)"
     )
     voicecmd.add_argument(
-        "action", nargs="?", default="", help="list, clone, mix, say, rename, or rm"
+        "action", nargs="?", default="", help="list, clone, mix, say, rename, rm, setup, start, stop, or status"
     )
     voicecmd.add_argument("rest", nargs="*", help="arguments for the action")
     voicecmd.add_argument(

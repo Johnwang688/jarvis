@@ -543,7 +543,7 @@ class EnginesCheck(unittest.TestCase):
             self.skipTest("tomllib needs Python 3.11")
         data = tomllib.loads((config.REPO_ROOT / "pyproject.toml").read_text())
         self.assertEqual(data["project"]["optional-dependencies"]["voice-gpu"], [
-            "faster-whisper==1.2.1", "ctranslate2==4.9.1", "onnxruntime-gpu==1.23.2",
+            "faster-whisper==1.2.1", "ctranslate2==4.9.1",
             "nvidia-cublas-cu12==12.9.3.13", "nvidia-cudnn-cu12==9.28.1.4",
             "nvidia-cuda-runtime-cu12==12.9.79", "nvidia-cufft-cu12==11.4.1.4",
             "nvidia-curand-cu12>=10.3.10,<10.4", "nvidia-cuda-nvrtc-cu12==12.9.86",

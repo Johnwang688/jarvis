@@ -11,6 +11,7 @@ from pathlib import Path
 import select
 import socket
 import stat
+import subprocess
 import threading
 import time
 
@@ -134,10 +135,11 @@ class _Peer:
     def _control(self, kind, payload):
         if self._controls >= wire.MAX_QUEUED_EVENTS:
             self.abort()
-        else:
-            self._queue.append((kind, payload, 0.0, None))
-            self._controls += 1
-            self._changed.notify()
+            return False
+        self._queue.append((kind, payload, 0.0, None))
+        self._controls += 1
+        self._changed.notify()
+        return True
 
     def pong(self, payload):
         with self._changed:
@@ -147,12 +149,12 @@ class _Peer:
     def event(self, kind, fields):
         with self._changed:
             if self.closed.is_set():
-                return
+                return False
             if kind == "say":
                 ident = fields["id"]
                 if ident in self._sentences or len(self._sentences) >= wire.MAX_QUEUED_EVENTS:
                     self.abort()
-                    return
+                    return False
                 self._sentences[ident] = _Sentence(self._next_index)
                 fields["n"] = self._next_index
                 self._next_index += 1
@@ -167,7 +169,7 @@ class _Peer:
                         kept.append(frame)
                 self._queue = kept
                 self._audio_s = max(0.0, self._audio_s)
-            self._control(wire.EVENT, wire.encode_event(kind, **fields))
+            return self._control(wire.EVENT, wire.encode_event(kind, **fields))
 
     def on_event(self, kind, **fields):
         if kind == "ignored":
@@ -305,6 +307,7 @@ class VoiceLink:
         self._pending = 0
         self._reason = "not_started"
         self._clicks = 0
+        self._helper_process = None
         self.address = None
 
     @property
@@ -329,6 +332,30 @@ class VoiceLink:
             if connected and peer.level is not None:
                 status["level"] = peer.level
             return status
+
+    def launch_helper(self):
+        from . import installation
+
+        with self._lifecycle:
+            status = self.status()
+            if not status["listening"]:
+                raise installation.HelperUnavailable("The voice link is unavailable.")
+            if status["connected"] or (self._helper_process is not None
+                                       and self._helper_process.poll() is None):
+                return False
+            try:
+                self._helper_process = installation.launch(self.port)
+            except (OSError, subprocess.SubprocessError):
+                raise installation.HelperUnavailable("Could not start the Windows voice helper.") from None
+            return True
+
+    def request_quit(self):
+        with self._lock:
+            peer = self._active
+            if peer is None or peer.version is None:
+                return False
+        # The helper recognizes this notice only after authenticating the peer.
+        return peer.event("notice", {"title": "", "text": "", "helper_action": "quit"})
 
     def _unavailable(self, reason):
         with self._lock:
