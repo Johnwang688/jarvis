@@ -27,6 +27,8 @@ class VoiceBrain(Protocol):
     - tool_end: name, outcome (ok, refused or failed), and changes_state
       (whether the tool is a write or otherwise acts beyond reading).
       An approval for that tool has resolved by this event.
+    - auto: tool, title, target, level and why describe a successful automatic
+      run after tool_end. Voice may ignore this event.
     - reply: text is the final reply. error and stopped carry no voice fields.
       Each terminates that turn after its final model and tool events.
 

@@ -41,6 +41,7 @@ def digest(id, session_id, tool, args, preview):
 @dataclass
 class _Request:
     item: dict
+    session_id: str
     turn_id: str
     deadline: float
     cancelled: Callable[[], bool] | None
@@ -170,7 +171,7 @@ class ApprovalBroker:
                 item["asked_at"] = asked_at
                 item["card"] = deepcopy(card)
                 item["display_why"] = display_why
-                request = _Request(item, turn_id, deadline, cancelled)
+                request = _Request(item, session_id, turn_id, deadline, cancelled)
                 self._append(request, "pending", asked_at)
                 self._pending[id] = request
             if on_pending is not None:
@@ -192,11 +193,12 @@ class ApprovalBroker:
                     self._finish(request, "cancelled")
             return False
 
-    def pending(self, *, turn_id=None):
+    def pending(self, *, turn_id=None, session_id=None):
         with self._changed:
             now = self._clock()
             requests = [request for request in self._pending.values()
-                        if turn_id is None or request.turn_id == turn_id]
+                        if (turn_id is None or request.turn_id == turn_id)
+                        and (session_id is None or request.session_id == session_id)]
             for request in requests:
                 self._advance(request, now)
             items = []
@@ -230,14 +232,15 @@ class ApprovalBroker:
                 raise ApprovalConflict("Approval could not be recorded.")
             return state
 
-    def _cancel(self, turn_id):
+    def _cancel(self, turn_id, session_id=None):
         for request in list(self._pending.values()):
-            if turn_id is None or request.turn_id == turn_id:
+            if ((turn_id is None or request.turn_id == turn_id)
+                    and (session_id is None or request.session_id == session_id)):
                 self._finish(request, "cancelled")
 
-    def cancel(self, turn_id=None, reason="stopped"):
+    def cancel(self, turn_id=None, reason="stopped", *, session_id=None):
         with self._changed:
-            self._cancel(turn_id)
+            self._cancel(turn_id, session_id)
 
     def shutdown(self):
         with self._changed:

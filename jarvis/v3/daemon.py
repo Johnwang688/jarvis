@@ -100,7 +100,7 @@ def _decode_route_body(data: bytes) -> dict:
 def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None, proposals=None,
-                    phone_status=None, get_feed=None) -> type[BaseHTTPRequestHandler]:
+                    phone_status=None, get_feed=None, voice_status=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -140,6 +140,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             "data_dir": directory,
             "jobs": {} if scheduler is None else scheduler.status(),
             "phone": {"bound": False, "host_configured": False} if phone_status is None else phone_status(),
+            "voice": {"brain": "claude", "state": "idle", "turns": 0} if voice_status is None else voice_status(),
         }
 
     class Handler(BaseHTTPRequestHandler):
@@ -364,6 +365,7 @@ class Daemon:
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
+        self._voice_brain, self._voice_turns = self._new_voice()
         self._executor = None
         self._executor_lock = threading.Lock()
         self._executor_stop = threading.Event()
@@ -516,6 +518,14 @@ class Daemon:
                            work=WorkService(registry=Registry(root / "projects.json"),
                                             ledger=Ledger(root / "threads.jsonl")))
 
+    def _new_voice(self):
+        from .voice.claude_brain import ClaudeVoiceBrain
+        from .voice.turns import VoiceTurns
+
+        brain = ClaudeVoiceBrain(self._data_dir, approvals=self._chat.approvals, work=self._chat.work,
+                                 calendar=self._chat._calendar)
+        return brain, VoiceTurns(brain, on_event=lambda *_args, **_fields: None)
+
     def start(self) -> None:
         with self._lock:
             if self._server is not None:
@@ -528,9 +538,11 @@ class Daemon:
             _prepare_data_dir(self._data_dir)
             if self._chat is None:
                 self._chat = self._new_chat()
+            if self._voice_brain is None:
+                self._voice_brain, self._voice_turns = self._new_voice()
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
-                                      get_feed=self._get_feed)
+                                      get_feed=self._get_feed, voice_status=self._voice_brain.status)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
@@ -561,6 +573,13 @@ class Daemon:
 
     def stop(self) -> None:
         with self._lock:
+            if self._voice_brain is not None:
+                for label, component in (("voice turns", self._voice_turns), ("voice brain", self._voice_brain)):
+                    try:
+                        component.close()
+                    except Exception:
+                        LOG.warning("Could not close %s at stop.", label)
+                self._voice_turns = self._voice_brain = None
             if self._server is None:
                 return
             self._stop_jobs()

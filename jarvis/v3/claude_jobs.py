@@ -35,6 +35,14 @@ _POLL_INTERVAL = 0.05
 _TERM_GRACE = 0.2
 _REAP_TIMEOUT = 1.0
 _TOKEN_LIMIT = 10**12
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+.][0-9A-Za-z.+-]*)?$")
+_ENV_KEEP = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR",
+    "TMP", "TEMP", "PWD", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+})
+_ENV_KEEP_PREFIXES = ("LC_", "XDG_", "WSL")
+SESSION_FLAGS = {"no-session-persistence": None, "disable-slash-commands": None}
 
 Outcome = Literal["ok", "error", "timeout", "cancelled"]
 
@@ -60,11 +68,34 @@ def resolve_cli() -> str | None:
     return resolve()
 
 
-def _job_env(name: str, review: bool, extra: dict[str, str]) -> dict[str, str]:
-    from jarvis.v2.providers.claude import ISOLATED_ENV_KEEP, ISOLATED_ENV_KEEP_PREFIXES
+def resolve_native_cli() -> str | None:
+    """Use the job resolver's installed-CLI search order without a v2 dependency."""
+    from jarvis import config
 
-    env = {key: value for key, value in os.environ.items()
-           if key in ISOLATED_ENV_KEEP or key.startswith(ISOLATED_ENV_KEEP_PREFIXES)}
+    if config.CLAUDE_CLI:
+        explicit = Path(config.CLAUDE_CLI).expanduser()
+        if explicit.is_absolute() and explicit.is_file() and os.access(explicit, os.X_OK):
+            return str(explicit)
+    directories = [Path(entry) for entry in os.get_exec_path()] + [Path.home() / ".local/bin"]
+    for directory in directories:
+        candidate = directory / "claude"
+        try:
+            if not directory.is_absolute() or any(
+                Path("/mnt") in (path, *path.parents) or path.suffix.lower() in {".cmd", ".bat", ".ps1", ".exe"}
+                for path in (candidate, candidate.resolve())
+            ):
+                continue
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except (OSError, RuntimeError):
+            continue
+    return None
+
+
+def _job_env(name: str, review: bool, extra: dict[str, str], *, environ=None) -> dict[str, str]:
+    environ = os.environ if environ is None else environ
+    env = {key: value for key, value in environ.items()
+           if key in _ENV_KEEP or key.startswith(_ENV_KEEP_PREFIXES)}
     env.update(extra)
     env.update(JARVIS_JOB=name, CLAUDE_CODE_DISABLE_CLAUDE_MDS="1")
     if review:
@@ -207,6 +238,13 @@ def _tokens(value) -> int:
     return value if type(value) is int and 0 <= value < _TOKEN_LIMIT else 0
 
 
+def usage_tokens(usage):
+    usage = usage if isinstance(usage, dict) else {}
+    inputs = sum(_tokens(usage.get(key)) for key in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return min(inputs, _TOKEN_LIMIT - 1), _tokens(usage.get("output_tokens"))
+
+
 def _result(result: JobResult, reason, returncode: int, output: _Output) -> JobResult:
     if reason == "cancelled":
         return replace(result, outcome=reason, error="Claude job cancelled.")
@@ -221,16 +259,11 @@ def _result(result: JobResult, reason, returncode: int, output: _Output) -> JobR
     if not isinstance(reply, dict) or reply.get("type") != "result":
         return replace(result, error=f"Claude job returned no valid result (exit {returncode}).")
 
-    usage = reply.get("usage")
-    if not isinstance(usage, dict):
-        usage = {}
-    input_tokens = sum(_tokens(usage.get(key)) for key in (
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    input_tokens, output_tokens = usage_tokens(reply.get("usage"))
     cost = reply.get("total_cost_usd")
     session_id = reply.get("session_id")
     result = replace(
-        result, input_tokens=min(input_tokens, _TOKEN_LIMIT - 1),
-        output_tokens=_tokens(usage.get("output_tokens")),
+        result, input_tokens=input_tokens, output_tokens=output_tokens,
         cost_usd=float(cost) if type(cost) in (int, float) and 0 <= cost <= sys.float_info.max else None,
         session_id=session_id if isinstance(session_id, str) and _SESSION.fullmatch(session_id) else None,
     )
@@ -241,9 +274,33 @@ def _result(result: JobResult, reason, returncode: int, output: _Output) -> JobR
     return replace(result, ok=True, outcome="ok", text=text)
 
 
+def _parse_version(text):
+    match = _VERSION.fullmatch(text)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _capture_version(cli, *, cwd, env, cancel, timeout):
+    return _capture([cli, "--version"], cwd=cwd, env=env, prompt=b"",
+                    timeout=min(_VERSION_TIMEOUT, timeout), cancel=cancel, stdout_cap=_VERSION_CAP)
+
+
+def _version_supported(reason, returncode, output):
+    if reason is not None or returncode != 0 or output.overflow:
+        return False
+    parts = output.stdout.decode("utf-8").split(maxsplit=1)
+    version = _parse_version(parts[0]) if parts else None
+    return version is not None and version >= _parse_version(MIN_CLI)
+
+
+def cli_meets_floor(cli, *, cwd, env, cancel=None, timeout=_VERSION_TIMEOUT):
+    try:
+        return _version_supported(*_capture_version(cli, cwd=cwd, env=env, cancel=cancel, timeout=timeout))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
 def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli):
     from jarvis import config
-    from jarvis.v2.providers.claude import parse_version
     from jarvis.v3.daemon import _prepare_data_dir
 
     if cancel is not None and cancel.is_set():
@@ -253,21 +310,15 @@ def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli)
     if not cli:
         return replace(result, error="Claude CLI was not found.")
     try:
-        reason, returncode, output = _capture(
-            [cli, "--version"], cwd=cwd, env=env, prompt=b"", timeout=min(_VERSION_TIMEOUT, timeout),
-            cancel=cancel, stdout_cap=_VERSION_CAP,
-        )
+        reason, returncode, output = _capture_version(cli, cwd=cwd, env=env, cancel=cancel, timeout=timeout)
         if reason == "cancelled" or (cancel is not None and cancel.is_set()):
             return replace(result, outcome="cancelled", error="Claude job cancelled.")
         if time.monotonic() >= deadline:
             return replace(result, outcome="timeout", error="Claude job timed out.")
-        version = None
-        if reason is None and returncode == 0 and not output.overflow:
-            parts = output.stdout.decode("utf-8").split(maxsplit=1)
-            version = parse_version(parts[0]) if parts else None
+        supported = _version_supported(reason, returncode, output)
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        version = None
-    if version is None or version < parse_version(MIN_CLI):
+        supported = False
+    if not supported:
         return replace(result, error=f"Claude CLI version {MIN_CLI} or newer is required.")
 
     try:
@@ -287,7 +338,7 @@ def _run(result, *, prompt, tool_args, mcp_json, cwd, timeout, env, cancel, cli)
             argv = [
                 cli, "-p", "--output-format", "json", "--model", result.model,
                 "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", path,
-                "--setting-sources=", "--no-session-persistence", "--disable-slash-commands",
+                "--setting-sources=", *(f"--{flag}" for flag in SESSION_FLAGS),
                 "--tools", builtins,
             ]
             if allowed:

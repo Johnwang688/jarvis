@@ -1519,6 +1519,7 @@ FAST_DRIVE_PARAGRAPH = "On a desk turn, `hud_browser_act` can perform a short re
 # FAST_STEPS. Here rather than in the provider because the paragraphs below
 # state them.
 FAST_STEPS = 8
+VOICE_MODEL = os.environ.get("JARVIS_VOICE_MODEL") or "claude-haiku-5-5"
 FAST_EDIT_STEPS = 30
 
 # The tools the owner's own chat turn at the HUD gains on the fast path
