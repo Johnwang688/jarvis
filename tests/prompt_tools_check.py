@@ -465,6 +465,16 @@ def config_checks() -> None:
     check("a toolset with none of them keeps every paragraph that names no tool",
           all(p in narrow(set()) for p in paragraphs if not mentions(p)
               and config.prompt_rule(p) is None))
+    from jarvis.v3 import chat, fastpath
+
+    fastpath.register_tools()
+    for label, prompt in built_on_system_prompt().items():
+        if label in ("v3 typed chat", "v3 voice"):
+            for gated in (False, True):
+                held = chat.available_tools(gated=gated)
+                shown = mentions(config.narrow_prompt(prompt, held)) & chat.PC_GATED
+                check(f"{label} describes the PC tools only when offered (broker={gated})",
+                      shown == (chat.PC_GATED if gated else set()))
 
 
 def built_on_system_prompt() -> dict[str, str]:
@@ -473,6 +483,8 @@ def built_on_system_prompt() -> dict[str, str]:
     from jarvis.face import server
     from jarvis.v2 import roles
     from jarvis.v2.providers import fastpath
+    from jarvis.v3.fastpath import _CHAT_PROMPT
+    from jarvis.v3.voice.claude_brain import _VOICE_PROMPT
 
     prompts = {
         "SYSTEM_PROMPT": config.SYSTEM_PROMPT,
@@ -481,6 +493,8 @@ def built_on_system_prompt() -> dict[str, str]:
         "goal": goalrunner.GOAL_SYSTEM,
         "Discord": discord_agent.DISCORD_SYSTEM,
         "face voice": server.VOICE_SYSTEM,
+        "v3 typed chat": config.SYSTEM_PROMPT + _CHAT_PROMPT,
+        "v3 voice": config.SYSTEM_PROMPT + _VOICE_PROMPT,
     }
     for role in roles.Role:  # the fast path appends a role brief's text
         prompts[f"fast path, {role.value}"] = (config.SYSTEM_PROMPT + fastpath.FAST_PROMPT

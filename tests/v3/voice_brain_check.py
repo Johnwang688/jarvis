@@ -712,7 +712,8 @@ class VoiceBrainCheck(unittest.TestCase):
                 patch.object(t3_client, "resolve", return_value="/example/bin/t3"),
                 patch("jarvis.tools.clock.datetime") as clock, patch.object(self.broker, "ask", wraps=self.broker.ask) as voice_ask):
             clock.now.return_value = datetime(2030, 1, 1, tzinfo=timezone.utc)
-            self.assertEqual(set(samples), set(chat.available_tools(gated=True, work=sample_work)))
+            # PC launch and its typed/voice parity use the fake launcher in pc_tools_check.
+            self.assertEqual(set(samples), set(chat.available_tools(gated=True, work=sample_work)) - chat.PC_GATED)
             cases = [*samples.items(), ("vault_add", {}), ("work_show", {"thread_id": "42", "messages": True}),
                      ("unknown_fixture_tool", {})]
             for index, (name, args) in enumerate(cases):

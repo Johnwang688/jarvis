@@ -17,16 +17,23 @@ _TITLES = {
     "calendar_delete": "Delete a calendar event",
     "work_start": "Start a coding thread",
     "work_send": "Send to a coding thread",
+    "app_open": "Open an app",
+    "folder_open": "Open a folder",
+    "link_open": "Open a link",
 }
 _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
 _TARGETS = {
     "vault_add": "Entry", "vault_patch": "Entry", "vault_archive": "Entry",
     "calendar_create": "Title", "calendar_update": "Event", "calendar_delete": "Event",
     "work_start": "Project", "work_send": "Thread",
+    "app_open": "App", "link_open": "URL",
 }
 
 
 def card_target(tool, card):
+    if tool == "folder_open":
+        project, folder = card["rows"]
+        return f"{project['value']} · {folder['value']}"
     return next(row["value"] for row in card["rows"] if row["label"] == _TARGETS[tool])
 
 
@@ -109,6 +116,13 @@ def build_card(tool, args, preview):
     elif tool in ("work_start", "work_send"):
         rows = _work_rows(tool, args, preview)
         limits = dict.fromkeys(("Brief", "Message", "Folder"))
+    elif tool == "app_open":
+        rows, limits = (("App", preview["app"]),), {}
+    elif tool == "folder_open":
+        rows = (("Project", preview["project"]), ("Folder", preview["path"]))
+        limits = {"Folder": None}
+    elif tool == "link_open":
+        rows, limits = (("URL", preview["url"]),), {"URL": None}
     else:
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)

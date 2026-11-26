@@ -33,11 +33,12 @@ CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_del
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
 WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})
 WORK_GATED = frozenset({"work_start", "work_send"})
+PC_GATED = frozenset({"app_open", "folder_open", "link_open"})
 # Results that never carry text written outside this session. Thread titles and learned
 # skill names can come from an earlier session that read outside text, so they are not here.
 CLEAN_RESULT_TOOLS = frozenset({
     "get_datetime", "calendar_free", "work_projects", "brief_post",
-}) | GATED_TOOLS | WORK_GATED
+}) | GATED_TOOLS | WORK_GATED | PC_GATED
 TOOL_NAMES = frozenset({
     "get_datetime", "vault_list", "vault_read", "vault_search", "index_search",
     "skill_view", "skill_names", "brief_post", *CALENDAR_TOOLS,
@@ -77,7 +78,7 @@ def _work_available(work):
 
 def available_tools(names=TOOL_NAMES, *, gated=False, work=None):
     if gated:
-        names = names | GATED_TOOLS
+        names = names | GATED_TOOLS | PC_GATED
     if _work_available(work):
         names = names | WORK_TOOLS
         if gated:
