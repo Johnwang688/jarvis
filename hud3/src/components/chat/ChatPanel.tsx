@@ -25,7 +25,8 @@ function Message({ message, draft = false }: { message: ChatMessage; draft?: boo
 }
 
 function Transcript({ rows }: { rows: ChatRow[] }) {
-  const groups: (Extract<ChatRow, { kind: "message" }> | Extract<ChatRow, { kind: "tool" }>[])[] = [];
+  type ToolRow = Exclude<ChatRow, { kind: "message" }>;
+  const groups: (Extract<ChatRow, { kind: "message" }> | ToolRow[])[] = [];
   for (const row of rows) {
     const last = groups.at(-1);
     if (row.kind === "message") groups.push(row);
@@ -34,7 +35,14 @@ function Transcript({ rows }: { rows: ChatRow[] }) {
   }
   return groups.map((group, index) => Array.isArray(group) ? (
     <ul key={index} className="chat-tools" aria-label="Tools">
-      {group.map((tool, toolIndex) => (
+      {group.map((tool, toolIndex) => tool.kind === "auto" ? (
+        <li key={toolIndex} className="chat-auto">
+          <details>
+            <summary>Ran without asking · <bdi>{tool.title}</bdi> · <bdi>{tool.target}</bdi></summary>
+            <div>Policy level {tool.level} · <bdi>{tool.why}</bdi></div>
+          </details>
+        </li>
+      ) : (
         <li key={toolIndex}>
           <bdi>{tool.name}</bdi>
           <span className={tool.ok === false ? "chat-tool-failed" : undefined}>
@@ -101,6 +109,7 @@ export function ChatPanel({ onApprovalsChange }: { onApprovalsChange?: (count: n
     <section className="agent-panel agent-chat" data-panel="chat" aria-labelledby="panel-chat">
       <header className="chat-header">
         <h2 id="panel-chat">Chat</h2>
+        {chat?.outside_text && <span className="chat-outside">Outside text read: actions will ask</span>}
         {chat && (
           <button type="button" disabled={chat.state !== "idle" || !!pending}
             onClick={() => void submit({ route: "new" })}>New chat</button>

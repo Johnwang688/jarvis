@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   actionError, readChat, readEvents, writeChat,
-  type ChatAction, type ChatMessage, type ChatSnapshot, type ChatState, type ChatTool,
+  type ChatAction, type ChatAuto, type ChatMessage, type ChatSnapshot, type ChatState, type ChatTool,
 } from "./chatApi";
 
 const ACTIVE_MS = 700;
@@ -12,7 +12,7 @@ export const isActive = (state: ChatState) => state === "running" || state === "
 
 type MessageRow = ChatMessage & { kind: "message"; steerSeq?: number };
 type ToolRow = ChatTool & { kind: "tool"; resultUnavailable?: boolean };
-export type ChatRow = MessageRow | ToolRow;
+export type ChatRow = MessageRow | ToolRow | ChatAuto;
 type ChatView = Omit<ChatSnapshot, "history" | "tools" | "replay"> & {
   rows: ChatRow[];
   notice?: "stopped" | "error";
@@ -34,7 +34,8 @@ function limitHistory(rows: ChatRow[]): ChatRow[] {
 }
 
 function applyEvents(current: ChatView, batch: EventBatch): ChatView {
-  const next = { ...current, state: batch.state, seq: batch.seq, approvals: batch.approvals };
+  const next = { ...current, state: batch.state, seq: batch.seq, approvals: batch.approvals,
+    outside_text: batch.outside_text ?? current.outside_text };
   let rows = [...current.rows];
   let after = current.seq;
   for (const event of batch.events) {
@@ -73,6 +74,12 @@ function applyEvents(current: ChatView, batch: EventBatch): ChatView {
         const finished: ToolRow = { kind: "tool", name: event.name, ok: event.ok, summary: event.summary };
         if (index === -1) rows.push(finished);
         else rows[index] = finished;
+        break;
+      }
+      case "auto": {
+        const index = rows.map((row) => row.kind === "tool" ? row.name : undefined).lastIndexOf(event.tool);
+        if (index === -1) rows.push(event);
+        else rows[index] = event;
         break;
       }
       case "error":
@@ -120,7 +127,7 @@ function reconcileSnapshot({ history, tools, replay, ...snapshot }: ChatSnapshot
           rows[anchor].steered = row.steered;
         }
         recentAnchor = index >= turnStart && anchor > lastReply && anchor < toolsBefore;
-      } else if (anchor !== -1) {
+      } else if (row.kind === "tool" && anchor !== -1) {
         let tool = pendingTool(row) ? { ...row, resultUnavailable: true } : row;
         if (recentAnchor && !row.resultUnavailable) {
           const index = snapshotTools.findIndex((entry) => entry.name === row.name
@@ -137,10 +144,17 @@ function reconcileSnapshot({ history, tools, replay, ...snapshot }: ChatSnapshot
       }
     }
   }
-  const transcript = rows.slice(0, toolsBefore).flatMap((row, index): ChatRow[] =>
-    [row, ...(knownTools.get(index) ?? [])]);
+  const saved = new Map<number, ChatAuto[]>();
+  for (const event of replay?.saved ?? []) {
+    const group = saved.get(event.after);
+    if (group) group.push(event);
+    else saved.set(event.after, [event]);
+  }
+  const atMessage = (row: MessageRow, index: number): ChatRow[] =>
+    [row, ...(knownTools.get(index) ?? []), ...(saved.get(index) ?? [])];
+  const transcript = rows.slice(0, toolsBefore).flatMap(atMessage);
   transcript.push(...snapshotTools.map((tool): ToolRow => ({ ...tool, kind: "tool" })));
-  transcript.push(...rows.slice(toolsBefore));
+  transcript.push(...rows.slice(toolsBefore).flatMap((row, index) => atMessage(row, index + toolsBefore)));
   const view = { ...snapshot, draft: active ? snapshot.draft : "", rows: transcript };
   if (!replay?.events.length) return view;
   const replayed = applyEvents({ ...view, seq: replay.events[0].seq - 1 }, {
@@ -181,6 +195,7 @@ export function useChat() {
           state: snapshot.state,
           draft: isActive(snapshot.state) ? snapshot.draft : "",
           approvals: snapshot.approvals,
+          outside_text: snapshot.outside_text,
         });
       } else {
         if (current && current.session_id !== snapshot.session_id) setFeedback(undefined);
@@ -270,7 +285,8 @@ export function useChat() {
         const result = await writeChat(action, AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]));
         if (disposed) return false;
         if ("sessionId" in result) {
-          publish({ session_id: result.sessionId, state: "idle", seq: current.seq, draft: "", rows: [], approvals: 0 });
+          publish({ session_id: result.sessionId, state: "idle", seq: current.seq, draft: "", rows: [], approvals: 0,
+            outside_text: false });
           needsSnapshot = true;
         } else {
           publish({ ...current, state: result.state, notice: undefined,

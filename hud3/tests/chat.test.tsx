@@ -78,6 +78,45 @@ function expectPost(route: string, body: object) {
 }
 
 describe("chat actions", () => {
+  it("replaces the tool row with automatic action details and no approval controls", async () => {
+    fetchMock.mockResolvedValueOnce(json(running)).mockResolvedValueOnce(batch("idle", 5, [
+      user("Save the fixture note"),
+      { kind: "tool_start", name: "vault_add", seq: 2 },
+      { kind: "tool_end", name: "vault_add", seq: 3, ok: true, summary: "Saved" },
+      { kind: "auto", tool: "vault_add", seq: 4, title: "Add a vault entry", target: "facts/fixture",
+        level: "L0", why: "default:vault.update" },
+      { kind: "reply", seq: 5, text: "Done." },
+    ]));
+    await mount();
+    await advance(700);
+    expect(box.querySelectorAll(".chat-tools li")).toHaveLength(1);
+    const row = box.querySelector(".chat-auto")!;
+    expect(row.querySelector("summary")?.textContent).toBe("Ran without asking · Add a vault entry · facts/fixture");
+    expect(row.querySelector("details div")?.textContent).toBe("Policy level L0 · default:vault.update");
+    expect(row.querySelector("button")).toBeNull();
+    expect(button("Approve")).toBeUndefined();
+  });
+
+  it("restores a saved automatic row and clears it and the outside-text indicator on New chat", async () => {
+    fetchMock.mockResolvedValueOnce(json({
+      ...idle, outside_text: true, history: [{ role: "user", text: "Fixture request" },
+        { role: "assistant", text: "Fixture reply" }],
+      replay: { history_prefix: 2, events: [], saved: [{
+        kind: "auto", tool: "work_send", title: "Send to a coding thread", target: "Fixture thread",
+        level: "L1", why: "owner-request:thread.send", after: 0,
+      }] },
+    })).mockResolvedValueOnce(json({ session_id: "new-sample" }));
+    await mount();
+    expect([...box.querySelectorAll(".chat-log > *")].map((row) => row.textContent)).toEqual([
+      "YouFixture request", expect.stringContaining("Ran without asking · Send to a coding thread · Fixture thread"),
+      "JarvisFixture reply",
+    ]);
+    expect(box.querySelector(".chat-header")?.textContent).toContain("Outside text read: actions will ask");
+    await click("New chat");
+    expect(box.querySelector(".chat-outside")).toBeNull();
+    expect(box.querySelector(".chat-auto")).toBeNull();
+  });
+
   it("loads idle and sends exactly once with Enter, preserving newlines", async () => {
     fetchMock.mockResolvedValueOnce(json(idle)).mockResolvedValueOnce(json({ state: "running", steered: false }, 202));
     await mount();

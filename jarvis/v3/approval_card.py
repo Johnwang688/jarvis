@@ -19,6 +19,15 @@ _TITLES = {
     "work_send": "Send to a coding thread",
 }
 _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
+_TARGETS = {
+    "vault_add": "Entry", "vault_patch": "Entry", "vault_archive": "Entry",
+    "calendar_create": "Title", "calendar_update": "Event", "calendar_delete": "Event",
+    "work_start": "Project", "work_send": "Thread",
+}
+
+
+def card_target(tool, card):
+    return next(row["value"] for row in card["rows"] if row["label"] == _TARGETS[tool])
 
 
 def card_text(value, *, limit=CARD_TEXT_LIMIT):

@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from jarvis.v3.policy import Policy
+from jarvis.v3.policy import Policy, set_auto
 from jarvis.v3.tools.calendar import CalendarTools
 
 from a6b1_acceptance_check import Model, reply
@@ -26,7 +26,8 @@ CASES = (
 
 
 class ChatFacts(Base):
-    def test_all_levels_still_wait_and_log_the_call_time_verdict(self):
+    def test_auto_off_cards_keep_the_level_and_log_the_call_time_verdict(self):
+        set_auto(self.policy_file, False)
         self.token.write_text("fake-token")
         vault = self.vault()
         vault.add(**ADD)
@@ -37,7 +38,8 @@ class ChatFacts(Base):
                                                                       approve=approve))
         cases = [(False, *case) for case in CASES] + [(True, *case) for case in CASES]
         cases.append((True, "vault_patch", PATCH, "vault.update", "L0", "default:vault.update"))
-        with patch.object(Policy, "explain", autospec=True, side_effect=Policy.explain) as explain:
+        with patch.object(Policy, "explain_with_auto", autospec=True,
+                          side_effect=Policy.explain_with_auto) as explain:
             for tainted, name, args, kind, level, why in cases:
                 with self.subTest(tainted=tainted, name=name):
                     calls = []
@@ -50,7 +52,7 @@ class ChatFacts(Base):
                     self.model.steps.extend((reply(calls=calls), reply("Done.")))
                     svc.send("Try the fixture action.")
                     item = self.next_card()
-                    expected = ("L2", "hard:tainted") if tainted else (level, why)
+                    expected = ("L2", "hard:tainted") if tainted else (level, "auto-off" if level < "L2" else why)
                     try:
                         snap = svc.snapshot()
                         self.assertEqual((snap["state"], snap["approvals"], snap["outside_text"]),
@@ -72,8 +74,10 @@ class ChatFacts(Base):
                         self.assertEqual(self.wait_idle(svc), "idle")
                     self.assertEqual(self.states(item["id"]), ["pending", "denied"])
                     rows = [json.loads(line) for line in self.log.read_text().splitlines()]
+                    logged = (("L2", "hard:tainted" if kind in ("vault.update", "calendar.block")
+                               else f"default:{kind}") if tainted else (level, why))
                     self.assertEqual([(row["level"], row["why"]) for row in rows if row["id"] == item["id"]],
-                                     [expected, expected])
+                                     [logged, logged])
 
 
 if __name__ == "__main__":

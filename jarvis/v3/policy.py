@@ -1,9 +1,9 @@
-"""Classify v3 proposals. H10 still requires approval at execution at every level.
+"""Classify v3 actions. Proposals require approval at execution under H10.
 
-The HUD policy route is out of scope for I1.
+Clean owner chat can run L0 and L1 automatically when enabled.
 """
 
-from contextlib import ExitStack, suppress
+from contextlib import contextmanager, suppress
 import fcntl
 import json
 import math
@@ -130,10 +130,7 @@ def _policy_path(path):
 
 
 def _read_file(directory, name):
-    try:
-        fd = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=directory)
-    except FileNotFoundError:
-        return _empty_file()
+    fd = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=directory)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
@@ -144,8 +141,9 @@ def _read_file(directory, name):
         if len(raw) > _MAX_BYTES or info.st_ctime_ns != after.st_ctime_ns:
             raise ValueError("Policy file exceeded the size limit or changed during the read.")
     data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-    if (type(data) is not dict or not data.keys() <= {"version", "rules", "default_level", "promotions"}
+    if (type(data) is not dict or not data.keys() <= {"version", "rules", "default_level", "promotions", "auto"}
             or type(data.get("version")) is not int or data["version"] != 1
+            or type(data.get("auto", True)) is not bool
             or type(data.get("rules")) is not list or not all(map(_valid_rule, data["rules"]))
             or not _level(data.get("default_level", "L2"))
             or type(data.get("promotions", [])) is not list
@@ -242,20 +240,30 @@ class Policy:
     def _snapshot(self):
         try:
             path = _policy_path(self.path)
-            with ExitStack() as stack:
-                try:
-                    directory = stack.enter_context(open_directory(path.parent))
-                except FileNotFoundError:
-                    return _empty_file()
+            with open_directory(path.parent) as directory:
                 return _read_file(directory, path.name)
+        except FileNotFoundError:
+            return {**_empty_file(), "auto": False}
         except Exception:
             return None
+
+    @property
+    def auto(self) -> bool:
+        data = self._snapshot()
+        return data is not None and data.get("auto", True)
 
     def level_for(self, proposal) -> Level:
         return self.explain(proposal)["level"]
 
     def explain(self, proposal) -> Decision:
+        return self._explain(self._snapshot(), proposal)
+
+    def explain_with_auto(self, proposal) -> tuple[Decision, bool]:
         data = self._snapshot()
+        return self._explain(data, proposal), data is not None and data.get("auto", True)
+
+    @staticmethod
+    def _explain(data, proposal) -> Decision:
         kind = None
         try:
             # Keep caller objects out of hashing and comparisons with policy keys.
@@ -312,6 +320,30 @@ def _replace_file(directory, name, data):
             os.unlink(tmp, dir_fd=directory)
 
 
+@contextmanager
+def _edit_file(path):
+    path = _policy_path(path)
+    with open_directory(path.parent, create=True) as directory:
+        # The directory inode stays stable across replacements of the file.
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        try:
+            data = _read_file(directory, path.name)
+        except FileNotFoundError:
+            data = _empty_file()
+        except (OSError, ValueError, RecursionError) as exc:
+            raise ValueError("Policy file is malformed or unreadable.") from exc
+        yield data
+        _replace_file(directory, path.name, data)
+
+
+def set_auto(path, enabled: bool):
+    """Persist the owner's chat automation setting."""
+    if type(enabled) is not bool:
+        raise ValueError("Automatic running must be on or off.")
+    with _edit_file(path) as data:
+        data["auto"] = enabled
+
+
 def set_rule(path, kind, level, when=None) -> tuple[Level, Level]:
     """Persist an owner rule and return the previous and new effective levels."""
     when = when.copy() if type(when) is dict else when
@@ -322,14 +354,7 @@ def set_rule(path, kind, level, when=None) -> tuple[Level, Level]:
     facts = {**_example_facts(kind), **when}
     if _apply_hard_rules(Decision(level=level, why=""), kind, facts)["level"] > level:
         raise ValueError("A hard policy rule requires a higher level.")
-    path = _policy_path(path)
-    with open_directory(path.parent, create=True) as directory:
-        # The directory inode stays stable across replacements of the file.
-        fcntl.flock(directory, fcntl.LOCK_EX)
-        try:
-            data = _read_file(directory, path.name)
-        except (OSError, ValueError, RecursionError) as exc:
-            raise ValueError("Policy file is malformed or unreadable.") from exc
+    with _edit_file(path) as data:
         previous = _decide(data, kind, facts)["level"]
         # Replace the same selector, preserving the order of the other rules.
         remaining = [row for row in data["rules"] if row["kind"] != kind
@@ -337,5 +362,4 @@ def set_rule(path, kind, level, when=None) -> tuple[Level, Level]:
                      or not all(_same_fact(row["when"][key], value) for key, value in when.items())]
         # A catch-all must follow every conditional rule it could shadow.
         data["rules"] = [rule, *remaining] if when else [*remaining, rule]
-        _replace_file(directory, path.name, data)
         return previous, _decide(data, kind, facts)["level"]

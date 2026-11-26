@@ -123,7 +123,7 @@ def data_route(handler, method: str, path: str, body: bytes) -> tuple[int, dict,
         chat = services.chat
         if entry.owner_key == _CHAT_SEND:
             # Reuse the window's send validation and response mapping.
-            chat = SimpleNamespace(send=partial(chat.send, steer=False))
+            chat = SimpleNamespace(send=partial(chat.send, steer=False, phone=True))
         status, payload = route.run(value, services.feed, chat, data_dir=services.data_dir,
                                     get_work=services.work, get_proposals=services.proposals)
     if 200 <= status < 300 and entry.project is not None:

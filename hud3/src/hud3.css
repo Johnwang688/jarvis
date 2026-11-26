@@ -416,6 +416,7 @@
 }
 
 .chat-header h2 { margin: 0; }
+.chat-outside { color: var(--text-muted); font-size: 11px; }
 
 .agent-chat button {
   min-height: 28px;
@@ -474,6 +475,15 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.chat-auto {
+  color: var(--accent-hi);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 3px 6px;
+}
+.chat-auto summary { cursor: pointer; }
+.chat-auto details > div { color: var(--text-muted); padding-inline-start: 1em; }
 
 .chat-working, .chat-composer-actions, .agent-chat > p { font-size: 12px; }
 .agent-chat .chat-error, .chat-tool-failed { color: var(--red); background: var(--glass-float); }

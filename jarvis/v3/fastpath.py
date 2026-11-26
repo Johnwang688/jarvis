@@ -21,7 +21,7 @@ from jarvis.context import ContextPolicy
 from jarvis.tools.clock import get_datetime
 
 from . import vault
-from .approval_card import build_card, card_text
+from .approval_card import build_card, card_target, card_text
 from .approvals import digest
 from .chat import (
     CALENDAR_WRITES, CLEAN_RESULT_TOOLS, GATED_TOOLS, TOOL_NAMES, WORK_GATED, WORK_TOOLS,
@@ -43,6 +43,7 @@ V3_TOOLS = TOOL_NAMES
 _ALL_GATED = GATED_TOOLS | WORK_GATED
 SUMMARY_CHARS = 200
 WORK_SHOW_LIMIT = 24_000
+AUTO_PER_TURN = 6
 # Chat has no file reader. An existing non-directory makes v1's context
 # policy truncate old results without creating shared spill files.
 _NO_SPILL = Path(os.devnull)
@@ -70,6 +71,7 @@ _POLICY_KINDS = {
     "work_start": "thread.start",
     "work_send": "thread.send",
 }
+_DELETE_TOOLS = frozenset({"calendar_delete", "vault_archive"})
 
 
 def _default_calendar(approve=None):
@@ -93,7 +95,10 @@ class _TurnTools:
     outside_text: Callable[[], bool]
     calendar: Callable
     work: object = None
+    phone_input: Callable[[], bool] = lambda: False
     posts: int = 0
+    auto_count: int = 0
+    auto_action: dict | None = None
     grant: "_WriteGrant | None" = None
 
     @cached_property
@@ -204,29 +209,62 @@ class ChatApprover:
                     preview = _vault_preview(turn.memory, name, call_args)
                 except vault.VaultError as exc:
                     return tools.Refusal(str(exc))
-            verdict = Policy().explain(facts)
+            verdict, auto_enabled = Policy().explain_with_auto(facts)
             if verdict["level"] == "L3":
                 return tools.Refusal("Policy blocks this action.")
             if verdict["level"] not in ("L0", "L1", "L2"):
                 return tools.Refusal("Policy could not evaluate this action.")
-            if tainted and verdict == {"level": "L2", "why": f"default:{kind}"}:
-                # Surface the taint on chat cards that would otherwise show an L2 default.
-                verdict = {"level": "L2", "why": "hard:tainted"}
+            if name in _DELETE_TOOLS and verdict["level"] < "L2":
+                verdict = {"level": "L2", "why": "hard:delete"}
             try:
                 card = build_card(name, call_args, preview)
             except WorkError as exc:
                 return tools.Refusal(str(exc))
-            receipt = []
-            allowed = self._broker.ask(
-                name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
-                verdict=verdict, preview=preview, cancelled=turn.stop,
-                on_approved=lambda id, signature: receipt.append((id, signature)),
-                on_pending=self._on_pending,
-            )
-            if allowed is not True or not receipt or turn.stop():
+            receipt = None
+            display_why = None
+            auto_action = None
+            if verdict["level"] < "L2" and not tainted and facts.get("owner_request") is True:
+                # Order phone sends and Stop against the durable auto decision.
+                with turn.tool_write() as writable:
+                    if not writable:
+                        return tools.Refusal("The chat turn is stopping.")
+                    if not auto_enabled:
+                        display_why = "auto-off"
+                    elif turn.phone_input():
+                        display_why = "phone"
+                    elif preview.get("flags"):
+                        display_why = "flagged"
+                    elif turn.auto_count >= AUTO_PER_TURN:
+                        display_why = "cap"
+                    else:
+                        target = card_target(name, card)
+                        receipt = self._broker.auto(
+                            name, args, session_id=turn.session_id, verdict=verdict,
+                            preview=preview, cancelled=turn.stop,
+                        )
+                        if receipt is None:
+                            display_why = "cap"
+                        else:
+                            turn.auto_count += 1
+                            auto_action = {"tool": name, "title": card["title"], "target": target, **verdict}
+            elif tainted and verdict == {"level": "L2", "why": f"default:{kind}"}:
+                display_why = "hard:tainted"
+            if receipt is None:
+                answer = []
+                allowed = self._broker.ask(
+                    name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
+                    verdict=verdict, preview=preview, cancelled=turn.stop, display_why=display_why,
+                    on_approved=lambda id, signature: answer.append((id, signature)),
+                    on_pending=self._on_pending,
+                )
+                if allowed is not True or not answer:
+                    return False
+                receipt = answer[0]
+            if turn.stop():
                 return False
-            request_id, approved_digest = receipt[0]
+            request_id, approved_digest = receipt
             turn.grant = _WriteGrant(request_id, approved_digest, name, call_args, tuple(args), preview)
+            turn.auto_action = auto_action
             return True
         except Exception:
             return tools.Refusal("The approval request could not be prepared.")
@@ -380,7 +418,7 @@ def work_start(
     brief: Annotated[str, "Instructions for the coding agent."],
     worktree: Annotated[bool, "Use a new worktree when the project has a base."] = True,
 ) -> str:
-    """Start a coding thread with owner approval."""
+    """Start a coding thread for the owner."""
     grant = _take_grant("work_start", dict(project=project, title=title, brief=brief, worktree=worktree))
     if grant is None:
         return "Error: Starting a coding thread requires approval."
@@ -394,7 +432,7 @@ def work_send(
     thread_id: Annotated[str, "ID of a coding thread Jarvis started."],
     message: Annotated[str, "Follow-up instructions for the coding agent."],
 ) -> str:
-    """Send a follow-up to a coding thread with owner approval."""
+    """Send a follow-up to a coding thread for the owner."""
     grant = _take_grant("work_send", dict(thread_id=thread_id, message=message))
     if grant is None:
         return "Error: Sending to a coding thread requires approval."
@@ -443,7 +481,7 @@ def vault_add(
     body: Annotated[str, "Markdown body to save."],
     source: Annotated[str, "Where the information came from."],
 ) -> str:
-    """Add a memory entry with owner approval."""
+    """Add a memory entry for the owner."""
     return _vault_write("vault_add", MemoryTools.memory_add, folder=folder, name=name,
                         description=description, body=body, source=source)
 
@@ -454,7 +492,7 @@ def vault_patch(
     old: Annotated[str, "Text that occurs exactly once."],
     new: Annotated[str, "Replacement text."],
 ) -> str:
-    """Replace one substring in a vault entry with owner approval."""
+    """Replace one substring in a vault entry for the owner."""
     return _vault_write("vault_patch", MemoryTools.memory_patch, name=name, old=old, new=new)
 
 
@@ -553,7 +591,7 @@ def calendar_create(
     description: Annotated[str, "Event description."] = "",
     reminders: Annotated[list[int] | None, "Up to five popup reminders in minutes before the event."] = None,
 ) -> str:
-    """Create a primary calendar event with owner approval."""
+    """Create an event on the owner's primary calendar."""
     return _calendar_write("calendar_create", title=title, start=start, end=end,
                            description=description, reminders=reminders)
 
@@ -566,7 +604,7 @@ def calendar_update(
     end: Annotated[str | None, "New end as an ISO 8601 datetime."] = None,
     description: Annotated[str | None, "New description."] = None,
 ) -> str:
-    """Update a Jarvis-owned event with owner approval."""
+    """Update a Jarvis-owned calendar event."""
     return _calendar_write("calendar_update", event_id=event_id, title=title,
                            start=start, end=end, description=description)
 
@@ -725,7 +763,7 @@ class _TurnSession:
     def record(self, text, turn, messages):
         self.messages = messages
 
-    def save(self, inputs, *, stopped, prompt_stamp, steer_stamps, reply_stamp):
+    def save(self, inputs, *, stopped, prompt, delivered, reply_stamp, auto):
         session = self.session
         turn = self.turn
         if turn is None or (stopped and not turn.cancelled) or self.messages is None:
@@ -735,13 +773,19 @@ class _TurnSession:
         else:
             messages = [row for row in self.messages if id(row) not in self.unsent]
         session.save_messages(messages)
-        rows = [("you", text, prompt_stamp) for text in inputs]
-        rows.extend(("you", text, stamp) for text, stamp in zip(self.steering, steer_stamps, strict=True))
+        user_rows = [(prompt["seq"], {"t": prompt["t"], "role": "you", "text": text}) for text in inputs]
+        user_rows.extend((row["seq"], {"t": row["t"], "role": "you", "text": text})
+                         for text, row in zip(self.steering, delivered, strict=True))
+        for event in auto:
+            # Keep display metadata out of the model transcript and indexed message text.
+            anchor = next(row for seq, row in reversed(user_rows) if seq < event["seq"])
+            anchor.setdefault("auto", []).append(event)
+        rows = [row for _, row in user_rows]
         if turn is not None and not stopped and turn.text.strip():
-            rows.append(("jarvis", turn.text, reply_stamp))
+            rows.append({"t": reply_stamp, "role": "jarvis", "text": turn.text})
         with session._log_path.open("a", encoding="utf-8") as log:
-            for role, text, stamp in rows:
-                log.write(json.dumps({"t": stamp, "role": role, "text": text}, ensure_ascii=False) + "\n")
+            for row in rows:
+                log.write(json.dumps(row, ensure_ascii=False) + "\n")
         session.meta.update(
             turns=session.turns + 1, updated=self.clock(),
             cost_usd=round(session.meta["cost_usd"] + (turn.cost_usd if turn is not None else 0), 6),
@@ -786,7 +830,7 @@ def _enable_request_guard():
 
 def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
              completion, stop, take_steering, admit_completion, emit, tool_write, record_outside_text,
-             turn_id=None, approvals=None, calendar=None, work=None):
+             phone_input, turn_id=None, approvals=None, calendar=None, work=None):
     register_tools(include_gated=approvals is not None)
     session = _TurnSession(sessions.Session(session_id, path, meta), clock)
     names = available_tools(V3_TOOLS, gated=approvals is not None, work=work)
@@ -845,10 +889,15 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                 outcome = "ok" if ok else "refused" if refused else "failed"
                 emit(kind, name=shown_name, ok=ok, summary=summary, outcome=outcome,
                      changes_state=name in _ALL_GATED or name == "brief_post")
+                if turn.auto_action is not None and turn.auto_action["tool"] == name:
+                    # A run that failed keeps its failed tool row: "ran" is only said of what ran.
+                    if ok:
+                        emit("auto", **turn.auto_action)
+                    turn.auto_action = None
 
     turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
                       lambda: meta["outside_text"],
-                      _default_calendar if calendar is None else calendar, work=work)
+                      _default_calendar if calendar is None else calendar, work=work, phone_input=phone_input)
     agent = _ChatAgent(
         model=models.tier("orchestrator"), system=config.SYSTEM_PROMPT + _CHAT_PROMPT,
         tool_names=names, max_steps=config.FAST_STEPS,

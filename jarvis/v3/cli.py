@@ -193,6 +193,22 @@ def policy_set(args) -> int:
     return 0
 
 
+def policy_auto(args) -> int:
+    from .policy import Policy, set_auto
+
+    try:
+        if args.setting != "status":
+            set_auto(config.V3_POLICY_FILE, args.setting == "on")
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("Error: The policy file could not be updated safely.", file=sys.stderr)
+        return 1
+    print("Automatic running is on." if Policy().auto else "Automatic running is off.")
+    return 0
+
+
 def work_registry(args) -> int:
     from .t3_client import T3, T3Error
     from .work import Registry, WorkError, WorkService
@@ -291,6 +307,10 @@ def add_commands(sub):
     setter.add_argument("kind")
     setter.add_argument("level")
     setter.set_defaults(func=policy_set)
+    automatic = policy_sub.add_parser("auto", help="control automatic actions in owner chat")
+    auto_sub = automatic.add_subparsers(dest="setting", required=True)
+    for setting in ("on", "off", "status"):
+        auto_sub.add_parser(setting).set_defaults(func=policy_auto)
 
     work = sub.add_parser("work", help="owner controls for coding projects")
     work.set_defaults(func=work_registry)
