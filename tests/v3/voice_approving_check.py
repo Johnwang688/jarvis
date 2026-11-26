@@ -158,7 +158,7 @@ class ApprovalAnswers(BrokerFixture):
 
     def test_click_only_kinds_and_current_chat_tools(self):
         expected = {"calendar_create", "calendar_update", "calendar_delete",
-                    "vault_add", "vault_patch", "vault_archive", "work_start", "work_send",
+                    "vault_add", "vault_patch", "vault_archive", "work_start", "work_send", "delegate",
                     "app_open", "folder_open", "link_open"}
         self.assertEqual(set(fastpath._POLICY_KINDS), expected)
         for tool in expected:

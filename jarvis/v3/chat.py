@@ -32,7 +32,7 @@ CALENDAR_TOOLS = frozenset({"calendar_list", "calendar_free"})
 CALENDAR_WRITES = frozenset({"calendar_create", "calendar_update", "calendar_delete"})
 GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDAR_WRITES
 WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show"})
-WORK_GATED = frozenset({"work_start", "work_send"})
+WORK_GATED = frozenset({"work_start", "work_send", "delegate"})
 PC_GATED = frozenset({"app_open", "folder_open", "link_open"})
 # Results that never carry text written outside this session. Thread titles and learned
 # skill names can come from an earlier session that read outside text, so they are not here.
@@ -64,25 +64,32 @@ def calendar_available():
     return Path(config.GOOGLE_TOKEN_PATH).is_file()
 
 
-def _work_available(work):
-    if work is None:
-        return False
+def _t3_available():
     try:
-        if not work.projects():
-            return False
         t3_client.resolve()
     except Exception:
         return False
     return True
 
 
+def _work_available(work):
+    try:
+        return work is not None and bool(work.projects()) and _t3_available()
+    except Exception:
+        return False
+
+
 def available_tools(names=TOOL_NAMES, *, gated=False, work=None):
     if gated:
         names = names | GATED_TOOLS | PC_GATED
-    if _work_available(work):
+    work_available = _work_available(work)
+    if work_available:
         names = names | WORK_TOOLS
         if gated:
-            names = names | WORK_GATED
+            names = names | (WORK_GATED - {"delegate"})
+    if (gated and callable(getattr(work, "plan_delegate", None))
+            and (work_available or _t3_available())):
+        names = names | {"delegate"}
     return sorted(names if calendar_available() else names - (CALENDAR_TOOLS | CALENDAR_WRITES))
 
 

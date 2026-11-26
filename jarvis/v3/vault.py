@@ -157,7 +157,7 @@ def body_cap(location: Location) -> int:
 
 def _new_entry(folder, name, description, body, source):
     if not isinstance(folder, str) or folder not in FOLDERS:
-        raise VaultError("Use a known memory folder.")
+        raise VaultError(f"Use a known memory folder: {', '.join(FOLDERS)}.")
     if not _slug(name):
         raise VaultError("Use a short kebab-case memory name.")
     _metadata("description", description)

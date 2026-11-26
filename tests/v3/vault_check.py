@@ -181,6 +181,11 @@ class VaultChecks(unittest.TestCase):
         (saved,) = archive.iterdir()
         self.assertEqual(saved.read_bytes(), pending)
 
+    def test_an_unknown_folder_is_refused_with_the_folders_that_exist(self):
+        reply = self.tools.memory_add("events", "tea", "A drink", "Mint tea.", "owner")
+        self.assertIn("people, projects, preferences, style, facts", reply)
+        self.assertFalse(self.root.exists())
+
     def test_missing_folders_are_lazy_and_recreated_on_write(self):
         self.assertEqual(self.tools.memory_list(), "Memory is empty.")
         self.assertFalse(self.root.exists())

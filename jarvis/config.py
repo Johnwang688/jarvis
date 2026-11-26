@@ -1594,8 +1594,16 @@ V3_PC_PARAGRAPH = (
     "a public HTTPS link."
 )
 
+V3_DELEGATE_PARAGRAPH = (
+    "You can hand a task to a stronger agent, GPT-6.2 Sol, which works in the background: "
+    "`delegate`. Do quick things yourself. Use `delegate` for work that needs many steps, real "
+    "work in a project's code, or anything you tried and could not finish. Never pretend a task "
+    "is done and never give up silently: either do it, or hand it off and say so in one sentence."
+)
+
 
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
+    "You can hand a task to a stronger agent": ((("delegate",), None),),
     "For an owner request to open something on the desk PC": (
         (("app_open", "folder_open", "link_open"), None),
     ),
@@ -1708,7 +1716,7 @@ def _original_prompt_rules() -> dict:
     paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
     paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH, FAST_LIMITS_PARAGRAPH,
                        FAST_DIRECT_PARAGRAPH, FAST_PROPOSE_PARAGRAPH, FAST_CHATS_PARAGRAPH,
-                       V3_PC_PARAGRAPH))
+                       V3_PC_PARAGRAPH, V3_DELEGATE_PARAGRAPH))
     result = {}
     for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
         matches = [p for p in paragraphs if p.startswith(opening)]

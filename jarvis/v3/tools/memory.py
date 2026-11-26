@@ -72,7 +72,7 @@ class MemoryTools:
     @_tool
     def memory_add(
         self,
-        folder: Annotated[str, "Vault folder for the new entry."],
+        folder: Annotated[str, "Vault folder for the new entry: people, projects, preferences, style or facts."],
         name: Annotated[str, "Name of the new entry."],
         description: Annotated[str, "One-line description of the entry."],
         body: Annotated[str, "Markdown body to save."],

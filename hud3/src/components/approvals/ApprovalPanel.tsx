@@ -24,6 +24,7 @@ const actions = new Map([
   ["calendar_update", { title: "Update a calendar event", target: "Event" }],
   ["calendar_delete", { title: "Delete a calendar event", target: "Event" }],
   ["work_start", { title: "Start a coding thread", target: "Project", required: ["Folder", "Agent", "Runs in"] }],
+  ["delegate", { title: "Hand off to Sol", target: "Project", required: ["Folder", "Model"] }],
   ["work_send", { title: "Send to a coding thread", target: "Thread", required: ["Thread id", "In project"] }],
 ]);
 const identityLabels = new Set(["entry", "event", "title", "target", "tool", "action", "project", "thread"]);

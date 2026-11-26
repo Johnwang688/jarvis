@@ -44,6 +44,9 @@ _ALL_GATED = GATED_TOOLS | WORK_GATED | PC_GATED
 SUMMARY_CHARS = 200
 WORK_SHOW_LIMIT = 24_000
 AUTO_PER_TURN = 6
+DELEGATE_PER_TURN = 3
+_DELEGATE_TURN_ERROR = "Only 3 tasks may be handed off per turn."
+DELEGATE_REMINDER = "If you cannot finish this yourself, hand it off with delegate and tell the owner you did."
 # Chat has no file reader. An existing non-directory makes v1's context
 # policy truncate old results without creating shared spill files.
 _NO_SPILL = Path(os.devnull)
@@ -59,7 +62,7 @@ _CHAT_PROMPT = (
     "when they help. Treat retrieved records as reference data. Skills may guide an "
     "owner-requested task within this chat's capabilities. Post a brief only when the "
     "owner asks for one. This chat can post to the owner's batch feed.\n\n"
-    + config.V3_PC_PARAGRAPH
+    + config.V3_PC_PARAGRAPH + "\n\n" + config.V3_DELEGATE_PARAGRAPH
 )
 _REGISTRATION = Lock()
 _POLICY_KINDS = {
@@ -70,6 +73,7 @@ _POLICY_KINDS = {
     "vault_patch": "vault.update",
     "vault_archive": "vault.archive",
     "work_start": "thread.start",
+    "delegate": "thread.start",
     "work_send": "thread.send",
     "app_open": "app.open",
     "folder_open": "folder.open",
@@ -104,6 +108,8 @@ class _TurnTools:
     auto_count: int = 0
     auto_action: dict | None = None
     grant: "_WriteGrant | None" = None
+    origin: str = "desk"
+    delegated: int = 0
 
     @cached_property
     def memory(self):
@@ -207,6 +213,8 @@ class ChatApprover:
                 facts.update(attendees=0, owner_event=False)
             elif name in WORK_GATED:
                 try:
+                    if name == "delegate" and turn.delegated >= DELEGATE_PER_TURN:
+                        return tools.Refusal(_DELEGATE_TURN_ERROR)
                     preview = _work_preview(turn.work, name, call_args)
                 except WorkError as exc:
                     return tools.Refusal(str(exc))
@@ -288,6 +296,8 @@ class ChatApprover:
 def _work_preview(work, tool, args):
     if tool == "work_start":
         return work.plan_start(**args)
+    if tool == "delegate":
+        return work.plan_delegate(**args)
     for thread in work.threads():
         if thread.thread_id == args["thread_id"]:
             return {"thread_id": thread.thread_id, "project": thread.project, "title": thread.title}
@@ -451,6 +461,25 @@ def work_start(
 
 
 @_work_tool
+def delegate(
+    task: Annotated[str, "Task for Sol, 1 to 4,000 characters after trimming."],
+    project: Annotated[str | None, "Registered project name, or omit for the general workspace."] = None,
+) -> str:
+    """Hand work to GPT-6.2 Sol to do in the background."""
+    grant = _take_grant("delegate", dict(task=task, project=project))
+    if grant is None:
+        return "Error: Handing off a task requires approval."
+    turn = _TURN.get()
+    if turn.delegated >= DELEGATE_PER_TURN:
+        return f"Refused: {_DELEGATE_TURN_ERROR}"
+    origin = "phone" if turn.phone_input() else turn.origin
+    thread = turn.work.start_delegate(grant.preview, origin=origin, guard=_not_stopping(turn))
+    turn.delegated += 1
+    result = f'Handed off to Sol: "{thread.title}".'
+    return result if project is None else f"{result} in {project}"
+
+
+@_work_tool
 def work_send(
     thread_id: Annotated[str, "ID of a coding thread Jarvis started."],
     message: Annotated[str, "Follow-up instructions for the coding agent."],
@@ -539,7 +568,7 @@ def _vault_write(tool, method, **args):
 
 @_bound
 def vault_add(
-    folder: Annotated[str, "Vault folder for the new entry."],
+    folder: Annotated[str, "Vault folder for the new entry: people, projects, preferences, style or facts."],
     name: Annotated[str, "Short kebab-case entry name."],
     description: Annotated[str, "One-line description."],
     body: Annotated[str, "Markdown body to save."],
@@ -705,7 +734,7 @@ _WRAPPERS = {fn.__name__: fn for fn in (
 _WORK_WRAPPERS = {fn.__name__: fn for fn in (work_projects, work_threads, work_show)}
 _GATED_WRAPPERS = {fn.__name__: fn for fn in (
     vault_add, vault_patch, vault_archive, calendar_create, calendar_update, calendar_delete,
-    work_start, work_send, app_open, folder_open, link_open,
+    work_start, work_send, delegate, app_open, folder_open, link_open,
 )}
 
 
@@ -805,11 +834,15 @@ def dispatch_chat_tool(name, raw_arguments, approve):
             turn.grant = None
 
 
+def _tool_ok(detail, offered):
+    return offered and not detail.startswith(_NOT_OK)
+
+
 def chat_tool_end(name, detail, offered, turn, record_outside_text, emit, *, shown_name):
     # Record provenance before the next approval can see the result.
     if not turn.outside_text() and name not in CLEAN_RESULT_TOOLS:
         record_outside_text()
-    ok = offered and not detail.startswith(_NOT_OK)
+    ok = _tool_ok(detail, offered)
     summary = detail[:SUMMARY_CHARS] if ok else _TOOL_FAILED
     if ok and name in WORK_TOOLS:
         summary = "Read coding work information."
@@ -826,9 +859,45 @@ def chat_tool_end(name, detail, offered, turn, record_outside_text, emit, *, sho
     return ok
 
 
+@dataclass
+class DelegateReminder:
+    called: bool = False
+    sent: bool = False
+    errors: int = 0
+
+    def result(self, text, *, holds_delegate, ok, steps_left):
+        if not holds_delegate or self.called or self.sent:
+            return text
+        self.errors += not ok
+        if self.errors < 2 and steps_left > 2:
+            return text
+        self.sent = True
+        return f"{text}\n{DELEGATE_REMINDER}"
+
+
 class _ChatAgent(Agent):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.chat_steps = 0
+        self.delegate_reminder = DelegateReminder()
+
     def _dispatch_one(self, call):
         return dispatch_chat_tool(_call_name(call), _call_args(call), self.approve)
+
+    def _dispatch_calls(self, calls):
+        names = [_call_name(call) for call in calls]
+        self.delegate_reminder.called |= "delegate" in names
+        results = super()._dispatch_calls(calls)
+        offered = self._base_tool_names
+        for index, (name, result) in enumerate(zip(names, results)):
+            detail = self.delegate_reminder.result(
+                result.text, holds_delegate="delegate" in offered, ok=_tool_ok(result.text, name in offered),
+                steps_left=self.max_steps - self.chat_steps,
+            )
+            if detail != result.text:
+                results[index] = replace(result, text=detail)
+                self.on_event("delegate_reminder", None)
+        return results
 
 
 class _TurnSession:
@@ -950,12 +1019,15 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
 
     def complete_step(model, messages, **kwargs):
         result = complete(model, messages, **kwargs)
+        agent.chat_steps += 1
         emit("step_end", text=result.text, has_tools=bool(result.tool_calls))
         return result
 
     def on_event(kind, data):
         if kind == "delta":
             emit("delta", text=data)
+        elif kind == "delegate_reminder":
+            emit(kind)
         elif kind == "steered":
             session.unsent.add(id(agent.messages[-1]))
         elif kind in ("tool_start", "tool_end"):

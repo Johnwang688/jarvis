@@ -4,7 +4,7 @@ from jarvis import untrusted
 from jarvis.tools import secrets
 from jarvis.v2 import redact
 
-from .work import WorkError
+from .work import DELEGATE_MODEL_LABEL, GENERAL_WORKSPACE, WorkError
 
 
 CARD_TEXT_LIMIT = 1200
@@ -16,6 +16,7 @@ _TITLES = {
     "calendar_update": "Update a calendar event",
     "calendar_delete": "Delete a calendar event",
     "work_start": "Start a coding thread",
+    "delegate": "Hand off to Sol",
     "work_send": "Send to a coding thread",
     "app_open": "Open an app",
     "folder_open": "Open a folder",
@@ -25,7 +26,7 @@ _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
 _TARGETS = {
     "vault_add": "Entry", "vault_patch": "Entry", "vault_archive": "Entry",
     "calendar_create": "Title", "calendar_update": "Event", "calendar_delete": "Event",
-    "work_start": "Project", "work_send": "Thread",
+    "work_start": "Project", "work_send": "Thread", "delegate": "Project",
     "app_open": "App", "link_open": "URL",
 }
 
@@ -98,6 +99,11 @@ def _work_rows(tool, args, preview):
                           if branch is not None else "The project folder")
         yield "Thread title", preview["title"]
         yield "Brief", preview["brief"]
+    elif tool == "delegate":
+        yield "Project", preview["project"] if preview["named"] else GENERAL_WORKSPACE
+        yield "Folder", preview["path"]
+        yield "Model", DELEGATE_MODEL_LABEL
+        yield "Task", preview["task"]
     else:
         yield "Thread", preview["title"]
         yield "Thread id", preview["thread_id"]
@@ -113,9 +119,9 @@ def build_card(tool, args, preview):
         # Calendar validates proposed descriptions before building the preview.
         # Render all of the redacted text even if the credential markers add length.
         limits = {"Description": None, "New description": None, "Current description": DESCRIPTION_LIMIT}
-    elif tool in ("work_start", "work_send"):
+    elif tool in ("work_start", "work_send", "delegate"):
         rows = _work_rows(tool, args, preview)
-        limits = dict.fromkeys(("Brief", "Message", "Folder"))
+        limits = dict.fromkeys(("Brief", "Message", "Folder", "Task"))
     elif tool == "app_open":
         rows, limits = (("App", preview["app"]),), {}
     elif tool == "folder_open":
@@ -127,11 +133,13 @@ def build_card(tool, args, preview):
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)
     title = card_text(_TITLES[tool])
+    if tool == "delegate" and card_text(preview["title"], limit=None) != preview["title"]:
+        raise WorkError("The coding thread details cannot be shown safely.")
     shown_rows = []
     for label, value in rows:
         shown_label = card_text(label)
         shown = card_text(value, limit=limits.get(label, CARD_TEXT_LIMIT))
-        if tool == "work_start" and label != "Brief" and shown != value:
+        if tool in ("work_start", "delegate") and label not in ("Brief", "Task") and shown != value:
             raise WorkError("The coding thread details cannot be shown safely.")
         shown_rows.append({"label": shown_label, "value": shown})
     return {"title": title, "rows": shown_rows}
