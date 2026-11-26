@@ -16,6 +16,7 @@ from jarvis.v2.quiet import QuietHours
 
 from ..work_watch import Notice
 from .approving import ANSWER_DECODE_GRACE_S, ANSWER_WINDOW_S, answer_decision
+from .brain import BRAIN_SETUP_CODES, VoiceSessionError, brain_error_code
 from .engines import EngineChoice, EngineUnavailable, KokoroVoice
 from .hearing import FRAME_MS, Hearing
 from .speaking import Speaking
@@ -30,6 +31,7 @@ FOLLOW_LEVEL_DB = config.V3_FOLLOW_LEVEL_DB
 ECHO_TAIL_S = 0.3
 PLAYED_GRACE_S = 2
 APPROVAL_POLL_S = 0.1
+BRAIN_WARM_RETRY_S = (3, 10, 30)
 MAX_PENDING_NOTICES = 3
 NOTICE_CONTEXT_S = 60
 _NOTICE_WORDS = {
@@ -156,6 +158,7 @@ class VoiceSession:
         self.on_answer = (approving.heard if approving is not None else
                           on_answer if on_answer is not None else lambda _text: False)
         self._clock = clock
+        self._epoch_offset = time.time() - clock()
         self._quiet = QuietHours(config.V2_DATA_DIR).is_quiet if quiet is None else quiet
         self._detector = detector
         self._end_silence_ms = end_silence_ms
@@ -170,6 +173,9 @@ class VoiceSession:
         self._generation = self._running_generation = 0
         self._worker = self._hearing = self._speaking = None
         self._warmers = []
+        self._brain_warmer = None
+        self._observed_connection = False
+        self._problem = None
         self._state = "resting"
         self._voice = self._fast if self._fast is not None else self._best
         self._gpu_warm = False
@@ -186,7 +192,7 @@ class VoiceSession:
         self._pending_flush = None
         self._echo_until = self._echo_frames = 0
         self._asking = self._answer_after = self._answer_until = None
-        self._unsubscribe = turns.subscribe(lambda kind, **fields: self._post("turn", kind, fields))
+        self._unsubscribe = turns.subscribe(self._turn_event)
 
         # These fields are owned by the worker.
         self._link = False
@@ -225,13 +231,18 @@ class VoiceSession:
             self._queue(self._generation, "notice", notice, overflow)
 
     def start(self):
-        """Bring up capture and begin first-use warm-up off the caller's thread."""
+        """Bring up capture and warm the brain for this link off the caller's thread."""
         with self._changed:
-            if self._closed or self._active:
+            if self._closed:
                 return
-            self._active = True
-            self._generation += 1
-            self._queue(None, "start", self._generation)
+            if not self._active:
+                self._active = True
+                self._generation += 1
+                self._queue(None, "start", self._generation)
+            if self._brain_warmer is None and not self._brain_connected():
+                self._warmers = [worker for worker in self._warmers if worker.is_alive()]
+                generation = self._generation
+                self._brain_warmer = self._warm("brain", lambda: self._warm_brain_generations(generation))
             if self._worker is not None:
                 return
             self._hearing = Hearing(self._transcriber, names=self._decode_names, clock=self._clock,
@@ -246,7 +257,6 @@ class VoiceSession:
             self._worker.start()
             self._warm("transcriber", self._warm_transcriber)
             self._warm("detector", self._hearing.warm)
-            self._warm("brain", self._warm_brain)
             if self._fast is not None and self._best is not None and self._best is not self._fast:
                 self._warm("voice", self._warm_best)
 
@@ -254,17 +264,65 @@ class VoiceSession:
         worker = Thread(target=target, name=f"voice-warm-{name}", daemon=True)
         self._warmers.append(worker)
         worker.start()
+        return worker
 
     def _warm_transcriber(self):
         choice = self._transcriber.load()
         with self._changed:
             self._queue(None, "transcriber", choice)
 
-    def _warm_brain(self):
-        try:
-            self._turns.warm()
-        except Exception:
-            self._post("error", "brain_warm_failed")
+    def _brain_connected(self):
+        connected = self._turns.brain_connected()
+        return self._observed_connection if connected is None else connected
+
+    def _warm_brain_generations(self, generation):
+        while True:
+            self._warm_brain(generation)
+            with self._changed:
+                if not self._active or generation == self._generation or self._brain_connected():
+                    self._brain_warmer = None
+                    return
+                # A replacement helper arrived while this worker was exiting.
+                generation = self._generation
+
+    def _warm_brain(self, generation):
+        def still_warming():
+            return self._active and generation == self._generation and not self._brain_connected()
+
+        for delay in (*BRAIN_WARM_RETRY_S, None):
+            with self._changed:
+                if not still_warming():
+                    return
+            try:
+                warmed = self._turns.warm()
+            except Exception as exc:
+                code = brain_error_code(str(exc)) if isinstance(exc, VoiceSessionError) else "unknown"
+            else:
+                if warmed is not False:
+                    with self._changed:
+                        self._observed_connection = True
+                        if self._brain_connected():
+                            self._problem = None
+                    return
+                # The brain let a pending turn try to connect first.
+                code = None
+            if code is not None:
+                if code == "closed":
+                    return
+                LOG.warning("The voice brain could not warm up: %s", code)
+            with self._changed:
+                if not still_warming():
+                    return
+                if code in BRAIN_SETUP_CODES or delay is None:
+                    if code is not None:
+                        reason = f"brain_{code}" if code != "unknown" else code
+                        self._record_problem(reason)
+                        if code in BRAIN_SETUP_CODES:
+                            self._queue(generation, "error", reason)
+                    return
+                retry_at = self._clock() + delay
+                while still_warming() and (remaining := retry_at - self._clock()) > 0:
+                    self._changed.wait(remaining)
 
     def _warm_best(self):
         try:
@@ -418,6 +476,7 @@ class VoiceSession:
                                                   if self._worker is None else "loading local transcriber")
             status = {
                 "state": state, "gpu_warm": self._gpu_warm, "counters": dict(self._counters),
+                "problem": None if self._problem is None else dict(self._problem),
                 "transcriber": {"name": choice.name, "reason": choice.reason},
                 "voice": {"name": _name(self._voice) if self._voice is not None else None,
                           "reason": self._voice_reason},
@@ -460,6 +519,14 @@ class VoiceSession:
         with self._changed:
             if self._active:
                 self._queue(self._generation, action, *args)
+
+    def _turn_event(self, kind, **fields):
+        if kind == "connected":
+            with self._changed:
+                self._observed_connection = True
+                self._changed.notify_all()
+        else:
+            self._post("turn", kind, fields)
 
     def _queue(self, generation, action, *args):
         self._mailbox.append((generation, action, args))
@@ -760,7 +827,7 @@ class VoiceSession:
                               prefix=notice_prefix)
         except Exception:
             self._turn_state = "idle"
-            self._error("turn_failed")
+            self._turn_error()
         self._publish_state()
 
     def _ordinary_admission(self, capture, fields):
@@ -776,6 +843,10 @@ class VoiceSession:
         return False
 
     def _handle_turn(self, kind, fields):
+        if kind == "completed":
+            with self._changed:
+                self._problem = None
+            return
         if not self._exchange:
             return
         if kind == "state":
@@ -820,7 +891,7 @@ class VoiceSession:
             self._end_approval()
         elif kind == "error":
             self._turn_state = "idle"
-            self._error("turn_failed")
+            self._turn_error(fields.get("reason"))
             self._publish_state()
         elif kind == "ignored":
             self._turn_state = "idle"
@@ -1017,6 +1088,17 @@ class VoiceSession:
     def _error(self, reason):
         self._count("errors")
         self._event("error", reason=reason)
+
+    def _record_problem(self, code):
+        self._problem = {"code": code, "at": self._epoch_offset + self._clock()}
+
+    def _turn_error(self, reason=None):
+        code = brain_error_code(reason)
+        LOG.warning("The voice turn failed: %s", code)
+        reason = "turn_failed" if code == "unknown" else f"brain_{code}"
+        with self._changed:
+            self._record_problem(reason)
+        self._error(reason)
 
     def _event(self, kind, **fields):
         with self._changed:

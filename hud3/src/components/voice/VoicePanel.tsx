@@ -197,6 +197,9 @@ export function VoicePanel() {
           <details className="voice-details">
             <summary>Details and settings</summary>
             <div className="voice-details-body">
+              {snapshot.problem && (
+                <p className="voice-error" title={snapshot.problem.hint}>{snapshot.problem.text}</p>
+              )}
               <p className="voice-engines">
                 Transcriber · {snapshot.transcriber.name ?? snapshot.transcriber.reason}
                 {snapshot.transcriber.name && snapshot.transcriber.reason && ` · ${snapshot.transcriber.reason}`}

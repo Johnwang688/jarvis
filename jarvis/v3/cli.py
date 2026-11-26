@@ -3,6 +3,7 @@
 import argparse
 from http.client import HTTPConnection, HTTPException
 import json
+from math import isfinite
 from pathlib import Path
 import signal
 import sqlite3
@@ -11,6 +12,7 @@ import time
 
 from jarvis import config
 from jarvis.v2 import hud_install
+from windows.v3voice_problems import PROBLEMS, UNKNOWN
 from . import hud, switch
 from .daemon import Daemon, SERVICE_NAME
 
@@ -314,6 +316,12 @@ def _print_voice_status(voice):
         print("The GPU voice is warm." if voice["gpu_warm"] else "The GPU voice is not warm.")
     if type(turns) is int:
         print(f"Voice turns started: {turns}.")
+    problem = voice.get("problem")
+    if isinstance(problem, dict):
+        code, at = problem.get("code"), problem.get("at")
+        if isinstance(code, str) and type(at) in (int, float) and isfinite(at):
+            _, line, _ = PROBLEMS.get(code, UNKNOWN)
+            print(f"Voice problem {_voice_problem_age(time.time() - at)}: {line}")
     link = voice.get("link")
     if not isinstance(link, dict):
         return
@@ -335,6 +343,15 @@ def _print_voice_status(voice):
         print(f"The Windows voice helper reports version {link['helper_version']}.")
     if type(link.get("level")) is int:
         print(f"Microphone level: {link['level']} out of 255.")
+
+
+def _voice_problem_age(seconds):
+    if seconds < 60:
+        return "just now"
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size:
+            count = int(seconds // size)
+            return f"{count} {unit}{'s' if count != 1 else ''} ago"
 
 
 def add_commands(sub, *, voice=True):

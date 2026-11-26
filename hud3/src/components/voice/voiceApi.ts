@@ -35,6 +35,7 @@ interface Engine {
 export interface VoiceSnapshot {
   state: keyof typeof STATES;
   reason?: string;
+  problem: { text: string; hint: string; at: number } | null;
   transcriber: Engine;
   voice: Engine;
   detector: string;

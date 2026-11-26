@@ -819,6 +819,10 @@ class TestMain(unittest.TestCase):
                 until(lambda: any(call.args == expected for call in fake.send.call_args_list))
                 devices.fault = OSError(DEVICE_WORDS)
                 until(lambda: helper._popup.states[-1][0].kind == "problem")
+                problem = helper._popup.states[-1][0]
+                self.assertEqual((problem.label, problem.line, problem.sub), (
+                    "Can’t hear you", "Audio capture stopped after a device error.", "Another app may be holding it",
+                ))
                 callbacks["on_disconnect"](3)
                 self.assertEqual(devices.closed, [1, 1])
                 self.assertEqual(helper._popup.states[-1][0].kind, "hidden")

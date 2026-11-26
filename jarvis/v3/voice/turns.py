@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ..work import GENERAL_WORKSPACE
-from .brain import VoiceBrain
+from .brain import VoiceBrain, VoiceSessionError, brain_error_code
 from .sentences import MIN_SENTENCE as MIN_SENTENCE, Sentences, split_opening
 
 
@@ -147,7 +147,11 @@ class VoiceTurns:
     def warm(self):
         warm = getattr(self._brain, "warm", None)
         if warm is not None:
-            warm()
+            return warm()
+
+    def brain_connected(self):
+        connected = getattr(self._brain, "is_connected", None)
+        return connected() if connected is not None else None
 
     @contextmanager
     def _update(self):
@@ -299,10 +303,11 @@ class VoiceTurns:
         try:
             prompt = text if prefix is None else f"{prefix}\n\n{text}"
             self._brain.send(prompt, steer=True, input_id=input_id, fresh_after=FRESH_AFTER_S)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
             with self._update():
                 if self._incoming.pop(input_id, None) is not None and not self._closed:
-                    self._emit("error")
+                    reason = brain_error_code(str(exc)) if isinstance(exc, VoiceSessionError) else "unknown"
+                    self._emit("error", reason=reason)
 
     def interrupt(self):
         self._interrupt(cancel=False)
@@ -395,6 +400,9 @@ class VoiceTurns:
                 turn.voice_origin = len(event["inputs"]) == 1
             if turn.turn != turn_id:
                 return
+            if kind == "connected":
+                self._emit("connected")
+                return
             for item in pending:
                 if turn.voice_origin and item["id"] not in turn.approvals:
                     self._state_to("thinking")
@@ -444,7 +452,9 @@ class VoiceTurns:
             turn.asking = None
             self._emit("approval_end")
         if kind == "error":
-            self._emit("error")
+            self._emit("error", reason=brain_error_code(event.get("reason")))
+        elif kind == "reply":
+            self._emit("completed")
         if kind == "stopped" and turn.pending_audio:
             turn.pending_audio.clear()
             self._emit("speech_stop")

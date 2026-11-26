@@ -3,6 +3,20 @@
 from typing import Callable, Protocol
 
 
+BRAIN_SETUP_CODES = frozenset({"api_key_env", "cli_missing", "private_cwd", "cli_version", "not_signed_in"})
+BRAIN_ERROR_CODES = BRAIN_SETUP_CODES | {
+    "connect_timeout", "connect_failed", "process_failed", "empty_response", "tool_timeout", "closed",
+}
+
+
+class VoiceSessionError(RuntimeError):
+    """A fixed reason for failure of the voice brain."""
+
+
+def brain_error_code(reason):
+    return reason if isinstance(reason, str) and reason in BRAIN_ERROR_CODES else "unknown"
+
+
 class VoiceBrain(Protocol):
     """Accept utterances with send, cancel a running turn with stop, deliver
     events through subscribe, and expose live cards via pending_approvals.
@@ -29,8 +43,9 @@ class VoiceBrain(Protocol):
       An approval for that tool has resolved by this event.
     - auto: tool, title, target, level and why describe a successful automatic
       run after tool_end. Voice may ignore this event.
-    - reply: text is the final reply. error and stopped carry no voice fields.
-      Each terminates that turn after its final model and tool events.
+    - connected: the brain has connected for this turn.
+    - reply: text is the final reply. error may carry a reason code.
+      reply, error, and stopped terminate the turn after its final model and tool events.
 
     pending_approvals(turn_id) returns a current snapshot for that turn.
     Each item has id, digest, tool and card with title and label/value rows.
