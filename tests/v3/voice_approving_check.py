@@ -160,7 +160,8 @@ class ApprovalAnswers(BrokerFixture):
         expected = {"calendar_create", "calendar_update", "calendar_delete",
                     "vault_add", "vault_patch", "vault_archive", "work_start", "work_send", "delegate",
                     "app_open", "folder_open", "link_open"}
-        browser = {"browser_open", "browser_read", "browser_follow", "browser_sign_in"}
+        browser = {"browser_open", "browser_read", "browser_follow", "browser_sign_in",
+                   "browser_press", "browser_fill"}
         self.assertEqual(set(fastpath._POLICY_KINDS), expected | browser)
         for tool in expected:
             self.assertTrue(self.approving.ask({"id": "fixture", "digest": "fake-digest", "tool": tool}))

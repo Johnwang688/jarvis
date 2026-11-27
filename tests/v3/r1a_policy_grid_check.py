@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from jarvis.v3 import policy
 
-from bt3_policy_check import NEW_EXEMPT
+from bt3_policy_check import BT4_KINDS, NEW_EXEMPT
 
 
 MISSING = object()
@@ -53,9 +53,9 @@ class PolicyGrid(unittest.TestCase):
         path = Path(self.enterContext(TemporaryDirectory())) / "policy.json"
         before, after = main.Policy(path), policy.Policy(path)
         pc_kinds = {"app.open", "folder.open", "link.open"}
-        kinds = sorted((policy.DEFAULTS.keys() - pc_kinds - BT3_KINDS) | main.DEFAULTS.keys() | policy.NEVER | {
+        kinds = sorted(((policy.DEFAULTS.keys() - pc_kinds - BT3_KINDS) | main.DEFAULTS.keys() | policy.NEVER | {
             "garden.water", "mail.forward", "share.doc",
-        })
+        }) - BT4_KINDS)
         owner_levels = {"thread.start": "L1", "thread.send": "L1", "calendar.event_change": "L1"}
         self.assertEqual(policy.OWNER_REQUEST, owner_levels)
         if hasattr(main, "OWNER_REQUEST"):

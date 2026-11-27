@@ -256,7 +256,6 @@ _DETAILS = {
     ),
     "failed": "The sign-in could not be completed.",
 }
-_POLL = 0.3
 _MAX_STEPS = 4
 
 
@@ -272,25 +271,9 @@ def find_login(store, name):
 
 
 def _settle(session, clock, timeout):
-    from .session import BrowserError
+    from .session import settle
 
-    deadline = clock() + timeout
-    previous = None
-    while (remaining := deadline - clock()) > 0:
-        try:
-            current = session.location(timeout=remaining)
-        except BrowserError as exc:
-            if exc.reason not in ("unsettled", "changed"):
-                raise
-            previous = None
-        else:
-            if clock() <= deadline and current == previous:
-                return current
-            previous = current
-        if deadline - clock() < _POLL:
-            break
-        time.sleep(_POLL)
-    raise BrowserError(_DETAILS["moved"], reason="moved")
+    return settle(session, clock, timeout)
 
 
 def _submit(session, store, login, kind):

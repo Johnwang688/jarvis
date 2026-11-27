@@ -8,18 +8,7 @@ from jarvis.v3.browser.session import BrowserError, Location, _READ_MOVED, _read
 from jarvis.v3.browser.signin import Script
 
 
-READ = Script(r"""function (worldKey) {
-    const nodeCap = 20_000, byteCap = 256 * 1024, refCap = 200;
-    const omitted = new Set([
-        'head', 'script', 'style', 'noscript', 'template', 'iframe', 'frame', 'noframes',
-        'input', 'textarea', 'select', 'option', 'datalist',
-    ]);
-    const roles = new Map([
-        ['button', 'button'], ['link', 'link'], ['checkbox', 'checkbox'],
-        ['tab', 'other'], ['menuitem', 'other'],
-    ]);
-    const encoder = new TextEncoder();
-    const range = document.createRange();
+_VISIBILITY = r"""
     const root = document.documentElement;
     const scroller = document.scrollingElement || root;
     const rootStyle = getComputedStyle(root);
@@ -33,7 +22,6 @@ READ = Script(r"""function (worldKey) {
         bottom: scroller.scrollHeight - scrollY,
     };
     const viewport = {left: 0, right: scroller.clientWidth, top: 0, bottom: scroller.clientHeight};
-    const designMode = document.designMode === 'on';
 
     function intersects(box, area) {
         return box.width > 0 && box.height > 0 &&
@@ -84,21 +72,136 @@ READ = Script(r"""function (worldKey) {
         return {left, right, top, bottom};
     }
 
+
+    function elementBox(node, area, lineBreak = false) {
+        if (node.matches('[hidden], [inert], [aria-hidden="true" i]')) return null;
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.contentVisibility === 'hidden' ||
+            Number(style.opacity) === 0) return null;
+        const box = node.getBoundingClientRect();
+        const hasBox = style.display !== 'contents';
+        if (lineBreak) return {style, box, hasBox};
+        // A border can make the bounding box large while the clip remains tiny.
+        const clipWidth = style.display === 'inline' ? box.width : node.clientWidth;
+        const clipHeight = style.display === 'inline' ? box.height : node.clientHeight;
+        if (hasBox && (!intersects(box, area) || clipped(style, box) ||
+            (style.position === 'fixed' && !intersects(box, viewport)) ||
+            tinyClip(style.overflowX, box.width, clipWidth) ||
+            tinyClip(style.overflowY, box.height, clipHeight))) return null;
+
+        return {style, box, hasBox};
+    }
+
+    function inClosedDetails(parent, child) {
+        if (!parent?.matches('details:not([open])')) return false;
+        return child !== parent.querySelector(':scope > summary');
+    }
+
+    function visibleElement({style, hasBox}) {
+        return hasBox && style.visibility === 'visible' && parseFloat(style.fontSize) >= 4;
+    }
+
+    function imageMap(image) {
+        const name = image.getAttribute('usemap');
+        return name?.startsWith('#') && name.length > 1 ?
+            document.querySelector('map[name=' + CSS.escape(name.slice(1)) + ']') : null;
+    }
+
+    function mapArea(node, map) {
+        if (!map || node.closest('map') !== map || !node.hasAttribute('href')) return false;
+        for (let item = node; item && item !== document.body; item = item.parentElement) {
+            if (item.matches('[hidden], [inert], [aria-hidden="true" i], [aria-disabled="true" i], ' +
+                             '[contenteditable]:not([contenteditable="false" i])') ||
+                inClosedDetails(item.parentElement, item)) return false;
+            const style = getComputedStyle(item);
+            if (style.display === 'none' || style.visibility !== 'visible' ||
+                style.contentVisibility === 'hidden' || Number(style.opacity) === 0) return false;
+        }
+        return true;
+    }
+
+    function usable(node) {
+        if (!node?.isConnected || node.ownerDocument !== document || node.matches(':disabled')) {
+            return false;
+        }
+        const ancestry = [];
+        for (let item = node; item; item = item.parentElement) ancestry.push(item);
+        let area = page, parent;
+        while (ancestry.length) {
+            const item = ancestry.pop();
+            if (inClosedDetails(parent, item) || item.matches('[aria-disabled="true" i]')) return false;
+            const layout = elementBox(item, area);
+            if (!layout) return false;
+            if (item === node) return visibleElement(layout);
+            if (layout.hasBox) area = contentArea(item, layout.style, layout.box, area);
+            parent = item;
+        }
+        return false;
+    }
+
+    function activationTarget(element) {
+        const native = element.closest('button, input, a[href], area[href], summary, select, textarea, label');
+        return native instanceof HTMLLabelElement ? native.control : (native || element);
+    }
+
+    function actionForm(node) {
+        if (node.matches('a, area')) return null;
+        return 'form' in node ? node.form : node.closest('form');
+    }
+
+    function actionMetadata(node, kind) {
+        const labels = Array.from(node.labels || []);
+        const attributes = ['type', 'name', 'id', 'autocomplete', 'form', 'for', 'role', 'aria-label',
+            'title', 'placeholder', 'alt', 'readonly', 'disabled'].map(key => node.getAttribute(key));
+        const caption = kind === 'button' || kind === 'other' ?
+            [node.innerText, node.getAttribute('value'),
+             ...Array.from(node.querySelectorAll('img[alt]'), image => image.alt)] : [];
+        const signature = JSON.stringify([node.localName, node.type, node.readOnly, node.disabled,
+            node.matches(':disabled'), node.isContentEditable, attributes, caption,
+            labels.map(label => [label.innerText, label.textContent, usable(label)])]);
+        return {form: actionForm(node), labels, signature};
+    }
+
+    function matchesMetadata(ref) {
+        const {form, labels, signature} = actionMetadata(ref.node, ref.kind);
+        const stored = ref.metadata;
+        return stored && form === stored.form && signature === stored.signature &&
+            labels.length === stored.labels.length && labels.every((label, i) => label === stored.labels[i]);
+    }
+
+"""
+
+
+READ = Script(r"""function (worldKey) {
+    const nodeCap = 20_000, byteCap = 256 * 1024, refCap = 200;
+    const omitted = new Set([
+        'head', 'script', 'style', 'noscript', 'template', 'iframe', 'frame', 'noframes',
+        'input', 'textarea', 'select', 'option', 'datalist',
+    ]);
+    const roles = new Map([
+        ['button', 'button'], ['link', 'link'], ['checkbox', 'checkbox'],
+        ['tab', 'other'], ['menuitem', 'other'],
+    ]);
+    const encoder = new TextEncoder();
+    const range = document.createRange();
+""" + _VISIBILITY + r"""
+    const designMode = document.designMode === 'on';
+
     function kindOf(element, tag) {
         if (tag === 'input') {
             if (element.type === 'hidden') return;
-            if (element.type === 'checkbox') return 'checkbox';
+            if (element.type === 'checkbox' || element.type === 'radio') return element.type;
             if (/^(button|submit|reset|image)$/.test(element.type)) return 'button';
             return 'field';
         }
         if (tag === 'textarea') return 'field';
         if (tag === 'select') return 'select';
-        if (tag === 'button') return 'button';
+        if (tag === 'button' || tag === 'summary') return 'button';
         if (tag === 'a' && element.hasAttribute('href')) return 'link';
         return roles.get(element.getAttribute('role'));
     }
 
-    const parts = [], controls = [], others = [], names = new Map();
+    const parts = [], controls = [], others = [], names = new Map(), areaLinks = new Set();
     let visits = 0, bytes = 0, length = 0, pendingBreak = false, more = false;
     let stopped = false;
     function append(value, collapse) {
@@ -146,6 +249,7 @@ READ = Script(r"""function (worldKey) {
         // In design mode the body is the editor. Ignore stray document children too.
         if (designMode && node !== root && node !== document.body) continue;
         if (node.nodeType === Node.TEXT_NODE) {
+            if (parent.node?.matches('details:not([open])')) continue;
             const style = parent.style;
             if (!style || style.visibility !== 'visible' || parseFloat(style.fontSize) < 4) continue;
             range.selectNodeContents(node);
@@ -163,27 +267,17 @@ READ = Script(r"""function (worldKey) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         const tag = node.localName;
         const control = tag === 'input' || tag === 'textarea' || tag === 'select';
-        if ((omitted.has(tag) && !control) ||
-            node.matches('[hidden], [inert], [aria-hidden="true" i], details:not([open])')) continue;
+        if ((omitted.has(tag) && !control) || inClosedDetails(parent.node, node)) continue;
 
-        const style = getComputedStyle(node);
-        if (style.display === 'none' || style.contentVisibility === 'hidden' ||
-            Number(style.opacity) === 0) continue;
-        const box = node.getBoundingClientRect();
-        const hasBox = style.display !== 'contents';
-        if (tag === 'br' && style.visibility === 'visible' && box.height > 0 &&
-            box.left >= parent.area.left && box.left < parent.area.right &&
-            box.bottom > parent.area.top && box.top < parent.area.bottom) {
-            pendingBreak = true;
+        const layout = elementBox(node, parent.area, tag === 'br');
+        if (!layout) continue;
+        const {style, box, hasBox} = layout;
+        if (tag === 'br') {
+            if (style.visibility === 'visible' && box.height > 0 &&
+                box.left >= parent.area.left && box.left < parent.area.right &&
+                box.bottom > parent.area.top && box.top < parent.area.bottom) pendingBreak = true;
+            continue;
         }
-        // A border can make the bounding box large while the clip remains tiny.
-        const clipWidth = style.display === 'inline' ? box.width : node.clientWidth;
-        const clipHeight = style.display === 'inline' ? box.height : node.clientHeight;
-        if (hasBox && (!intersects(box, parent.area) || clipped(style, box) ||
-            (style.position === 'fixed' && !intersects(box, viewport)) ||
-            tinyClip(style.overflowX, box.width, clipWidth) ||
-            tinyClip(style.overflowY, box.height, clipHeight))) continue;
-
         const block = hasBox && !/^(inline|ruby)/.test(style.display);
         if (block) pendingBreak = true;
         const editable = (designMode && node === document.body) ||
@@ -192,7 +286,19 @@ READ = Script(r"""function (worldKey) {
             (node.getAttribute('role') || '').toLowerCase().split(/\s+/).includes('textbox');
         const kind = control ? kindOf(node, tag) : editable ? 'field' : kindOf(node, tag);
         const ariaDisabled = parent.ariaDisabled || node.matches('[aria-disabled="true" i]');
-        const visible = hasBox && style.visibility === 'visible' && parseFloat(style.fontSize) >= 4;
+        const visible = visibleElement(layout);
+        if (tag === 'img' && visible && !ariaDisabled && !designMode && node.hasAttribute('usemap')) {
+            const map = imageMap(node);
+            for (const area of map?.areas || []) {
+                if (others.length >= refCap || ++visits > nodeCap) {
+                    more = true;
+                    break;
+                }
+                if (areaLinks.has(area) || !mapArea(area, map)) continue;
+                areaLinks.add(area);
+                others.push({node: area, kind: 'link', imageMapHost: node, order: visits});
+            }
+        }
         if (tag === 'img' && visible && parent.imageCaption && !parent.imageCaption.image) {
             const alt = attribute(node, 'alt');
             if (alt) parent.imageCaption.image = alt;
@@ -216,7 +322,7 @@ READ = Script(r"""function (worldKey) {
         }
         if (!control && !editable && node.firstChild) {
             stack.push({
-                next: node.firstChild, style, ariaDisabled, name, block, imageCaption,
+                next: node.firstChild, node, style, ariaDisabled, name, block, imageCaption,
                 area: hasBox ? contentArea(node, style, box, parent.area) : parent.area,
             });
         }
@@ -307,12 +413,23 @@ READ = Script(r"""function (worldKey) {
         if (editable) return item(title);
         return fromText(name) || item(image || title || attribute(node, 'alt') || attribute(node, 'name'));
     }
-    const items = candidates.map(labelOf);
+    const items = candidates.map(candidate => {
+        const item = labelOf(candidate);
+        const {node, kind} = candidate;
+        if (kind === 'link' && (!(node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement) ||
+            !node.hasAttribute('href'))) item.nativeLink = false;
+        return item;
+    });
     // This isolated world lives only as long as the document. Index n-1 is ref n.
-    globalThis.__jarvisReadRefs = candidates.map(({node, kind}) => ({
-        node, href: kind === 'link' ? node.href : null
+    const numbers = new Map(candidates.map(({node}, index) => [node, index + 1]));
+    globalThis.__jarvisReadRefs = candidates.map(({node, kind, editable, imageMapHost}) => ({
+        node, kind, editable, imageMapHost,
+        metadata: worldKey ? actionMetadata(node, kind) : null,
+        targetNumber: numbers.get(activationTarget(node)),
+        href: kind === 'link' ? node.href : null,
     }));
     globalThis.__jarvisReadKey = worldKey;
+    globalThis.__jarvisActBindings = new Map();
     return {title, text, items, more: more || stopped};
 }""")
 
@@ -346,6 +463,7 @@ class Ref(NamedTuple):
     number: int
     kind: str
     label: str
+    native_link: bool = True
 
 
 class PageView(NamedTuple):
@@ -359,7 +477,7 @@ class PageView(NamedTuple):
 
 
 _WITHHELD = "[a line was withheld]"
-_KINDS = frozenset({"link", "button", "field", "select", "checkbox", "other"})
+_KINDS = frozenset({"link", "button", "field", "select", "checkbox", "radio", "other"})
 
 
 def _withhold_lines(lines: list[str]) -> set[int]:
@@ -434,11 +552,13 @@ def read_page(session, *, with_context=False) -> PageView:
         refs = []
         for number, item in enumerate(items, 1):
             kind, label, sources = item["kind"], item["label"], item["labelLines"]
+            native_link = item.get("nativeLink", True)
             if (kind not in _KINDS or type(label) is not str or type(sources) is not list or
+                    type(native_link) is not bool or
                     any(type(source) is not int or not 0 <= source < line_count for source in sources)):
                 raise ValueError
             label = "[withheld]" if withheld.intersection(sources) else _screen(label)[:80]
-            refs.append(Ref(number, kind, label))
+            refs.append(Ref(number, kind, label, native_link))
         body = untrusted.neutralize_markers(_join_lines(lines))
         truncated = more or len(body) > 4_000
         if len(body) > 4_000:

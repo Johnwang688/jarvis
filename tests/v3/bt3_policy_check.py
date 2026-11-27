@@ -60,6 +60,7 @@ NEW_EXEMPT = frozenset({
     "app.open", "folder.open", "calendar.block", "calendar.block_move", "calendar.add_due_date",
     "mail.file", "mail.label", "mail.archive", "mail.draft",
 })
+BT4_KINDS = {"browser.click", "browser.submit", "browser.type"}
 ADDRESS_KINDS = frozenset({"browser.open", "link.open"})
 
 
@@ -75,7 +76,7 @@ class BrowserPolicyCheck(unittest.TestCase):
 
     def test_before_and_after(self):
         kinds = [kind for _, _, group in BEFORE for kind in group]
-        self.assertCountEqual(kinds, policy.DEFAULTS.keys() | policy.OTHER_PEOPLE |
+        self.assertCountEqual(kinds, (policy.DEFAULTS.keys() - BT4_KINDS) | policy.OTHER_PEOPLE |
                               {"fixture.unknown", "browser.future", "share.doc"})
         self.assertEqual(policy.TAINT_EXEMPT, NEW_EXEMPT | {"browser.read", "browser.follow", "browser.sign_in"})
         changes = clean_cells = cells = 0
