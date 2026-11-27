@@ -25,7 +25,9 @@ from urllib.parse import urlsplit
 
 from jarvis.v2.browser import policy
 from jarvis.v2.browser.gate import Gate
+from jarvis.v3.browser import signin
 from jarvis.v3.browser.link import LinkError, windows_link
+from jarvis.v3.logins import canonical_origin
 
 
 _BLANK = "about:blank"
@@ -37,6 +39,7 @@ _EVENT_POLL = 0.05
 _CLOSED = "The browser session is closed."
 _UNSETTLED = "The browser's current address could not be verified."
 _NOT_A_SITE = "The browser is not showing a public website."
+_MOVED = "The browser moved away from the sign-in document."
 _GATE_BYPASSED = "The browser did not use Jarvis's network gate."
 
 
@@ -61,6 +64,12 @@ class Location(NamedTuple):
 
 def _frame_location(frame):
     return Location(frame["url"] + frame.get("urlFragment", ""), frame["id"], frame["loaderId"])
+
+
+def _context_lost(message):
+    message = (message or "").lower()
+    return "context" in message and any(word in message for word in
+                                        ("destroyed", "cannot find", "not found", "no longer"))
 
 
 def _judge(url, refused, *, landed=False):
@@ -476,7 +485,7 @@ class BrowserSession:
         self._clock = clock
         self._load_timeout = load_timeout
         self._settle_timeout = settle_timeout
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._gate = None
         self._gate_port = None
         self._tab = None
@@ -560,10 +569,67 @@ class BrowserSession:
                     raise BrowserError(_GATE_BYPASSED, reason="gate_bypassed") from None
             return tab.open(address, self._load_timeout)
 
-    def location(self) -> Location:
+    def location(self, *, timeout=None) -> Location:
         """The committed http(s) main-frame document, as a snapshot (module note)."""
         with self._lock:
-            return self._live_tab().location(self._settle_timeout)
+            budget = self._settle_timeout if timeout is None else min(timeout, self._settle_timeout)
+            return self._live_tab().location(budget)
+
+    def document_call(self, origin, source, arguments, *, timeout=10.0):
+        """Run an approved sign-in script in a fresh world of the main document."""
+        try:
+            function = signin.document_function(source)
+            if arguments is not None and (
+                type(arguments) is not list or any(type(value) is not str for value in arguments)
+            ):
+                raise TypeError("Sign-in script arguments must be a list of strings or None.")
+            with self._lock:
+                deadline = time.monotonic() + timeout
+                location = self.location(timeout=timeout)
+                if not origin or canonical_origin(location.url) != origin:
+                    raise BrowserError(_MOVED, reason="moved")
+                tab = self._live_tab()
+                reason = "unsettled"
+                try:
+                    return self._call_in_world(tab, location, origin, function, arguments, deadline)
+                except BrowserError as exc:
+                    reason = exc.reason
+                except LinkError as exc:
+                    if _context_lost(exc.browser_message):
+                        reason = "moved"
+                except (KeyError, TypeError, ValueError):
+                    pass
+        finally:
+            del arguments
+        # Leave the protocol error and its request-data traceback behind.
+        raise BrowserError(_MOVED if reason == "moved" else _UNSETTLED, reason=reason)
+
+    @staticmethod
+    def _call_in_world(tab, location, origin, function, arguments, deadline):
+        def remaining():
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise BrowserError(_UNSETTLED, reason="unsettled")
+            return budget
+
+        world = tab.call("Page.createIsolatedWorld", {
+            "frameId": location.frame_id, "worldName": f"jarvis-signin-{secrets.token_hex(16)}",
+        }, timeout=remaining())
+        context = world["executionContextId"]
+        if type(context) is not int or context <= 0:
+            raise BrowserError(_UNSETTLED, reason="unsettled")
+        with tab.changed:
+            if (tab.frame, tab.loader) != (location.frame_id, location.loader_id):
+                raise BrowserError(_MOVED, reason="moved")
+        reply = tab.call("Runtime.callFunctionOn", {
+            "executionContextId": context,
+            "functionDeclaration": function,
+            "arguments": [{"value": value} for value in (origin, *(arguments or ()))],
+            "returnByValue": True,
+        }, timeout=remaining())
+        if "exceptionDetails" in reply:
+            raise BrowserError(_UNSETTLED, reason="unsettled")
+        return reply["result"]["value"]
 
     def is_current(self, location: Location) -> bool:
         """Whether a fresh snapshot still shows that document. A hint, not a guarantee."""
