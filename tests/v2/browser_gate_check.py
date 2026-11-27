@@ -787,6 +787,11 @@ class NoToolReachesTheBrowser(unittest.TestCase):
     REPO = Path(__file__).resolve().parents[2]
     ALLOWED = {"jarvis/v2/daemon.py"}           # and the browser package itself
     PACKAGE = "jarvis/v2/browser/"
+    GATE_REFERENCES = {
+        "jarvis/v2/browser_open.py": "    from .browser.gate import default_resolve",
+        "jarvis/v3/browser/session.py": "from jarvis.v2.browser.gate import Gate",
+        "jarvis/v3/imports.py": '    "jarvis.v2.browser.gate":',
+    }
     NEEDLES = __import__("re").compile(
         r"browser\.(host|gate)\b|browser\s+import\s+[^\n]*\b(host|gate)\b"
         r"|\bBrowserHost\b|\bGate\(|['\"]/browser\b"
@@ -799,7 +804,13 @@ class NoToolReachesTheBrowser(unittest.TestCase):
             if rel in self.ALLOWED or rel.startswith(self.PACKAGE):
                 continue
             text = path.read_text(encoding="utf-8")
+            lines = text.splitlines()
             for match in self.NEEDLES.finditer(text):
+                if match.group(0) == "browser.gate" and rel in self.GATE_REFERENCES:
+                    line = lines[text.count("\n", 0, match.start())]
+                    reference = self.GATE_REFERENCES[rel]
+                    if line == reference or (rel == "jarvis/v3/imports.py" and line.startswith(reference)):
+                        continue
                 if rel == "jarvis/v2/hud_api.py" and match.group(0) in ("'/browser", '"/browser'):
                     continue
                 hits.append(f"{rel}: {match.group(0)}")

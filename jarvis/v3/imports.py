@@ -15,6 +15,8 @@ from pathlib import Path
 
 
 ALLOWED_V2: dict[str, str] = {
+    "jarvis.v2.browser.gate": "Reuse the SOCKS gate with LAN and loopback access closed.",
+    "jarvis.v2.browser.policy": "Reuse the browser address and port rules.",
     "jarvis.v2.hud_install": "Reuse installed HUD manifests, verified file reads and hardened Git checks.",
     "jarvis.v2.redact": "Reuse credential redaction for text shown to owners and models.",
     "jarvis.v2.push": "Reuse encrypted owner Web Push with count and rank only.",
