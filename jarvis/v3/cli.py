@@ -1,6 +1,7 @@
 """Command-line entry points for v3."""
 
 import argparse
+import getpass
 from http.client import HTTPConnection, HTTPException
 import json
 from math import isfinite
@@ -9,6 +10,7 @@ import signal
 import sqlite3
 import sys
 import time
+import warnings
 
 from jarvis import config
 from jarvis.v2 import hud_install
@@ -239,6 +241,67 @@ def work_registry(args) -> int:
     return 0
 
 
+def _login_store():
+    from .logins import Store
+
+    return Store.system()
+
+
+def _add_login(store, args):
+    from .logins import LoginError
+
+    login, _ = store._check_add(args.name, args.site, args.user, browser=args.browser, replace=args.replace)
+    try:
+        with warnings.catch_warnings():
+            # Prevent getpass from falling back to input with terminal echo on.
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            password = getpass.getpass(f"Password for {login.username} at {login.origin}: ")
+            confirmation = getpass.getpass("Again: ")
+    except (EOFError, KeyboardInterrupt, OSError, UnicodeError, getpass.GetPassWarning):
+        raise LoginError("Could not read the password without terminal echo.") from None
+    if not password or not confirmation:
+        raise LoginError("The password cannot be empty.")
+    if password != confirmation:
+        raise LoginError("The passwords did not match.")
+    login = store.add(args.name, args.site, args.user, password, browser=args.browser, replace=args.replace)
+    print(f"Saved login {login.name} for {login.origin} (user {login.username}, browser {login.browser}).")
+
+
+def _list_logins(store):
+    logins = store.list()
+    if not logins:
+        print("No saved logins.")
+        return
+    name_width = max(len(login.name) for login in logins)
+    origin_width = max(len(login.origin) for login in logins)
+    user_width = max(len(login.username) for login in logins)
+    for login in logins:
+        print(f"{login.name:<{name_width}}  {login.origin:<{origin_width}}  "
+              f"{login.username:<{user_width}}  {login.browser}")
+
+
+def login_command(args) -> int:
+    from .logins import LoginError
+
+    try:
+        if args.action == "add" and not sys.stdin.isatty():
+            raise LoginError("Run this in your own terminal. "
+                             "The password is typed there and is never passed as an argument.")
+        store = _login_store()
+        if args.action == "add":
+            _add_login(store, args)
+        elif args.action == "list":
+            _list_logins(store)
+        elif store.remove(args.name):
+            print(f"Removed login {args.name}.")
+        else:
+            raise LoginError(f"No saved login named {args.name}.")
+    except LoginError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def consolidate_vault(args) -> int:
     from . import consolidate
     from .budget import Budget
@@ -427,6 +490,18 @@ def add_commands(sub, *, voice=True):
     add.add_argument("--base")
     add.add_argument("--no-t3", action="store_true", help="skip registering the folder with T3")
     work_sub.add_parser("remove", help="remove a registered project").add_argument("name")
+
+    login = sub.add_parser("login", help="manage saved web logins")
+    login.set_defaults(func=login_command)
+    login_sub = login.add_subparsers(dest="action", required=True)
+    save = login_sub.add_parser("add", help="save a login with a password typed in the terminal")
+    save.add_argument("name")
+    save.add_argument("--site", required=True, help="HTTPS site origin")
+    save.add_argument("--user", required=True, help="username")
+    save.add_argument("--browser", default="chrome", metavar="{chrome,edge}")
+    save.add_argument("--replace", action="store_true")
+    login_sub.add_parser("list", help="list saved login metadata")
+    login_sub.add_parser("remove", help="remove a saved login").add_argument("name")
 
 
 def main(argv: list[str]) -> int:
