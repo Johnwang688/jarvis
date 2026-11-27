@@ -10,7 +10,7 @@ Contract: turn-end hooks -> review queue (contract 1.5). Payload shapes: docs/pl
                                   payload is malformed, when Claude's stop_hook_active is true, or when the queue already holds 500 items.
                                   claude: transcript = payload transcript_path. codex: transcript = None (the consumer finds it).
   jarvis/v3/review_queue.py
-    SKILL_STEPS = 10; MEMORY_TURNS = 10; MAX_AGE_S = 7 * 86400
+    SKILL_STEPS = 25; MEMORY_TURNS = 10; MAX_AGE_S = 7 * 86400
     count(provider, transcript) -> (tool_steps, user_turns)      whole transcript so far; tolerant of torn or foreign lines
     Consumer(queue=None, state=None, *, clock=time.time, codex_sessions=None, claude_projects=None, count=count)
       A transcript is read only when it lies inside its provider's session folder (claude_projects, default ~/.claude/projects;
@@ -158,24 +158,24 @@ class Hook(Base):
 
 class Consume(Base):
     def test_thresholds(self):
-        path = self.transcript(tools=9, turns=9)
+        path = self.transcript(tools=24, turns=9)
         self.enqueue(path)
         self.assertEqual(self.consumer().tick(), [])
         self.assertEqual(self.items(), [])                              # consumed either way
-        self.transcript(tools=10, turns=9)
+        self.transcript(tools=25, turns=9)
         self.enqueue(path)
         out = self.consumer().tick()
-        self.assertEqual([(r["kind"], r["tool_steps"], r["user_turns"], r["session_id"], r["transcript"]) for r in out], [("skill", 10, 9, "s1", str(path))])
-        self.transcript(tools=19, turns=10)
+        self.assertEqual([(r["kind"], r["tool_steps"], r["user_turns"], r["session_id"], r["transcript"]) for r in out], [("skill", 25, 9, "s1", str(path))])
+        self.transcript(tools=49, turns=10)
         self.enqueue(path)
-        self.assertEqual([r["kind"] for r in self.consumer().tick()], ["memory"])       # 9 more steps since the skill review: not yet
-        self.transcript(tools=20, turns=19)
+        self.assertEqual([r["kind"] for r in self.consumer().tick()], ["memory"])
+        self.transcript(tools=50, turns=19)
         self.enqueue(path)
         self.assertEqual([r["kind"] for r in self.consumer().tick()], ["skill"])
-        self.assertEqual((review_queue.SKILL_STEPS, review_queue.MEMORY_TURNS), (10, 10))
+        self.assertEqual((review_queue.SKILL_STEPS, review_queue.MEMORY_TURNS), (25, 10))
 
     def test_sessions_are_counted_apart_and_once_per_tick(self):
-        a, b = self.transcript("a.jsonl", tools=12, turns=12), self.transcript("b.jsonl", tools=3, turns=11)
+        a, b = self.transcript("a.jsonl", tools=25, turns=12), self.transcript("b.jsonl", tools=3, turns=11)
         for _ in range(3):
             self.enqueue(a, "sa")
         self.enqueue(b, "sb")
@@ -183,7 +183,7 @@ class Consume(Base):
         self.assertEqual(out, [("sa", "memory"), ("sa", "skill"), ("sb", "memory")])
 
     def test_dropped_items(self):
-        good = self.transcript(tools=12)
+        good = self.transcript(tools=25)
         self.enqueue(good, "old", age=8 * 86400)
         self.enqueue(self.tmp / "missing.jsonl", "gone")
         secret = self.tmp / "transcripts" / ".env"
@@ -206,12 +206,12 @@ class Consume(Base):
         thread = CODEX["thread-id"]
         day = self.tmp / "codex-sessions" / "2030" / "01" / "15"
         day.mkdir(parents=True)
-        source = self.transcript("c.jsonl", tools=11, turns=2, provider="codex")
+        source = self.transcript("c.jsonl", tools=25, turns=2, provider="codex")
         target = day / f"rollout-2030-01-15T10-00-00-{thread}.jsonl"
         target.write_text(source.read_text())
         self.enqueue(None, thread, provider="codex")
         out = self.consumer().tick()
-        self.assertEqual([(r["kind"], r["provider"], r["transcript"], r["tool_steps"]) for r in out], [("skill", "codex", str(target), 11)])
+        self.assertEqual([(r["kind"], r["provider"], r["transcript"], r["tool_steps"]) for r in out], [("skill", "codex", str(target), 25)])
         self.enqueue(None, "00000000-0000-7000-8000-00000000ffff", provider="codex")
         self.assertEqual(self.consumer().tick(), [])
 

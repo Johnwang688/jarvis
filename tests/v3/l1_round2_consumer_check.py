@@ -19,7 +19,7 @@ class ConsumerRoundTwo(unittest.TestCase):
         self.queue = self.home / "review-queue"
         self.queue.mkdir(mode=0o700)
         self.transcript = self.projects / "example-session.jsonl"
-        self.transcript.write_bytes((TOOL + b"\n") * 10)
+        self.transcript.write_bytes((TOOL + b"\n") * review_queue.SKILL_STEPS)
         self.consumer = review_queue.Consumer(
             self.queue, self.home / "state", clock=lambda: NOW,
             claude_projects=self.projects, codex_sessions=self.home / ".codex/sessions",
@@ -35,27 +35,27 @@ class ConsumerRoundTwo(unittest.TestCase):
         }))
 
     def test_shorter_in_place_rewrite_due_even_with_same_tool_count(self):
-        self.transcript.write_bytes((TOOL + b" " * 100 + b"\n") * 10)
+        self.transcript.write_bytes((TOOL + b" " * 100 + b"\n") * review_queue.SKILL_STEPS)
         before = self.transcript.stat()
         self.enqueue(self.transcript)
-        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [10])
+        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [review_queue.SKILL_STEPS])
         self.assertEqual(self.consumer.tick(), [])
 
-        self.transcript.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * 10)
+        self.transcript.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * review_queue.SKILL_STEPS)
         after = self.transcript.stat()
         self.assertEqual(after.st_ino, before.st_ino)
         self.assertLess(after.st_size, before.st_size)
         self.enqueue(self.transcript)
 
-        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [10])
+        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [review_queue.SKILL_STEPS])
 
     def test_older_notification_does_not_discard_due_rotated_transcript(self):
         self.enqueue(self.transcript)
-        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [10])
+        self.assertEqual([r["tool_steps"] for r in self.consumer.tick()], [review_queue.SKILL_STEPS])
         self.assertEqual(self.consumer.tick(), [])
 
         replacement = self.projects / "example-session-continued.jsonl"
-        replacement.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * 10)
+        replacement.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * review_queue.SKILL_STEPS)
         self.enqueue(self.transcript)
         self.enqueue(replacement)
 
@@ -66,7 +66,7 @@ class ConsumerRoundTwo(unittest.TestCase):
         self.assertEqual([r["transcript"] for r in self.consumer.tick()], [str(self.transcript)])
         self.assertEqual(self.consumer.tick(), [])
         replacement = self.projects / "example-session-continued.jsonl"
-        replacement.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * 10)
+        replacement.write_bytes((TOOL.replace(b'"Read"', b'"Edit"') + b"\n") * review_queue.SKILL_STEPS)
         self.enqueue(replacement)
         self.assertEqual([r["transcript"] for r in self.consumer.tick()], [str(replacement)])
         self.assertEqual(self.consumer.tick(), [])

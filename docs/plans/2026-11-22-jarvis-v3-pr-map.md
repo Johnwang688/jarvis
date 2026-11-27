@@ -918,7 +918,7 @@ S1–S6. It is the owner's decision.
     the notification. Both baselines restart at zero when the file shrinks
     below the reviewed byte length or a count falls below its baseline.
     State for files unseen for 30 days is pruned.
-    It returns a skill review at ≥ 10 tool steps and a memory review at
+    It returns a skill review at ≥ 25 tool calls and a memory review at
     ≥ 10 user turns (config).
   - Drops items older than 7 d and items with an unreadable transcript, a
     credential path or a transcript outside its provider's session folder.

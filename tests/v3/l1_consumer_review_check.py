@@ -23,7 +23,7 @@ class ConsumerReview(unittest.TestCase):
         self.queue.mkdir(mode=0o700)
         self.state = self.home / "review-state"
         self.transcript = self.projects / "example-session.jsonl"
-        self.transcript.write_bytes(TOOL * 10)
+        self.transcript.write_bytes(TOOL * review_queue.SKILL_STEPS)
         self.item = 0
 
     def enqueue(self, path, session=None):
@@ -40,7 +40,7 @@ class ConsumerReview(unittest.TestCase):
     def test_outside_transcript_is_discarded_before_counting(self):
         outside = self.home / "unrelated" / self.transcript.name
         outside.parent.mkdir()
-        outside.write_bytes(TOOL * 10)
+        outside.write_bytes(TOOL * review_queue.SKILL_STEPS)
         self.enqueue(outside)
         self.enqueue(self.transcript)
         counted = []
@@ -56,14 +56,14 @@ class ConsumerReview(unittest.TestCase):
 
     def test_rotated_transcript_gets_a_fresh_count_baseline(self):
         self.enqueue(self.transcript)
-        self.assertEqual([r["tool_steps"] for r in self.consumer().tick()], [10])
+        self.assertEqual([r["tool_steps"] for r in self.consumer().tick()], [review_queue.SKILL_STEPS])
         self.assertEqual(self.consumer().tick(), [])
 
         self.transcript.rename(self.transcript.with_suffix(".previous"))
-        self.transcript.write_bytes(TOOL.replace(b'"Read"', b'"Grep"') * 10)
+        self.transcript.write_bytes(TOOL.replace(b'"Read"', b'"Grep"') * review_queue.SKILL_STEPS)
         self.enqueue(self.transcript)
 
-        self.assertEqual([r["tool_steps"] for r in self.consumer().tick()], [10])
+        self.assertEqual([r["tool_steps"] for r in self.consumer().tick()], [review_queue.SKILL_STEPS])
 
     @unittest.skipIf(os.geteuid() == 0, "root can read files with mode 000")
     def test_unreadable_transcript_does_not_block_other_sessions(self):

@@ -219,7 +219,7 @@ class Inspect(Base):
 
 class Golden(Base):
     def test_queue_to_skill_and_memory(self):
-        path = self.transcript("sess-a1", turns=10, tools=10)
+        path = self.transcript("sess-a1", turns=10, tools=25)
         queue = self.v3 / "review-queue"
         queue.mkdir(mode=0o700)
         ended = datetime.fromtimestamp(self.now - 60, timezone.utc).isoformat()
