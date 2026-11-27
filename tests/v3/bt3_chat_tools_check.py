@@ -48,7 +48,7 @@ class OwnerAddressMatcherCheck(unittest.TestCase):
             self.assertFalse(self.match(address, typed), address)
 
 
-class BrowserChatCheck(fixtures.Base):
+class BrowserChatFixture(fixtures.Base):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.dict(os.environ, {"HOME": str(self.tmp), "XDG_CONFIG_HOME": str(self.tmp)}))
@@ -76,6 +76,8 @@ class BrowserChatCheck(fixtures.Base):
         self.desk.reset_mock()
         return svc
 
+
+class BrowserChatCheck(BrowserChatFixture):
     def deny_open(self, why="hard:tainted"):
         card = self.next_card()
         level = "L0" if why == "auto-off" else "L2"
@@ -227,7 +229,7 @@ class BrowserChatCheck(fixtures.Base):
                 self.assertEqual(self.wait_idle(svc), "idle")
                 self.assertEqual(chat.BROWSER_GATED & set(self.model.seen[0]["tools"]),
                                  set() if phone else visible)
-        self.assertFalse(chat.BROWSER_GATED & set(tools.default_names()))
+        self.assertFalse((chat.BROWSER_GATED - chat.BROWSER_ACTIONS) & set(tools.default_names()))
         self.assertFalse(chat.BROWSER_GATED & tools.PARALLEL_SAFE)
 
     def test_open_taints_before_the_next_approval_in_the_same_batch(self):

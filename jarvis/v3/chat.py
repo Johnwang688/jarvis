@@ -34,7 +34,8 @@ GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDA
 WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show", "message_list", "message_read"})
 WORK_GATED = frozenset({"work_start", "work_send", "delegate"})
 PC_GATED = frozenset({"app_open", "folder_open", "link_open"})
-BROWSER_GATED = frozenset({"browser_open", "browser_read", "browser_follow", "browser_sign_in"})
+BROWSER_ACTIONS = frozenset({"browser_press", "browser_fill"})
+BROWSER_GATED = BROWSER_ACTIONS | {"browser_open", "browser_read", "browser_follow", "browser_sign_in"}
 BROWSER_PAGE_TOOLS = BROWSER_GATED - {"browser_sign_in"}
 # Results that never carry text written outside this session. Thread titles and learned
 # skill names can come from an earlier session that read outside text, so they are not here.

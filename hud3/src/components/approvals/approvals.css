@@ -85,5 +85,5 @@
   background: var(--glass-solid);
   border-radius: var(--radius-btn);
 }
-.approval-details dd { white-space: pre-wrap; }
+.approval-summary dd, .approval-details dd { white-space: pre-wrap; }
 .agent-chat .approval-error { color: var(--red); }

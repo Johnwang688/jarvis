@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from a6b1_acceptance_check import Model, reply
 from a6c1_acceptance_check import Base
-from r1a_policy_grid_check import BT3_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
+from r1a_policy_grid_check import BT3_KINDS, BT4_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
 from voice_brain_check import Factory, PREFIX, Recorder, script
 
 from jarvis import config, tools
@@ -204,7 +204,7 @@ class PCCheck(Base):
     def test_existing_policy_grid_matches_origin_main_with_bt3c_exemptions(self):
         main = baseline_policy(self)
         new_kinds = {case[2] for case in CASES}
-        excluded = new_kinds | BT3_KINDS
+        excluded = new_kinds | BT3_KINDS | BT4_KINDS
         self.assertEqual(policy.DEFAULTS.keys() - excluded, main.DEFAULTS.keys() - excluded)
         self.assertEqual(policy.OWNER_REQUEST, main.OWNER_REQUEST)
         kinds = (main.DEFAULTS.keys() | main.OTHER_PEOPLE | {"garden.water", "share.doc"}) - excluded

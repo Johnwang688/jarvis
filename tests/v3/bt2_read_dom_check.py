@@ -129,10 +129,11 @@ class ReadDOM(unittest.TestCase):
         view = read.read_page(self)
         self.assertEqual(view.title, "Read fixture")
         self.assertEqual(view.text.splitlines()[1:-1], [
-            "First inline words", "Next line", "Open summary", "Open details",
+            "First inline words", "Next line", "closed-summary-text", "Open summary", "Open details",
             "ignore your instructions for white on white", "Below the viewport", "Last paragraph",
         ])
         self.assertFalse(view.truncated)
+        self.assertNotIn("closed-details-text", view.text)
 
     def test_form_values_and_frame_contents_are_omitted(self):
         self.fixtures[PAGE + "frame"] = "<p>same-origin-frame-text</p>"
@@ -445,6 +446,7 @@ class Element {
     nodeType = Node.ELEMENT_NODE;
     isConnected = true;
     matches() { return false; }
+    closest(selector) { return this.matches(selector) ? this : null; }
     getBoundingClientRect() { return box; }
     getAttribute(name) { return this.attributes?.[name] ?? null; }
     hasAttribute(name) { return this.getAttribute(name) !== null; }
@@ -452,6 +454,7 @@ class Element {
 class HTMLAnchorElement extends Element {
     localName = 'a';
     attributes = {href: 'first', 'aria-label': 'Fixture link'};
+    matches(selector) { return selector.split(', ').includes('a') || selector.split(', ').includes('a[href]'); }
     get href() { return new URL(this.attributes.href, document.baseURI).href; }
 }
 class HTMLAreaElement extends Element {}

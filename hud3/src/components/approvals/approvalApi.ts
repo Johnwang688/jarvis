@@ -3,6 +3,7 @@ import { apiFetch } from "../../api";
 export interface ApprovalRow {
   label: string;
   value: string;
+  source?: "page";
 }
 
 export interface ApprovalRequest {
@@ -40,7 +41,8 @@ function parseApproval(value: unknown): ListedApproval {
   }
   const display = record(card) && typeof card.title === "string" && Array.isArray(card.rows)
     && card.rows.every((row): row is ApprovalRow =>
-      record(row) && typeof row.label === "string" && typeof row.value === "string")
+      record(row) && typeof row.label === "string" && typeof row.value === "string"
+        && (row.source === undefined || row.source === "page"))
     ? { title: card.title, rows: card.rows } : null;
   return { id, digest, tool: typeof tool === "string" ? tool : "", card: display, level, why, asked_at, expires_in };
 }

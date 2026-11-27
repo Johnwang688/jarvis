@@ -27,6 +27,8 @@ _TITLES = {
     "browser_read": "Read the browser page",
     "browser_follow": "Follow a link on the browser page",
     "browser_sign_in": "Sign in to a saved site",
+    "browser_press": "Press a browser control",
+    "browser_fill": "Fill a browser field",
 }
 _BROWSER_TAINT_NOTE = (
     "This chat has read outside text. Jarvis wants to open an address you did not supply in this turn."
@@ -120,6 +122,32 @@ def _work_rows(tool, args, preview):
         yield "Message", args["message"]
 
 
+def _browser_action_rows(tool, args, preview):
+    item = preview["item"]
+    origin, destination = item["origin"], item["destination_origin"]
+    other_origin = destination if destination != origin else ""
+    yield "Site", origin
+    if tool == "browser_fill":
+        yield "Field", item["label"] or f"Item {args['number']}"
+        yield "Text", args["text"]
+        then = "submit the form" if args["submit"] else "the page receives this text; the form is not submitted"
+        if args["submit"] and other_origin:
+            then += f" to {other_origin}"
+        yield "Then", then
+    else:
+        yield "Button", item["label"] or f"Item {item['target_number']}"
+        if item["kind"] == "toggle":
+            yield "Kind", "checkbox or radio"
+        elif item["button_like"]:
+            yield "Kind", "button"
+        else:
+            yield "Kind", "other control"
+        if item["kind"] == "submit" and other_origin:
+            yield "Sends to", other_origin
+        if item["payment"]:
+            yield "Reason", "This looks like a payment form."
+
+
 def build_card(tool, args, preview):
     if tool.startswith("calendar_"):
         from .tools.calendar import DESCRIPTION_LIMIT
@@ -145,8 +173,9 @@ def build_card(tool, args, preview):
         limits = {"URL": None}
     elif tool == "browser_read":
         rows, limits = (), {}
-    elif tool == "browser_follow":
-        rows, limits = [("Link number", str(args["number"]))], {}
+    elif tool == "browser_follow" or (tool == "browser_press" and "link" in preview):
+        number = preview.get("item", {}).get("target_number", args["number"])
+        rows, limits = [("Link number", str(number))], {}
         if preview["saved_site"]:
             link = preview["link"]
             source = urlsplit(link.source_origin).hostname
@@ -155,12 +184,20 @@ def build_card(tool, args, preview):
                 ("Destination", destination),
                 ("Reason", f"A page on {source} links to {destination}, where Jarvis has a saved login."),
             ])
+    elif tool in ("browser_press", "browser_fill"):
+        rows, limits = _browser_action_rows(tool, args, preview), {"Text": None, "Field": 80, "Button": 80}
     elif tool == "browser_sign_in":
         rows, limits = (("Saved login", args["name"]),), {}
     else:
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)
-    title = card_text(_TITLES[tool])
+    title = _TITLES[tool]
+    if tool == "browser_press":
+        if "link" in preview:
+            title = _TITLES["browser_follow"]
+        elif preview["item"]["kind"] == "submit":
+            title = "Submit a browser form"
+    title = card_text(title)
     if tool == "delegate" and card_text(preview["title"], limit=None) != preview["title"]:
         raise WorkError("The coding thread details cannot be shown safely.")
     shown_rows = []
@@ -169,5 +206,13 @@ def build_card(tool, args, preview):
         shown = card_text(value, limit=limits.get(label, CARD_TEXT_LIMIT))
         if tool in ("work_start", "delegate") and label not in ("Brief", "Task") and shown != value:
             raise WorkError("The coding thread details cannot be shown safely.")
-        shown_rows.append({"label": shown_label, "value": shown})
+        row = {"label": shown_label, "value": shown}
+        if tool in ("browser_press", "browser_fill") and label in ("Field", "Button"):
+            row["source"] = "page"
+        if tool in ("browser_press", "browser_fill") and shown != value:
+            if label == "Text":
+                raise WorkError("That text cannot be shown exactly on the approval card.")
+            if label in ("Site", "Destination", "Sends to", "Then"):
+                raise WorkError("The browser destination cannot be shown safely.")
+        shown_rows.append(row)
     return {"title": title, "rows": shown_rows}

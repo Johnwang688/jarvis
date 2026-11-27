@@ -36,6 +36,7 @@ _CHECK_RETRY = 2.0
 _CHECK_MAX_AGE = 300.0
 _GUARD_TIMEOUT = 5.0
 _EVENT_POLL = 0.05
+_SETTLE_POLL = 0.3
 _CLOSED = "The browser session is closed."
 _UNSETTLED = "The browser's current address could not be verified."
 _NOT_A_SITE = "The browser is not showing a public website."
@@ -49,6 +50,27 @@ class BrowserError(Exception):
     def __init__(self, message, *, reason):
         super().__init__(message)
         self.reason = reason
+
+
+def settle(session, clock, timeout):
+    """Wait for two matching settled main-frame snapshots within the budget."""
+    deadline = clock() + timeout
+    previous = None
+    while (remaining := deadline - clock()) > 0:
+        try:
+            current = session.location(timeout=remaining)
+        except BrowserError as exc:
+            if exc.reason not in ("unsettled", "changed"):
+                raise
+            previous = None
+        else:
+            if clock() <= deadline and current == previous:
+                return current
+            previous = current
+        if deadline - clock() < _SETTLE_POLL:
+            break
+        time.sleep(_SETTLE_POLL)
+    raise BrowserError(_READ_MOVED, reason="moved")
 
 
 class Landing(NamedTuple):
@@ -670,6 +692,18 @@ class BrowserSession:
 
         if type(number) is not int or not 1 <= number <= 200:
             return None
+        return self._read_context_call(context_id, read.document_function(read.FOLLOW), [number],
+                                       timeout, check_after=True)
+
+    def act_call(self, context_id, script, arguments, *, timeout=10.0):
+        """Run only fixed action scripts in the isolated world of the last read."""
+        from . import act
+
+        function = act.document_function(script)
+        return self._read_context_call(context_id, function, arguments, timeout,
+                                       check_after=script is act.DESCRIBE)
+
+    def _read_context_call(self, context_id, function, arguments, timeout, *, check_after):
         with self._lock:
             world = self._read_world
             if world is None or type(context_id) is not int or context_id != world[0]:
@@ -679,16 +713,19 @@ class BrowserSession:
                 self._read_world = None
                 raise BrowserError(_READ_MOVED, reason="moved")
             tab = self._live_tab()
+            if not check_after:
+                # A sent action cannot be retried against the same numbered read.
+                self._read_world = None
             try:
                 value = self._call_in_context(tab, context_id, _read_origin(location),
-                                              read.document_function(read.FOLLOW), [world_key, number], timeout)
+                                              function, [world_key, *arguments], timeout)
             except LinkError as exc:
                 if not _context_lost(exc.browser_message):
                     raise BrowserError(_UNSETTLED, reason="unsettled") from None
                 value = "moved"
             except (KeyError, TypeError, ValueError):
                 raise BrowserError(_UNSETTLED, reason="unsettled") from None
-            if value == "moved" or not self.is_current(location):
+            if value == "moved" or (check_after and not self.is_current(location)):
                 self._read_world = None
                 raise BrowserError(_READ_MOVED, reason="moved")
             return value

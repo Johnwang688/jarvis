@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from a6c1_acceptance_check import Base, Model, reply
-from r1a_policy_grid_check import BT3_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
+from r1a_policy_grid_check import BT3_KINDS, BT4_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
 from voice_brain_check import Factory, PREFIX, Recorder, script
 
 from jarvis import config, tools
@@ -216,7 +216,7 @@ class Delegation(Base):
         # The browser kinds have their own table. Compare the rest whether or
         # not the baseline already has them.
         def legacy(defaults):
-            return {kind: level for kind, level in defaults.items() if kind not in BT3_KINDS}
+            return {kind: level for kind, level in defaults.items() if kind not in BT3_KINDS | BT4_KINDS}
 
         self.assertEqual((legacy(policy.DEFAULTS), policy.OWNER_REQUEST, policy.NEVER),
                          (legacy(main.DEFAULTS), main.OWNER_REQUEST, main.NEVER))

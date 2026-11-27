@@ -27,6 +27,7 @@ const actions = new Map([
   ["delegate", { title: "Hand off to Sol", target: "Project", required: ["Folder", "Model"] }],
   ["work_send", { title: "Send to a coding thread", target: "Thread", required: ["Thread id", "In project"] }],
 ]);
+const browserPressTitles = new Set(["Press a browser control", "Submit a browser form", "Follow a link on the browser page"]);
 const identityLabels = new Set(["entry", "event", "title", "target", "tool", "action", "project", "thread"]);
 
 function safeIdentity(value: string) {
@@ -57,7 +58,7 @@ function Field({ row, full = false }: { row: ApprovalRow; full?: boolean }) {
   const format = full ? visibleText : preview;
   return (
     <div className="approval-field">
-      <dt><bdi>{format(row.label)}</bdi></dt>
+      <dt><bdi>{format(row.label)}</bdi>{row.source === "page" && " (text from the page)"}</dt>
       <dd><bdi>{format(row.value)}</bdi></dd>
     </div>
   );
@@ -164,8 +165,16 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   const disabled = !ready || busy;
   const { card, tool } = request;
   const rows = card?.rows ?? [];
-  const action = actions.get(tool);
-  const targets = rows.filter((row) => identityLabels.has(labelKey(row.label)));
+  const browserAction = tool === "browser_fill"
+    ? { title: "Fill a browser field", target: "Site", required: ["Field", "Text", "Then"] }
+    : tool === "browser_press" && card && browserPressTitles.has(card.title)
+      ? card.title === "Follow a link on the browser page"
+        ? { title: card.title, target: "Link number" }
+        : { title: card.title, target: "Site", required: ["Button", "Kind"] }
+      : undefined;
+  const action = browserAction ?? actions.get(tool);
+  const targets = rows.filter((row) => identityLabels.has(labelKey(row.label))
+    || (browserAction && labelKey(row.label) === labelKey(browserAction.target)));
   const target = targets.length === 1 && targets[0].label === action?.target ? targets[0] : undefined;
   const policy = [
     { label: "Policy level", value: request.level },
@@ -174,7 +183,9 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   const safe = !!target && card?.title === action?.title && safeIdentity(target.value)
     && (action?.required ?? []).every((label) => {
       const matches = rows.filter((row) => labelKey(row.label) === labelKey(label));
-      return matches.length === 1 && matches[0].label === label && safeIdentity(matches[0].value);
+      return matches.length === 1 && matches[0].label === label
+        && (label === "Text" && browserAction ? matches[0].value.length > 0
+          && matches[0].value === visibleText(matches[0].value) : safeIdentity(matches[0].value));
     })
     && !conflictingLabels([...rows, ...policy]);
   const title = card?.title ?? "";
@@ -236,7 +247,9 @@ function ApprovalCard({ shown, ready, busy, answer }: {
       </dl>
       <dl className="approval-summary">
         {rows.map((row, index) =>
-          row === target || row.label === "Revision" ? null : <Field key={index} row={row} />)}
+          row === target || row.label === "Revision" ? null : <Field key={index} row={row}
+            full={(tool === "browser_fill" && (row.label === "Text" || row.label === "Then"))
+              || (tool === "browser_press" && row.label === "Sends to")} />)}
       </dl>
       <dl className="approval-policy">
         {policy.map((row) => <Field key={row.label} row={row} />)}
