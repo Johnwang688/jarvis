@@ -1,3 +1,3 @@
 """Jarvis — a personal agent with a hand-rolled tool-calling loop."""
 
-__version__ = "3.9.1"
+__version__ = "3.10.1"

@@ -283,7 +283,7 @@ def checked_start(self):
         assert set(json.load(response)["jobs"]) == {
             "feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
             "schoolwork", "github", "triggers", "work-watch", "planner", "executor", "consolidate", "morning-brief",
-            "learning-digest", "evening-wrap",
+            "learning-digest", "evening-wrap", "browser-reap",
         }
     assert not forbidden.intersection(sys.modules)
     signal.raise_signal(signal.SIGTERM)
