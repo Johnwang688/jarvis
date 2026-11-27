@@ -40,6 +40,8 @@ _CLOSED = "The browser session is closed."
 _UNSETTLED = "The browser's current address could not be verified."
 _NOT_A_SITE = "The browser is not showing a public website."
 _MOVED = "The browser moved away from the sign-in document."
+_READ_MOVED = "The browser moved away from the document being read."
+_DEFAULT_READ = object()
 _GATE_BYPASSED = "The browser did not use Jarvis's network gate."
 
 
@@ -64,6 +66,19 @@ class Location(NamedTuple):
 
 def _frame_location(frame):
     return Location(frame["url"] + frame.get("urlFragment", ""), frame["id"], frame["loaderId"])
+
+
+def _read_origin(location: Location) -> str:
+    # CDP reports Chromium's canonical URL. Drop everything outside the origin.
+    parts = urlsplit(location.url)
+    host, port = parts.hostname, parts.port
+    if parts.scheme not in policy.SCHEMES or not host:
+        raise BrowserError(_NOT_A_SITE, reason="not_a_site")
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parts.scheme == "https" else 80
+    suffix = "" if port in (None, default_port) else f":{port}"
+    return f"{parts.scheme}://{host}{suffix}"
 
 
 def _context_lost(message):
@@ -604,8 +619,36 @@ class BrowserSession:
         # Leave the protocol error and its request-data traceback behind.
         raise BrowserError(_MOVED if reason == "moved" else _UNSETTLED, reason=reason)
 
+    def read_call(self, location: Location, script=_DEFAULT_READ, *, timeout=10.0):
+        """Read a verified main-frame snapshot with the built-in read script."""
+        from jarvis.v3.browser import read
+
+        function = read.document_function(read.READ if script is _DEFAULT_READ else script)
+        with self._lock:
+            deadline = time.monotonic() + timeout
+            if self.location(timeout=timeout) != location:
+                raise BrowserError(_READ_MOVED, reason="moved")
+            tab = self._live_tab()
+            origin = _read_origin(location)
+            reason = "unsettled"
+            try:
+                value = self._call_in_world(tab, location, origin, function, None, deadline,
+                                            purpose="read")
+                if value != "moved":
+                    return value
+                reason = "moved"
+            except BrowserError as exc:
+                reason = exc.reason
+            except LinkError as exc:
+                if _context_lost(exc.browser_message):
+                    reason = "moved"
+            except (KeyError, TypeError, ValueError):
+                pass
+        message = {"closed": _CLOSED, "moved": _READ_MOVED}.get(reason, _UNSETTLED)
+        raise BrowserError(message, reason=reason)
+
     @staticmethod
-    def _call_in_world(tab, location, origin, function, arguments, deadline):
+    def _call_in_world(tab, location, origin, function, arguments, deadline, *, purpose="signin"):
         def remaining():
             budget = deadline - time.monotonic()
             if budget <= 0:
@@ -613,7 +656,7 @@ class BrowserSession:
             return budget
 
         world = tab.call("Page.createIsolatedWorld", {
-            "frameId": location.frame_id, "worldName": f"jarvis-signin-{secrets.token_hex(16)}",
+            "frameId": location.frame_id, "worldName": f"jarvis-{purpose}-{secrets.token_hex(16)}",
         }, timeout=remaining())
         context = world["executionContextId"]
         if type(context) is not int or context <= 0:
@@ -621,6 +664,10 @@ class BrowserSession:
         with tab.changed:
             if (tab.frame, tab.loader) != (location.frame_id, location.loader_id):
                 raise BrowserError(_MOVED, reason="moved")
+            if purpose == "read":
+                tab.require_alive()
+                if tab.url != location.url or tab._navigation_pending():
+                    raise BrowserError(_READ_MOVED, reason="moved")
         reply = tab.call("Runtime.callFunctionOn", {
             "executionContextId": context,
             "functionDeclaration": function,
