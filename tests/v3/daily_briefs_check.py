@@ -420,7 +420,7 @@ class Wiring(unittest.TestCase):
                 self.assertEqual(set(scheduler.status()), {
                     "feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
                     "schoolwork", "github", "triggers", "work-watch", "planner", "executor", "consolidate", "morning-brief",
-                    "learning-digest", "evening-wrap",
+                    "learning-digest", "evening-wrap", "browser-reap",
                 })
                 outcomes = {entry["job"]: entry["outcome"] for entry in scheduler.tick()}
             self.assertEqual(outcomes["morning-brief"], "ok")
