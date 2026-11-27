@@ -8,7 +8,7 @@ from jarvis.v3.browser.session import BrowserError, Location, _READ_MOVED, _read
 from jarvis.v3.browser.signin import Script
 
 
-READ = Script(r"""function () {
+READ = Script(r"""function (worldKey) {
     const nodeCap = 20_000, byteCap = 256 * 1024, refCap = 200;
     const omitted = new Set([
         'head', 'script', 'style', 'noscript', 'template', 'iframe', 'frame', 'noframes',
@@ -309,17 +309,36 @@ READ = Script(r"""function () {
     }
     const items = candidates.map(labelOf);
     // This isolated world lives only as long as the document. Index n-1 is ref n.
-    globalThis.__jarvisReadRefs = candidates.map(({node}) => node);
+    globalThis.__jarvisReadRefs = candidates.map(({node, kind}) => ({
+        node, href: kind === 'link' ? node.href : null
+    }));
+    globalThis.__jarvisReadKey = worldKey;
     return {title, text, items, more: more || stopped};
 }""")
 
 
+FOLLOW = Script(r"""function (worldKey, number) {
+    if (typeof worldKey !== 'string' || globalThis.__jarvisReadKey !== worldKey) return 'moved';
+    const refs = globalThis.__jarvisReadRefs;
+    if (!Array.isArray(refs)) return 'moved';
+    if (!Number.isSafeInteger(number) || number < 1) return null;
+    const ref = refs[number - 1];
+    if (!ref) return null;
+    const {node, href: readHref} = ref;
+    if (!node || !node.isConnected || node.ownerDocument !== document ||
+        !(node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement) ||
+        !node.hasAttribute('href')) return null;
+    const href = node.href;
+    return href === readHref && /^https?:\/\//.test(href) ? href : null;
+}""")
+
+
 def document_function(script: Script) -> str:
-    if script is not READ:
-        raise TypeError("Only the built-in read script is allowed.")
-    return """function (origin) {
+    if script is not READ and script is not FOLLOW:
+        raise TypeError("Only the built-in read and follow scripts are allowed.")
+    return """function (origin, ...args) {
     if (window.top !== window || location.origin !== origin) return "moved";
-    return (""" + script.source + """)();
+    return (""" + script.source + """)(...args);
 }"""
 
 
@@ -335,6 +354,8 @@ class PageView(NamedTuple):
     text: str
     refs: tuple[Ref, ...]
     truncated: bool
+    body: str = ""
+    context_id: int | None = None
 
 
 _WITHHELD = "[a line was withheld]"
@@ -390,13 +411,16 @@ def _screen(value: str) -> str:
     return _join_lines(lines)
 
 
-def read_page(session) -> PageView:
+def read_page(session, *, with_context=False) -> PageView:
     """Read the current page. Title and ref labels are untrusted data too.
 
     A model-facing caller must fence those fields before presenting them.
     """
     location = session.location()
-    result = session.read_call(location)
+    if with_context:
+        result, context_id = session.read_call(location, with_context=True)
+    else:
+        result, context_id = session.read_call(location), None
     if result == "moved" or not session.is_current(location):
         raise BrowserError(_READ_MOVED, reason="moved")
     try:
@@ -420,7 +444,8 @@ def read_page(session) -> PageView:
         if len(body) > 4_000:
             body = body[:body.rfind("\n", 0, 4_001) + 1].rstrip()
         return PageView(location, _screen(title)[:120],
-                        untrusted.fence(body, _read_origin(location)), tuple(refs), truncated)
+                        untrusted.fence(body, _read_origin(location)), tuple(refs), truncated,
+                        body, context_id)
     except Exception:
         # Conversion and redaction failures may carry page data.
         pass

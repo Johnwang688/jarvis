@@ -30,6 +30,10 @@ from .index import open_directory
 
 FEED_DIR = config.V3_DIR / "feed"
 FEEDBACK_TAGS = frozenset({"too_long", "missing_context"})
+SIGN_IN_NOTICE = "Jarvis used the saved login for "
+_SIGN_IN_HOST = r"[a-z0-9.-]{1,253}"
+_SIGN_IN_ASK = re.compile(re.escape(SIGN_IN_NOTICE) + _SIGN_IN_HOST + r"\.")
+_OLD_SIGN_IN_ASK = re.compile(r"Jarvis signed in to " + _SIGN_IN_HOST + r"\.")
 _ACTIONS = {"approve": "approved", "edit": "edited", "other": "other", "not_now": "dismissed"}
 _STATES = frozenset({"open", "expired", "done", *_ACTIONS.values()})
 _TEXT_ANSWERS = {"edit", "other"}
@@ -143,7 +147,7 @@ def _items(value, limit):
     return value
 
 
-def _fields(fields, *, replay=False):
+def _fields(fields, *, replay=False, actor=None):
     _shape(fields, _POST_FIELDS, _OPTIONAL_FIELDS)
     kind = _enum(fields["kind"], _KINDS)
     rank = fields["rank"]
@@ -152,9 +156,15 @@ def _fields(fields, *, replay=False):
     critical = fields.get("time_critical", False)
     if type(critical) is not bool:
         raise FeedError("A brief's time_critical flag must be a boolean.")
+    ask = fields["ask"]
+    # A valid saved hostname can be longer than the ordinary brief title limit.
+    sign_in_notice = (actor == "jarvis" and kind == "news" and rank == 4
+                      and isinstance(ask, str) and (_SIGN_IN_ASK.fullmatch(ask)
+                                                    or (replay and _OLD_SIGN_IN_ASK.fullmatch(ask))))
     result = {
         "kind": kind, "rank": rank, "time_critical": critical,
-        "ask": _text(fields["ask"], 120), "due": _date_field(fields.get("due"), replay=replay),
+        "ask": _text(ask, len(SIGN_IN_NOTICE) + 254 if sign_in_notice else 120),
+        "due": _date_field(fields.get("due"), replay=replay),
         "why_now": _text(fields.get("why_now", ""), 200, empty=True),
         "options": [], "context": [], "recommend": None, "default": None,
         "attachment": None, "proposal_id": None,
@@ -332,7 +342,7 @@ class _Projection:
             actor = values.pop("actor")
             session = values.pop("session")
             route = _enum(values.pop("route"), {"push", "batch"})
-            values = _fields(values, replay=True)
+            values = _fields(values, replay=True, actor=actor)
             session = _provenance(values, actor, session)
             pending = event["pending"]
             # Replay the route chosen in the original clock's zone. The
@@ -528,7 +538,7 @@ class Feed:
             fields = fields.copy()
             key = _ref(fields.pop("idempotency_key"))
             bid = hashlib.sha256(f"jarvis-feed-post:{key}".encode()).hexdigest()[:32]
-        values = _fields(fields)
+        values = _fields(fields, actor=actor)
         session = _provenance(values, actor, session)
         payload = None
         with self._locked() as (directory, log, state):

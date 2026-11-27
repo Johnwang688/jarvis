@@ -13,6 +13,8 @@ from jarvis.v3 import policy
 
 
 MISSING = object()
+# The four BT3 kinds have their own before-and-after table.
+BT3_KINDS = {"browser.open", "browser.read", "browser.follow", "browser.sign_in"}
 FACT_AXES = {
     "tainted": (True, False, MISSING, 0),
     "owner_request": (True, False, MISSING, 1, "true"),
@@ -45,7 +47,7 @@ class PolicyGrid(unittest.TestCase):
         path = Path(self.enterContext(TemporaryDirectory())) / "policy.json"
         before, after = main.Policy(path), policy.Policy(path)
         pc_kinds = {"app.open", "folder.open", "link.open"}
-        kinds = sorted((policy.DEFAULTS.keys() - pc_kinds) | main.DEFAULTS.keys() | policy.NEVER | {
+        kinds = sorted((policy.DEFAULTS.keys() - pc_kinds - BT3_KINDS) | main.DEFAULTS.keys() | policy.NEVER | {
             "garden.water", "mail.forward", "share.doc",
         })
         owner_levels = {"thread.start": "L1", "thread.send": "L1", "calendar.event_change": "L1"}

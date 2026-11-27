@@ -28,6 +28,7 @@ OTHER_PEOPLE = frozenset({
     "mail.send", "mail.reply", "mail.forward", "calendar.invite", "calendar.respond",
 })
 MONEY = frozenset({"money.spend"})
+TAINT_EXEMPT = frozenset({"browser.read", "browser.follow", "browser.sign_in"})
 _CALENDAR_EDITS = frozenset({
     "calendar.block_move", "calendar.event_change", "calendar.event_delete",
 })
@@ -43,6 +44,10 @@ DEFAULTS: dict[str, Level] = {
     "app.open": "L0",
     "folder.open": "L0",
     "link.open": "L1",
+    "browser.read": "L0",
+    "browser.follow": "L0",
+    "browser.open": "L0",
+    "browser.sign_in": "L1",
     "calendar.block_move": "L1",
     "pr.draft_open": "L1",
     "thread.fix_test": "L1",
@@ -203,9 +208,15 @@ def _other_people(kind):
 def _apply_hard_rules(decision, kind, facts):
     if kind in NEVER:
         return Decision(level="L3", why="hard:never")
+    if kind.startswith("browser."):
+        floor = DEFAULTS.get(kind, "L2")
+        if decision["level"] < floor:
+            decision = Decision(level=floor, why="hard:browser-floor")
     if decision["level"] >= "L2":
         return decision
-    if facts.get("tainted") is not False:
+    # Owner decision (2026-11-27): read sends no new input, follow uses the
+    # page's own link, and sign-in uses only an owner-saved origin and login.
+    if facts.get("tainted") is not False and kind not in TAINT_EXEMPT:
         return Decision(level="L2", why="hard:tainted")
     if _other_people(kind) or (
         kind.startswith("calendar.") and not _same_fact(facts.get("attendees"), 0)
@@ -354,6 +365,8 @@ def set_rule(path, kind, level, when=None) -> tuple[Level, Level]:
     rule = {"kind": kind, "level": level, "when": when}
     if not _valid_rule(rule):
         raise ValueError("Use a lowercase area.verb kind, a level from L0 to L3, and valid facts.")
+    if kind.startswith("browser.") and level < DEFAULTS.get(kind, "L2"):
+        raise ValueError("Browser policy cannot go below the default level.")
     facts = {**_example_facts(kind), **when}
     if _apply_hard_rules(Decision(level=level, why=""), kind, facts)["level"] > level:
         raise ValueError("A hard policy rule requires a higher level.")

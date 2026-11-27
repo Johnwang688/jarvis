@@ -69,8 +69,12 @@ def _frame_location(frame):
 
 
 def _read_origin(location: Location) -> str:
+    return _http_origin(location.url)
+
+
+def _http_origin(url: str) -> str:
     # CDP reports Chromium's canonical URL. Drop everything outside the origin.
-    parts = urlsplit(location.url)
+    parts = urlsplit(url)
     host, port = parts.hostname, parts.port
     if parts.scheme not in policy.SCHEMES or not host:
         raise BrowserError(_NOT_A_SITE, reason="not_a_site")
@@ -505,6 +509,7 @@ class BrowserSession:
         self._gate_port = None
         self._tab = None
         self._checked_at = None
+        self._read_world = None
 
     def _refused_ports(self):
         # policy.refused_ports already includes the configured and default v3
@@ -569,6 +574,7 @@ class BrowserSession:
 
     def open(self, url):
         with self._lock:
+            self._read_world = None
             tab = self._live_tab()
             try:
                 address = _judge(url, self._refused_ports())
@@ -606,7 +612,8 @@ class BrowserSession:
                 tab = self._live_tab()
                 reason = "unsettled"
                 try:
-                    return self._call_in_world(tab, location, origin, function, arguments, deadline)
+                    value, _ = self._call_in_world(tab, location, origin, function, arguments, deadline)
+                    return value
                 except BrowserError as exc:
                     reason = exc.reason
                 except LinkError as exc:
@@ -619,22 +626,32 @@ class BrowserSession:
         # Leave the protocol error and its request-data traceback behind.
         raise BrowserError(_MOVED if reason == "moved" else _UNSETTLED, reason=reason)
 
-    def read_call(self, location: Location, script=_DEFAULT_READ, *, timeout=10.0):
-        """Read a verified main-frame snapshot with the built-in read script."""
+    def read_call(self, location: Location, script=_DEFAULT_READ, *, timeout=10.0, with_context=False):
+        """Read a main-frame snapshot, optionally returning its context id for follow."""
         from jarvis.v3.browser import read
 
-        function = read.document_function(read.READ if script is _DEFAULT_READ else script)
+        if script is not _DEFAULT_READ and script is not read.READ:
+            raise TypeError("Only the built-in read script is allowed.")
+        function = read.document_function(read.READ)
         with self._lock:
+            self._read_world = None
             deadline = time.monotonic() + timeout
             if self.location(timeout=timeout) != location:
                 raise BrowserError(_READ_MOVED, reason="moved")
             tab = self._live_tab()
             origin = _read_origin(location)
+            # CDP's numeric context ids can be reused across renderer processes.
+            # Bind FOLLOW to a key installed only by READ in this isolated world.
+            world_key = secrets.token_hex(16) if with_context else None
             reason = "unsettled"
             try:
-                value = self._call_in_world(tab, location, origin, function, None, deadline,
-                                            purpose="read")
+                arguments = [world_key] if with_context else None
+                value, context = self._call_in_world(tab, location, origin, function, arguments, deadline,
+                                                     purpose="read")
                 if value != "moved":
+                    if with_context:
+                        self._read_world = (context, location, world_key)
+                        return value, context
                     return value
                 reason = "moved"
             except BrowserError as exc:
@@ -646,6 +663,35 @@ class BrowserSession:
                 pass
         message = {"closed": _CLOSED, "moved": _READ_MOVED}.get(reason, _UNSETTLED)
         raise BrowserError(message, reason=reason)
+
+    def follow_call(self, context_id: int, number: int, *, timeout=10.0):
+        """Resolve a numbered item only in the isolated world of the last read."""
+        from jarvis.v3.browser import read
+
+        if type(number) is not int or not 1 <= number <= 200:
+            return None
+        with self._lock:
+            world = self._read_world
+            if world is None or type(context_id) is not int or context_id != world[0]:
+                raise BrowserError(_READ_MOVED, reason="moved")
+            _, location, world_key = world
+            if not self.is_current(location):
+                self._read_world = None
+                raise BrowserError(_READ_MOVED, reason="moved")
+            tab = self._live_tab()
+            try:
+                value = self._call_in_context(tab, context_id, _read_origin(location),
+                                              read.document_function(read.FOLLOW), [world_key, number], timeout)
+            except LinkError as exc:
+                if not _context_lost(exc.browser_message):
+                    raise BrowserError(_UNSETTLED, reason="unsettled") from None
+                value = "moved"
+            except (KeyError, TypeError, ValueError):
+                raise BrowserError(_UNSETTLED, reason="unsettled") from None
+            if value == "moved" or not self.is_current(location):
+                self._read_world = None
+                raise BrowserError(_READ_MOVED, reason="moved")
+            return value
 
     @staticmethod
     def _call_in_world(tab, location, origin, function, arguments, deadline, *, purpose="signin"):
@@ -668,12 +714,17 @@ class BrowserSession:
                 tab.require_alive()
                 if tab.url != location.url or tab._navigation_pending():
                     raise BrowserError(_READ_MOVED, reason="moved")
+        value = BrowserSession._call_in_context(tab, context, origin, function, arguments, remaining())
+        return value, context
+
+    @staticmethod
+    def _call_in_context(tab, context, origin, function, arguments, timeout):
         reply = tab.call("Runtime.callFunctionOn", {
             "executionContextId": context,
             "functionDeclaration": function,
             "arguments": [{"value": value} for value in (origin, *(arguments or ()))],
             "returnByValue": True,
-        }, timeout=remaining())
+        }, timeout=timeout)
         if "exceptionDetails" in reply:
             raise BrowserError(_UNSETTLED, reason="unsettled")
         return reply["result"]["value"]
@@ -695,6 +746,7 @@ class BrowserSession:
     def _close(self):
         tab, gate = self._tab, self._gate
         self._checked_at = self._tab = self._gate = self._gate_port = None
+        self._read_world = None
         try:
             if tab is not None:
                 tab.close()

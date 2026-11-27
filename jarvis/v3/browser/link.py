@@ -353,6 +353,15 @@ def windows_link(browser, *, proxy_port, window=False, **options) -> BrowserLink
     return BrowserLink(command, interop=True, cwd=bridge, **options)
 
 
+def bridge_available() -> bool:
+    """Check the installation without starting the helper or the browser."""
+    try:
+        bridge = installation._bridge()
+        return (bridge / "venv" / "Scripts" / "python.exe").is_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
 def _helper_launch(browser, *, proxy_port, window):
     if browser not in ("chrome", "edge"):
         raise LinkError("Invalid Windows browser.")

@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -76,13 +78,14 @@ class ReadDOM(unittest.TestCase):
         if frame is None:
             frame = self.location().frame_id
         self.world_count += 1
+        self.world_key = f"fixture-world-{self.world_count}"
         self.world = self.cdp.send("Page.createIsolatedWorld", {
             "frameId": frame, "worldName": f"test-read-{self.world_count}",
         })["executionContextId"]
         result = self.cdp.send("Runtime.callFunctionOn", {
             "executionContextId": self.world,
             "functionDeclaration": read.document_function(read.READ),
-            "arguments": [{"value": origin}],
+            "arguments": [{"value": origin}, {"value": self.world_key}],
             "returnByValue": True,
         })
         self.assertNotIn("exceptionDetails", result)
@@ -317,7 +320,7 @@ class ReadDOM(unittest.TestCase):
         result = self.cdp.send("Runtime.evaluate", {
             "contextId": self.world,
             "expression": "[Array.isArray(globalThis.__jarvisReadRefs), "
-                          "globalThis.__jarvisReadRefs.length, globalThis.__jarvisReadRefs[1].id]",
+                          "globalThis.__jarvisReadRefs.length, globalThis.__jarvisReadRefs[1].node.id]",
             "returnByValue": True,
         })
         self.assertEqual(result["result"]["value"], [True, 12, "send"])
@@ -356,7 +359,7 @@ class ReadDOM(unittest.TestCase):
         self.assertEqual([(ref.number, ref.label) for ref in view.refs], list(enumerate(expected, 1)))
         result = self.cdp.send("Runtime.evaluate", {
             "contextId": self.world,
-            "expression": "globalThis.__jarvisReadRefs[197].id",
+            "expression": "globalThis.__jarvisReadRefs[197].node.id",
             "returnByValue": True,
         })
         self.assertEqual(result["result"]["value"], "last")
@@ -378,6 +381,107 @@ class ReadDOM(unittest.TestCase):
         self.assertEqual(self.document_read(frame=frame), "moved")
         self.load("<p>Another origin</p>", OTHER)
         self.assertEqual(self.document_read(), "moved")
+
+    def follow(self, number, origin=ORIGIN, *, world_key=None):
+        result = self.cdp.send("Runtime.callFunctionOn", {
+            "executionContextId": self.world,
+            "functionDeclaration": read.document_function(read.FOLLOW),
+            "arguments": [{"value": origin}, {"value": world_key or self.world_key}, {"value": number}],
+            "returnByValue": True,
+        })
+        self.assertNotIn("exceptionDetails", result)
+        return result["result"]["value"]
+
+    def test_follow_resolves_only_numbered_http_links_in_the_read_document(self):
+        self.load("""
+            <a id="remove" href="/first#part">First link</a>
+            <button>Button</button>
+            <a id="replace" href="http://other.example.invalid/path">Second link</a>
+            <a href="javascript:void(0)">Script link</a>
+            <a href="data:text/plain,fixture">Data link</a>
+        """)
+        items = self.document_read()["items"]
+        self.assertEqual([item["label"] for item in items],
+                         ["First link", "Button", "Second link", "Script link", "Data link"])
+        self.assertEqual(self.follow(1), ORIGIN + "/first#part")
+        self.assertEqual(self.follow(3), OTHER + "path")
+        self.assertEqual(self.follow(1, world_key="old-world"), "moved")
+        for number in (0, 2, 4, 5, 6):
+            self.assertIsNone(self.follow(number))
+        self.page.locator("#remove").evaluate("node => node.href = '/different'")
+        self.assertIsNone(self.follow(1))
+        self.page.locator("#remove").evaluate("node => node.remove()")
+        self.page.locator("#replace").evaluate("node => node.replaceWith(node.cloneNode(true))")
+        self.assertIsNone(self.follow(1))
+        self.assertIsNone(self.follow(3))
+
+    def test_follow_checks_origin_and_top_frame_even_with_the_right_number(self):
+        self.load('<a href="/target">Link</a>', OTHER)
+        self.document_read(OTHER.rstrip("/"))
+        self.assertEqual(self.follow(1), "moved")
+        self.fixtures[PAGE + "frame"] = '<a href="/target">Frame link</a>'
+        self.load('<iframe src="/frame"></iframe>')
+        child = self.tree()["childFrames"][0]["frame"]["id"]
+        self.assertEqual(self.document_read(frame=child), "moved")
+        self.assertEqual(self.follow(1), "moved")
+
+
+class FollowFakeDOM(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the fake DOM fixture.")
+    def test_read_and_follow_bind_the_resolved_href_without_a_browser(self):
+        script = r"""
+const assert = require('node:assert/strict');
+const location = new URL('http://example.invalid/current');
+const window = {};
+window.top = window;
+const Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 };
+const box = {left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100};
+const getComputedStyle = () => ({
+    display: 'block', overflowX: 'visible', overflowY: 'visible',
+    visibility: 'visible', fontSize: '16px', opacity: '1',
+});
+const scrollX = 0, scrollY = 0;
+class Element {
+    nodeType = Node.ELEMENT_NODE;
+    isConnected = true;
+    matches() { return false; }
+    getBoundingClientRect() { return box; }
+    getAttribute(name) { return this.attributes?.[name] ?? null; }
+    hasAttribute(name) { return this.getAttribute(name) !== null; }
+}
+class HTMLAnchorElement extends Element {
+    localName = 'a';
+    attributes = {href: 'first', 'aria-label': 'Fixture link'};
+    get href() { return new URL(this.attributes.href, document.baseURI).href; }
+}
+class HTMLAreaElement extends Element {}
+class HTMLLabelElement extends Element {}
+const node = new HTMLAnchorElement();
+const root = Object.assign(new Element(), {
+    localName: 'html', clientWidth: 100, clientHeight: 100, scrollWidth: 100, scrollHeight: 100,
+    firstChild: node,
+});
+const document = {
+    documentElement: root, title: 'Fixture', baseURI: String(location), createRange: () => ({}),
+};
+node.ownerDocument = document;
+const origin = location.origin;
+assert.equal(read(origin, 'fixture').items[0].label, 'Fixture link');
+assert.equal(follow(origin, 'fixture', 1), origin + '/first');
+node.attributes.href = 'changed';
+assert.equal(follow(origin, 'fixture', 1), null);
+node.attributes.href = 'first';
+document.baseURI = origin + '/base/';
+assert.equal(follow(origin, 'fixture', 1), null);
+"""
+        scripts = ["const read = " + read.document_function(read.READ) + ";",
+                   "const follow = " + read.document_function(read.FOLLOW) + ";"]
+        with tempfile.TemporaryDirectory() as home:
+            completed = subprocess.run(
+                ["node"], input="\n".join([*scripts, script]), text=True,
+                capture_output=True, timeout=10, env={**os.environ, "HOME": home},
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 if __name__ == "__main__":
