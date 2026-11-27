@@ -27,7 +27,7 @@ from .index import open_directory
 from .ingest.transcripts import _batch, _fingerprint
 
 
-SKILL_STEPS = 10
+SKILL_STEPS = 25
 MEMORY_TURNS = 10
 MAX_AGE_S = 7 * 86400
 _STATE_AGE_S = 30 * 86400

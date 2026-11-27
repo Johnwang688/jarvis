@@ -216,9 +216,9 @@ sessions, terminal sessions and the fast path (as plain tools) all get it.
   drop a small JSON record into a queue directory: transcript path,
   tool-call count and cwd. They write a file and make no network call.
   daemon2 consumes the queue.
-- **Thresholds, Hermes defaults:** a skill review after ≥10 tool-calling
-  steps since the last review of that session; a memory review every ~10
-  user turns. Skip short chats.
+- **Thresholds:** a skill review after ≥25 tool calls since the last skill
+  review of that session, and a memory review after ≥10 user turns since the
+  last memory review. Skip short chats.
 - **Runner:** `claude -p --model haiku` (H9) with a minimal tool allowlist:
   `jarvis-brain` skill and memory tools plus read-only file tools,
   `--strict-mcp-config`, and deny-all approvals. A recursion guard (an env

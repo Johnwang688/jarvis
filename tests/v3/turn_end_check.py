@@ -36,7 +36,7 @@ class QueueChecks(unittest.TestCase):
         self.projects = self.home / ".claude/projects"
         self.projects.mkdir(parents=True)
         self.transcript = self.projects / "session.jsonl"
-        self.transcript.write_bytes(TOOL * 10)
+        self.transcript.write_bytes(TOOL * review_queue.SKILL_STEPS)
         self.payload = {**CLAUDE, "transcript_path": str(self.transcript)}
 
     def fire(self, changes=None):
@@ -145,8 +145,8 @@ class QueueChecks(unittest.TestCase):
             return original(*args)
 
         with patch.object(review_queue, "_batch", side_effect=grow_then_read):
-            self.assertEqual(review_queue.count("claude", self.transcript), (10, 0))
-        self.assertEqual(review_queue.count("claude", self.transcript), (11, 0))
+            self.assertEqual(review_queue.count("claude", self.transcript), (review_queue.SKILL_STEPS, 0))
+        self.assertEqual(review_queue.count("claude", self.transcript), (review_queue.SKILL_STEPS + 1, 0))
 
     def test_huge_transcript_is_bounded_and_a_large_count_resumes(self):
         with self.transcript.open("ab") as stream:
@@ -156,12 +156,12 @@ class QueueChecks(unittest.TestCase):
             review_queue.count("claude", self.transcript)
         self.assertLess(time.monotonic() - started, 2.0)
 
-        self.transcript.write_bytes(TOOL * 20)
+        self.transcript.write_bytes(TOOL * (2 * review_queue.SKILL_STEPS))
         self.fire()
-        with patch.object(review_queue, "_SCAN_BYTES", len(TOOL) * 10):
+        with patch.object(review_queue, "_SCAN_BYTES", len(TOOL) * review_queue.SKILL_STEPS):
             self.assertEqual(self.tick(), [])
             self.assertEqual(len(list(self.queue.iterdir())), 1)
-            self.assertEqual([r["tool_steps"] for r in self.tick()], [20])
+            self.assertEqual([r["tool_steps"] for r in self.tick()], [2 * review_queue.SKILL_STEPS])
         self.assertEqual(list(self.queue.iterdir()), [])
 
     def test_protected_ancestors_and_links_are_skipped_before_count(self):
