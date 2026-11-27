@@ -247,6 +247,47 @@ def _login_store():
     return Store.system()
 
 
+def _login_session(browser, *, window):
+    from .browser.session import BrowserSession
+
+    return BrowserSession(browser, window=window)
+
+
+def _test_login(args):
+    from .browser.link import LinkError
+    from .browser.session import BrowserError
+    from .browser.signin import find_login, sign_in
+    from .logins import LoginError, canonical_origin
+
+    try:
+        store = _login_store()
+        login = find_login(store, args.name)
+        session = _login_session(login.browser, window=args.window)
+        try:
+            if args.page is None or canonical_origin(args.page) == login.origin:
+                session.start()
+            outcome = sign_in(session, store, login.name, page=args.page)
+            line = f"{login.name}: {outcome.detail}"
+            wait_for_enter = args.window and sys.stdin.isatty()
+            if wait_for_enter:
+                print(line, flush=True)
+                try:
+                    input("Press Enter to close the browser. ")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        finally:
+            session.close()
+        if not wait_for_enter:
+            print(line)
+    except LoginError:
+        print("Error: The saved login could not be loaded.", file=sys.stderr)
+        return 1
+    except (BrowserError, LinkError):
+        print("Error: The browser session could not be used.", file=sys.stderr)
+        return 1
+    return {"signed_in": 0, "needs_code": 2}.get(outcome.result, 1)
+
+
 def _add_login(store, args):
     from .logins import LoginError
 
@@ -282,6 +323,9 @@ def _list_logins(store):
 
 def login_command(args) -> int:
     from .logins import LoginError
+
+    if args.action == "test":
+        return _test_login(args)
 
     try:
         if args.action == "add" and not sys.stdin.isatty():
@@ -502,6 +546,10 @@ def add_commands(sub, *, voice=True):
     save.add_argument("--replace", action="store_true")
     login_sub.add_parser("list", help="list saved login metadata")
     login_sub.add_parser("remove", help="remove a saved login").add_argument("name")
+    test = login_sub.add_parser("test", help="try a saved login in the browser")
+    test.add_argument("name")
+    test.add_argument("--page", metavar="URL", help="sign-in page on the saved site")
+    test.add_argument("--window", action="store_true", help="show the browser window")
 
 
 def main(argv: list[str]) -> int:

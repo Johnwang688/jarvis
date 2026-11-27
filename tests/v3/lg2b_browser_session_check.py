@@ -13,6 +13,7 @@ from unittest.mock import patch
 from jarvis import config
 from jarvis.v2.browser import policy
 from jarvis.v3.browser import session as S
+from jarvis.v3.browser import signin
 from jarvis.v3.browser.link import LinkError
 
 
@@ -97,6 +98,8 @@ class FakeLink:
         self.history = None
         self.main_frame = {"id": ROOT_FRAME, "url": BLANK, "loaderId": "blank-loader"}
         self.frame_tree = lambda: self.main_frame.copy()
+        self.create_world = lambda: {"executionContextId": 7}
+        self.document_reply = lambda: {"result": {"type": "string", "value": "none"}}
         self.targets = {"startup": BLANK}
         self.next_target = 0
         self.callback = None
@@ -182,6 +185,10 @@ class FakeLink:
             return {"success": True}
         elif method == "Page.getFrameTree":
             return {"frameTree": {"frame": self.frame_tree()}}
+        elif method == "Page.createIsolatedWorld":
+            return self.create_world()
+        elif method == "Runtime.callFunctionOn":
+            return self.document_reply()
         elif method == "Page.navigate":
             url = params["url"]
             return self.blank_navigation(url) if url == BLANK else self.navigation(url)
@@ -548,6 +555,91 @@ class BrowserSessionCheck(unittest.TestCase):
         self.assertTrue(self.browser.is_current(current))
         self.link.same_document(PUBLIC + "#new")
         self.assertFalse(self.browser.is_current(current))
+
+    def test_document_call_uses_fresh_main_frame_world_and_guard_first(self):
+        self.browser.start()
+        self.link.frame(PUBLIC)
+        self.link.frame(OTHER, frame="iframe", parentId=ROOT_FRAME)
+        origin = PUBLIC.rstrip("/")
+        for args in (None, ["after"]):
+            self.assertEqual(self.browser.document_call(origin, signin.INSPECT, args), "none")
+        methods = [entry for entry in self.trace.items if entry[0] in
+                   ("Page.createIsolatedWorld", "Runtime.callFunctionOn")]
+        self.assertEqual([method for method, _, _ in methods],
+                         ["Page.createIsolatedWorld", "Runtime.callFunctionOn"] * 2)
+        self.assertNotEqual(methods[0][1]["worldName"], methods[2][1]["worldName"])
+        for index, (_, world, session) in enumerate(methods[::2]):
+            self.assertEqual(world["frameId"], ROOT_FRAME)
+            self.assertEqual(session, SESSION)
+            _, call, session = methods[2 * index + 1]
+            self.assertEqual(session, SESSION)
+            self.assertEqual(call["executionContextId"], 7)
+            self.assertIs(call["returnByValue"], True)
+            self.assertEqual(call["arguments"], [{"value": origin}] +
+                             ([{"value": "after"}] if index else []))
+            first_statement = call["functionDeclaration"].splitlines()[1:4]
+            self.assertEqual(first_statement, [
+                '    if (window.top !== window || location.protocol !== "https:" ||',
+                '        location.origin !== origin || self.origin !== origin ||',
+                '        document.domain !== location.hostname) return "moved";',
+            ])
+        self.assertFalse(any(call[0] == "Runtime.enable" for call in self.trace.items))
+
+    def test_document_call_refuses_other_scripts_and_origins_before_world(self):
+        self.browser.start()
+        self.link.frame(OTHER)
+        origin = PUBLIC.rstrip("/")
+        for source in (signin.INSPECT.source, signin.Script(signin.INSPECT.source)):
+            with self.assertRaisesRegex(TypeError, "built-in sign-in script"):
+                self.browser.document_call(origin, source, None)
+        self.refused(lambda: self.browser.document_call(origin, signin.INSPECT, None), "moved")
+        self.assertFalse(any(call[0] == "Page.createIsolatedWorld" for call in self.trace.items))
+
+    def test_document_call_drops_raw_protocol_errors(self):
+        self.browser.start()
+        self.link.frame(PUBLIC)
+
+        def destroyed():
+            raise LinkError(FILE, browser_message="Cannot find context with specified id")
+
+        def protocol_error():
+            raise LinkError(FILE, browser_message=FILE)
+
+        for response, reason in ((destroyed, "moved"), (protocol_error, "unsettled"),
+                                 (lambda: {"exceptionDetails": {"text": FILE}}, "unsettled")):
+            with self.subTest(reason=reason):
+                self.link.document_reply = response
+                try:
+                    self.browser.document_call(PUBLIC.rstrip("/"), signin.ACT, ["after"])
+                except S.BrowserError as error:
+                    self.assertEqual(error.reason, reason)
+                    self.assertNotIn(FILE, str(error))
+                    self.assertIsNone(error.__context__)
+                    frame = error.__traceback__.tb_next
+                    self.assertIsNone(frame.tb_next)
+                    self.assertNotIn("arguments", frame.tb_frame.f_locals)
+                else:
+                    self.fail("Expected the document call to fail.")
+
+    def test_document_call_with_no_time_left_never_creates_world(self):
+        self.browser.start()
+        self.link.frame(PUBLIC)
+        self.refused(lambda: self.browser.document_call(PUBLIC.rstrip("/"), signin.ACT, None,
+                                                       timeout=0), "unsettled")
+        self.assertFalse(any(call[0] == "Page.createIsolatedWorld" for call in self.trace.items))
+
+    def test_document_call_does_not_send_arguments_after_a_commit(self):
+        self.browser.start()
+        self.link.frame(PUBLIC)
+
+        def world_after_commit():
+            self.link.frame(PUBLIC, loader="different-document")
+            return {"executionContextId": 8}
+
+        self.link.create_world = world_after_commit
+        self.refused(lambda: self.browser.document_call(PUBLIC.rstrip("/"), signin.ACT, ["after"]),
+                     "moved")
+        self.assertFalse(any(call[0] == "Runtime.callFunctionOn" for call in self.trace.items))
 
     def test_close_after_link_death_is_idempotent(self):
         self.browser.start()
