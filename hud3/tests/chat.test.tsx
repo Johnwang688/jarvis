@@ -111,7 +111,7 @@ describe("chat actions", () => {
       "YouFixture request", expect.stringContaining("Ran without asking · Send to a coding thread · Fixture thread"),
       "JarvisFixture reply",
     ]);
-    expect(box.querySelector(".chat-header")?.textContent).toContain("Outside text read: actions will ask");
+    expect(box.querySelector(".chat-header")?.textContent).toContain("Outside text read: sensitive actions ask");
     await click("New chat");
     expect(box.querySelector(".chat-outside")).toBeNull();
     expect(box.querySelector(".chat-auto")).toBeNull();

@@ -10,7 +10,7 @@ Contract: the decision-rights policy (plan §13, approved by the owner 2026-11-2
     Order: a file rule for the kind (first match whose `when` facts all equal the proposal's) else DEFAULTS[kind] else the file's
     default_level (L2 when absent). THEN the hard rules, which only ever raise a level and which no file can change:
       hard:never         kinds in NEVER (credentials, the policy itself, the gate, schoolwork submissions, deleting others' data) -> L3
-      hard:tainted       proposal tainted (prompted by untrusted content), or `tainted` missing or not a bool -> at least L2
+      hard:tainted       taint true, missing or invalid -> at least L2 for actions subject to the taint floor
       hard:other-people  kinds in OTHER_PEOPLE (mail.send, mail.reply, mail.forward, calendar.invite, calendar.respond, share.*) -> at least L2;
                          also any calendar proposal whose attendees is not exactly the int 0 (missing, a bool, negative, a string: all ask)
       hard:money         kinds in MONEY, or proposal money truthy -> at least L2
@@ -76,7 +76,7 @@ class Defaults(Base):
     def test_unknown_and_unjudgeable_proposals_ask(self):
         self.assertEqual(self.level("garden.water"), "L2")
         for bad in (None, "mail.draft", [], {}, {"kind": 5}, {"kind": ""}, {"kind": "Mail.Draft", "tainted": False}, {"kind": "mail.draft\n", "tainted": False},
-                    {"kind": "mail.draft"}, {"kind": "mail.draft", "tainted": "no"}, {"kind": "mail.draft", "tainted": 0}):
+                    {"kind": "vault.update"}, {"kind": "vault.update", "tainted": "no"}, {"kind": "vault.update", "tainted": 0}):
             self.assertIn(self.p.level_for(bad), ("L2", "L3"), repr(bad))
         self.assertEqual(self.p.level_for({"kind": "mail.draft", "tainted": False}), "L0")
 
@@ -101,11 +101,13 @@ class Hard(Base):
         self.assertEqual(self.p.explain(prop("garden.water"))["why"], "hard:unknown-kind")
         self.assertEqual(self.level("vault.update"), "L0")                       # a file may still set what the hard rules leave alone
 
-    def test_tainted_always_asks(self):
+    def test_taint_floor_has_explicit_exemptions(self):
         self.write(self.PERMISSIVE)
-        for kind in ("vault.update", "mail.draft", "calendar.block", "mail.file", "research.start"):
+        for kind in ("vault.update", "research.start", "garden.water"):
             self.assertEqual(self.level(kind, tainted=True), "L2", kind)
             self.assertEqual(self.p.explain(prop(kind, tainted=True))["why"], "hard:tainted")
+        for kind in ("mail.draft", "calendar.block", "mail.file"):
+            self.assertEqual(self.level(kind, tainted=True), "L0", kind)
         self.assertEqual(self.level("school.submit", tainted=True), "L3")
 
     def test_calendar_facts(self):

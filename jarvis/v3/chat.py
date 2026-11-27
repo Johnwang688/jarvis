@@ -580,6 +580,7 @@ class ChatService:
                     meta["outside_text"] = self._outside_text
                     session = run_turn(
                         sid, path, meta, text="\n\n".join(inputs), data_dir=self.root.parent,
+                        owner_inputs=tuple(inputs),
                         feed_root=self._feed_root, clock=self._clock, completion=self._completion,
                         stop=lambda: self._stop.is_set() or self._closed.is_set(),
                         take_steering=self._take_steering,

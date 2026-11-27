@@ -29,7 +29,7 @@ _TITLES = {
     "browser_sign_in": "Sign in to a saved site",
 }
 _BROWSER_TAINT_NOTE = (
-    "Jarvis read text from outside in this turn and now wants to open an address it wrote itself."
+    "This chat has read outside text. Jarvis wants to open an address you did not supply in this turn."
 )
 _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
 _TARGETS = {

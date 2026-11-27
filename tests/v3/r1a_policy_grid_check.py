@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from jarvis.v3 import policy
 
+from bt3_policy_check import NEW_EXEMPT
+
 
 MISSING = object()
 # The four BT3 kinds have their own before-and-after table.
@@ -40,8 +42,12 @@ def fact_grid(kinds):
         yield {"kind": kind, **{key: value for key, value in zip(FACT_AXES, values) if value is not MISSING}}
 
 
+def bt3c_baseline_facts(proposal):
+    return dict(proposal, tainted=False) if proposal["kind"] in NEW_EXEMPT else proposal
+
+
 class PolicyGrid(unittest.TestCase):
-    def test_owner_request_is_the_only_legacy_kind_delta(self):
+    def test_legacy_grid_has_only_the_pinned_owner_request_and_bt3c_deltas(self):
         main = baseline_policy(self)
 
         path = Path(self.enterContext(TemporaryDirectory())) / "policy.json"
@@ -53,15 +59,17 @@ class PolicyGrid(unittest.TestCase):
         owner_levels = {"thread.start": "L1", "thread.send": "L1", "calendar.event_change": "L1"}
         self.assertEqual(policy.OWNER_REQUEST, owner_levels)
         if hasattr(main, "OWNER_REQUEST"):
-            # The baseline already carries the owner-request change, so the two policies must
-            # agree on every cell: any difference is a policy change that needs its own grid.
+            # The baseline already carries the owner-request change.
+            changes = 0
             for configured in (False, True):
                 if configured:
                     policy.set_rule(path, "thread.start", "L3")
                     policy.set_rule(path, "calendar.event_change", "L2", when={"attendees": 1})
                 for proposal in fact_grid(kinds):
-                    self.assertEqual(after.explain(proposal), before.explain(proposal), (configured, proposal))
-            print("Policy grid differing cells: 0 (the baseline already has the owner-request level).", flush=True)
+                    actual = after.explain(proposal)
+                    self.assertEqual(actual, before.explain(bt3c_baseline_facts(proposal)), (configured, proposal))
+                    changes += actual != before.explain(proposal)
+            print(f"Policy grid differing cells: {changes} (BT3c exemptions).", flush=True)
             return
         differences = []
         archive_differences = 0
@@ -74,7 +82,7 @@ class PolicyGrid(unittest.TestCase):
             changed = 0
             for proposal in fact_grid(kinds):
                 kind = proposal["kind"]
-                old, new = before.explain(proposal), after.explain(proposal)
+                old, new = before.explain(bt3c_baseline_facts(proposal)), after.explain(proposal)
                 if kind == "vault.archive":
                     self.assertEqual(old, {"level": "L2", "why": "default-level"}, proposal)
                     self.assertEqual(new, {"level": "L2", "why": "default:vault.archive"}, proposal)

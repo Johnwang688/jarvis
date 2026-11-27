@@ -157,7 +157,7 @@ def brain_registration(args) -> int:
 
 
 def policy_show(_args) -> int:
-    from .policy import MONEY, OTHER_PEOPLE, Policy
+    from .policy import MONEY, OTHER_PEOPLE, TAINT_EXEMPT, Policy
 
     print("Effective policy for untainted proposals with no spend, attendees, or owner event.")
     print("Rows with a condition use those values in place of the example facts.")
@@ -170,7 +170,9 @@ def policy_show(_args) -> int:
             hard = "  [hard:money floor L2]"
         print(f"{kind}  {decision['level']}  [{decision['why']}]{hard}{condition}")
     print("Hard L2 floors")
-    print("  Tainted proposals or missing or invalid taint facts")
+    print("  Outside text or missing or invalid taint facts, with these exemptions")
+    print(f"    {', '.join(sorted(TAINT_EXEMPT))}")
+    print("    browser.open and link.open when the owner supplied the exact address this turn")
     print(f"  {', '.join(sorted(OTHER_PEOPLE))}, share.*, or calendar actions without a verified zero attendee count")
     print(f"  {', '.join(sorted(MONEY))}, spending, or an invalid money fact")
     print("  Moving or deleting calendar events without verified Jarvis ownership")

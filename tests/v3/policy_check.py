@@ -44,7 +44,7 @@ class PolicyCheck(unittest.TestCase):
             ("calendar.respond", {"attendees": 0}, "other-people"), ("share.doc", {}, "other-people"),
             ("calendar.block", {"attendees": 1}, "other-people"),
             ("money.spend", {}, "money"), ("vault.update", {"money": True}, "money"),
-            ("mail.draft", {"tainted": True}, "tainted"),
+            ("research.start", {"tainted": True}, "tainted"),
             ("calendar.block_move", {"attendees": 0, "owner_event": True}, "owner-event"),
             ("calendar.event_change", {"attendees": 0, "owner_event": True}, "owner-event"),
             ("calendar.event_delete", {"attendees": 0, "owner_event": True}, "owner-event"),
@@ -68,7 +68,7 @@ class PolicyCheck(unittest.TestCase):
                    {"kind": "thread.fix_test", "level": "L0", "when": {"verified": 0}})
         for bad in (0.0, "0", None, [], FalseLike()):
             with self.subTest(type=type(bad)):
-                self.assertEqual(self.decision("mail.draft", tainted=bad)["level"], "L2")
+                self.assertEqual(self.decision("vault.update", tainted=bad)["level"], "L2")
                 self.assertEqual(self.decision("mail.draft", money=bad)["level"], "L2")
                 self.assertEqual(self.decision("calendar.block", attendees=bad)["level"], "L2")
                 self.assertEqual(self.decision("calendar.block_move", attendees=0, owner_event=bad)["level"], "L2")
@@ -78,8 +78,8 @@ class PolicyCheck(unittest.TestCase):
             self.assertEqual(self.decision("calendar.block", attendees=bad)["level"], "L2")
             self.assertEqual(self.decision("thread.fix_test", verified=bad),
                              {"level": "L1", "why": "default:thread.fix_test"})
-        for fact in ("tainted", "money"):
-            self.assertEqual(self.decision("mail.draft", **{fact: 0})["level"], "L2")
+        self.assertEqual(self.decision("vault.update", tainted=0)["level"], "L2")
+        self.assertEqual(self.decision("mail.draft", money=0)["level"], "L2")
         self.assertEqual(self.decision("calendar.block_move", attendees=0, owner_event=0)["level"], "L2")
         self.assertEqual(self.decision("calendar.block_move", attendees=0)["level"], "L2")
         self.assertEqual(self.decision("thread.fix_test"), {"level": "L1", "why": "default:thread.fix_test"})

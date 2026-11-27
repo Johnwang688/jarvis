@@ -1,6 +1,6 @@
 """Classify v3 actions. Proposals require approval at execution under H10.
 
-Clean owner chat can run L0 and L1 automatically when enabled.
+Owner chat can run L0 and L1 automatically when enabled, subject to the hard rules.
 """
 
 from contextlib import contextmanager, suppress
@@ -28,7 +28,20 @@ OTHER_PEOPLE = frozenset({
     "mail.send", "mail.reply", "mail.forward", "calendar.invite", "calendar.respond",
 })
 MONEY = frozenset({"money.spend"})
-TAINT_EXEMPT = frozenset({"browser.read", "browser.follow", "browser.sign_in"})
+# Owner decision (2026-11-26): after outside text, actions that can leak data or leave lasting changes keep their card.
+# vault.update can persist hostile text. research.start, investigation.readonly, thread.fix_test and pr.draft_open can launch work or leave records.
+# browser.open and link.open can send data in a URL, so only the exact address supplied by the owner this turn is exempt.
+# Unknown and future kinds stay gated until deliberately exempted.
+TAINT_EXEMPT = frozenset({
+    # Opening an app or folder shows it on the owner's screen.
+    "app.open", "folder.open",
+    # Jarvis's own calendar blocks and due dates are visible and undoable.
+    "calendar.block", "calendar.block_move", "calendar.add_due_date",
+    # Filing mail and saving drafts are undoable and send nothing.
+    "mail.file", "mail.label", "mail.archive", "mail.draft",
+    # Reading sends no new input, following uses the page's link, and sign-in uses a saved origin and login.
+    "browser.read", "browser.follow", "browser.sign_in",
+})
 _CALENDAR_EDITS = frozenset({
     "calendar.block_move", "calendar.event_change", "calendar.event_delete",
 })
@@ -69,7 +82,7 @@ OWNER_REQUEST: dict[str, Level] = {
     "thread.start": "L1", "thread.send": "L1", "calendar.event_change": "L1",
 }
 _KIND = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")
-_FACT_TYPES = {"tainted": bool, "attendees": int, "owner_event": bool, "money": bool}
+_FACT_TYPES = {"tainted": bool, "attendees": int, "owner_event": bool, "money": bool, "owner_address": bool}
 _NOFOLLOW = os.O_NOFOLLOW | os.O_NONBLOCK
 _MAX_BYTES = 256 * 1024
 _MISSING = object()
@@ -205,6 +218,12 @@ def _other_people(kind):
     return kind in OTHER_PEOPLE or kind.startswith("share.")
 
 
+def taint_exempt(kind, facts):
+    return kind in TAINT_EXEMPT or (
+        kind in ("browser.open", "link.open") and facts.get("owner_address") is True
+    )
+
+
 def _apply_hard_rules(decision, kind, facts):
     if kind in NEVER:
         return Decision(level="L3", why="hard:never")
@@ -214,9 +233,7 @@ def _apply_hard_rules(decision, kind, facts):
             decision = Decision(level=floor, why="hard:browser-floor")
     if decision["level"] >= "L2":
         return decision
-    # Owner decision (2026-11-27): read sends no new input, follow uses the
-    # page's own link, and sign-in uses only an owner-saved origin and login.
-    if facts.get("tainted") is not False and kind not in TAINT_EXEMPT:
+    if facts.get("tainted") is not False and not taint_exempt(kind, facts):
         return Decision(level="L2", why="hard:tainted")
     if _other_people(kind) or (
         kind.startswith("calendar.") and not _same_fact(facts.get("attendees"), 0)

@@ -332,7 +332,7 @@ class ProposalChecks(unittest.TestCase):
                         action={"tool": "calendar_create", "args": {"title": "Fake block"}, "preview": {}})
         tainted = self.store.add(draft)
         self.assertEqual(tainted["level_proposed"], "L0")
-        self.assertEqual((tainted["level"], tainted["why"]), ("L2", "hard:tainted"))
+        self.assertEqual((tainted["level"], tainted["why"]), ("L0", "default:calendar.block"))
         clean = replace(draft, tainted=False, dedupe_key="calendar.block:fake-clean")
         set_rule(self.policy_path, "calendar.block", "L1", {"attendees": 0, "owner_event": False})
         self.assertEqual(self.store.add(clean)["level"], "L1")
