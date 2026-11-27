@@ -20,7 +20,7 @@ class AutoWindow(layout.Layout):
         )
         self.open_window()
         card = self.chat_panel.get_by_role("region", name="Tool approval")
-        outside = self.chat_panel.get_by_text("Outside text read: actions will ask", exact=True)
+        outside = self.chat_panel.get_by_text("Outside text read: sensitive actions ask", exact=True)
         self.send("Save the fixture note.")
         auto = self.transcript.locator(".chat-auto")
         self.expect(auto.locator("summary")).to_have_text(f"Ran without asking · Add a vault entry · {target}")

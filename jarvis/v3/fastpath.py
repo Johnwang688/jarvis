@@ -12,8 +12,9 @@ from inspect import signature
 import json
 import os
 from pathlib import Path
+import re
 from threading import Lock
-from typing import Annotated, Callable
+from typing import Annotated, Callable, Iterable
 from uuid import uuid4
 
 from jarvis import config, llm, models, runtime, sessions, tools, untrusted
@@ -33,7 +34,7 @@ from .chat import (
 from .feed import Feed
 from .index import Index
 from .owner_routes import FEED_LOCK_TIMEOUT
-from .policy import Policy
+from .policy import Policy, taint_exempt
 from .t3_client import RUNNING
 from .tools.feed import FeedTools
 from .tools.memory import MemoryTools
@@ -126,6 +127,7 @@ class _TurnTools:
     delegated: int = 0
     browser_desk: object = None
     browser_calls: int = 0
+    owner_texts: Callable[[], Iterable[str]] = tuple
 
     @cached_property
     def memory(self):
@@ -204,6 +206,60 @@ class _CalendarGrant:
         return True
 
 
+_ADDRESS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+_ADDRESS_AUTHORITY_END = re.compile(r"[/?#]")
+_OWNER_ADDRESS_LIMIT = 2048
+
+
+_ADDRESS_WRAPPERS = {"<": ">", "(": ")", "[": "]", "{": "}", '"': '"', "'": "'"}
+_SENTENCE_END = ".,;:!?"
+
+
+def _owner_tokens(word):
+    """The addresses one typed word can mean.
+
+    Inside a balanced wrapper the address is exactly what was typed there.
+    Otherwise it is the word as typed, or the word without the punctuation
+    that may only have ended the sentence.
+    """
+    closer = _ADDRESS_WRAPPERS.get(word[:1])
+    if closer is not None:
+        inner = word[1:].rstrip(_SENTENCE_END)
+        if inner.endswith(closer):
+            return (inner[:-1],)
+    plain = word.lstrip("<([{\"'")
+    ended = plain.rstrip(">)]}\"'" + _SENTENCE_END)
+    return (plain,) if ended == plain else (plain, ended)
+
+
+def _matches_owner_address(url: str, texts: Iterable[str]) -> bool:
+    """Compare owner tokens without applying the browser's URL interpretation."""
+    address = url.strip()
+    if not 1 <= len(address) <= _OWNER_ADDRESS_LIMIT:
+        return False
+    for text in texts:
+        for token in (token for word in text.split() for token in _owner_tokens(word)):
+            if not 1 <= len(token) <= _OWNER_ADDRESS_LIMIT:
+                continue
+            scheme = _ADDRESS_SCHEME.match(token)
+            location = token[scheme.end():].removeprefix("//") if scheme else token
+            authority = _ADDRESS_AUTHORITY_END.split(location, maxsplit=1)[0]
+            if "@" in authority or (not scheme and "@" in token):
+                continue
+            candidates = (token,)
+            if not scheme and token[0].isalnum() and "." in authority:
+                candidates = (token, "https://" + token)
+            for candidate in candidates:
+                if address == candidate:
+                    return True
+                # A final slash in a query or fragment is part of its value.
+                if "?" not in candidate and "#" not in candidate and (
+                    address == candidate + "/" or address + "/" == candidate
+                ):
+                    return True
+    return False
+
+
 class ChatApprover:
     def __init__(self, broker, turn, *, on_pending=None):
         self._broker = broker
@@ -227,7 +283,7 @@ class ChatApprover:
             kind = _POLICY_KINDS[name]
             tainted = turn.outside_text()
             facts = {"kind": kind, "tainted": tainted}
-            if not tainted:
+            if tainted is False:
                 facts["owner_request"] = True
             if name in CALENDAR_WRITES:
                 if not calendar_available():
@@ -247,6 +303,9 @@ class ChatApprover:
                     preview = _pc_preview(turn.work, name, call_args)
                 except pc.PCError as exc:
                     return tools.Refusal(str(exc))
+                if name == "link_open":
+                    # The preview has already verified that this is a public HTTPS URL.
+                    facts["owner_address"] = _matches_owner_address(call_args["url"], turn.owner_texts())
             elif name in BROWSER_GATED:
                 if turn.browser_desk is None:
                     return tools.Refusal("Browser tools are unavailable.")
@@ -254,7 +313,10 @@ class ChatApprover:
                 if name == "browser_open":
                     if not 1 <= len(call_args["url"]) <= BROWSER_URL_LIMIT:
                         return tools.Refusal(f"Use an HTTP or HTTPS address of at most {BROWSER_URL_LIMIT:,} characters.")
-                    preview = {"url": call_args["url"], "tainted": tainted is not False}
+                    owner_address = _matches_owner_address(call_args["url"], turn.owner_texts())
+                    facts["owner_address"] = owner_address
+                    # The card's taint note describes an address written by the model.
+                    preview = {"url": call_args["url"], "tainted": tainted is not False and not owner_address}
                 elif name == "browser_follow":
                     link = turn.browser_desk.resolve_follow(call_args["number"])
                     if isinstance(link, str):
@@ -295,9 +357,11 @@ class ChatApprover:
             receipt = None
             display_why = None
             auto_action = None
+            eligible = (facts.get("owner_request") is True if tainted is False
+                        else taint_exempt(kind, facts))
             if name in BROWSER_GATED and verdict["level"] < "L2":
                 display_why = "auto-off"
-            elif verdict["level"] < "L2" and not tainted and facts.get("owner_request") is True:
+            elif verdict["level"] < "L2" and eligible:
                 # Order phone sends and Stop against the durable auto decision.
                 with turn.tool_write() as writable:
                     if not writable:
@@ -660,7 +724,10 @@ def folder_open(project: Annotated[str, "Name of a registered work project."]) -
 
 @_bound
 def link_open(url: Annotated[str, "Public HTTPS URL, at most 2,000 characters."]) -> str:
-    """Open a public HTTPS link in the desk PC's default browser."""
+    """Open a public HTTPS link in the desk PC's default browser.
+
+    After outside text, this asks unless the owner typed the address in this chat turn.
+    """
     return _pc_open("link_open", pc.open_link, url=url)
 
 
@@ -681,7 +748,7 @@ def _browser_call(tool, **args):
 
 @_bound
 def browser_open(url: Annotated[str, "HTTP or HTTPS address to open."]) -> str:
-    """Open and read a page. Opening an address you supply asks after outside text has been read."""
+    """Open and read a page. After outside text, opening asks unless the owner gave the address this turn."""
     return _browser_call("browser_open", url=url)
 
 
@@ -1162,7 +1229,7 @@ def _enable_request_guard():
             hooks.append(_stop_before_request)
 
 
-def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
+def run_turn(session_id, path, meta, *, text, owner_inputs, data_dir, feed_root, clock,
              completion, stop, take_steering, admit_completion, emit, tool_write, record_outside_text,
              phone_input, turn_id=None, approvals=None, calendar=None, work=None, browser_desk=None):
     register_tools(include_gated=approvals is not None)
@@ -1217,10 +1284,12 @@ def run_turn(session_id, path, meta, *, text, data_dir, feed_root, clock,
                 chat_tool_end(name, detail, name in names, turn,
                               lambda: record_outside_text(session.session), emit, shown_name=shown_name)
 
+    # The service sends owner inputs and admits steering separately from the model transcript.
     turn = _TurnTools(session_id, turn_id, data_dir, feed_root, clock, tool_write, stop, before_request,
                       lambda: meta["outside_text"],
                       _default_calendar if calendar is None else calendar, work=work,
-                      phone_input=phone_input, browser_desk=browser_desk)
+                      phone_input=phone_input, browser_desk=browser_desk,
+                      owner_texts=lambda: (*owner_inputs, *session.steering))
     agent = _ChatAgent(
         model=models.tier("orchestrator"), system=config.SYSTEM_PROMPT + _CHAT_PROMPT,
         tool_names=names, max_steps=config.FAST_STEPS,

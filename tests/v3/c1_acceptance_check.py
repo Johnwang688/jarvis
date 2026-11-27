@@ -183,6 +183,8 @@ class Creating(Base):
         ((method, url, params, body),) = self.http.writes()
         self.assertEqual((method, url, params.get("sendUpdates")), ("POST", BASE, "none"))
         self.assertEqual(body["extendedProperties"], {"private": {"jarvis": "1"}})
+        # A block can be created without a card after outside text: its details stay with the owner.
+        self.assertEqual(body["visibility"], "private")
         self.assertEqual(body["start"], {"dateTime": "2026-11-25T18:00:00-06:00", "timeZone": "America/Chicago"})
         self.assertEqual(body["end"]["dateTime"], "2026-11-25T19:30:00-06:00")
         self.assertEqual((body["summary"], body["description"]), ("Study", "Chapter 4"))

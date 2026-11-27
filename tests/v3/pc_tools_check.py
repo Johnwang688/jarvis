@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from a6b1_acceptance_check import Model, reply
 from a6c1_acceptance_check import Base
-from r1a_policy_grid_check import BT3_KINDS, baseline_policy, fact_grid
+from r1a_policy_grid_check import BT3_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
 from voice_brain_check import Factory, PREFIX, Recorder, script
 
 from jarvis import config, tools
@@ -197,19 +197,21 @@ class PCCheck(Base):
                 self.assertEqual(policy.DEFAULTS[kind], level)
                 self.assertEqual(p.explain(dict(kind=kind, tainted=False, owner_request=owner_request)),
                                  {"level": level, "why": f"default:{kind}"})
-                self.assertEqual(p.explain(dict(kind=kind, tainted=True, owner_request=owner_request)),
-                                 {"level": "L2", "why": "hard:tainted"})
+                expected = ({"level": "L2", "why": "hard:tainted"} if kind == "link.open"
+                            else {"level": level, "why": f"default:{kind}"})
+                self.assertEqual(p.explain(dict(kind=kind, tainted=True, owner_request=owner_request)), expected)
 
-    def test_existing_policy_grid_matches_origin_main(self):
+    def test_existing_policy_grid_matches_origin_main_with_bt3c_exemptions(self):
         main = baseline_policy(self)
         new_kinds = {case[2] for case in CASES}
-        self.assertEqual(policy.DEFAULTS.keys() - new_kinds - BT3_KINDS, main.DEFAULTS.keys() - new_kinds)
+        excluded = new_kinds | BT3_KINDS
+        self.assertEqual(policy.DEFAULTS.keys() - excluded, main.DEFAULTS.keys() - excluded)
         self.assertEqual(policy.OWNER_REQUEST, main.OWNER_REQUEST)
-        kinds = (main.DEFAULTS.keys() | main.OTHER_PEOPLE | {"garden.water", "share.doc"}) - new_kinds
+        kinds = (main.DEFAULTS.keys() | main.OTHER_PEOPLE | {"garden.water", "share.doc"}) - excluded
         baseline = main.Policy(self.policy_file)
         current = policy.Policy(self.policy_file)
         for proposal in fact_grid(sorted(kinds)):
-            self.assertEqual(current.explain(proposal), baseline.explain(proposal), proposal)
+            self.assertEqual(current.explain(proposal), baseline.explain(bt3c_baseline_facts(proposal)), proposal)
 
     def test_chat_auto_has_a_durable_row_and_emits_the_target(self):
         svc = self.service_with_calls(*(case[:2] for case in CASES))
@@ -226,8 +228,9 @@ class PCCheck(Base):
             self.assert_auto(event, case)
         self.assertEqual(set(self.model.seen[0]["tools"]) & chat.PC_GATED, chat.PC_GATED)
 
-    def test_chat_cards_require_approval_with_auto_off_or_taint(self):
-        for case, tainted, choice in product(CASES, (False, True), ("approve", "deny")):
+    def test_chat_cards_require_approval_with_auto_off_or_for_a_model_link_after_taint(self):
+        card_cases = [(case, False) for case in CASES] + [(CASES[-1], True)]
+        for (case, tainted), choice in product(card_cases, ("approve", "deny")):
             name, args, _, level, title, success = case
             with self.subTest(name=name, tainted=tainted, decision=choice):
                 policy.set_auto(self.policy_file, tainted)
@@ -327,22 +330,25 @@ class PCCheck(Base):
         self.assertEqual(brain.pending_approvals(turn), [])
         self.assertEqual(self.states(None), ["auto"] * len(CASES))
 
-        for index, tainted in enumerate((False, True)):
+        for tainted in (False, True):
             policy.set_auto(self.policy_file, tainted)
             calls = [("vault_list", {})] if tainted else []
             self.launch.reset_mock()
             turn = send(calls + [case[:2] for case in CASES])
-            for count, case in enumerate(CASES, 1):
+            card_cases = CASES[-1:] if tainted else CASES
+            for count, case in enumerate(card_cases, 1):
                 name, args, _, level, title, _ = case
                 events.wait("approval_pending", count=count, turn=turn)
                 item, = brain.pending_approvals(turn)
                 self.assert_card(item, name, args, title, "L2" if tainted else level,
                                  "hard:tainted" if tainted else "auto-off")
-                self.assertEqual(self.launch.call_count, 0 if index else count - 1)
-                self.broker.answer(item["id"], item["digest"], "deny" if index else "approve")
+                self.assertEqual(self.launch.call_count, 2 if tainted else count - 1)
+                self.broker.answer(item["id"], item["digest"], "deny" if tainted else "approve")
             events.wait("reply", turn=turn)
-            self.assertEqual(self.launch.call_count, 0 if index else len(CASES))
-            self.assertNotIn("auto", events.kinds(turn))
+            self.assertEqual(self.launch.call_count, 2 if tainted else len(CASES))
+            auto_events = (event for event in events.events if event.get("turn") == turn and event["kind"] == "auto")
+            for case, event in zip(CASES[:2] if tainted else (), auto_events, strict=True):
+                self.assert_auto(event, case)
 
     def test_launcher_errors_are_safe_and_do_not_retry(self):
         for error, expected in (

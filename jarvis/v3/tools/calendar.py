@@ -467,6 +467,9 @@ class CalendarTools:
                 "overrides": [{"method": "popup", "minutes": minutes} for minutes in reminders],
             }
         body["extendedProperties"] = {"private": {"jarvis": "1"}}
+        # Details stay with the owner even when the calendar is shared: a block
+        # may be created without a card after outside text has been read.
+        body["visibility"] = "private"
         return {"method": "POST", "url": _PRIMARY, "params": {"sendUpdates": "none"}, "body": body}
 
     @_text_result

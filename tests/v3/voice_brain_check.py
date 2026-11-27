@@ -654,7 +654,7 @@ class VoiceBrainCheck(unittest.TestCase):
         self.answer(fresh, "deny")
         self.events.wait("reply", turn=turn)
 
-    def test_every_gated_tool_uses_the_tainted_level(self):
+    def test_every_gated_tool_uses_the_tainted_level_or_the_calendar_exemption(self):
         class DelegatingWork(Work):
             def plan_delegate(self, task, project=None):
                 return dict(project=project, named=True, title=task, task=task, path="/example/fixture")
@@ -682,7 +682,8 @@ class VoiceBrainCheck(unittest.TestCase):
             for count, expected in enumerate(gated, 1):
                 self.events.wait("approval_pending", count=count, turn=turn)
                 card, = self.brain.pending_approvals(turn)
-                self.assertEqual((card["tool"], card["level"], card["why"]), (expected, "L2", "hard:tainted"))
+                level, why = ("L0", "auto-off") if expected == "calendar_create" else ("L2", "hard:tainted")
+                self.assertEqual((card["tool"], card["level"], card["why"]), (expected, level, why))
                 self.answer(card, "deny")
             self.events.wait("reply", turn=turn)
             self.assertEqual([item[1] for item in self.client().results[1:]], [REFUSAL] * len(gated))

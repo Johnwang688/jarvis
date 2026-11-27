@@ -52,7 +52,8 @@ class ChatFacts(Base):
                     self.model.steps.extend((reply(calls=calls), reply("Done.")))
                     svc.send("Try the fixture action.")
                     item = self.next_card()
-                    expected = ("L2", "hard:tainted") if tainted else (level, "auto-off" if level < "L2" else why)
+                    expected = (("L2", "hard:tainted") if tainted and kind != "calendar.block"
+                                else (level, "auto-off" if level < "L2" else why))
                     try:
                         snap = svc.snapshot()
                         self.assertEqual((snap["state"], snap["approvals"], snap["outside_text"]),
@@ -74,8 +75,8 @@ class ChatFacts(Base):
                         self.assertEqual(self.wait_idle(svc), "idle")
                     self.assertEqual(self.states(item["id"]), ["pending", "denied"])
                     rows = [json.loads(line) for line in self.log.read_text().splitlines()]
-                    logged = (("L2", "hard:tainted" if kind in ("vault.update", "calendar.block")
-                               else f"default:{kind}") if tainted else (level, why))
+                    logged = (("L2", "hard:tainted" if kind == "vault.update" else f"default:{kind}")
+                              if tainted and kind != "calendar.block" else (level, why))
                     self.assertEqual([(row["level"], row["why"]) for row in rows if row["id"] == item["id"]],
                                      [logged, logged])
 

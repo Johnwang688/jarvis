@@ -109,7 +109,7 @@ export function ChatPanel({ onApprovalsChange }: { onApprovalsChange?: (count: n
     <section className="agent-panel agent-chat" data-panel="chat" aria-labelledby="panel-chat">
       <header className="chat-header">
         <h2 id="panel-chat">Chat</h2>
-        {chat?.outside_text && <span className="chat-outside">Outside text read: actions will ask</span>}
+        {chat?.outside_text && <span className="chat-outside">Outside text read: sensitive actions ask</span>}
         {chat && (
           <button type="button" disabled={chat.state !== "idle" || !!pending}
             onClick={() => void submit({ route: "new" })}>New chat</button>

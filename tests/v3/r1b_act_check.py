@@ -51,10 +51,10 @@ class Act(Base):
     def rows(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def expected(self, tainted, setting, origin, flagged, level, why):
+    def expected(self, name, tainted, setting, origin, flagged, level, why):
         if setting == "malformed":
             return "card", "L2", "malformed-file"
-        if tainted:
+        if tainted and name != "calendar_create":
             return "card", "L2", "hard:tainted"
         if level == "L2":
             return "card", level, why
@@ -115,7 +115,7 @@ class Act(Base):
                     gated_args, original = self.grid_args(name, args, number, flagged)
                     calls = [("index_search", {})] if tainted else []
                     calls.append((name, gated_args))
-                    expected = self.expected(tainted, setting, origin, flagged, level, why)
+                    expected = self.expected(name, tainted, setting, origin, flagged, level, why)
                     previous_writes = len(self.cal.writes()) + len(self.work.t3)
 
                     def seed_revision(*preview_args):

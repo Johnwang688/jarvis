@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from a6c1_acceptance_check import Base, Model, reply
-from r1a_policy_grid_check import BT3_KINDS, baseline_policy, fact_grid
+from r1a_policy_grid_check import BT3_KINDS, baseline_policy, bt3c_baseline_facts, fact_grid
 from voice_brain_check import Factory, PREFIX, Recorder, script
 
 from jarvis import config, tools
@@ -213,14 +213,20 @@ class Delegation(Base):
     def test_policy_grid_matches_origin_main(self):
         self.assertEqual(fastpath._POLICY_KINDS["delegate"], "thread.start")
         main = baseline_policy(self)
-        legacy = {kind: level for kind, level in policy.DEFAULTS.items() if kind not in BT3_KINDS}
-        self.assertEqual((legacy, policy.OWNER_REQUEST, policy.NEVER),
-                         (main.DEFAULTS, main.OWNER_REQUEST, main.NEVER))
+        # The browser kinds have their own table. Compare the rest whether or
+        # not the baseline already has them.
+        def legacy(defaults):
+            return {kind: level for kind, level in defaults.items() if kind not in BT3_KINDS}
+
+        self.assertEqual((legacy(policy.DEFAULTS), policy.OWNER_REQUEST, policy.NEVER),
+                         (legacy(main.DEFAULTS), main.OWNER_REQUEST, main.NEVER))
         current, before = policy.Policy(self.policy_file), main.Policy(self.policy_file)
         for auto in (False, True):
             policy.set_auto(self.policy_file, auto)
-            for facts in fact_grid(legacy):
-                self.assertEqual(current.explain_with_auto(facts), before.explain_with_auto(facts), facts)
+            for facts in fact_grid(legacy(policy.DEFAULTS)):
+                # The kinds that outside text no longer raises are judged as untainted in the baseline.
+                self.assertEqual(current.explain_with_auto(facts),
+                                 before.explain_with_auto(bt3c_baseline_facts(facts)), facts)
 
     def test_desk_auto_and_cards_for_taint_auto_off_and_phone(self):
         self.register()

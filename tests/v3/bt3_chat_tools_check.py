@@ -1,6 +1,7 @@
 """Exercise the owner chat's BT3 tools with a fake desk and model."""
 
 import os
+from threading import Event
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -17,12 +18,34 @@ from jarvis.v3.voice.approving import VoiceApproving
 
 
 URL = "https://example.invalid/path"
+OWNER_URL = "https://example.invalid/page"
 NEXT = "https://other.example.invalid/next"
 PAGE = "Site: https://example.invalid. Text was not cut.\n" + untrusted.fence(
     "Page title\n[1] link: Next\n\nOutside text", "https://example.invalid"
 )
-TAINT_NOTE = "Jarvis read text from outside in this turn and now wants to open an address it wrote itself."
+TAINT_NOTE = "This chat has read outside text. Jarvis wants to open an address you did not supply in this turn."
 LINK = ResolvedLink(NEXT, "https://example.invalid", "https://other.example.invalid")
+
+
+class OwnerAddressMatcherCheck(unittest.TestCase):
+    def match(self, address, text):
+        return fastpath._matches_owner_address(address, [text])
+
+    def test_a_wrapped_address_is_exactly_what_was_typed_inside(self):
+        typed = "open <https://example.invalid/page?q=value!> please"
+        self.assertTrue(self.match("https://example.invalid/page?q=value!", typed))
+        self.assertFalse(self.match("https://example.invalid/page?q=value", typed))
+        self.assertTrue(self.match("https://example.invalid/a.", 'see "https://example.invalid/a.".'))
+        self.assertFalse(self.match("https://example.invalid/a", 'see "https://example.invalid/a.".'))
+
+    def test_an_unwrapped_word_means_itself_or_itself_without_sentence_punctuation(self):
+        typed = "is it https://example.invalid/page?q=value! or (https://example.invalid/other)."
+        for address in ("https://example.invalid/page?q=value!", "https://example.invalid/page?q=value",
+                        "https://example.invalid/other"):
+            self.assertTrue(self.match(address, typed), address)
+        for address in ("https://example.invalid/page", "https://example.invalid/page?q=value!!",
+                        "https://example.invalid/other)x", "https://example.invalid.evil.invalid/other"):
+            self.assertFalse(self.match(address, typed), address)
 
 
 class BrowserChatCheck(fixtures.Base):
@@ -42,6 +65,152 @@ class BrowserChatCheck(fixtures.Base):
     def talk_browser(self, *steps, **options):
         self.model = fixtures.Model(*steps)
         return self.service(self.model, **({"approvals": self.broker, "browser_desk": self.desk} | options))
+
+    def tainted_chat(self, *steps, earlier_input="Read the fixture.", earlier_reply="Read it."):
+        svc = self.talk_browser(fixtures.reply(calls=[("browser_read", {})]),
+                                fixtures.reply(earlier_reply), *steps)
+        svc.new_session()
+        svc.send(earlier_input)
+        self.assertEqual(self.wait_idle(svc), "idle")
+        self.assertTrue(svc.snapshot()["outside_text"])
+        self.desk.reset_mock()
+        return svc
+
+    def deny_open(self, why="hard:tainted"):
+        card = self.next_card()
+        level = "L0" if why == "auto-off" else "L2"
+        self.assertEqual((card["tool"], card["level"], card["why"]), ("browser_open", level, why))
+        self.desk.open.assert_not_called()
+        self.assertEqual(self.broker.answer(card["id"], card["digest"], "deny"), "denied")
+
+    def test_tainted_chat_opens_the_owners_address(self):
+        max_address = OWNER_URL + "x" * (2048 - len(OWNER_URL))
+        for token, address in (
+            (OWNER_URL, OWNER_URL), (f"<{OWNER_URL}>", OWNER_URL),
+            (f'"{OWNER_URL}"', OWNER_URL), (f"'{OWNER_URL}'", OWNER_URL),
+            (f"{OWNER_URL}.", OWNER_URL), (f"{OWNER_URL},", OWNER_URL),
+            ("example.invalid/page", OWNER_URL), ("example.invalid/page/", OWNER_URL),
+            (OWNER_URL, OWNER_URL + "/"), (OWNER_URL + "/", f" {OWNER_URL}\t"),
+            (OWNER_URL + "?key=value#part", OWNER_URL + "?key=value#part"),
+            (max_address, max_address),
+        ):
+            with self.subTest(token=token[:100], address=address[:100]):
+                svc = self.tainted_chat(fixtures.reply(calls=[("browser_open", {"url": address})]),
+                                        fixtures.reply("Done."))
+                svc.send(f"Open {token} please.")
+                self.assertEqual(self.wait_idle(svc), "idle")
+                self.desk.open.assert_called_once_with(url=address)
+                self.assertEqual(self.states(None), [])
+
+    def test_tainted_chat_asks_for_altered_addresses(self):
+        long_address = OWNER_URL + "x" * (2049 - len(OWNER_URL))
+        for token, address in (
+            (OWNER_URL, OWNER_URL + "?key=value"), (OWNER_URL, OWNER_URL + "#part"),
+            (OWNER_URL + "?key=value", OWNER_URL), (OWNER_URL + "#part", OWNER_URL),
+            (OWNER_URL + "?key=value", OWNER_URL + "?key=value/"),
+            (OWNER_URL + "#part", OWNER_URL + "#part/"),
+            (OWNER_URL, OWNER_URL + "/extra"), (OWNER_URL, OWNER_URL + "//"),
+            (OWNER_URL, "https://other.example.invalid/page"),
+            (OWNER_URL, "http://example.invalid/page"), (OWNER_URL, "https://example.invalid/Page"),
+            (OWNER_URL, "https://example.invalid/p%61ge"),
+            ("user@example.invalid/page", "https://user@example.invalid/page"),
+            ("https://user@example.invalid/page", "https://user@example.invalid/page"),
+            (long_address, long_address),
+        ):
+            with self.subTest(token=token[:100], address=address[:100]):
+                svc = self.tainted_chat(fixtures.reply(calls=[("browser_open", {"url": address})]),
+                                        fixtures.reply("Done."))
+                svc.send(f"Open {token} please.")
+                self.deny_open()
+                self.assertEqual(self.wait_idle(svc), "idle")
+
+    def test_tainted_chat_does_not_use_prior_inputs_assistant_text_or_current_page(self):
+        for source in ("previous owner input", "assistant reply", "current page"):
+            with self.subTest(source=source):
+                steps = [fixtures.reply(calls=[("browser_open", {"url": OWNER_URL})]), fixtures.reply("Done.")]
+                if source == "current page":
+                    self.desk.read.side_effect = [PAGE, PAGE + "\n" + OWNER_URL]
+                    steps.insert(0, fixtures.reply(calls=[("browser_read", {})]))
+                svc = self.tainted_chat(*steps,
+                                        earlier_input=OWNER_URL if source == "previous owner input" else "Read it.",
+                                        earlier_reply=OWNER_URL if source == "assistant reply" else "Done reading.")
+                svc.send("Open the fixture.")
+                self.deny_open()
+                self.assertEqual(self.wait_idle(svc), "idle")
+
+    def test_typed_address_still_respects_the_switch_and_stricter_rules(self):
+        for why in ("auto-off", "file:0", "blocked"):
+            with self.subTest(why=why):
+                policy.set_auto(self.policy_file, True)
+                svc = self.tainted_chat(fixtures.reply(calls=[("browser_open", {"url": OWNER_URL})]),
+                                        fixtures.reply("Done."))
+                policy.set_auto(self.policy_file, why != "auto-off")
+                if why != "auto-off":
+                    policy.set_rule(self.policy_file, "browser.open", "L3" if why == "blocked" else "L2")
+                svc.send(OWNER_URL)
+                if why != "blocked":
+                    self.deny_open(why)
+                self.assertEqual(self.wait_idle(svc), "idle")
+                self.desk.open.assert_not_called()
+                if why == "blocked":
+                    self.assertIn("Policy blocks this action.", self.results()[-1])
+
+    def test_steering_counts_only_after_admission_and_queued_input_counts_in_its_turn(self):
+        open_address = fixtures.reply(calls=[("browser_open", {"url": OWNER_URL})])
+        for steer in (True, False):
+            with self.subTest(steer=steer):
+                entered, release = Event(), Event()
+
+                def first_step(_messages):
+                    entered.set()
+                    assert release.wait(10), "test did not release the provider"
+                    return open_address
+
+                finish = fixtures.reply("Done.")
+                later_steps = (open_address, finish) if steer else (finish, open_address, finish)
+                svc = self.tainted_chat(first_step, *later_steps)
+                svc.send("Open the fixture.")
+                try:
+                    self.assertTrue(entered.wait(10))
+                    self.assertEqual(svc.send(OWNER_URL, steer=steer)["steered"], steer)
+                finally:
+                    release.set()
+                self.deny_open()
+                self.assertEqual(self.wait_idle(svc), "idle")
+                self.desk.open.assert_called_once_with(url=OWNER_URL)
+
+    def test_fact_is_code_computed_for_browser_open_only(self):
+        explain_with_auto = policy.Policy.explain_with_auto
+        seen = []
+
+        def explain(instance, facts):
+            seen.append(facts)
+            return explain_with_auto(instance, facts)
+
+        svc = self.tainted_chat(fixtures.reply(calls=[
+            ("browser_read", {}), ("browser_follow", {"number": 1}), ("browser_sign_in", {"name": "example"}),
+            ("browser_open", {"url": NEXT, "owner_address": True}), ("browser_open", {"url": OWNER_URL}),
+            ("vault_add", fixtures.ADD),
+        ]), fixtures.reply("Done."))
+        with patch.object(policy.Policy, "explain_with_auto", explain):
+            svc.send(OWNER_URL)
+            card = self.next_card()
+            self.assertEqual(card["tool"], "vault_add")
+            self.assertEqual(self.broker.answer(card["id"], card["digest"], "deny"), "denied")
+            self.assertEqual(self.wait_idle(svc), "idle")
+        self.desk.open.assert_called_once_with(url=OWNER_URL)
+        self.assertIn("Error: arguments contain an unknown field.", self.results())
+        self.assertEqual([f["kind"] for f in seen if "owner_address" in f], ["browser.open"])
+        self.assertIs(next(f["owner_address"] for f in seen if f["kind"] == "browser.open"), True)
+
+    def test_phone_input_cannot_open_its_own_address(self):
+        svc = self.tainted_chat(fixtures.reply(calls=[("browser_open", {"url": OWNER_URL})]),
+                                fixtures.reply("Done."))
+        svc.send(OWNER_URL, steer=False, phone=True)
+        self.assertEqual(self.wait_idle(svc), "idle")
+        self.assertNotIn("browser_open", self.model.seen[-1]["tools"])
+        self.desk.open.assert_not_called()
+        self.assertEqual(self.states(None), [])
 
     def test_offer_only_in_window_chat_with_an_available_desk_and_broker(self):
         for browser, ready, broker, phone in (
@@ -175,7 +344,7 @@ class BrowserChatCheck(fixtures.Base):
         self.desk.resolve_follow.assert_not_called()
         self.desk.follow.assert_not_called()
 
-    def follow_real_desk(self, address, *, store_failure=False):
+    def follow_real_desk(self, address, *, store_failure=False, owner_input="Follow the fixture link."):
         session = Mock(spec=BrowserSession)
         session.location.return_value = Location(URL, "frame", "loader")
         session.is_current.return_value = True
@@ -195,7 +364,7 @@ class BrowserChatCheck(fixtures.Base):
         svc = self.talk_browser(fixtures.reply(calls=[("browser_read", {}), ("browser_follow", {"number": 2})]),
                                 fixtures.reply("Done."), browser_desk=desk)
         svc.new_session()
-        svc.send("Follow the fixture link.")
+        svc.send(owner_input)
         return svc, session, store
 
     def test_follow_is_automatic_for_same_origin_same_site_and_unsaved_sites(self):
@@ -214,7 +383,7 @@ class BrowserChatCheck(fixtures.Base):
         address = "https://page.other.invalid/approved"
         for landing in (address, "https://page.other.invalid/changed"):
             with self.subTest(landing=landing):
-                svc, session, store = self.follow_real_desk(address)
+                svc, session, store = self.follow_real_desk(address, owner_input=f"Follow the link to {address}")
                 card = self.next_card()
                 self.assertEqual((card["tool"], card["level"], card["why"]),
                                  ("browser_follow", "L2", "hard:tainted"))

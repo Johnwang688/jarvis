@@ -451,11 +451,13 @@ Rules:
 - **"Important" is decided by the policy, not the model.** The tests are
   reversibility, visibility to others, money, deadlines and the safety gate.
   When unsure, go up a level.
-- **Untrusted content never lowers a level.** An action prompted by
-  instructions *inside* an email, web page or document is always at least L2.
-  This is the main defence for an agent that reads email and can act
-  (private data + untrusted content + outward actions). The ingesting job
-  holds no outward tools; it only produces structured proposals.
+- **Untrusted content never lowers a level.** After outside text, actions
+  that can leak data or leave lasting changes still need L2. The policy
+  explicitly exempts local app and folder opens, Jarvis's calendar blocks
+  and due dates, reversible mail filing and drafts, browser read, follow
+  and saved sign-in, and opens of addresses the owner supplied in the current
+  chat turn. Other hard rules still apply. The ingesting job holds no
+  outward tools and only produces structured proposals.
 - **Promotion is learned and then owner-approved.** After a kind of proposal
   has been approved N times without edits, Jarvis proposes moving it down a
   level. The policy file is protected state, so a change takes effect only
