@@ -378,12 +378,14 @@ class DaemonBrowserCheck(unittest.TestCase):
         original = daemon.browser
         daemon.start()
         self.assertIs(daemon.browser, original)
+        self.assertIs(daemon._chat._browser_desk._service, original)
         self.assertEqual(self.status(daemon)["browser"], CLOSED)
         daemon.stop()
         with self.assertRaises(BrowserUnavailable), original.use("chrome"):
             self.fail("A stopped service cannot be used")
         daemon.start()
         self.assertIsNot(daemon.browser, original)
+        self.assertIs(daemon._chat._browser_desk._service, daemon.browser)
         self.assertEqual(self.status(daemon)["browser"], CLOSED)
         daemon.stop()
         self.popen.assert_not_called()

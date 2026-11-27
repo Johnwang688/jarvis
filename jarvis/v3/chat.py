@@ -34,11 +34,13 @@ GATED_TOOLS = frozenset({"vault_add", "vault_patch", "vault_archive"}) | CALENDA
 WORK_TOOLS = frozenset({"work_projects", "work_threads", "work_show", "message_list", "message_read"})
 WORK_GATED = frozenset({"work_start", "work_send", "delegate"})
 PC_GATED = frozenset({"app_open", "folder_open", "link_open"})
+BROWSER_GATED = frozenset({"browser_open", "browser_read", "browser_follow", "browser_sign_in"})
+BROWSER_PAGE_TOOLS = BROWSER_GATED - {"browser_sign_in"}
 # Results that never carry text written outside this session. Thread titles and learned
 # skill names can come from an earlier session that read outside text, so they are not here.
 CLEAN_RESULT_TOOLS = frozenset({
     "get_datetime", "calendar_free", "work_projects", "brief_post",
-}) | GATED_TOOLS | WORK_GATED | PC_GATED
+}) | GATED_TOOLS | WORK_GATED | PC_GATED | {"browser_sign_in"}
 TOOL_NAMES = frozenset({
     "get_datetime", "vault_list", "vault_read", "vault_search", "index_search",
     "skill_view", "skill_names", "brief_post", *CALENDAR_TOOLS,
@@ -79,9 +81,11 @@ def _work_available(work):
         return False
 
 
-def available_tools(names=TOOL_NAMES, *, gated=False, work=None):
+def available_tools(names=TOOL_NAMES, *, gated=False, work=None, browser_desk=None):
     if gated:
         names = names | GATED_TOOLS | PC_GATED
+        if browser_desk is not None and browser_desk.available():
+            names = names | BROWSER_GATED
     work_available = _work_available(work)
     if work_available:
         names = names | WORK_TOOLS
@@ -187,7 +191,7 @@ _BAD_SESSION = (ChatStorageError, OSError, ValueError, TypeError, KeyError, Recu
 
 class ChatService:
     def __init__(self, root, *, completion=None, clock=time.time, feed_root=None,
-                 approvals=None, calendar=None, work=None):
+                 approvals=None, calendar=None, work=None, browser_desk=None):
         self.root = Path(root).expanduser().absolute()
         self._feed_root = self.root.parent / "feed" if feed_root is None else Path(feed_root)
         self._completion = completion
@@ -195,6 +199,7 @@ class ChatService:
         self.approvals = approvals
         self._calendar = calendar
         self.work = work
+        self._browser_desk = browser_desk
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._stop = threading.Event()
@@ -368,7 +373,8 @@ class ChatService:
                 if self._session_id is not None:
                     raise ChatStorageError("Chat session is unavailable.") from None
             return {"state": self._state, "session_id": self._session_id, "seq": self._seq,
-                    "draft": self._draft, "tools": available_tools(gated=self.approvals is not None, work=self.work),
+                    "draft": self._draft, "tools": available_tools(
+                        gated=self.approvals is not None, work=self.work, browser_desk=self._browser_desk),
                     "history": history, "last_error": self._last_error, "outside_text": self._outside_text,
                     "replay": self._replay(history),
                     "approvals": self._approval_count()}
@@ -582,6 +588,7 @@ class ChatService:
                         phone_input=lambda: self._phone_input,
                         turn_id=self._turn_id,
                         approvals=self.approvals, calendar=self._calendar, work=self.work,
+                        browser_desk=self._browser_desk,
                     )
                     with self._lock:
                         if self._closed.is_set():

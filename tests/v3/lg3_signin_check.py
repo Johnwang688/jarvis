@@ -85,7 +85,7 @@ class SignInCheck(unittest.TestCase):
         return Store.secret_for(self.store, name, url)
 
     def run_flow(self, expected, *, scripts=(), locations=(), opening=None, page=None, timeout=20.0,
-                 secret_reads=0):
+                 secret_reads=0, use_current=False):
         session = FakeSession(self.trace, scripts=scripts, locations=locations, opening=opening)
         output = io.StringIO()
 
@@ -95,7 +95,7 @@ class SignInCheck(unittest.TestCase):
 
         with patch.object(signin.time, "sleep", side_effect=advance), redirect_stdout(output), redirect_stderr(output):
             outcome = signin.sign_in(session, self.store, NAME, page=page, clock=lambda: self.now,
-                                     step_timeout=timeout)
+                                     step_timeout=timeout, use_current=use_current)
         self.assertEqual(outcome.result, expected)
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(session.scripts, deque())
@@ -127,6 +127,14 @@ class SignInCheck(unittest.TestCase):
         ], locations=[location()] * 3, secret_reads=1)
         self.assertEqual(outcome.detail, "The site accepted the form.")
         self.assertIn(("script", ORIGIN, signin.ACT, ["both", USER, TYPED]), self.trace)
+
+    def test_current_page_starts_at_inspect_without_navigating(self):
+        current = location(ORIGIN + "/sign-in")
+        self.run_flow("signed_in", scripts=[
+            (signin.INSPECT, "both"), (signin.ACT, "submitted"), (signin.INSPECT, "none"),
+        ], locations=[current] * 3, secret_reads=1, use_current=True)
+        self.assertEqual(self.trace[0], ("script", ORIGIN, signin.INSPECT, None))
+        self.assertFalse(any(entry[0] == "open" for entry in self.trace))
 
     def test_two_page_flow_waits_through_rewritten_addresses_and_changed_snapshots(self):
         first = location(ORIGIN + "/enter", "next")

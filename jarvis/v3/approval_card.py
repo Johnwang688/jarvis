@@ -1,5 +1,7 @@
 """Build bounded, redacted text for the owner's approval card."""
 
+from urllib.parse import urlsplit
+
 from jarvis import untrusted
 from jarvis.tools import secrets
 from jarvis.v2 import redact
@@ -21,7 +23,14 @@ _TITLES = {
     "app_open": "Open an app",
     "folder_open": "Open a folder",
     "link_open": "Open a link",
+    "browser_open": "Open a browser address",
+    "browser_read": "Read the browser page",
+    "browser_follow": "Follow a link on the browser page",
+    "browser_sign_in": "Sign in to a saved site",
 }
+_BROWSER_TAINT_NOTE = (
+    "Jarvis read text from outside in this turn and now wants to open an address it wrote itself."
+)
 _FULL_VAULT_ROWS = {"Body", "Old text", "New text"}
 _TARGETS = {
     "vault_add": "Entry", "vault_patch": "Entry", "vault_archive": "Entry",
@@ -129,6 +138,25 @@ def build_card(tool, args, preview):
         limits = {"Folder": None}
     elif tool == "link_open":
         rows, limits = (("URL", preview["url"]),), {"URL": None}
+    elif tool == "browser_open":
+        rows = [("URL", preview["url"])]
+        if preview["tainted"]:
+            rows.append(("Reason", _BROWSER_TAINT_NOTE))
+        limits = {"URL": None}
+    elif tool == "browser_read":
+        rows, limits = (), {}
+    elif tool == "browser_follow":
+        rows, limits = [("Link number", str(args["number"]))], {}
+        if preview["saved_site"]:
+            link = preview["link"]
+            source = urlsplit(link.source_origin).hostname
+            destination = urlsplit(link.destination_origin).hostname
+            rows.extend([
+                ("Destination", destination),
+                ("Reason", f"A page on {source} links to {destination}, where Jarvis has a saved login."),
+            ])
+    elif tool == "browser_sign_in":
+        rows, limits = (("Saved login", args["name"]),), {}
     else:
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)

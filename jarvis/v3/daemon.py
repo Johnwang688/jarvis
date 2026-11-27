@@ -26,10 +26,12 @@ from jarvis import config
 from windows.v3voice_problems import PROBLEMS, UNKNOWN
 from . import hud, owner_routes
 from .approvals import ApprovalBroker
+from .browser.desk import BrowserDesk
 from .browser.service import BrowserService
 from .chat import ChatService
 from .executor import Executor, Worker as ExecutorWorker
 from .jobs import Job, Scheduler, default_jobs, idle_seconds
+from .logins import Store
 from .voice import settings as voice_settings
 from .work import WorkService
 
@@ -373,10 +375,10 @@ class Daemon:
         self._proposals = proposals
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
-        self._chat = self._new_chat() if chat is None else chat
         self._owns_browser = browser is None
         self._replace_browser = False
         self.browser = BrowserService() if browser is None else browser
+        self._chat = self._new_chat() if chat is None else chat
         self._voice_settings_lock = threading.Lock()
         self._voice_epoch_offset = time.time() - time.monotonic()
         self._voice_settings = voice_settings.load(self._data_dir)
@@ -532,9 +534,13 @@ class Daemon:
         from .work import Ledger, Registry
 
         root = self._data_dir / "work"
+        desk = BrowserDesk(self.browser, store_factory=Store.system, feed_post=self._post_browser_feed)
         return ChatService(self._chats_root, approvals=ApprovalBroker(log=self._data_dir / "approvals.jsonl"),
                            work=WorkService(registry=Registry(root / "projects.json"),
-                                            ledger=Ledger(root / "threads.jsonl")))
+                                            ledger=Ledger(root / "threads.jsonl")), browser_desk=desk)
+
+    def _post_browser_feed(self, *, actor, **fields):
+        return self._get_feed().post(fields, actor=actor)
 
     def _announce_work(self, notice):
         session = self._voice_session
@@ -681,11 +687,11 @@ class Daemon:
                     # A restart must never clear a stop that an older sweep still uses.
                     raise RuntimeError("The previous proposal sweep is still finishing.")
             _prepare_data_dir(self._data_dir)
-            if self._chat is None:
-                self._chat = self._new_chat()
             if self._replace_browser:
                 self.browser = BrowserService()
                 self._replace_browser = False
+            if self._chat is None:
+                self._chat = self._new_chat()
             if self._voice_brain is None:
                 with self._voice_settings_lock:
                     self._voice_settings = voice_settings.load(self._data_dir)
@@ -748,6 +754,10 @@ class Daemon:
                 LOG.warning("Could not close the browser service at stop.")
             self._replace_browser = self._owns_browser
             if self._server is None:
+                if self._owns_chat and self._chat is not None:
+                    self._chat.close()
+                    self._chat.approvals.shutdown()
+                    self._chat = None
                 return
             self._stop_jobs()
             if self._phone_server is not None:

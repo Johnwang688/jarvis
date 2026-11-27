@@ -11,7 +11,7 @@ from ..approvals import ApprovalConflict
 ANSWER_WINDOW_S = 15
 ANSWER_DECODE_GRACE_S = 5
 VOICE_NEEDS_CLICK = policy.MONEY | policy.NEVER
-_CLICK_PREFIXES = ("credential.", "policy.", "gate.", "money.")
+_CLICK_PREFIXES = ("credential.", "policy.", "gate.", "money.", "browser.")
 YES = frozenset({
     "yes", "yeah", "yep", "yes please", "approve", "approved", "go ahead",
     "do it", "allow", "allow it", "yes go ahead", "yes do it",

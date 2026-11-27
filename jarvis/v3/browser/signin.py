@@ -313,16 +313,19 @@ def _submit(session, store, login, kind):
         del secret
 
 
-def sign_in(session, store, name, *, page=None, clock=time.monotonic, step_timeout=20.0) -> Outcome:
+def sign_in(session, store, name, *, page=None, clock=time.monotonic, step_timeout=20.0,
+            expected_login=None, use_current=False) -> Outcome:
     from .session import BrowserError
 
     login = find_login(store, name)
+    if expected_login is not None and login != expected_login:
+        raise LoginError("The saved login changed. Try again.")
     page = login.origin + "/" if page is None else page
     if canonical_origin(page) != login.origin:
         return _outcome("wrong_site")
 
     try:
-        if session.open(page).outcome != "loaded":
+        if not use_current and session.open(page).outcome != "loaded":
             return _outcome("failed")
         after_password = False
         handled_signature = None

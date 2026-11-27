@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from a6b1_acceptance_check import Model, reply
 from a6c1_acceptance_check import Base
-from r1a_policy_grid_check import baseline_policy, fact_grid
+from r1a_policy_grid_check import BT3_KINDS, baseline_policy, fact_grid
 from voice_brain_check import Factory, PREFIX, Recorder, script
 
 from jarvis import config, tools
@@ -203,7 +203,7 @@ class PCCheck(Base):
     def test_existing_policy_grid_matches_origin_main(self):
         main = baseline_policy(self)
         new_kinds = {case[2] for case in CASES}
-        self.assertEqual(policy.DEFAULTS.keys() - new_kinds, main.DEFAULTS.keys() - new_kinds)
+        self.assertEqual(policy.DEFAULTS.keys() - new_kinds - BT3_KINDS, main.DEFAULTS.keys() - new_kinds)
         self.assertEqual(policy.OWNER_REQUEST, main.OWNER_REQUEST)
         kinds = (main.DEFAULTS.keys() | main.OTHER_PEOPLE | {"garden.water", "share.doc"}) - new_kinds
         baseline = main.Policy(self.policy_file)

@@ -160,9 +160,12 @@ class ApprovalAnswers(BrokerFixture):
         expected = {"calendar_create", "calendar_update", "calendar_delete",
                     "vault_add", "vault_patch", "vault_archive", "work_start", "work_send", "delegate",
                     "app_open", "folder_open", "link_open"}
-        self.assertEqual(set(fastpath._POLICY_KINDS), expected)
+        browser = {"browser_open", "browser_read", "browser_follow", "browser_sign_in"}
+        self.assertEqual(set(fastpath._POLICY_KINDS), expected | browser)
         for tool in expected:
             self.assertTrue(self.approving.ask({"id": "fixture", "digest": "fake-digest", "tool": tool}))
+        for tool in browser:
+            self.assertFalse(self.approving.ask({"id": "fixture", "digest": "fake-digest", "tool": tool}))
         kinds = sorted(policy.NEVER | policy.MONEY | {"credential.inspect", "gate.inspect",
                        "policy.inspect", "money.inspect"}) + [None]
         for kind in kinds:
