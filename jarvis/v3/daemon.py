@@ -26,9 +26,10 @@ from jarvis import config
 from windows.v3voice_problems import PROBLEMS, UNKNOWN
 from . import hud, owner_routes
 from .approvals import ApprovalBroker
+from .browser.service import BrowserService
 from .chat import ChatService
 from .executor import Executor, Worker as ExecutorWorker
-from .jobs import Scheduler, default_jobs, idle_seconds
+from .jobs import Job, Scheduler, default_jobs, idle_seconds
 from .voice import settings as voice_settings
 from .work import WorkService
 
@@ -104,7 +105,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
                     scheduler: Scheduler | None = None,
                     chat: ChatService | None = None, *, work=None, proposals=None,
                     phone_status=None, get_feed=None, voice_status=None,
-                    voice_helper=None, voice_panel=None) -> type[BaseHTTPRequestHandler]:
+                    voice_helper=None, voice_panel=None, browser_status=None) -> type[BaseHTTPRequestHandler]:
     started_at = datetime.now(timezone.utc).isoformat()
     started_tick = time.monotonic()
     pid = os.getpid()
@@ -145,6 +146,7 @@ def _status_handler(data_dir: Path, hud_dir: Path | None = None,
             "jobs": {} if scheduler is None else scheduler.status(),
             "phone": {"bound": False, "host_configured": False} if phone_status is None else phone_status(),
             "voice": {"brain": "claude", "state": "resting", "turns": 0} if voice_status is None else voice_status(),
+            "browser": {"chrome": "closed", "edge": "closed"} if browser_status is None else browser_status(),
         }
 
     class Handler(BaseHTTPRequestHandler):
@@ -359,7 +361,8 @@ def _prepare_data_dir(path: Path) -> None:
 class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
                  hud_dir: Path | None = None, *, jobs=None, chat=None, work=None, proposals=None,
-                 phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST, voice_link_port=None):
+                 phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST, voice_link_port=None,
+                 browser: BrowserService | None = None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._phone_host = config.remote_host() if phone_host is _CONFIGURED_PHONE_HOST else phone_host
         self._requested_phone_port = phone_port
@@ -371,6 +374,9 @@ class Daemon:
         self._chats_root = self._data_dir / "chats"
         self._owns_chat = chat is None
         self._chat = self._new_chat() if chat is None else chat
+        self._owns_browser = browser is None
+        self._replace_browser = False
+        self.browser = BrowserService() if browser is None else browser
         self._voice_settings_lock = threading.Lock()
         self._voice_epoch_offset = time.time() - time.monotonic()
         self._voice_settings = voice_settings.load(self._data_dir)
@@ -388,7 +394,8 @@ class Daemon:
                                 index_path=os.environ.get("JARVIS_INDEX_DB") or self._data_dir / "index.sqlite",
                                 executor=self._sweep_executor, executor_activity=self._executor_activity,
                                 announce=self._announce_work if self._voice_session is not None else None)
-        self._scheduler = Scheduler(jobs, state=self._data_dir / "jobs/state.json",
+        browser_reap = Job("browser-reap", lambda: self.browser.reap_async(), every_s=60)
+        self._scheduler = Scheduler((browser_reap, *jobs), state=self._data_dir / "jobs/state.json",
                                     idle=self._idle_seconds)
         self.address = ("127.0.0.1", self._requested_port)
         self._server: ThreadingHTTPServer | None = None
@@ -676,6 +683,9 @@ class Daemon:
             _prepare_data_dir(self._data_dir)
             if self._chat is None:
                 self._chat = self._new_chat()
+            if self._replace_browser:
+                self.browser = BrowserService()
+                self._replace_browser = False
             if self._voice_brain is None:
                 with self._voice_settings_lock:
                     self._voice_settings = voice_settings.load(self._data_dir)
@@ -683,7 +693,8 @@ class Daemon:
             handler = _status_handler(self._data_dir, self._hud_dir, self._scheduler, self._chat,
                                       work=self._work, proposals=self._proposals, phone_status=self._phone_status,
                                       get_feed=self._get_feed, voice_status=self._voice_status,
-                                      voice_helper=self._voice_helper, voice_panel=self._voice_panel)
+                                      voice_helper=self._voice_helper, voice_panel=self._voice_panel,
+                                      browser_status=self.browser.status)
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self._requested_port), handler)
             except OSError as exc:
@@ -731,6 +742,11 @@ class Daemon:
                         component.close()
                     except Exception:
                         LOG.warning("Could not close %s at stop.", label)
+            try:
+                self.browser.close()
+            except Exception:
+                LOG.warning("Could not close the browser service at stop.")
+            self._replace_browser = self._owns_browser
             if self._server is None:
                 return
             self._stop_jobs()

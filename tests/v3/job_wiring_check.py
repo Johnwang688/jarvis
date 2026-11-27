@@ -145,9 +145,10 @@ class JobWiringCheck(unittest.TestCase):
     def test_daemon_full_defaults_start_tick_and_stop_offline(self):
         names = {"feed", "skill-curator", "transcripts", "reviewer", "gmail", "calendar",
                  "schoolwork", "github", "triggers", "work-watch", "planner", "executor", "consolidate", "morning-brief",
-                 "learning-digest", "evening-wrap"}
+                 "learning-digest", "evening-wrap", "browser-reap"}
         due_names = {"feed", "transcripts", "reviewer", "gmail", "calendar",
-                     "schoolwork", "github", "triggers", "work-watch", "planner", "executor", "consolidate"}
+                     "schoolwork", "github", "triggers", "work-watch", "planner", "executor", "consolidate",
+                     "browser-reap"}
         no_network = AssertionError("unexpected outbound request")
         with (patch.multiple(config, V3_DIR=self.data, V3_INDEX_DB=self.index,
                              GOOGLE_TOKEN_PATH=self.token, SESSIONS_DIR=self.home / "sessions"),
