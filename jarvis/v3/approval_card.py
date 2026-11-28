@@ -1,10 +1,12 @@
 """Build bounded, redacted text for the owner's approval card."""
 
 from urllib.parse import urlsplit
+from unicodedata import category
 
 from jarvis import untrusted
 from jarvis.tools import secrets
 from jarvis.v2 import redact
+from jarvis.v2.browser.policy import MAX_URL
 
 from .work import DELEGATE_MODEL_LABEL, GENERAL_WORKSPACE, WorkError
 
@@ -175,9 +177,10 @@ def build_card(tool, args, preview):
         rows, limits = (), {}
     elif tool == "browser_follow" or (tool == "browser_press" and "link" in preview):
         number = preview.get("item", {}).get("target_number", args["number"])
-        rows, limits = [("Link number", str(number))], {}
+        link = preview["link"]
+        rows = [("Link number", str(number)), ("Address", link.address), ("From", link.source_origin)]
+        limits = dict.fromkeys(("Address", "From"))
         if preview["saved_site"]:
-            link = preview["link"]
             source = urlsplit(link.source_origin).hostname
             destination = urlsplit(link.destination_origin).hostname
             rows.extend([
@@ -187,7 +190,8 @@ def build_card(tool, args, preview):
     elif tool in ("browser_press", "browser_fill"):
         rows, limits = _browser_action_rows(tool, args, preview), {"Text": None, "Field": 80, "Button": 80}
     elif tool == "browser_sign_in":
-        rows, limits = (("Saved login", args["name"]),), {}
+        rows, limits = (("Saved login", preview["name"]), ("Site", preview["origin"]),
+                        ("Browser", preview["browser"])), {}
     else:
         rows = _vault_rows(tool, args, preview)
         limits = dict.fromkeys(_FULL_VAULT_ROWS)
@@ -203,11 +207,21 @@ def build_card(tool, args, preview):
     shown_rows = []
     for label, value in rows:
         shown_label = card_text(label)
+        if label == "Address" and (
+            not 1 <= len(value) <= MAX_URL or any(category(char) in ("Cc", "Cs") for char in value)
+        ):
+            raise WorkError("The browser destination cannot be shown safely.")
         shown = card_text(value, limit=limits.get(label, CARD_TEXT_LIMIT))
         if tool in ("work_start", "delegate") and label not in ("Brief", "Task") and shown != value:
             raise WorkError("The coding thread details cannot be shown safely.")
+        if tool == "browser_sign_in" and shown != value:
+            raise WorkError("The saved login details cannot be shown safely.")
+        if label in ("Address", "From") and shown != value:
+            raise WorkError("The browser destination cannot be shown safely.")
         row = {"label": shown_label, "value": shown}
-        if tool in ("browser_press", "browser_fill") and label in ("Field", "Button"):
+        if label in ("Address", "From") or (
+            tool in ("browser_press", "browser_fill") and label in ("Field", "Button")
+        ):
             row["source"] = "page"
         if tool in ("browser_press", "browser_fill") and shown != value:
             if label == "Text":

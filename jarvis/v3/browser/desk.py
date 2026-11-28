@@ -2,6 +2,7 @@
 
 import logging
 import time
+from dataclasses import asdict
 from functools import wraps
 from hashlib import sha256
 from typing import NamedTuple
@@ -322,7 +323,13 @@ class BrowserDesk:
         return self._act(number, text, submit, expected)
 
     @_fixed_errors
-    def sign_in(self, name) -> str:
+    def describe_login(self, name):
+        _validate_name(name)
+        # list() reads metadata without using the saved password.
+        return asdict(find_login(self._store_factory(), name))
+
+    @_fixed_errors
+    def sign_in(self, name, *, expected=None) -> str:
         try:
             _validate_name(name)
         except LoginError:
@@ -330,6 +337,8 @@ class BrowserDesk:
         try:
             store = self._store_factory()
             login = find_login(store, name)
+            if expected is not None and asdict(login) != expected:
+                return "Refused: The saved login changed. Ask again."
             with self._service.use(login.browser) as session:
                 try:
                     use_current = canonical_origin(session.location().url) == login.origin

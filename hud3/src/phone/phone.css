@@ -91,6 +91,7 @@ html, body, #root {
 .phone-content .agent-feed { max-height: none; }
 .phone-content .agent-chat > .chat-log { min-height: 104px; }
 .phone-content .agent-chat > .approval-card { max-height: 48%; }
+.phone-content .approval-summary[data-browser] { max-height: none; overflow: visible; }
 
 .phone-work {
   display: flex;

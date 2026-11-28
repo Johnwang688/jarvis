@@ -49,7 +49,11 @@ it("shows all exact text and the field's provenance before approving", async () 
 
 it.each(["Press a browser control", "Submit a browser form", "Follow a link on the browser page"])(
   "offers approval for %s", async (title) => {
-    const rows = title.startsWith("Follow") ? [{ label: "Link number", value: "1" }] : [site, button, kind];
+    const rows: ApprovalRow[] = title.startsWith("Follow") ? [
+      { label: "Link number", value: "1" },
+      { label: "Address", value: "https://example.invalid/next?q=fixture", source: "page" },
+      { label: "From", value: site.value, source: "page" },
+    ] : [site, button, kind];
     await mount("browser_press", title, rows);
     expect(host.querySelector<HTMLButtonElement>(".approval-approve")?.disabled).toBe(false);
   },

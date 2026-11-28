@@ -59,6 +59,10 @@ class BrowserChatFixture(fixtures.Base):
         self.desk.available.return_value = True
         self.desk.open.return_value = self.desk.read.return_value = self.desk.follow.return_value = PAGE
         self.desk.sign_in.return_value = "The site accepted the form."
+        self.desk.describe_login.return_value = {
+            "name": "example", "origin": "https://example.invalid",
+            "username": "user@example.com", "browser": "chrome",
+        }
         self.desk.resolve_follow.return_value = LINK
         self.desk.crosses_into_saved_site.return_value = False
 
@@ -205,16 +209,16 @@ class BrowserChatCheck(BrowserChatFixture):
         self.assertEqual([f["kind"] for f in seen if "owner_address" in f], ["browser.open"])
         self.assertIs(next(f["owner_address"] for f in seen if f["kind"] == "browser.open"), True)
 
-    def test_phone_input_cannot_open_its_own_address(self):
+    def test_phone_input_can_open_its_own_address_after_outside_text(self):
         svc = self.tainted_chat(fixtures.reply(calls=[("browser_open", {"url": OWNER_URL})]),
                                 fixtures.reply("Done."))
         svc.send(OWNER_URL, steer=False, phone=True)
         self.assertEqual(self.wait_idle(svc), "idle")
-        self.assertNotIn("browser_open", self.model.seen[-1]["tools"])
-        self.desk.open.assert_not_called()
+        self.assertIn("browser_open", self.model.seen[-1]["tools"])
+        self.desk.open.assert_called_once_with(url=OWNER_URL)
         self.assertEqual(self.states(None), [])
 
-    def test_offer_only_in_window_chat_with_an_available_desk_and_broker(self):
+    def test_offer_on_either_surface_with_an_available_desk_and_broker(self):
         for browser, ready, broker, phone in (
             (None, True, self.broker, False), (self.desk, False, self.broker, False),
             (self.desk, True, None, False), (self.desk, True, self.broker, True),
@@ -227,8 +231,7 @@ class BrowserChatCheck(BrowserChatFixture):
                 self.assertEqual(chat.BROWSER_GATED & set(svc.snapshot()["tools"]), visible)
                 svc.send("Fixture.", phone=phone)
                 self.assertEqual(self.wait_idle(svc), "idle")
-                self.assertEqual(chat.BROWSER_GATED & set(self.model.seen[0]["tools"]),
-                                 set() if phone else visible)
+                self.assertEqual(chat.BROWSER_GATED & set(self.model.seen[0]["tools"]), visible)
         self.assertFalse((chat.BROWSER_GATED - chat.BROWSER_ACTIONS) & set(tools.default_names()))
         self.assertFalse(chat.BROWSER_GATED & tools.PARALLEL_SAFE)
 
@@ -246,7 +249,7 @@ class BrowserChatCheck(BrowserChatFixture):
         self.assertEqual(self.desk.open.call_args_list, [call(url=URL)])
         self.desk.read.assert_called_once_with()
         self.desk.follow.assert_called_once_with(number=1, expected=LINK)
-        self.desk.sign_in.assert_called_once_with(name="example")
+        self.desk.sign_in.assert_called_once_with(name="example", expected=self.desk.describe_login.return_value)
         self.assertTrue(svc.snapshot()["outside_text"])
         self.assertEqual(self.broker.answer(card["id"], card["digest"], "deny"), "denied")
         self.assertEqual(self.wait_idle(svc), "idle")
@@ -391,6 +394,8 @@ class BrowserChatCheck(BrowserChatFixture):
                                  ("browser_follow", "L2", "hard:tainted"))
                 self.assertEqual(card["card"]["rows"], [
                     {"label": "Link number", "value": "2"},
+                    {"label": "Address", "value": address, "source": "page"},
+                    {"label": "From", "value": "https://example.invalid", "source": "page"},
                     {"label": "Destination", "value": "page.other.invalid"},
                     {"label": "Reason", "value": "A page on example.invalid links to page.other.invalid, "
                                                  "where Jarvis has a saved login."},
