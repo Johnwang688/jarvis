@@ -1181,6 +1181,15 @@ class WindowsDesktop:
         if not self.user.SetCursorPos(*point):
             raise Refused("The pointer could not be positioned.")
 
+    def wheel_reversed(self):
+        # The Windows mouse setting "Scrolling direction" also flips injected wheel input.
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Mouse") as key:
+                return winreg.QueryValueEx(key, "ReverseMouseWheelDirection")[0] == 1
+        except OSError:
+            return False
+
     def pointer_at(self, point):
         pos = wt.POINT()
         return self.user.GetCursorPos(ctypes.byref(pos)) and (pos.x, pos.y) == point
@@ -1358,7 +1367,7 @@ def _window_mouse(req, *, amount=None):
     if selector == "ref":
         # Windows verification pending: a physical click or wheel hit must still be the ref.
         hit = auto.ControlFromPoint(*current)
-        if hit is None or not auto.CompareControls(node, hit):
+        if hit is None or not auto.ControlsAreSame(node, hit):
             raise Refused("The pointer is over a different control.")
     if amount is not None and _WINDOW_DESKTOP.foreground() != grant.hwnd:
         raise Refused("The target window must be in the foreground to scroll.")
@@ -1370,7 +1379,9 @@ def _window_mouse(req, *, amount=None):
         events[0].mi.dwFlags, events[1].mi.dwFlags = 0x0002, 0x0004
     else:
         events[0].mi.dwFlags = 0x0800
-        events[0].mi.mouseData = (amount * 120) & 0xFFFFFFFF
+        # A positive amount scrolls up whichever way the owner's wheel is set (seen live 2026-11-28).
+        notches = -amount if _WINDOW_DESKTOP.wheel_reversed() else amount
+        events[0].mi.mouseData = (notches * 120) & 0xFFFFFFFF
     sent = backend.user32.SendInput(len(events), events, ctypes.sizeof(backend.INPUT))
     if sent != len(events):
         if amount is None and sent == 1:
@@ -1462,7 +1473,7 @@ def op_window_type(req):
     def verify_focus(keys):
         focused, _, _ = _window_input_control(req, grant, "focus", None, keys=keys)
         # Windows verification pending: UIA element identity survives a fresh focus lookup.
-        if not auto.CompareControls(node, focused) or _WINDOW_DESKTOP.window_at(*point) != grant.hwnd:
+        if not auto.ControlsAreSame(node, focused) or _WINDOW_DESKTOP.window_at(*point) != grant.hwnd:
             raise Refused("The requested text field lost focus.")
         _WINDOW_DESKTOP.require_idle_input()
 
@@ -1568,7 +1579,11 @@ def serve_once(host: str, port: int) -> None:
                 payload = {"id": req.get("id"), "ok": True, "result": result}
             except Refused as exc:
                 payload = {"id": req.get("id"), "ok": False, "error": f"Refused: {exc}"}
-            except Exception:
+            except Exception as exc:
+                # The reply stays general. The cause goes to this console only.
+                frame = traceback.extract_tb(exc.__traceback__)[-1]
+                print(f"[bridge] {op} failed: {type(exc).__name__} at {Path(frame.filename).name}:{frame.lineno}",
+                      flush=True)
                 payload = {"id": req.get("id"), "ok": False,
                            "error": "Refused: Windows could not complete the operation safely."}
             stream.write((json.dumps(payload) + "\n").encode())
