@@ -143,9 +143,10 @@ def _judge(url, refused, *, landed=False):
 class _Tab:
     """State for one link. Its reader records events and queues CDP work."""
 
-    def __init__(self, link, refused_ports):
+    def __init__(self, link, refused_ports, *, window):
         self.link = link
         self.refused_ports = refused_ports
+        self.window = window
         self.changed = threading.Condition()
         self.targets = threading.Lock()
         self.close_lock = threading.Lock()
@@ -156,6 +157,8 @@ class _Tab:
         self.link_closed = False
         self.main_target = None
         self.session = None
+        self.early_target_losses = set()
+        self.early_detaches = set()
         self.frame = None
         self.url = ""
         self.loader = None
@@ -179,11 +182,23 @@ class _Tab:
         self.link.subscribe(self._event)
         with self.targets:
             self.link.call("Target.setDiscoverTargets", {"discover": True})
-            self.main_target = self._create_target(_BLANK)
+            # Attach by target ID, independent of which tab Chrome selects.
+            options = {"newWindow": True, "background": True} if self.window else {}
+            target = self._create_target(_BLANK, **options)
+            with self.changed:
+                self.main_target = target
+                if target in self.early_target_losses:
+                    self._stop_events()
+                self.early_target_losses.clear()
+                self.require_alive()
         self.worker.start()
         attached = self.link.call("Target.attachToTarget",
                                   {"targetId": self.main_target, "flatten": True})
-        self.session = attached["sessionId"]
+        with self.changed:
+            self.session = attached["sessionId"]
+            if self.session in self.early_detaches:
+                self._stop_events()
+            self.early_detaches.clear()
         self.call("Page.enable")
         self.call("Network.enable")
         self.link.call("Browser.setDownloadBehavior", {"behavior": "deny"})
@@ -196,7 +211,15 @@ class _Tab:
                 self._frame_landed(frame)
 
     def call(self, method, params=None, **options):
-        return self.link.call(method, params, session=self.session, **options)
+        self.require_alive()
+        try:
+            result = self.link.call(method, params, session=self.session, **options)
+        except LinkError:
+            if not self.alive:
+                raise BrowserError(_CLOSED, reason="closed") from None
+            raise
+        self.require_alive()
+        return result
 
     def create_probe(self, url):
         with self.targets:
@@ -270,16 +293,23 @@ class _Tab:
                     self.actions.put(("popup", info["targetId"]))
             elif method in ("Target.targetDestroyed", "Target.targetCrashed"):
                 target = params["targetId"]
+                if self.main_target is None:
+                    # Discovery events can arrive before the createTarget reply.
+                    self.early_target_losses.add(target)
                 if target == self.main_target:
                     self._stop_events()
                 elif method == "Target.targetDestroyed":
                     self.actions.put(("destroyed", target))
-            elif (method == "Target.detachedFromTarget" and self.session is not None
-                  and params.get("sessionId") == self.session):
-                self._stop_events()
+            elif method == "Target.detachedFromTarget":
+                session = params["sessionId"]
+                if self.session is None:
+                    self.early_detaches.add(session)
+                elif session == self.session:
+                    self._stop_events()
             elif self.session is not None and message.get("sessionId") == self.session:
                 if method == "Page.javascriptDialogOpening":
-                    self.actions.put(("dialog", None))
+                    accept = self.window and params.get("type") == "beforeunload"
+                    self.actions.put(("dialog", accept))
                 elif method == "Page.frameNavigated" and "parentId" not in params["frame"]:
                     self._frame_landed(params["frame"])
                 elif method == "Page.navigatedWithinDocument" and params["frameId"] == self.frame:
@@ -354,7 +384,8 @@ class _Tab:
                         if target not in self.owned_targets:
                             self._close_popup(target)
                 elif kind == "dialog":
-                    self.call("Page.handleJavaScriptDialog", {"accept": False},
+                    # Accept a visible window's beforeunload so it can close.
+                    self.call("Page.handleJavaScriptDialog", {"accept": target},
                               timeout=_GUARD_TIMEOUT)
                 else:
                     self._blank()
@@ -548,45 +579,65 @@ class BrowserSession:
         with self._lock:
             if self.alive:
                 return
+            launched = False
             try:
                 self._close()
                 self._gate = self._gate_factory(refused=self._refused_ports)
                 port = self._gate.start()
                 self._gate_port = port
                 link = self._link_factory(self._browser, proxy_port=port, window=self._window)
-                self._tab = _Tab(link, self._refused_ports)
+                self._tab = _Tab(link, self._refused_ports, window=self._window)
                 link.start()
+                launched = True
                 self._tab.setup()
                 self._check_gate()
             except BaseException as exc:
+                closed = launched and not self._tab.alive
                 self._close_quietly()
-                if not isinstance(exc, Exception) or isinstance(exc, BrowserError):
+                if not isinstance(exc, Exception):
+                    raise
+                if closed:
+                    raise BrowserError(_CLOSED, reason="closed") from None
+                if isinstance(exc, BrowserError):
                     raise
                 raise BrowserError("The browser session could not start.", reason="start_failed") from None
 
     def _check_gate(self):
+        tab = self._tab
         for attempt in range(3):
+            tab.require_alive()
             if attempt:
-                time.sleep(_CHECK_RETRY)
-            if not self._tab.alive:
-                break
+                if tab.window:
+                    with tab.changed:
+                        tab.changed.wait_for(lambda: not tab.alive, _CHECK_RETRY)
+                else:
+                    time.sleep(_CHECK_RETRY)
+                tab.require_alive()
             name = f"{secrets.token_hex(16)}.gate-check.invalid"
             target = None
             try:
                 seen = self._gate.expect_check(name)
                 deadline = time.monotonic() + _CHECK_TIMEOUT
-                target = self._tab.create_probe(f"http://{name}/")
-                passed = seen.wait(max(0, deadline - time.monotonic()))
+                target = tab.create_probe(f"http://{name}/")
+                remaining = max(0, deadline - time.monotonic())
+                if tab.window:
+                    while not (passed := seen.wait(min(remaining, _EVENT_POLL))) and remaining:
+                        tab.require_alive()
+                        remaining = max(0, deadline - time.monotonic())
+                else:
+                    passed = seen.wait(remaining)
             except LinkError:
                 # A lost createTarget reply leaves ownership unknown.
                 break
             finally:
                 self._gate.forget_check(name)
-                if target is not None:
-                    self._tab.close_probe(target)
-            if passed and self._tab.alive:
+                if target is not None and tab.alive:
+                    tab.close_probe(target)
+            tab.require_alive()
+            if passed:
                 self._checked_at = self._clock()
                 return
+        tab.require_alive()
         raise BrowserError(_GATE_BYPASSED, reason="gate_bypassed")
 
     def _live_tab(self):
@@ -606,9 +657,12 @@ class BrowserSession:
                 try:
                     self._check_gate()
                 except BaseException as exc:
+                    alive = tab.alive
                     self._close_quietly()
                     if not isinstance(exc, Exception):
                         raise
+                    if not alive:
+                        raise BrowserError(_CLOSED, reason="closed") from None
                     raise BrowserError(_GATE_BYPASSED, reason="gate_bypassed") from None
             return tab.open(address, self._load_timeout)
 
@@ -646,7 +700,8 @@ class BrowserSession:
         finally:
             del arguments
         # Leave the protocol error and its request-data traceback behind.
-        raise BrowserError(_MOVED if reason == "moved" else _UNSETTLED, reason=reason)
+        message = {"closed": _CLOSED, "moved": _MOVED}.get(reason, _UNSETTLED)
+        raise BrowserError(message, reason=reason)
 
     def read_call(self, location: Location, script=_DEFAULT_READ, *, timeout=10.0, with_context=False):
         """Read a main-frame snapshot, optionally returning its context id for follow."""
@@ -705,6 +760,7 @@ class BrowserSession:
 
     def _read_context_call(self, context_id, function, arguments, timeout, *, check_after):
         with self._lock:
+            tab = self._live_tab()
             world = self._read_world
             if world is None or type(context_id) is not int or context_id != world[0]:
                 raise BrowserError(_READ_MOVED, reason="moved")
@@ -712,7 +768,6 @@ class BrowserSession:
             if not self.is_current(location):
                 self._read_world = None
                 raise BrowserError(_READ_MOVED, reason="moved")
-            tab = self._live_tab()
             if not check_after:
                 # A sent action cannot be retried against the same numbered read.
                 self._read_world = None

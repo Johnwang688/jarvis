@@ -13,7 +13,12 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from lg2b_browser_session_check import FakeGate, FakeLink, OTHER, PUBLIC, Trace
+
+from jarvis.v3.browser.desk import BrowserDesk
+from jarvis.v3.browser.link import LinkError
 from jarvis.v3.browser.service import BrowserBusy, BrowserService, BrowserUnavailable
+from jarvis.v3.browser.session import BrowserError, BrowserSession
 from jarvis.v3.daemon import Daemon
 
 
@@ -21,8 +26,9 @@ CLOSED = {"chrome": "closed", "edge": "closed"}
 
 
 class FakeSession:
-    def __init__(self, browser):
+    def __init__(self, browser, *, window=False):
         self.browser = browser
+        self.window = window
         self.alive = False
         self.starts = self.closes = 0
         self.fail_start = self.fail_close = False
@@ -48,8 +54,8 @@ class BrowserServiceCheck(unittest.TestCase):
                                       idle_seconds=10, lease_wait=0.05)
         self.addCleanup(self.service.close)
 
-    def make_session(self, browser):
-        session = FakeSession(browser)
+    def make_session(self, browser, *, window=False):
+        session = FakeSession(browser, window=window)
         self.sessions.append(session)
         return session
 
@@ -80,7 +86,8 @@ class BrowserServiceCheck(unittest.TestCase):
 
         first.alive = False
         self.assertEqual(self.service.status(), {"chrome": "failed", "edge": "closed"})
-        with self.service.use("chrome") as second:
+        with (self.assertRaisesRegex(BrowserError, r"^The browser session is closed\.$"),
+              self.service.use("chrome") as second):
             self.assertIsNot(second, first)
             self.assertEqual(first.closes, 1)
             second.alive = False
@@ -89,13 +96,61 @@ class BrowserServiceCheck(unittest.TestCase):
         self.assertIsNot(self.borrow("chrome"), second)
         self.assertEqual(len(self.sessions), 3)
 
+    def test_factory_receives_window_mode_and_reap_closes_visible_session(self):
+        self.assertFalse(self.borrow("chrome").window)
+        factory = Mock(side_effect=self.make_session)
+        service = BrowserService(window=True, session_factory=factory, clock=lambda: self.now,
+                                 idle_seconds=10)
+        self.addCleanup(service.close)
+        with service.use("edge") as visible:
+            self.assertTrue(visible.window)
+        factory.assert_called_once_with("edge", window=True)
+        self.assertEqual(service.status(), {"chrome": "closed", "edge": "open"})
+        self.now += 11
+        self.assertEqual(service.reap(), 1)
+        self.assertEqual(visible.closes, 1)
+        self.assertEqual(service.status(), CLOSED)
+
+    def test_lost_main_tab_during_use_returns_fixed_error_and_next_use_restarts(self):
+        trace = Trace()
+        links = []
+
+        def make_session(browser, *, window):
+            gate = FakeGate(trace)
+            link = FakeLink(trace, gate)
+            links.append(link)
+            return BrowserSession(browser, window=window, link_factory=link.factory,
+                                  gate_factory=gate.factory)
+
+        factory = Mock(side_effect=make_session)
+        service = BrowserService(window=True, session_factory=factory)
+        self.addCleanup(service.close)
+        desk = BrowserDesk(service, store_factory=Mock(), feed_post=Mock())
+        with service.use("chrome") as first:
+            self.assertEqual(first.open(PUBLIC).outcome, "loaded")
+        link = links[0]
+
+        def disconnect(_url):
+            link.emit("Target.targetDestroyed", {"targetId": "target-1"}, session=None)
+            raise LinkError("Fixture transport error")
+
+        link.navigation = disconnect
+        self.assertEqual(desk.open(OTHER), "Error: The browser session is closed.")
+        self.assertFalse(first.alive)
+        self.assertEqual(service.status(), CLOSED)
+        self.assertEqual(trace.items.count(("link.close",)), 1)
+        with service.use("chrome") as second:
+            self.assertIsNot(second, first)
+            self.assertEqual(second.open(OTHER).outcome, "loaded")
+        self.assertEqual(factory.call_count, 2)
+
     def test_failed_start_is_closed_redacted_and_retryable(self):
         broken = self.make_session("chrome")
         broken.fail_start = broken.fail_close = True
         with patch.object(self.service, "_session_factory", return_value=broken) as factory:
             with self.assertRaisesRegex(BrowserUnavailable, r"^The browser could not be started\.$") as error:
                 self.borrow("chrome")
-        factory.assert_called_once_with("chrome")
+        factory.assert_called_once_with("chrome", window=False)
         self.assertIsNone(error.exception.__cause__)
         self.assertIsNone(error.exception.__context__)
         self.assertEqual((broken.starts, broken.closes), (1, 1))
@@ -184,7 +239,7 @@ class BrowserServiceCheck(unittest.TestCase):
                 session = FakeSession("chrome")
                 session.fail_start = fail
                 start = session.start
-                service = BrowserService(session_factory=lambda _: session, lease_wait=0)
+                service = BrowserService(session_factory=lambda _, *, window: session, lease_wait=0)
                 slot = service._slots["chrome"]
                 original_lease = slot.lease
                 lease = Mock(wraps=original_lease)
@@ -259,7 +314,7 @@ class BrowserServiceCheck(unittest.TestCase):
         for reap_first in (False, True):
             with self.subTest(reap_first=reap_first):
                 session = FakeSession("chrome")
-                service = BrowserService(session_factory=lambda _: session, clock=lambda: self.now,
+                service = BrowserService(session_factory=lambda _, *, window: session, clock=lambda: self.now,
                                          idle_seconds=10)
                 self.addCleanup(service.close)
                 with service.use("chrome"):
@@ -373,6 +428,19 @@ class DaemonBrowserCheck(unittest.TestCase):
         self.assertEqual(service.status(), CLOSED)
 
     def test_default_service_stays_lazy_through_start_stop_and_restart(self):
+        for override, window in ((None, True), ("1", False), ("true", True)):
+            with (self.subTest(override=override), patch.dict(os.environ),
+                  patch("jarvis.v3.daemon.BrowserService", wraps=BrowserService) as factory):
+                if override is None:
+                    os.environ.pop("JARVIS_BROWSER_HEADLESS", None)
+                else:
+                    os.environ["JARVIS_BROWSER_HEADLESS"] = override
+                self.check_default_service_restart()
+                self.assertEqual(factory.call_count, 2)
+                self.assertTrue(all(call.args == () and call.kwargs == {"window": window}
+                                    for call in factory.call_args_list))
+
+    def check_default_service_restart(self):
         daemon = Daemon(**self.options)
         self.addCleanup(daemon.stop)
         original = daemon.browser

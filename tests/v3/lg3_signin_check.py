@@ -275,7 +275,7 @@ class CliCheck(unittest.TestCase):
                     {"signed_in": 0, "needs_code": 2}.get(result, 1), f"{NAME}: {detail}\n", "",
                 ))
                 self.store_factory.assert_called_with()
-                self.session_factory.assert_called_with("edge", window=False)
+                self.session_factory.assert_called_with("edge", window=True)
                 self.sign_in.assert_called_with(self.session, self.store, NAME, page=PAGE)
                 self.session.start.assert_called_once()
                 self.session.close.assert_called_once()
@@ -300,9 +300,18 @@ class CliCheck(unittest.TestCase):
         self.session.close.assert_called_once()
         self.session.reset_mock()
         self.tty.return_value = True
-        self.invoke("--window")
+        self.invoke()
         self.wait.assert_called_once_with("Press Enter to close the browser. ")
         self.session.close.assert_called_once()
+
+    def test_hidden_suppresses_window_and_terminal_prompt(self):
+        self.sign_in.return_value = signin._outcome("signed_in")
+        self.tty.return_value = True
+        for flags in (("--hidden",), ("--window", "--hidden")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags)[0], 0)
+                self.session_factory.assert_called_with("edge", window=False)
+        self.wait.assert_not_called()
 
     def test_wrong_site_does_not_start_browser(self):
         self.sign_in.side_effect = lambda *a, **kw: real_sign_in(*a, **kw)

@@ -377,7 +377,7 @@ class Daemon:
         self._owns_chat = chat is None
         self._owns_browser = browser is None
         self._replace_browser = False
-        self.browser = BrowserService() if browser is None else browser
+        self.browser = BrowserService(window=not config.browser_headless()) if browser is None else browser
         self._chat = self._new_chat() if chat is None else chat
         self._voice_settings_lock = threading.Lock()
         self._voice_epoch_offset = time.time() - time.monotonic()
@@ -688,7 +688,7 @@ class Daemon:
                     raise RuntimeError("The previous proposal sweep is still finishing.")
             _prepare_data_dir(self._data_dir)
             if self._replace_browser:
-                self.browser = BrowserService()
+                self.browser = BrowserService(window=not config.browser_headless())
                 self._replace_browser = False
             if self._chat is None:
                 self._chat = self._new_chat()

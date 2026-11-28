@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
+import io
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -12,8 +13,9 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from jarvis import config
 from jarvis.v3.browser.link import BrowserLink, LinkError, helper_command, windows_link
@@ -205,7 +207,7 @@ class HelperTest(FakeBrowserTest):
         # Measured on Windows: killing the browser the moment its pipe closed lost a new cookie.
         self.profile.mkdir(parents=True)
         (self.profile / "save-after-close").touch()
-        process, ready = self.start_helper()
+        process, ready = self.start_helper(self.args(window=True))
         self.send(process, {"id": 1, "method": "Browser.close"})
         self.assertEqual(process.wait(timeout=10), 0)
         self.assertTrue((self.profile / "saved").is_file())
@@ -220,11 +222,32 @@ class HelperTest(FakeBrowserTest):
         self.assert_gone(ready["pid"])
 
     def test_browser_exit_ends_helper_with_stdin_still_open(self):
-        process, ready = self.start_helper()
+        process, ready = self.start_helper(self.args(window=True))
+        started = time.monotonic()
         self.send(process, {"id": 1, "method": "Test.exit"})
         self.assertEqual(process.wait(timeout=5), 0)
+        self.assertLess(time.monotonic() - started, helper.EXIT_WAIT)
         self.assert_gone(ready["pid"])
         self.assertEqual(process.stderr.read(), b"")
+
+    def test_browser_pipe_break_during_a_request_allows_graceful_exit(self):
+        browser = Mock()
+        browser.poll.return_value = None
+        writer = Mock()
+        writer.write.side_effect = BrokenPipeError
+        release = threading.Event()
+        reader = Mock()
+
+        def delayed_eof(_size):
+            release.wait(2)
+            return b""
+
+        reader.read.side_effect = delayed_eof
+        try:
+            source = io.BytesIO(b'{"id":1,"method":"Page.navigate"}\n')
+            self.assertEqual(helper._relay(browser, source, io.BytesIO(), reader, writer), (0, True))
+        finally:
+            release.set()
 
     def test_killing_helper_also_kills_fake_browser(self):
         # Adopt the orphan so the test can reap it and verify its exit status.
@@ -298,15 +321,23 @@ class HelperTest(FakeBrowserTest):
             for window in (False, True):
                 with self.subTest(browser=browser, window=window):
                     args = self.args(browser, window=window)
-                    headless = [] if window else ["--headless=new"]
+                    mode_flags = [
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling",
+                        "--deny-permission-prompts",
+                        "--hide-crash-restore-bubble",
+                        "--window-size=1280,900",
+                        "--no-startup-window",
+                    ] if window else ["--headless=new", "about:blank"]
                     link = self.start_link(self.command(args))
                     self.assertEqual(link.call("Test.args")["args"],
-                                     [*expected, *headless, "about:blank"])
+                                     [*expected, *mode_flags])
                     link.close()
                     pipe_flags = helper.WindowsAdapter().pipe_flags(123, 456)
                     self.assertEqual(helper._browser_args(helper._arguments(args), pipe_flags),
                                      [*expected[:4], "--remote-debugging-io-pipes=123,456",
-                                      *expected[4:], *headless, "about:blank"])
+                                      *expected[4:], *mode_flags])
 
     def test_adapter_interface_and_fixed_windows_candidates(self):
         methods = {"candidates", "pipe_flags", "launch", "settle", "stop"}
@@ -327,6 +358,57 @@ class HelperTest(FakeBrowserTest):
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         ))))
         self.assertEqual(list(adapter.candidates("chrome", {"ProgramFiles": "relative"})), [])
+
+
+class WindowsAdapterTest(unittest.TestCase):
+    def test_both_modes_use_the_original_startup_options(self):
+        for window in (False, True):
+            with self.subTest(window=window):
+                adapter = helper.WindowsAdapter()
+                args = SimpleNamespace(profile_dir="example-profile", proxy_port=12345, window=window)
+                pipe_api = SimpleNamespace(CreatePipe=Mock(side_effect=[(123, 124), (455, 456)]),
+                                           CloseHandle=Mock())
+                crt = SimpleNamespace(open_osfhandle=Mock(side_effect=[10, 11]))
+                startup = SimpleNamespace(lpAttributeList={})
+                with (patch.dict(sys.modules, {"_winapi": pipe_api, "msvcrt": crt}),
+                      patch.object(adapter, "_join_job"),
+                      patch.object(os, "set_handle_inheritable", create=True) as inherit,
+                      patch.object(os, "O_BINARY", 0, create=True),
+                      patch.object(os, "fdopen", side_effect=[io.BytesIO(), io.BytesIO()]),
+                      patch.object(subprocess, "STARTUPINFO", return_value=startup, create=True),
+                      patch.object(subprocess, "Popen") as popen):
+                    process, reader, writer = adapter.launch("example-browser.exe", args)
+                self.addCleanup(reader.close)
+                self.addCleanup(writer.close)
+                self.assertIs(process, popen.return_value)
+                popen.assert_called_once_with(
+                    ["example-browser.exe", *helper._browser_args(
+                        args, ["--remote-debugging-io-pipes=123,456"])],
+                    executable="example-browser.exe", startupinfo=startup, close_fds=True,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                self.assertEqual(inherit.call_args_list, [call(123, True), call(456, True)])
+                self.assertEqual(vars(startup), {"lpAttributeList": {"handle_list": [123, 456]}})
+
+    def test_already_exited_browser_skips_exit_wait_and_checks_the_job(self):
+        adapter = helper.WindowsAdapter()
+        process = Mock()
+        process.poll.return_value = 0
+        with patch.object(adapter, "_others_in_job", return_value=0) as others:
+            adapter.settle(process)
+            adapter.stop(process)
+        process.wait.assert_not_called()
+        process.kill.assert_not_called()
+        others.assert_called_once_with()
+
+    def test_browser_still_exiting_gets_time_to_save(self):
+        adapter = helper.WindowsAdapter()
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(adapter, "_others_in_job", return_value=0):
+            adapter.settle(process)
+        process.wait.assert_called_once_with(helper.EXIT_WAIT)
+        process.kill.assert_not_called()
 
 
 class LinkTest(FakeBrowserTest):

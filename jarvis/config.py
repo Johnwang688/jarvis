@@ -736,6 +736,10 @@ DIRECT_CAPTURE_PROBE_PATH = Path(
 BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))
 
 
+def browser_headless() -> bool:
+    return os.environ.get("JARVIS_BROWSER_HEADLESS") == "1"
+
+
 def credential_dirs() -> tuple[str, ...]:
     """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a) and the phone's
     folder and voice pairing under the v2 data root, read at call time: each

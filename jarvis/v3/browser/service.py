@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import threading
 import time
 
-from .session import BrowserSession
+from .session import BrowserError, BrowserSession, _CLOSED as _SESSION_CLOSED
 
 
 class BrowserBusy(Exception):
@@ -32,11 +32,12 @@ class _Slot:
 
 
 class BrowserService:
-    def __init__(self, *, session_factory=BrowserSession, clock=time.monotonic,
+    def __init__(self, *, window: bool = False, session_factory=BrowserSession, clock=time.monotonic,
                  idle_seconds=600.0, lease_wait=30.0):
         if not 0 <= lease_wait <= threading.TIMEOUT_MAX:
             raise ValueError("The browser lease wait is out of range.")
         self._session_factory = session_factory
+        self._window = window
         self._clock = clock
         self._idle_seconds = idle_seconds
         self._lease_wait = lease_wait
@@ -89,6 +90,8 @@ class BrowserService:
                     died = not self._closed and not session.alive
                 if died:
                     self._close_session(slot, session)
+            if died:
+                raise BrowserError(_SESSION_CLOSED, reason="closed")
         finally:
             slot.lease.release()
 
@@ -108,7 +111,7 @@ class BrowserService:
                 raise BrowserUnavailable(_START_FAILED)
 
         try:
-            session = self._session_factory(browser)
+            session = self._session_factory(browser, window=self._window)
         except Exception:
             session = None
         if session is None:
@@ -126,8 +129,12 @@ class BrowserService:
             try:
                 session.start()
                 alive = session.alive
-            except Exception:
+                closed = not alive
+            except BrowserError as exc:
                 alive = False
+                closed = exc.reason == "closed"
+            except Exception:
+                alive = closed = False
             except BaseException:
                 self._close_session(slot, session)
                 raise
@@ -137,13 +144,15 @@ class BrowserService:
                     slot.failed = False
                     slot.starting = False
                     return session
-                slot.failed = not alive
+                slot.failed = not alive and not closed
             self._close_session(slot, session)
         finally:
             with self._lock:
                 slot.starting = False
         with self._lock:
             reason = _CLOSED if self._closed else _START_FAILED
+        if closed and reason == _START_FAILED:
+            raise BrowserError(_SESSION_CLOSED, reason="closed")
         raise BrowserUnavailable(reason)
 
     def reap(self) -> int:
