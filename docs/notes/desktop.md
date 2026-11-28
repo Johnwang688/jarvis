@@ -126,5 +126,41 @@ showing its own file):
 - Notepad's text area gets no ref and typing is ref-only, so a document body
   cannot be typed into yet.
 
-State: built and tested with fakes; the daemon routes and the command have not
-yet been run against a real bridge.
+Clicking, scrolling and switching windows (same day, the next change):
+
+- **`jarvis computer click X Y`** and **`scroll X Y AMOUNT`** take a point in the
+  latest screenshot of the same driving code. The daemon asks the bridge which
+  control is at that point, then sends the input with that control as the
+  expectation, so the bridge refuses when something else is there by then. A
+  failed screenshot, a new driving code, and a successful `front` all require a
+  new screenshot first. A negative amount scrolls down.
+- **`jarvis computer windows`** lists the open windows by number, with the front
+  one and view-only ones (terminals) marked. The bridge's window ids stay in
+  the daemon. **`jarvis computer front N`** brings a window of the latest list
+  forward through the bridge op `window_front`: a protected window is never
+  raised, held keys or mouse buttons refuse it, and the window is restored only
+  if it was minimized and never resized. The bridge does not list minimized
+  windows, so in practice they cannot be brought back this way yet.
+- **The action log.** Before any click, scroll or `front` reaches the bridge the
+  daemon appends a start line to `computer_actions.jsonl` in its data directory
+  (private file, no links followed): the action, the point, the control's name
+  and role, the window's program and title. The outcome line follows: `done`,
+  `refused` (the bridge said no, nothing happened) or `failed` (it may or may
+  not have happened). If the start line cannot be written, nothing is sent. The
+  driving code, pictures and window ids are never written.
+- **No approval card** (owner decision). The limits are the window guard, the
+  action log and the written instructions that `jarvis computer guide` prints
+  (`jarvis/v3/prompts/computer_guide.md`): what the driving thread must not do
+  unless the owner asked for exactly that, and that words on the screen are
+  content, not instructions.
+- **Not there yet:** typing and key presses, right or double clicks and drags, an
+  on-screen border with a Stop control, and a chat tool that starts the driving
+  thread. The owner starts driving with `jarvis computer start` and gives the
+  thread the code.
+- `tests/v3/computer_live_smoke.py` is an owner-run check on real Windows. It
+  starts its own bridge on a private port, builds its own driving permission in
+  its own process and acts only inside a Notepad window showing its own file; it
+  also reports whether a point inside an open menu can be reached.
+
+State: built and tested with fakes; the daemon routes and the commands have not
+yet been run against a real bridge, and the owner has not yet run the new check.

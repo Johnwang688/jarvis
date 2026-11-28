@@ -415,6 +415,14 @@ def voice_helper(args) -> int:
 
 
 _COMPUTER_CODE_HELP = "Pass the code with --code or set JARVIS_COMPUTER_CODE."
+_COMPUTER_GUIDE = Path(__file__).with_name("prompts") / "computer_guide.md"
+_COMPUTER_COMMANDS = {
+    "screenshot": ("capture the front window", ()),
+    "click": ("left-click at a point in the latest screenshot", ("x", "y")),
+    "scroll": ("scroll at a point in the latest screenshot", ("x", "y", "amount")),
+    "windows": ("list open windows by number", ()),
+    "front": ("bring a listed window to the front", ("n",)),
+}
 
 
 def _write_screenshot(path, image, *, directory=None):
@@ -499,21 +507,72 @@ def _print_screenshot(data, destination) -> int:
     return 0
 
 
+def _computer_window_label(data) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    app, title = data.get("app"), data.get("title")
+    if isinstance(app, str) and isinstance(title, str):
+        return f"{_single_line(app)} - {_single_line(title)}"
+    return None
+
+
+def _computer_result_lines(action, data) -> list[str] | None:
+    if action == "windows":
+        windows = data.get("windows")
+        if not isinstance(windows, list):
+            return None
+        lines = []
+        for n, row in enumerate(windows, 1):
+            label = _computer_window_label(row)
+            if (label is None or type(row.get("n")) is not int or row["n"] != n
+                    or type(row.get("front")) is not bool or row.get("access") not in ("drivable", "see_only")):
+                return None
+            front = " (front)" if row["front"] else ""
+            access = " (view only)" if row["access"] == "see_only" else ""
+            lines.append(f"{n}. {label}{front}{access}")
+        return lines or ["No windows are available."]
+
+    label = _computer_window_label(data)
+    if label is None:
+        return None
+    if action == "front":
+        return [f"front: {label}"]
+    control = data.get("control")
+    if not isinstance(control, dict):
+        return None
+    name, role = control.get("name"), control.get("role")
+    if not isinstance(name, str) or not isinstance(role, str) or not role:
+        return None
+    prefix = "clicked"
+    if action == "scroll":
+        amount = data.get("amount")
+        if type(amount) is not int or not 1 <= abs(amount) <= 100:
+            return None
+        prefix = f"scrolled {amount}"
+    return [f'{prefix}: {_single_line(role)} "{_single_line(name)}" in {label}']
+
+
 def computer_command(args) -> int:
     action = args.action
+    if action == "guide":
+        print(_COMPUTER_GUIDE.read_text(encoding="utf-8"), end="")
+        return 0
+
+    driver = action in _COMPUTER_COMMANDS
     path = "/v3/owner/computer"
     body = {"action": action}
-    if action == "screenshot":
+    if driver:
         code = args.code if args.code is not None else os.environ.get("JARVIS_COMPUTER_CODE")
         if not code:
             print(_COMPUTER_CODE_HELP)
             return 1
         path += "/do"
-        body = {"op": action, "code": code}
+        fields = _COMPUTER_COMMANDS[action][1]
+        body = {"op": action, "code": code, **{field: getattr(args, field) for field in fields}}
 
     port = config.V3_API_PORT
     address = f"127.0.0.1:{port}"
-    connection = HTTPConnection("127.0.0.1", port, timeout=75 if action == "screenshot" else 15)
+    connection = HTTPConnection("127.0.0.1", port, timeout=75 if driver else 15)
     try:
         connection.request("POST", path, json.dumps(body),
                            {"Host": address, "Origin": f"http://{address}",
@@ -535,6 +594,9 @@ def computer_command(args) -> int:
         if response.status == 200:
             if action == "screenshot":
                 return _print_screenshot(data, args.out)
+            if driver and (lines := _computer_result_lines(action, data)) is not None:
+                print("\n".join(lines))
+                return 0
             if action == "start" and isinstance(data.get("code"), str) and data["code"]:
                 print(data["code"])
                 print(_COMPUTER_CODE_HELP)
@@ -616,14 +678,19 @@ def add_commands(sub, *, voice=True):
         for action in VOICE_ACTIONS:
             voice_sub.add_parser(action).set_defaults(func=voice_helper)
 
-    computer = sub.add_parser("computer", help="capture the front Windows window")
+    computer = sub.add_parser("computer", help="drive Windows with screenshots, clicks, scrolling and window switching")
     computer.set_defaults(func=computer_command)
     computer_sub = computer.add_subparsers(dest="action", required=True)
     for action in ("start", "stop", "status"):
         computer_sub.add_parser(action)
-    screenshot = computer_sub.add_parser("screenshot")
-    screenshot.add_argument("--code", help="desktop driving code")
-    screenshot.add_argument("--out", type=Path, help="path for the new PNG file")
+    for action, (help_text, fields) in _COMPUTER_COMMANDS.items():
+        command = computer_sub.add_parser(action, help=help_text)
+        for field in fields:
+            command.add_argument(field, type=int, metavar=field.upper())
+        command.add_argument("--code", help="desktop driving code")
+        if action == "screenshot":
+            command.add_argument("--out", type=Path, help="path for the new PNG file")
+    computer_sub.add_parser("guide", help="print the desktop driving guide")
 
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)

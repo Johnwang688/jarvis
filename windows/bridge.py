@@ -989,6 +989,7 @@ class WindowsDesktop:
             (self.user.GetWindow, [wt.HWND, wt.UINT], wt.HWND),
             (self.user.IsWindowVisible, [wt.HWND], wt.BOOL),
             (self.user.IsIconic, [wt.HWND], wt.BOOL),
+            (self.user.ShowWindow, [wt.HWND, ctypes.c_int], wt.BOOL),
             (self.user.GetWindowThreadProcessId, [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
             # c_void_p: the attribute decides the type (a RECT for the frame, a DWORD for the cloak).
             (self.dwm.DwmGetWindowAttribute,
@@ -1171,6 +1172,14 @@ class WindowsDesktop:
         # Windows verification pending: exact foreground HWND lookup.
         return self.user.GetForegroundWindow() or None
 
+    def bring_forward(self, hwnd) -> bool:
+        # Windows verification pending: restore only when minimized and verify the final foreground.
+        if self.user.IsIconic(hwnd):
+            self.user.ShowWindow(hwnd, 9)  # SW_RESTORE
+        _force_foreground(hwnd)
+        time.sleep(0.1)
+        return self.foreground() == hwnd
+
     def window_at(self, x, y):
         # Windows verification pending: GA_ROOT maps a child hit to its top-level window.
         hit = self.user.WindowFromPoint(wt.POINT(x, y))
@@ -1242,6 +1251,17 @@ def _window_backend(hwnd):
 
 def op_windows(_req):
     return {"windows": _WINDOW_GUARD.windows()}
+
+
+def op_window_front(req):
+    window = req.get("window")
+    hwnd = _WINDOW_GUARD.forward(window)
+    _WINDOW_DESKTOP.require_idle_input()
+    if not _WINDOW_DESKTOP.bring_forward(hwnd):
+        raise Refused("Windows did not bring that window to the front.")
+    if _WINDOW_GUARD.forward(window) != hwnd:
+        raise Refused("The window changed. List windows again.")
+    return {"front": True}
 
 
 def op_window_snapshot(req):
@@ -1518,6 +1538,7 @@ def op_window_screenshot(req):
 
 _WINDOW_OPS = {
     "windows": op_windows, "window_snapshot": op_window_snapshot,
+    "window_front": op_window_front,
     "window_probe": op_window_probe, "window_click": op_window_click,
     "window_type": op_window_type, "window_key": op_window_key,
     "window_scroll": op_window_scroll, "window_screenshot": op_window_screenshot,
