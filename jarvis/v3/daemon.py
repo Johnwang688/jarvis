@@ -23,6 +23,7 @@ import time
 from typing import Callable
 
 from jarvis import config
+from jarvis.desktop import DesktopSession
 from windows.v3voice_problems import PROBLEMS, UNKNOWN
 from . import hud, owner_routes
 from .approvals import ApprovalBroker
@@ -364,11 +365,14 @@ class Daemon:
     def __init__(self, port: int | None = None, data_dir: Path | None = None,
                  hud_dir: Path | None = None, *, jobs=None, chat=None, work=None, proposals=None,
                  phone_port: int | None = None, phone_host=_CONFIGURED_PHONE_HOST, voice_link_port=None,
-                 browser: BrowserService | None = None):
+                 browser: BrowserService | None = None, desktop_port: int | None = None):
         self._requested_port = config.V3_API_PORT if port is None else port
         self._phone_host = config.remote_host() if phone_host is _CONFIGURED_PHONE_HOST else phone_host
         self._requested_phone_port = phone_port
         self._requested_voice_link_port = voice_link_port
+        if desktop_port is None and self._requested_port == 0:
+            desktop_port = 0
+        self.desktop = DesktopSession(port=desktop_port, managed=True)
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._work = work
@@ -729,9 +733,15 @@ class Daemon:
             self._server = server
             self._start_phone(handler.phone_services)
             self._start_voice_link()
+            if config.desktop_drive():
+                try:
+                    self.desktop.start()
+                except OSError:
+                    LOG.warning("Could not start the Windows desktop bridge listener.")
 
     def stop(self) -> None:
         with self._lock:
+            self.desktop.stop()
             if self._voice_link is not None:
                 try:
                     self._voice_link.close()

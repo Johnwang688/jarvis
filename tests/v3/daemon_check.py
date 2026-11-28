@@ -22,6 +22,8 @@ import unittest
 from unittest.mock import patch
 
 from jarvis import config
+from jarvis.desktop import DesktopError
+from windows import desktopwire
 from jarvis.v3 import cli
 from jarvis.v3.daemon import Daemon, _status_handler
 
@@ -192,6 +194,43 @@ class DaemonCheck(unittest.TestCase):
                 self.daemon.start()
             server.assert_not_called()
         self.assertFalse(target.exists())
+
+    def test_desktop_bridge_is_disabled_by_default(self):
+        with patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": "0"}):
+            self.daemon.start()
+            self.assertIsNone(self.daemon.desktop.bound_port)
+
+    def test_desktop_bridge_requires_pairing_and_stops_with_daemon(self):
+        key_path = self.data.parent / "fake-desktop-key"
+        key_path.write_bytes(b"ab" * 32)
+        key_path.chmod(0o600)
+        with patch.dict(os.environ, {"JARVIS_DESKTOP_DRIVE": "1"}), patch.object(
+            config, "voice_link_key", return_value=key_path,
+        ):
+            self.daemon.start()
+            bridge = self.daemon.desktop
+            address = ("127.0.0.1", bridge.bound_port)
+            with socket.create_connection(address, timeout=2) as peer, peer.makefile("rwb") as stream:
+                desktopwire.wire.send_json(stream, {"hello": "legacy"})
+                self.assertEqual(stream.read(1), b"")
+                self.assertFalse(bridge.connected)
+            with socket.create_connection(address, timeout=2) as peer, peer.makefile("rwb") as stream:
+                desktopwire.prove_windows(stream, desktopwire.private_key(key_path))
+                self.assertTrue(bridge.wait_for_bridge(2))
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    pending = workers.submit(bridge.request, "ping", timeout=8)
+                    self.assertEqual(desktopwire.wire.read_json(stream)["op"], "ping")
+                    workers.submit(self.daemon.stop).result(timeout=3)
+                    with self.assertRaises(DesktopError):
+                        pending.result(timeout=1)
+                self.assertEqual(stream.read(1), b"")
+            self.assertIsNone(bridge.bound_port)
+            self.assertFalse(bridge.connected)
+            with self.assertRaises(DesktopError):
+                bridge.request("ping")
+            self.assertIsNone(bridge.bound_port)
+            with socket.create_server(address):
+                pass
 
     def test_concurrent_stop_during_request(self):
         self.daemon.start()
