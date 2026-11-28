@@ -168,6 +168,10 @@ The phone's only door is the remote listener (8408, loopback, behind `tailscale
 serve`): strict Host/Origin, `/m/*` only; agents never reach it. Routes need
 a passkey session; gated actions a sliding 1 h passkey unlock.
 Phone sends are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07.
+Phone chat can use Jarvis's browser on the desk PC. Browser policy is shared
+with desk chat, and phone sign-in always asks when policy permits it. Approve
+on the unlocked phone or in the Jarvis window. Browser cards are click-only
+for voice. The PC app, folder and default-browser tools remain desk-only.
 Dictation is not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
 
 ## Inbox

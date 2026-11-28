@@ -27,7 +27,13 @@ const actions = new Map([
   ["delegate", { title: "Hand off to Sol", target: "Project", required: ["Folder", "Model"] }],
   ["work_send", { title: "Send to a coding thread", target: "Thread", required: ["Thread id", "In project"] }],
 ]);
-const browserPressTitles = new Set(["Press a browser control", "Submit a browser form", "Follow a link on the browser page"]);
+const browserFollow = { title: "Follow a link on the browser page", target: "Link number", required: ["Address", "From"] };
+const browserPressTitles = new Set(["Press a browser control", "Submit a browser form", browserFollow.title]);
+const browserActions = new Map<string, { title: string; target: string; required?: string[] }>([
+  ["browser_open", { title: "Open a browser address", target: "URL" }],
+  ["browser_follow", browserFollow],
+  ["browser_sign_in", { title: "Sign in to a saved site", target: "Saved login", required: ["Site", "Browser"] }],
+]);
 const identityLabels = new Set(["entry", "event", "title", "target", "tool", "action", "project", "thread"]);
 
 function safeIdentity(value: string) {
@@ -168,10 +174,12 @@ function ApprovalCard({ shown, ready, busy, answer }: {
   const browserAction = tool === "browser_fill"
     ? { title: "Fill a browser field", target: "Site", required: ["Field", "Text", "Then"] }
     : tool === "browser_press" && card && browserPressTitles.has(card.title)
-      ? card.title === "Follow a link on the browser page"
-        ? { title: card.title, target: "Link number" }
+      ? card.title === browserFollow.title
+        ? browserFollow
         : { title: card.title, target: "Site", required: ["Button", "Kind"] }
-      : undefined;
+      : browserActions.get(tool);
+  // Reading the current page takes no arguments and has no target row.
+  const browserRead = tool === "browser_read" && card?.title === "Read the browser page" && rows.length === 0;
   const action = browserAction ?? actions.get(tool);
   const targets = rows.filter((row) => identityLabels.has(labelKey(row.label))
     || (browserAction && labelKey(row.label) === labelKey(browserAction.target)));
@@ -180,7 +188,7 @@ function ApprovalCard({ shown, ready, busy, answer }: {
     { label: "Policy level", value: request.level },
     { label: "Why asked", value: request.why },
   ];
-  const safe = !!target && card?.title === action?.title && safeIdentity(target.value)
+  const safe = (browserRead || (!!target && card?.title === action?.title && safeIdentity(target.value)))
     && (action?.required ?? []).every((label) => {
       const matches = rows.filter((row) => labelKey(row.label) === labelKey(label));
       return matches.length === 1 && matches[0].label === label
@@ -245,11 +253,10 @@ function ApprovalCard({ shown, ready, busy, answer }: {
         {target && <Field row={target} full />}
         <Field row={{ label: "Tool", value: comparableText(tool) ? tool : "Unavailable" }} />
       </dl>
-      <dl className="approval-summary">
+      <dl className="approval-summary" data-browser={!!browserAction || undefined}>
         {rows.map((row, index) =>
           row === target || row.label === "Revision" ? null : <Field key={index} row={row}
-            full={(tool === "browser_fill" && (row.label === "Text" || row.label === "Then"))
-              || (tool === "browser_press" && row.label === "Sends to")} />)}
+            full={!!browserAction} />)}
       </dl>
       <dl className="approval-policy">
         {policy.map((row) => <Field key={row.label} row={row} />)}

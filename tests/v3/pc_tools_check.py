@@ -307,6 +307,30 @@ class PCCheck(Base):
         self.assertNotIn("auto", self.kinds(svc))
         self.launch.assert_not_called()
 
+    def test_phone_steering_after_pc_preview_refuses_at_ask_time(self):
+        policy.set_rule(self.policy_file, "link.open", "L2")
+        entered, release = Event(), Event()
+
+        def lookup(_host):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return False
+
+        self.dns.side_effect = lookup
+        svc = self.service_with_calls(("link_open", {"url": URL}))
+        with patch.object(self.broker, "ask", return_value=False) as ask:
+            svc.send("Open the fixture.")
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(svc.send("Continue from the phone.", phone=True)["steered"])
+            finally:
+                release.set()
+            self.assertEqual(self.wait_idle(svc), "idle")
+        ask.assert_not_called()
+        self.assertIn(f"Refused: {pc.PHONE_REFUSAL}", self.results()[0])
+        self.assertEqual(self.states(None), [])
+        self.launch.assert_not_called()
+
     def test_voice_sdk_offers_all_tools_and_uses_chat_receipts(self):
         factory, events = Factory(), Recorder()
         self.enterContext(patch.object(claude_jobs, "resolve_native_cli", return_value="/example/bin/claude"))

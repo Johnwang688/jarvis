@@ -8,7 +8,7 @@ import sys
 from threading import Event, Thread
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 from a6b1_acceptance_check import Model, reply
@@ -16,8 +16,9 @@ import phone_auth_check as auth_check
 from phone_listener_check import HOST, request
 
 from jarvis import config, llm, sessions
-from jarvis.v3 import owner_routes, phone_routes
+from jarvis.v3 import owner_routes, phone_routes, policy
 from jarvis.v3.approvals import ApprovalBroker
+from jarvis.v3.browser.desk import BrowserDesk
 from jarvis.v3.chat import MAX_INBOX, ChatService
 from jarvis.v3.daemon import Daemon
 from jarvis.v3.work import Ledger, Registry, WorkError
@@ -56,11 +57,11 @@ class PhoneRoutesCheck(unittest.TestCase):
         self.enterContext(patch.object(sessions, "AUTO_TITLE", False))
         self.enterContext(patch.object(llm, "chat", side_effect=AssertionError("Real model call")))
 
-    def start(self, model=None, *, proposals=None):
+    def start(self, model=None, *, proposals=None, browser_desk=None):
         self.broker = ApprovalBroker(clock=lambda: 1000, log=self.data / "approvals.jsonl")
         self.addCleanup(self.broker.shutdown)
         self.chat = ChatService(self.data / "chats", completion=Model() if model is None else model,
-                                approvals=self.broker)
+                                approvals=self.broker, browser_desk=browser_desk)
         self.registry = Registry(self.data / "work/projects.json")
         self.ledger = Ledger(self.data / "work/threads.jsonl")
         self.daemon = Daemon(port=0, phone_host=HOST, data_dir=self.data, hud_dir=self.root / "hud",
@@ -184,6 +185,51 @@ class PhoneRoutesCheck(unittest.TestCase):
         self.assertEqual(results, [False])
         self.assertEqual(approved, [])
         self.assertEqual(self.me(self.cookie)["unlock_s"], 0)
+
+    def test_phone_browser_sign_in_appears_and_approval_requires_unlock(self):
+        self.enterContext(patch.object(config, "V3_POLICY_FILE", self.data / "policy.json"))
+        policy.set_auto(config.V3_POLICY_FILE, True)
+        browser = Mock(spec=BrowserDesk)
+        browser.available.return_value = True
+        browser.describe_login.return_value = {
+            "name": "fixture", "origin": "https://login.example.invalid",
+            "browser": "chrome", "username": "user@example.com",
+        }
+        browser.sign_in.return_value = "The site accepted the form."
+        model = Model(reply(calls=[("browser_sign_in", {"name": "fixture"})]), reply("Done."))
+        self.start(model, browser_desk=browser)
+        self.assertEqual(self.api("chat/send", body={"text": "Sign in to the fixture."}),
+                         (202, {"state": "running", "steered": False}))
+        deadline = time.monotonic() + 5
+        while True:
+            status, snapshot = self.api("approvals", method="GET")
+            self.assertEqual(status, 200)
+            if snapshot["approvals"]:
+                break
+            self.assertLess(time.monotonic(), deadline, "No browser approval appeared on the phone")
+            time.sleep(0.01)
+        (card,) = snapshot["approvals"]
+        self.assertEqual((card["tool"], card["why"]), ("browser_sign_in", "phone"))
+        self.assertEqual(card["card"]["rows"], [
+            {"label": "Saved login", "value": "fixture"},
+            {"label": "Site", "value": "https://login.example.invalid"},
+            {"label": "Browser", "value": "chrome"},
+        ])
+        body = {"id": card["id"], "digest": card["digest"], "decision": "approve"}
+        self.assertEqual(self.api(APPROVAL_ANSWER, body=body), LOCKED)
+        self.unlock(self.cookie)
+        self.clock.now += 3601
+        self.assertEqual(self.api(APPROVAL_ANSWER, body=body), LOCKED)
+        browser.sign_in.assert_not_called()
+        self.unlock(self.cookie)
+        self.assertEqual(self.api(APPROVAL_ANSWER, body=body), (200, {"id": body["id"], "state": "approved"}))
+        self.assertEqual(self.api(APPROVAL_ANSWER, body=body)[0], 409)
+        deadline = time.monotonic() + 5
+        while self.chat.snapshot()["state"] == "running":
+            self.assertLess(time.monotonic(), deadline, "Approved browser turn did not finish")
+            time.sleep(0.01)
+        self.assertEqual(self.chat.snapshot()["state"], "idle")
+        browser.sign_in.assert_called_once_with(name="fixture", expected=browser.describe_login.return_value)
 
     def test_05_unknown_or_malformed_approval_needs_unlock(self):
         self.start()

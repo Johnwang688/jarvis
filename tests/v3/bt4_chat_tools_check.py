@@ -185,7 +185,11 @@ class ActionChat(bt3.BrowserChatFixture):
                 card = self.next_card()
                 self.assertEqual((card["level"], card["why"]),
                                  ("L2", "hard:tainted") if auto else ("L0", "auto-off"))
-                rows = [{"label": "Link number", "value": "2"}]
+                rows = [
+                    {"label": "Link number", "value": "2"},
+                    {"label": "Address", "value": address, "source": "page"},
+                    {"label": "From", "value": "https://example.invalid", "source": "page"},
+                ]
                 if auto:
                     rows.extend([
                         {"label": "Destination", "value": "page.other.invalid"},
@@ -243,16 +247,27 @@ class ActionChat(bt3.BrowserChatFixture):
             self.assertTrue(chat.BROWSER_ACTIONS <= offered)
             self.assertTrue({"browser_click", "browser_type"}.isdisjoint(offered))
 
-    def test_phone_and_unavailable_desk_do_not_offer_actions(self):
-        svc = self.start(CLICK, TYPING, phone=True)
-        self.assertEqual(self.wait_idle(svc), "idle")
-        self.assertTrue(chat.BROWSER_ACTIONS <= set(self.model.seen[0]["tools"]))
-        self.assertFalse(chat.BROWSER_ACTIONS & set(self.model.seen[-1]["tools"]))
+    def test_phone_and_desk_show_the_same_cards_before_acting(self):
+        for action, fields in ((CLICK, {}), (TYPING, {"kind": "field", "textarea": True, "can_submit": True,
+                                                     "destination_origin": "https://example.invalid"})):
+            shown = []
+            for phone in (False, True):
+                with self.subTest(tool=action[0], phone=phone):
+                    svc = self.start(action, phone=phone, **fields)
+                    card = self.next_card()
+                    self.assertEqual(card["tool"], action[0])
+                    shown.append(card["card"])
+                    self.assertEqual(self.acted, [])
+                    self.answer(card, "approve" if phone else "deny")
+                    self.assertEqual(self.wait_idle(svc), "idle")
+                    self.assertEqual(len(self.acted), int(phone))
+                    self.assertTrue(chat.BROWSER_ACTIONS <= set(self.model.seen[-1]["tools"]))
+            self.assertEqual(shown[0], shown[1])
+
+    def test_unavailable_desk_does_not_offer_actions(self):
         self.assertFalse(chat.BROWSER_ACTIONS & set(chat.available_tools(gated=True)))
         self.desk.available.return_value = False
         self.assertFalse(chat.BROWSER_ACTIONS & set(chat.available_tools(gated=True, browser_desk=self.desk)))
-        self.assertEqual(self.acted, [])
-        self.assertEqual(self.states(None), [])
 
     def test_twelve_calls_include_both_action_tools(self):
         bad_type = ("browser_fill", {"number": "bad", "text": TYPED})

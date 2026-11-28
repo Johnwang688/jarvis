@@ -54,7 +54,6 @@ AUTO_PER_TURN = 6
 DELEGATE_PER_TURN = 3
 BROWSER_PER_TURN = 12
 _BROWSER_TURN_ERROR = "Error: Only 12 browser tool calls are allowed per chat turn."
-_BROWSER_PHONE_REFUSAL = "Browser tools are available only in the Jarvis window."
 _DELEGATE_TURN_ERROR = "Only 3 tasks may be handed off per turn."
 DELEGATE_REMINDER = "If you cannot finish this yourself, hand it off with delegate and tell the owner you did."
 # Chat has no file reader. An existing non-directory makes v1's context
@@ -175,6 +174,7 @@ class _WriteGrant:
     args: dict
     supplied: tuple[str, ...]
     preview: dict
+    owner_answered: bool
 
 
 def _take_grant(tool, args):
@@ -277,8 +277,6 @@ class ChatApprover:
             name = tool.name
             if name in PC_GATED and turn.phone_input():
                 return tools.Refusal(pc.PHONE_REFUSAL)
-            if name in BROWSER_GATED and turn.phone_input():
-                return tools.Refusal(_BROWSER_PHONE_REFUSAL)
             bound = signature(_GATED_WRAPPERS[name]).bind(**args)
             bound.apply_defaults()
             call_args = bound.arguments
@@ -366,12 +364,17 @@ class ChatApprover:
                 return tools.Refusal("Policy could not evaluate this action.")
             if name in _DELETE_TOOLS and verdict["level"] < "L2":
                 verdict = {"level": "L2", "why": "hard:delete"}
-            if name in BROWSER_GATED and auto_enabled and verdict["level"] < "L2":
+            if name == "browser_sign_in":
+                preview = turn.browser_desk.describe_login(call_args["name"])
+                if isinstance(preview, str):
+                    return _BrowserRefusal(preview)
+            phone_sign_in = name == "browser_sign_in" and turn.phone_input()
+            if name in BROWSER_GATED and auto_enabled and verdict["level"] < "L2" and not phone_sign_in:
                 # BT3 browser policy has its own per-turn cap. Below Ask,
                 # bind a one-call grant without spending a general auto approval.
                 request_id = uuid4().hex
                 turn.grant = _WriteGrant(request_id, digest(request_id, turn.session_id, name, args, preview),
-                                         name, call_args, tuple(args), preview)
+                                         name, call_args, tuple(args), preview, owner_answered=False)
                 return True
             try:
                 card = build_card(name, call_args, preview)
@@ -383,7 +386,7 @@ class ChatApprover:
             eligible = (facts.get("owner_request") is True if tainted is False
                         else taint_exempt(kind, facts))
             if name in BROWSER_GATED and verdict["level"] < "L2":
-                display_why = "auto-off"
+                display_why = "phone" if phone_sign_in else "auto-off"
             elif verdict["level"] < "L2" and eligible:
                 # Order phone sends and Stop against the durable auto decision.
                 with turn.tool_write() as writable:
@@ -412,11 +415,10 @@ class ChatApprover:
                             auto_action = {"tool": name, "title": card["title"], "target": target, **verdict}
             elif tainted and verdict == {"level": "L2", "why": f"default:{kind}"}:
                 display_why = "hard:tainted"
-            if receipt is None:
+            owner_answered = receipt is None
+            if owner_answered:
                 if name in PC_GATED and turn.phone_input():
                     return tools.Refusal(pc.PHONE_REFUSAL)
-                if name in BROWSER_GATED and turn.phone_input():
-                    return tools.Refusal(_BROWSER_PHONE_REFUSAL)
                 answer = []
                 allowed = self._broker.ask(
                     name, args, card, session_id=turn.session_id, turn_id=turn.turn_id,
@@ -430,7 +432,8 @@ class ChatApprover:
             if turn.stop():
                 return False
             request_id, approved_digest = receipt
-            turn.grant = _WriteGrant(request_id, approved_digest, name, call_args, tuple(args), preview)
+            turn.grant = _WriteGrant(request_id, approved_digest, name, call_args, tuple(args), preview,
+                                     owner_answered=owner_answered)
             turn.auto_action = auto_action
             return True
         except Exception:
@@ -759,8 +762,6 @@ def _browser_call(tool, **args):
     grant = _take_grant(tool, args)
     if grant is None or turn.browser_desk is None:
         return "Error: The browser call requires chat authorization."
-    if turn.phone_input():
-        return f"Refused: {_BROWSER_PHONE_REFUSAL}"
     if turn.stop():
         return "Error: The chat turn is stopping."
     if tool == "browser_follow" or (tool == "browser_press" and "item" not in grant.preview):
@@ -773,13 +774,27 @@ def _browser_call(tool, **args):
         )
     if tool == "browser_fill":
         return turn.browser_desk.type(**grant.args, expected=grant.preview["item"])
+    if tool == "browser_sign_in":
+        if grant.owner_answered:
+            return turn.browser_desk.sign_in(**grant.args, expected=grant.preview)
+        # A phone steer can arrive after the automatic grant was issued. The
+        # lock orders that check against sends; the sign-in itself runs
+        # outside it, because it is the chat's main lock and a sign-in takes seconds.
+        with turn.tool_write() as writable:
+            if not writable:
+                return "Error: The chat turn is stopping."
+            if turn.phone_input():
+                return "Refused: This is now a phone turn. Request the browser sign-in again."
+        return turn.browser_desk.sign_in(**grant.args, expected=grant.preview)
     method = tool.removeprefix("browser_")
     return getattr(turn.browser_desk, method)(**grant.args)
 
 
 @_bound
 def browser_open(url: Annotated[str, "HTTP or HTTPS address to open."]) -> str:
-    """Open and read a page. After outside text, opening asks unless the owner gave the address this turn."""
+    """Open and read a page in Jarvis's browser on the desk PC, with results in this chat.
+    After outside text, opening asks unless the owner gave the address this turn.
+    """
     return _browser_call("browser_open", url=url)
 
 
@@ -818,7 +833,9 @@ def browser_fill(number: Annotated[int, "Field number from the last page read."]
 
 @_bound
 def browser_sign_in(name: Annotated[str, "Saved login name chosen by the owner."]) -> str:
-    """Open or follow to the site's sign-in page first, then call browser_sign_in. You never see the password."""
+    """Open or follow to the site's sign-in page first, then call browser_sign_in.
+    On a phone turn this requires approval. You never see the password.
+    """
     return _browser_call("browser_sign_in", name=name)
 
 
@@ -1287,7 +1304,7 @@ def run_turn(session_id, path, meta, *, text, owner_inputs, data_dir, feed_root,
     register_tools(include_gated=approvals is not None)
     session = _TurnSession(sessions.Session(session_id, path, meta), clock)
     names = available_tools(V3_TOOLS, gated=approvals is not None, work=work,
-                            browser_desk=None if phone_input() else browser_desk)
+                            browser_desk=browser_desk)
     known = V3_TOOLS | WORK_TOOLS
     if approvals is not None:
         known |= _ALL_GATED

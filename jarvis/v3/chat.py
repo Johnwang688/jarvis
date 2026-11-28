@@ -447,7 +447,7 @@ class ChatService:
                 if steer:
                     self._phone_input |= phone
                     row = self._emit("steer", text=text, listener_fields={"input_id": input_id})
-                    self._inbox.append(dict(row, input_id=input_id))
+                    self._inbox.append(dict(row, input_id=input_id, phone=phone))
                     return {"state": "running", "steered": True}
                 row = self._emit("steer", text=text, queued=True, listener_fields={"input_id": input_id})
                 self._queued.append(dict(row, phone=phone))
