@@ -304,6 +304,9 @@ class Guard:
             raise Refused("The window's screen bounds are unavailable.")
         return rect
 
+    def in_front(self, hwnd) -> bool:
+        return self._read("foreground") == hwnd
+
     def capture(self, window_id) -> Grant:
         hwnd, order, kind, masks = self._target(window_id)
         if not policy.may_capture(kind):

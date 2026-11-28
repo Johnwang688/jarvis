@@ -65,6 +65,9 @@ class ComputerDrive:
             result = self._desktop.request(op, timeout=30, require_pair=True, scope=grant.scope,
                                            hud_sensitive=None, current=lambda: self._current(grant), **fields)
         except DesktopError as exc:
+            if not self._current(grant):
+                # The session's own wording for a call that is no longer wanted is about chats.
+                raise ComputerError("The desktop driving grant ended.") from None
             raise ComputerError(str(exc)) from None
         except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             raise ComputerError("The desktop bridge returned an invalid reply.") from None
@@ -92,7 +95,7 @@ class ComputerDrive:
             raise ComputerError("There is no single front window available to capture.")
 
         window = front[0]
-        shot = self._request(grant, "window_screenshot", window=window["window"])
+        shot = self._request(grant, "window_screenshot", window=window["window"], front=True)
         if not isinstance(shot, dict):
             raise ComputerError("The desktop bridge returned an invalid screenshot.")
         image, size = shot.get("image_b64"), shot.get("size")

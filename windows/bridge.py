@@ -1505,6 +1505,9 @@ def op_window_screenshot(req):
     _same_window(grant, after)
     if image.size != (rect.right - rect.left, rect.bottom - rect.top):
         raise Refused("The screenshot does not match the window bounds.")
+    if req.get("front") is True and not _WINDOW_GUARD.in_front(grant.hwnd):
+        # The caller picked this window because it was in front; the owner has since switched.
+        raise Refused("That window is no longer in front. Take the screenshot again.")
     black_out(image, (rect.left, rect.top), grant.masks + after.masks)
     buf = io.BytesIO()
     image.save(buf, format="PNG")

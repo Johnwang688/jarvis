@@ -81,3 +81,50 @@ Approvals still appear in the HUD. If the voice wait times out, the helper
 says “Still working. Check the driver chat.” The turn continues until it
 finishes or the owner stops it with the badge or physical Esc. When the
 driver chat is busy, a spoken request waits for its own turn and reply.
+
+## 2026-11-28 — v3: an agent thread looks at the front window (`jarvis computer`)
+
+Owner decisions (2026-11-28). The driver is an agent thread that has a shell, so
+the tools are a command line and not an MCP server. The v3 daemon does the work
+and holds the permission. The commands act on the window in front; there is no
+window argument. Clicks get no approval card: the limits are the window guard and
+written instructions. The agent app's own window may be driven like any other.
+
+What exists after this change:
+
+- **The v3 daemon owns the bridge listener.** `Daemon.start()` opens
+  `DesktopSession(managed=True)` only when `JARVIS_DESKTOP_DRIVE=1` is set for the
+  daemon, and `Daemon.stop()` closes it. A managed session accepts the paired
+  bridge only and never opens its listener because someone asked for status. An
+  older `jarvis desktop status` run beside it says another Jarvis process holds
+  the port.
+- **A driving code.** `jarvis computer start` asks the daemon for a one-time code.
+  It lives in the daemon's memory only: a new `start` replaces it, `jarvis computer
+  stop` or a daemon stop ends it, and switching `JARVIS_DESKTOP_DRIVE` off ends it.
+  The code is never logged. A thread passes it as `JARVIS_COMPUTER_CODE` or `--code`.
+- **`jarvis computer screenshot`** asks the bridge for its window list, takes the
+  one row marked `front` (drivable or see-only; a protected front window gives no
+  picture), and saves the PNG. If the owner switches windows while the picture is
+  taken, the bridge refuses it instead of returning the earlier window. The default folder is
+  `<system temp>/jarvis-computer-<uid>/`, private to the user, newest 20 kept;
+  `--out PATH` writes a new file there and refuses an existing one. It prints the
+  path, the window's program and title, and the picture's size.
+- **Bridge.** `Guard.windows()` rows carry `front`. Every call from the daemon is
+  paired, carries one random scope per driving code, and passes
+  `hud_sensitive=None`, so Jarvis's own window stays protected.
+
+Found on real Windows the same day (the owner ran `tests/v3/window_act_smoke.py`,
+which starts its own bridge on a private port and acts only on a Notepad window
+showing its own file):
+
+- A click by ref failed in every window: the `uiautomation` function is
+  `ControlsAreSame`; the name the bridge called does not exist.
+- Windows applies the mouse setting "Scrolling direction" to injected wheel input
+  too. The bridge now reads it and turns the wheel so a positive amount always
+  scrolls up.
+- After both fixes, click by ref, click by point and the wheel both ways passed.
+- Notepad's text area gets no ref and typing is ref-only, so a document body
+  cannot be typed into yet.
+
+State: built and tested with fakes; the daemon routes and the command have not
+yet been run against a real bridge.

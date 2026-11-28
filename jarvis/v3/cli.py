@@ -458,10 +458,18 @@ def _save_screenshot(image, destination):
                            for entry in entries if entry.name != name and entry.name.startswith("shot-")
                            and entry.name.endswith(".png") and entry.is_file(follow_symlinks=False))
         for _, old in shots[:-19]:
-            os.unlink(old, dir_fd=directory)
+            try:
+                os.unlink(old, dir_fd=directory)
+            except FileNotFoundError:
+                pass  # something else cleaned it up first; the new picture is saved
         return folder / name
     finally:
         os.close(directory)
+
+
+def _single_line(value: str) -> str:
+    """Text from a window or the daemon as one line with no control characters."""
+    return " ".join("".join(char if char.isprintable() else " " for char in value).split())
 
 
 def _print_screenshot(data, destination) -> int:
@@ -486,7 +494,7 @@ def _print_screenshot(data, destination) -> int:
         print("Could not save the screenshot to the requested output or private screenshot folder.")
         return 1
     print(path)
-    print("window: " + " ".join(app.splitlines()) + " - " + " ".join(title.splitlines()))
+    print(f"window: {_single_line(app)} - {_single_line(title)}")
     print(f"size: {size[0]}x{size[1]}")
     return 0
 
@@ -520,8 +528,9 @@ def computer_command(args) -> int:
 
     if isinstance(data, dict):
         message = data.get("message")
-        if response.status != 200 and isinstance(message, str):
-            print(message)
+        reason = message if isinstance(message, str) else data.get("error")
+        if response.status != 200 and isinstance(reason, str) and reason:
+            print(_single_line(reason))
             return 1
         if response.status == 200:
             if action == "screenshot":
