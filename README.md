@@ -101,6 +101,8 @@ the window on the Windows desktop, so you watch the agent work in real time and
 close the window to stop it. `JARVIS_BROWSER_HEADLESS=1` for batch runs,
 `JARVIS_BROWSER_SLOWMO` to pace the actions (default 250ms).
 
+The v3 daemon drives visible Windows Chrome or Edge by default. Set `JARVIS_BROWSER_HEADLESS=1` to run it headless.
+
 Every session writes a Playwright trace to `traces/`. Review any run frame by
 frame, with before/after DOM snapshots:
 

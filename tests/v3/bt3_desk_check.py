@@ -11,10 +11,11 @@ from unittest.mock import Mock, call, patch
 
 import bt2_read_check
 from lg1_login_store_check import MemoryBackend, NAME, ORIGIN, TYPED, USER
+from lg2b_browser_session_check import FakeGate, FakeLink, Trace
 
 from jarvis.v3.browser import desk, read, signin
 from jarvis.v3.browser.link import LinkError
-from jarvis.v3.browser.service import BrowserBusy, BrowserUnavailable
+from jarvis.v3.browser.service import BrowserBusy, BrowserService, BrowserUnavailable
 from jarvis.v3.browser.session import BrowserError, BrowserSession, Landing, Location
 from jarvis.v3.feed import Feed, FeedError
 from jarvis.v3.logins import LoginError, Store
@@ -173,6 +174,50 @@ class DeskCheck(unittest.TestCase):
         with self.assertLogs(desk.LOG, level="WARNING") as logs:
             self.assertEqual(self.desk.read(), "Error: The browser could not complete the request.")
         self.assertEqual(logs.output, ["WARNING:jarvis.v3.browser.desk:Unexpected browser desk error."])
+
+    def test_startup_disconnect_is_closed_and_failed_launch_is_unavailable(self):
+        for phase, expected in (
+            ("launch", "Error: The browser is unavailable."),
+            ("setup", "Error: The browser session is closed."),
+            ("gate", "Error: The browser session is closed."),
+        ):
+            with self.subTest(phase=phase):
+                trace = Trace()
+                gate = FakeGate(trace)
+                link = FakeLink(trace, gate)
+                if phase == "launch":
+                    link.fail = "start"
+                if phase == "gate":
+                    gate.passes.clear()
+                real_call = link.call
+
+                def simulate_setup(method, *args, **kwargs):
+                    if phase == "setup" and method == "Page.enable":
+                        link.alive = False
+                    return real_call(method, *args, **kwargs)
+
+                def disconnect_while_waiting(_timeout):
+                    link.alive = False
+                    return False
+
+                expect = gate.expect_check
+
+                def simulate_check(name):
+                    seen = expect(name)
+                    if phase == "gate":
+                        seen.wait = disconnect_while_waiting
+                    return seen
+
+                service = BrowserService(window=True, session_factory=lambda browser, *, window:
+                                         BrowserSession(browser, window=window, link_factory=link.factory,
+                                                        gate_factory=gate.factory))
+                self.addCleanup(service.close)
+                browser_desk = desk.BrowserDesk(service, store_factory=self.factory, feed_post=self.feed)
+                with (patch.object(link, "call", side_effect=simulate_setup),
+                      patch.object(gate, "expect_check", side_effect=simulate_check)):
+                    self.assertEqual(browser_desk.open(PAGE), expected)
+                self.assertEqual(trace.items.count(("link.close",)), 1)
+                self.assertEqual(trace.items.count(("gate.stop",)), 1)
         self.assertFalse(self.service.held)
 
     def test_sign_in_uses_saved_browser_and_default_page_and_posts_exact_notice(self):

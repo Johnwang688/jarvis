@@ -169,8 +169,9 @@ class WindowsAdapter:
 
     def settle(self, process):
         """Let a browser that is closing by itself finish saving its profile."""
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(EXIT_WAIT)
+        if process.poll() is None:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(EXIT_WAIT)
         deadline = time.monotonic() + SAVE_WAIT
         while time.monotonic() < deadline:
             try:
@@ -181,8 +182,9 @@ class WindowsAdapter:
             time.sleep(0.05)
 
     def stop(self, process):
-        process.kill()
-        process.wait()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 class PosixAdapter:
@@ -283,9 +285,18 @@ def _browser_args(args, pipe_flags):
         "--disable-features=MediaRouter,DialMediaRouteProvider,CastMediaRouteProvider,"
         "WebRtcHideLocalIpsWithMdns",
     ]
-    if not args.window:
-        flags.append("--headless=new")
-    return [*flags, "about:blank"]
+    if args.window:
+        flags.extend([
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+            "--deny-permission-prompts",
+            "--hide-crash-restore-bubble",
+            "--window-size=1280,900",
+            "--no-startup-window",
+        ])
+        return flags
+    return [*flags, "--headless=new", "about:blank"]
 
 
 def _write(stream, data):
@@ -336,6 +347,10 @@ def _relay(process, source, target, reader, writer):
     def copy(relay, source, target, browser_side):
         try:
             relay(source, target)
+        except BrokenPipeError:
+            # An owner close can break an in-flight write before the CDP
+            # output reader sees EOF. Give Chromium the same save window.
+            done.put((1, False) if browser_side else (0, True))
         except (OSError, ValueError, RecursionError):
             done.put((1, False))
         else:

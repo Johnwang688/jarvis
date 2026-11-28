@@ -100,13 +100,15 @@ class FakeLink:
         self.frame_tree = lambda: self.main_frame.copy()
         self.create_world = lambda: {"executionContextId": 7}
         self.document_reply = lambda: {"result": {"type": "string", "value": "none"}}
-        self.targets = {"startup": BLANK}
+        self.targets = {}
+        self.window = False
         self.next_target = 0
         self.callback = None
         self.reader = threading.local()
 
     def factory(self, browser, *, proxy_port, window):
         self.trace.add("link.factory", browser, proxy_port, window)
+        self.window = window
         return self
 
     def start(self):
@@ -165,7 +167,7 @@ class FakeLink:
         self.trace.add(method, params, session)
         if self.fail == method:
             raise LinkError("The browser refused the request.", browser_message=FILE)
-        if method == "Target.setDiscoverTargets":
+        if method == "Target.setDiscoverTargets" and not self.window:
             self.target_created("startup", BLANK)
         elif method == "Target.createTarget":
             self.next_target += 1
@@ -212,11 +214,15 @@ class BrowserSessionCheck(unittest.TestCase):
         self.sleeps = []
         self.enterContext(patch.object(S, "time", SimpleNamespace(monotonic=time.monotonic,
                                                                 sleep=self.sleeps.append)))
-        self.browser = S.BrowserSession("edge", window=True, link_factory=self.link.factory,
-                                        gate_factory=self.gate.factory, clock=lambda: self.now,
-                                        load_timeout=0.04, settle_timeout=0.10,
-                                        extra_refused_ports={19001})
-        self.addCleanup(self.browser.close)
+        self.browser = self.make_browser(window=True)
+
+    def make_browser(self, *, window):
+        browser = S.BrowserSession("edge", window=window, link_factory=self.link.factory,
+                                   gate_factory=self.gate.factory, clock=lambda: self.now,
+                                   load_timeout=0.04, settle_timeout=0.10,
+                                   extra_refused_ports={19001})
+        self.addCleanup(browser.close)
+        return browser
 
     def refused(self, action, reason):
         with self.assertRaises(S.BrowserError) as caught:
@@ -243,18 +249,34 @@ class BrowserSessionCheck(unittest.TestCase):
         self.assertTrue(config.control_ports() <= self.gate.refused())
         with patch.multiple(config, V3_API_PORT=19110, REMOTE_PORT=19108, VOICE_LINK_PORT=19109):
             self.assertTrue({19108, 19109, 19110, 8408, 8409, 8410} <= self.gate.refused())
-        setup = [("Target.setDiscoverTargets", {"discover": True}, None),
-                 ("Target.createTarget", {"url": BLANK}, None),
-                 ("Target.attachToTarget", {"targetId": "target-1", "flatten": True}, None),
-                 ("Page.enable", None, SESSION), ("Network.enable", None, SESSION),
-                 ("Browser.setDownloadBehavior", {"behavior": "deny"}, None),
-                 ("Page.setLifecycleEventsEnabled", {"enabled": True}, SESSION)]
-        positions = [calls.index(call) for call in setup]
-        self.assertEqual(positions, sorted(positions))
-        self.assertLess(positions[-1], calls.index(self.probe_calls()[0]))
-        self.assertEqual(len(self.probe_calls()), 1)
-        self.trace.wait_for(("Target.closeTarget", {"targetId": "startup"}, None))
+        self.assertEqual([item for item in calls if item[0][0].isupper()],
+                         self.setup_calls({"url": BLANK, "newWindow": True, "background": True}))
+        self.assertEqual(self.link.targets, {"target-1": BLANK})
         self.refused(self.browser.location, "not_a_site")
+
+    def setup_calls(self, main_params):
+        name, = self.gate.names
+        return [
+            ("Target.setDiscoverTargets", {"discover": True}, None),
+            ("Target.createTarget", main_params, None),
+            ("Target.attachToTarget", {"targetId": "target-1", "flatten": True}, None),
+            ("Page.enable", None, SESSION),
+            ("Network.enable", None, SESSION),
+            ("Browser.setDownloadBehavior", {"behavior": "deny"}, None),
+            ("Page.setLifecycleEventsEnabled", {"enabled": True}, SESSION),
+            ("Page.getFrameTree", None, SESSION),
+            ("Target.createTarget", {"url": f"http://{name}/", "background": True}, None),
+            ("Target.closeTarget", {"targetId": "target-2"}, None),
+        ]
+
+    def test_headless_control_calls_match_original_setup(self):
+        self.make_browser(window=False).start()
+        startup_close = ("Target.closeTarget", {"targetId": "startup"}, None)
+        self.trace.wait_for(startup_close)
+        calls = [item for item in self.trace.items if item[0][0].isupper()]
+        self.assertEqual(calls.count(startup_close), 1)
+        calls.remove(startup_close)
+        self.assertEqual(calls, self.setup_calls({"url": BLANK}))
 
     def test_link_start_and_setup_failures_close_link_and_gate(self):
         for method in ("start", "Network.enable"):
@@ -267,6 +289,7 @@ class BrowserSessionCheck(unittest.TestCase):
                 self.assertEqual(self.trace.items.count(("gate.stop",)), 1)
 
     def test_gate_check_passes_on_third_attempt(self):
+        self.browser = self.make_browser(window=False)
         self.gate.passes = {3}
         self.browser.start()
         self.assertTrue(self.browser.alive)
@@ -289,6 +312,7 @@ class BrowserSessionCheck(unittest.TestCase):
             self.assertLess(forget, self.trace.items.index(closed))
 
     def test_gate_check_failure_closes_everything(self):
+        self.browser = self.make_browser(window=False)
         self.gate.passes.clear()
         message = self.refused(self.browser.start, "gate_bypassed")
         self.assertEqual(message, "The browser did not use Jarvis's network gate.")
@@ -298,7 +322,6 @@ class BrowserSessionCheck(unittest.TestCase):
 
     def test_refused_open_never_calls_link(self):
         self.browser.start()
-        self.trace.wait_for(("Target.closeTarget", {"targetId": "startup"}, None))
         self.now += 301
         count = len(self.trace.items)
         urls = ("http://192.0.2.1/", "http://localhost/", "http://127.0.0.1/",
@@ -372,7 +395,8 @@ class BrowserSessionCheck(unittest.TestCase):
         self.assertEqual(len(self.probe_calls()), 2)
         visits = self.trace.items.count(("Page.navigate", {"url": PUBLIC}, SESSION))
         self.now += 301
-        self.refused(lambda: self.browser.open(PUBLIC), "gate_bypassed")
+        with patch.multiple(S, _CHECK_TIMEOUT=0.01, _CHECK_RETRY=0):
+            self.refused(lambda: self.browser.open(PUBLIC), "gate_bypassed")
         self.assertEqual(len(self.probe_calls()), 5)
         self.assertEqual(self.trace.items.count(("Page.navigate", {"url": PUBLIC}, SESSION)), visits)
         self.assert_closed()
@@ -418,10 +442,12 @@ class BrowserSessionCheck(unittest.TestCase):
         self.browser.start()
         self.link.target_created("popup", BLANK)
         self.link.target_created("worker", BLANK, kind="service_worker")
-        self.link.emit("Page.javascriptDialogOpening", {"message": "fake message"})
-        self.trace.wait_for(("Page.handleJavaScriptDialog", {"accept": False}, SESSION))
+        for kind in ("alert", "confirm", "prompt", "beforeunload"):
+            self.link.emit("Page.javascriptDialogOpening", {"type": kind, "message": "fake message"})
+        self.trace.wait_for(("Page.handleJavaScriptDialog", {"accept": False}, SESSION), count=3)
+        self.trace.wait_for(("Page.handleJavaScriptDialog", {"accept": True}, SESSION))
         self.assertEqual(self.link.targets, {"target-1": BLANK, "worker": BLANK})
-        self.assertEqual(self.browser._tab.popups_closed, 2)  # Startup page and popup.
+        self.assertEqual(self.browser._tab.popups_closed, 1)
         self.assertTrue(self.browser.alive)
 
     def test_unconfirmed_blank_closes_browser(self):
@@ -654,6 +680,94 @@ class BrowserSessionCheck(unittest.TestCase):
         self.assert_closed()
         self.assertEqual(self.trace.items.count(("gate.stop",)), 1)
         self.assertEqual(self.trace.items.count(("link.close",)), 1)
+
+    def test_main_target_loss_closes_the_link_and_unblocks_an_in_flight_call(self):
+        for method, params in (
+            ("Target.targetDestroyed", {"targetId": "target-1"}),
+            ("Target.targetCrashed", {"targetId": "target-1"}),
+            ("Target.detachedFromTarget", {"sessionId": SESSION}),
+        ):
+            with self.subTest(method=method):
+                self.gate.passes.add(len(self.gate.names) + 1)
+                self.link.next_target = 0
+                self.trace.items.clear()
+                self.browser.start()
+
+                def lose_tab(_url):
+                    self.link.emit(method, params, session=None)
+                    self.assertFalse(self.browser.alive)
+                    self.trace.wait_for(("link.close",))
+                    raise LinkError(FILE)
+
+                self.link.navigation = lose_tab
+                for url in (PUBLIC, OTHER):
+                    self.assertEqual(self.refused(lambda: self.browser.open(url), "closed"),
+                                     "The browser session is closed.")
+                self.browser.close()
+                self.assertEqual(self.trace.items.count(("link.close",)), 1)
+
+    def test_main_target_lost_before_setup_records_the_reply(self):
+        for command, event, params in (
+            ("Target.createTarget", "Target.targetDestroyed", {"targetId": "target-1"}),
+            ("Target.createTarget", "Target.targetCrashed", {"targetId": "target-1"}),
+            ("Target.attachToTarget", "Target.detachedFromTarget", {"sessionId": SESSION}),
+        ):
+            with self.subTest(event=event):
+                self.link.next_target = 0
+                self.trace.items.clear()
+                original = self.link.call
+
+                def close_before_reply(method, *args, **kwargs):
+                    result = original(method, *args, **kwargs)
+                    if method == command:
+                        self.link.emit(event, params, session=None)
+                    return result
+
+                with patch.object(self.link, "call", side_effect=close_before_reply):
+                    self.assertEqual(self.refused(self.browser.start, "closed"),
+                                     "The browser session is closed.")
+                self.assertEqual(self.gate.names, [])
+                self.assert_closed()
+
+    def test_main_target_loss_discards_a_late_document_reply(self):
+        self.browser.start()
+        self.link.frame(PUBLIC)
+
+        def late_reply():
+            self.link.emit("Target.targetDestroyed", {"targetId": "target-1"}, session=None)
+            return {"result": {"type": "string", "value": "none"}}
+
+        self.link.document_reply = late_reply
+        self.assertEqual(
+            self.refused(lambda: self.browser.document_call(PUBLIC.rstrip("/"), signin.INSPECT, None),
+                         "closed"),
+            "The browser session is closed.",
+        )
+
+    def test_death_during_navigation_or_document_call_reports_closed(self):
+        def disconnect(*args):
+            self.link.alive = False
+            raise LinkError(FILE)
+
+        self.gate.passes = {1, 2, 3}
+        for operation in ("navigate", "read", "signin"):
+            with self.subTest(operation=operation):
+                self.browser.start()
+                self.assertEqual(self.browser.open(PUBLIC).outcome, "loaded")
+                location = self.browser.location()
+                if operation == "navigate":
+                    self.link.navigation = disconnect
+                    call = lambda: self.browser.open(OTHER)
+                elif operation == "read":
+                    self.link.document_reply = disconnect
+                    call = lambda: self.browser.read_call(location)
+                else:
+                    self.link.document_reply = disconnect
+                    call = lambda: self.browser.document_call(PUBLIC.rstrip("/"), signin.ACT, [])
+                self.assertEqual(self.refused(call, "closed"), "The browser session is closed.")
+                self.assertFalse(self.browser.alive)
+                self.link.navigation = self.link.loaded
+                self.browser.close()
 
 
 if __name__ == "__main__":

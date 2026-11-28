@@ -264,13 +264,14 @@ def _test_login(args):
     try:
         store = _login_store()
         login = find_login(store, args.name)
-        session = _login_session(login.browser, window=args.window)
+        window = not args.hidden
+        session = _login_session(login.browser, window=window)
         try:
             if args.page is None or canonical_origin(args.page) == login.origin:
                 session.start()
             outcome = sign_in(session, store, login.name, page=args.page)
             line = f"{login.name}: {outcome.detail}"
-            wait_for_enter = args.window and sys.stdin.isatty()
+            wait_for_enter = window and sys.stdin.isatty()
             if wait_for_enter:
                 print(line, flush=True)
                 try:
@@ -551,7 +552,8 @@ def add_commands(sub, *, voice=True):
     test = login_sub.add_parser("test", help="try a saved login in the browser")
     test.add_argument("name")
     test.add_argument("--page", metavar="URL", help="sign-in page on the saved site")
-    test.add_argument("--window", action="store_true", help="show the browser window")
+    test.add_argument("--window", action="store_true", help=argparse.SUPPRESS)
+    test.add_argument("--hidden", action="store_true", help="run the browser headless")
 
 
 def main(argv: list[str]) -> int:

@@ -15,7 +15,7 @@ from jarvis.v3.logins import LoginError, _validate_name, canonical_origin
 from .link import LinkError, bridge_available
 from .read import Ref, read_page
 from .service import BrowserBusy, BrowserUnavailable
-from .session import BrowserError, Location, _http_origin, _read_origin, settle
+from .session import BrowserError, Location, _CLOSED, _http_origin, _read_origin, settle
 from .signin import _DETAILS, find_login, sign_in
 
 
@@ -78,6 +78,7 @@ def _fixed_errors(method):
             return "Error: The browser is unavailable."
         except BrowserError as exc:
             return {
+                "closed": f"Error: {_CLOSED}",
                 "moved": _MOVED,
                 "refused": _REFUSED,
                 "not_a_site": "Refused: The browser is not showing a public site.",
