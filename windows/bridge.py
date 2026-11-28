@@ -212,7 +212,7 @@ def find_window(spec: dict) -> int | None:
     return hits[0] if hits else None
 
 
-def _force_foreground(hwnd: int) -> bool:
+def _force_foreground(hwnd: int, *, alt_tap: bool = True) -> bool:
     """Actually raise a window, working around Windows' foreground lock.
 
     A bare SetForegroundWindow from a process that is not already in the
@@ -248,7 +248,7 @@ def _force_foreground(hwnd: int) -> bool:
         if user32.GetForegroundWindow() == hwnd:
             return True
 
-        if attempt == 0:
+        if attempt == 0 and alt_tap:
             user32.keybd_event(VK_MENU, 0, 0, 0)
             user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
         time.sleep(0.2)
@@ -1176,7 +1176,7 @@ class WindowsDesktop:
         # Windows verification pending: restore only when minimized and verify the final foreground.
         if self.user.IsIconic(hwnd):
             self.user.ShowWindow(hwnd, 9)  # SW_RESTORE
-        _force_foreground(hwnd)
+        _force_foreground(hwnd, alt_tap=False)  # no key press reaches whatever is in front
         time.sleep(0.1)
         return self.foreground() == hwnd
 
@@ -1255,8 +1255,8 @@ def op_windows(_req):
 
 def op_window_front(req):
     window = req.get("window")
-    hwnd = _WINDOW_GUARD.forward(window)
     _WINDOW_DESKTOP.require_idle_input()
+    hwnd = _WINDOW_GUARD.forward(window)  # judged last, right before the window is raised
     if not _WINDOW_DESKTOP.bring_forward(hwnd):
         raise Refused("Windows did not bring that window to the front.")
     if _WINDOW_GUARD.forward(window) != hwnd:

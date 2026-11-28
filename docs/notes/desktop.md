@@ -148,6 +148,14 @@ Clicking, scrolling and switching windows (same day, the next change):
   `refused` (the bridge said no, nothing happened) or `failed` (it may or may
   not have happened). If the start line cannot be written, nothing is sent. The
   driving code, pictures and window ids are never written.
+- **Stop.** After `jarvis computer stop` returns, no further input is written to
+  the bridge: the bridge session holds a send gate from a request's last
+  permission check until its bytes are written, and stop takes that gate (for
+  at most two seconds, so a stuck send cannot hold a stop up). A request already
+  written may still complete, and its outcome is logged. An action aimed with a
+  screenshot or list that a parallel command has since replaced is not sent.
+  Bringing a window forward never taps a key to get past the foreground lock,
+  so it can be refused where the older app tools would have succeeded.
 - **No approval card** (owner decision). The limits are the window guard, the
   action log and the written instructions that `jarvis computer guide` prints
   (`jarvis/v3/prompts/computer_guide.md`): what the driving thread must not do

@@ -46,7 +46,7 @@ class ComputerBridgeCheck(unittest.TestCase):
             method = getattr(scope["WindowsDesktop"], name)
             setattr(self.desktop, name, method.__get__(self.desktop))
 
-    def raise_target(self, hwnd):
+    def raise_target(self, hwnd, **_):
         self.desktop.front = hwnd
 
     def front(self, *, paired=True, request=None):
@@ -54,13 +54,13 @@ class ComputerBridgeCheck(unittest.TestCase):
 
     def test_raises_the_window_without_resizing(self):
         self.assertEqual(self.front(), {"front": True})
-        self.force.assert_called_once_with(10)
+        self.force.assert_called_once_with(10, alt_tap=False)
         self.desktop.user.ShowWindow.assert_not_called()
 
     def test_restores_a_minimized_target_before_raising(self):
         self.desktop.user.IsIconic.return_value = True
 
-        def raise_after_restore(hwnd):
+        def raise_after_restore(hwnd, **_):
             self.desktop.user.ShowWindow.assert_called_once_with(hwnd, 9)
             self.raise_target(hwnd)
 
@@ -81,10 +81,10 @@ class ComputerBridgeCheck(unittest.TestCase):
         self.force.return_value = True
         with self.assertRaisesRegex(Refused, "did not bring that window to the front"):
             self.front()
-        self.force.assert_called_once_with(10)
+        self.force.assert_called_once_with(10, alt_tap=False)
 
     def test_rechecks_the_window_identity_after_raising(self):
-        def replace(hwnd):
+        def replace(hwnd, **_):
             self.raise_target(hwnd)
             self.desktop.pids[hwnd] += 1
 

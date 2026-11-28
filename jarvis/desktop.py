@@ -56,6 +56,9 @@ class DesktopSession:
         self._stream: Any = None
         self._lock = threading.Lock()
         self._requests = threading.Lock()
+        # Held from a request's last `current()` check until its bytes are written. A caller that
+        # revokes permission while holding it knows that nothing it no longer wants goes out after.
+        self.send_gate = threading.Lock()
         self._handshake: socket.socket | None = None
         self._managed = managed
         self._accept_thread: threading.Thread | None = None
@@ -209,14 +212,18 @@ class DesktopSession:
                     raise DesktopError("the desktop bridge disconnected.")
                 if require_pair and not self._paired:
                     raise DesktopError("Start the paired Windows desktop bridge to use it from HUD chats.")
-                if current is not None and not current():
-                    raise DesktopError("The owner chat turn is no longer current.")
-                self._next_id += 1
-                payload = {"id": self._next_id, "op": op, **fields}
             try:
                 conn.settimeout(timeout)
-                stream.write((json.dumps(payload) + "\n").encode())
-                stream.flush()
+                with self.send_gate:
+                    with self._lock:
+                        if self._conn is not conn:
+                            raise DesktopError("the desktop bridge disconnected.")
+                        if current is not None and not current():
+                            raise DesktopError("The owner chat turn is no longer current.")
+                        self._next_id += 1
+                        payload = {"id": self._next_id, "op": op, **fields}
+                    stream.write((json.dumps(payload) + "\n").encode())
+                    stream.flush()
                 line = stream.readline()
             except (OSError, ValueError) as exc:
                 self._drop_peer(conn, stream)

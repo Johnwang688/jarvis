@@ -63,13 +63,33 @@ def find_menu(probe, size):
     return None
 
 
+class WrongWindow(Exception):
+    """The front window is not the check's Notepad, so the run must not act any further."""
+
+
 def check(drive, code, ask, report, open_program, records):
     """The whole run. `ask(op, **fields)` reaches the bridge directly, for read-only looks."""
+    try:
+        _check(drive, code, ask, report, open_program, records)
+    except WrongWindow:
+        report.out("      Stopping here: nothing is clicked in any other window.")
+    finally:
+        drive.stop("check finished")
+
+
+def _check(drive, code, ask, report, open_program, records):
     out = report.out
 
     def look(name):
+        """A new screenshot. Every click and wheel turn after it lands in the window it shows,
+        so anything but the check's Notepad ends the run before the next action."""
         time.sleep(base.SETTLE)
-        return report.step(f"screenshot ({name})", lambda: drive.screenshot(code))
+        shot = report.step(f"screenshot ({name})", lambda: drive.screenshot(code))
+        if shot is not None and not is_check_window(shot):
+            report.verdict(f"the front window is still the check's Notepad ({name})", False,
+                           f"program {shot['app'] or '?'}")
+            raise WrongWindow
+        return shot
 
     def numbered():
         rows = report.step("windows", lambda: drive.windows(code))
@@ -98,11 +118,7 @@ def check(drive, code, ask, report, open_program, records):
     start = look("start")
     if start is None:
         return
-    report.verdict("the front window is the check's Notepad", is_check_window(start),
-                   f"program {start['app'] or '?'}, size {start['size']}")
-    if not is_check_window(start):
-        out("      Stopping here: nothing is clicked in any other window.")
-        return
+    out(f"      the front window is the check's Notepad, size {start['size']}")
     x, y = start["size"][0] // 2, start["size"][1] // 2
 
     # 2. Click and wheel, through the driving code.
@@ -168,9 +184,8 @@ def check(drive, code, ask, report, open_program, records):
             report.verdict("a click needs a new screenshot after switching windows", False, "the click went through")
         except ComputerError:
             report.verdict("a click needs a new screenshot after switching windows", True, "refused")
-        back = look("after bringing Notepad forward")
-        if back is not None:
-            report.verdict("Notepad is in front again", is_check_window(back), f"program {back['app'] or '?'}")
+        if look("after bringing Notepad forward") is not None:
+            report.verdict("Notepad is in front again", True, "the new screenshot shows it")
 
     # 5. The action log, and stopping.
     states = [record.get("state") for record in records]

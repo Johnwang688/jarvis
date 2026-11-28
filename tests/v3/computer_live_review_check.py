@@ -44,12 +44,13 @@ class FakeWindows:
     """A Notepad showing the check file, one other window, and later Character Map."""
 
     def __init__(self, *, reversed_wheel=False, menus_reachable=False, charmap_takes_front=True,
-                 notepad_title="scroll-check.txt - Notepad", stolen_after=None):
+                 notepad_title="scroll-check.txt - Notepad", stolen_after=None, other_accepts_input=False):
         self.connected, self.calls = True, []
         self.front, self.top, self.menu_open, self.charmap = None, 2000, False, False
         self.reversed_wheel, self.menus_reachable = reversed_wheel, menus_reachable
         self.charmap_takes_front, self.notepad_title = charmap_takes_front, notepad_title
         self.stolen_after = stolen_after  # the other window takes the front after this many listings
+        self.other_accepts_input = other_accepts_input
         rng = Random(7)
         self.page = Image.new("L", (SIZE[0], 6000), "white")
         draw = ImageDraw.Draw(self.page)
@@ -92,6 +93,8 @@ class FakeWindows:
             return {"windows": self.rows()}
         if op == "window_screenshot" and fields["window"] == OTHER:
             return self.picture()  # looking at the front window is allowed; acting on it is not
+        if fields["window"] == OTHER and self.other_accepts_input and op != "window_front":
+            return {"name": "Example", "role": "document", "rect": [0, 0, 1, 1]}  # recorded in self.calls
         if fields["window"] != NOTEPAD:
             raise AssertionError(f"{op} reached a window other than the check's Notepad")
         if op == "window_front":
@@ -160,8 +163,19 @@ class ComputerLiveReviewCheck(unittest.TestCase):
 
     def test_a_window_that_takes_the_front_before_the_first_picture_stops_the_run(self):
         desktop, report, output = self.run_check(stolen_after=1)
-        self.assertEqual(report.failed, ["the front window is the check's Notepad"], output)
+        self.assertEqual(report.failed, ["the front window is still the check's Notepad (start)"], output)
         self.assertEqual({op for op, _ in desktop.calls}, {"windows", "window_screenshot"})
+
+    def test_a_window_that_takes_the_front_later_gets_no_click_or_wheel(self):
+        # From the review: only the first screenshot was checked, so a later one of another
+        # window would have been clicked and scrolled.
+        for listings in range(2, 11):
+            with self.subTest(listings=listings):
+                desktop, report, output = self.run_check(stolen_after=listings, other_accepts_input=True)
+                self.assertFalse([(op, fields) for op, fields in desktop.calls
+                                  if op in ("window_probe", "window_click", "window_scroll", "window_front")
+                                  and fields.get("window") == OTHER], output)
+                self.assertTrue(report.failed, output)
 
     def test_output_never_carries_a_window_title(self):
         _, _, output = self.run_check()

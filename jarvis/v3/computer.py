@@ -1,6 +1,7 @@
 """Memory-only grants for driving Windows, with a private action log."""
 
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
@@ -36,6 +37,8 @@ class ComputerActionLog:
                         or info.st_mode & 0o077 or info.st_nlink != 1):
                     raise OSError("The desktop action log must be a private regular file.")
                 if os.write(fd, line) != len(line):
+                    # Take the fragment back, or the next record would be glued to it.
+                    os.ftruncate(fd, info.st_size)
                     raise OSError("Incomplete desktop action log write.")
             finally:
                 os.close(fd)
@@ -71,15 +74,30 @@ class ComputerDrive:
             self._grant = None
         return enabled
 
+    @contextmanager
+    def _no_send(self):
+        """Hold off the bridge session's sends, so that after stop() returns nothing new goes out.
+
+        A send that is stuck must not hold up the owner's stop: after two seconds the grant is
+        revoked anyway.
+        """
+        gate = getattr(self._desktop, "send_gate", None)
+        held = gate is not None and gate.acquire(timeout=2)
+        try:
+            yield
+        finally:
+            if held:
+                gate.release()
+
     def start(self) -> str:
-        with self._lock:
+        with self._no_send(), self._lock:
             if not self._check_enabled():
                 raise ComputerError("Desktop driving is switched off.")
             self._grant = _Grant(secrets.token_urlsafe(32), "computer-" + secrets.token_hex(16))
             return self._grant.code
 
     def stop(self, reason: str = "") -> bool:
-        with self._lock:
+        with self._no_send(), self._lock:
             active = self._check_enabled() and self._grant is not None
             self._grant = None
             return active
@@ -107,17 +125,23 @@ class ComputerDrive:
             raise ComputerError("The desktop driving code is invalid or expired.")
         return grant
 
-    def _request(self, grant: _Grant, op: str, *, input_op=False, **fields):
-        if not self._current(grant):
-            raise ComputerError("The desktop driving grant ended.")
+    def _request(self, grant: _Grant, op: str, *, input_op=False, still=None, **fields):
+        """One bridge call. `still()` says whether the screenshot or list an action was aimed with is the latest."""
+        def unwanted():
+            if not self._current(grant):
+                return "The desktop driving grant ended."
+            if still is not None and not still():
+                return "A newer screenshot or window list replaced the one this action used. Look again."
+            return None
+
+        if (reason := unwanted()) is not None:
+            raise ComputerError(reason)
         try:
             result = self._desktop.request(op, timeout=30, require_pair=True, scope=grant.scope,
-                                           hud_sensitive=None, current=lambda: self._current(grant), **fields)
+                                           hud_sensitive=None, current=lambda: unwanted() is None, **fields)
         except DesktopError as exc:
-            if not self._current(grant):
-                # The session's own wording for a call that is no longer wanted is about chats.
-                raise ComputerError("The desktop driving grant ended.") from None
-            raise ComputerError(str(exc)) from None
+            # The session's own wording for a call that is no longer wanted is about chats.
+            raise ComputerError(unwanted() or str(exc)) from None
         except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             raise ComputerError("The desktop bridge returned an invalid reply.") from None
         # Once input was sent, keep its outcome even if the grant has ended.
@@ -220,7 +244,8 @@ class ComputerDrive:
             raise ComputerError("The desktop bridge returned an invalid control.")
         control = {"name": name[:200], "role": role[:200]}
         self._act(grant, op, window, {**point, "control": dict(control), **extra},
-                  {**point, "expect": {"name": name, "role": role}, **extra})
+                  {**point, "expect": {"name": name, "role": role}, **extra},
+                  still=lambda: self._latest(grant, "screenshot", shot))
         return {"control": control, "app": window.app, "title": window.title, **extra}
 
     def front(self, code, n) -> dict:
@@ -233,14 +258,18 @@ class ComputerDrive:
             raise ComputerError("Use a window number from the latest list.")
         self._require_log()
         window = windows[n - 1]
-        self._act(grant, "front", window, {}, {})
+        self._act(grant, "front", window, {}, {}, still=lambda: self._latest(grant, "windows", windows))
         return {"app": window.app, "title": window.title}
 
     def _require_log(self) -> None:
         if self._log is None:
             raise ComputerError("The desktop action log is unavailable.")
 
-    def _act(self, grant: _Grant, op: str, window: _Window, record: dict, fields: dict) -> None:
+    def _latest(self, grant: _Grant, kind: str, value) -> bool:
+        with self._lock:
+            return getattr(grant, kind) is value
+
+    def _act(self, grant: _Grant, op: str, window: _Window, record: dict, fields: dict, *, still) -> None:
         if not self._current(grant):
             raise ComputerError("The desktop driving grant ended.")
         id_ = secrets.token_hex(16)
@@ -251,7 +280,7 @@ class ComputerDrive:
             raise ComputerError("Could not write the desktop action log.") from None
         state, detail = "failed", ""
         try:
-            self._request(grant, f"window_{op}", input_op=True, window=window.id, **fields)
+            self._request(grant, f"window_{op}", input_op=True, still=still, window=window.id, **fields)
             if op == "front":
                 with self._lock:
                     if self._grant is grant:
