@@ -132,7 +132,9 @@ class DesktopSession:
                     if self._handshake is conn:
                         self._handshake = None
                 continue
-            with self._lock:
+            # Wait for a request in flight: replacing its connection would fail a
+            # call whose action may already have happened. stop() still ends both.
+            with self._requests, self._lock:
                 if self._handshake is conn:
                     self._handshake = None
                 if self._server is not server or (self._conn is not None and self._paired and not paired):
@@ -184,6 +186,8 @@ class DesktopSession:
                 raise DesktopError("The desktop bridge listener is stopped.")
         else:
             self.start()
+        with self._lock:
+            server = self._server
         # The bridge redials every couple of seconds, so a Jarvis that just
         # started has to give it a moment to find the new listener. Without
         # this wait the first desktop call of every session reports "no
@@ -197,6 +201,9 @@ class DesktopSession:
             )
         with self._requests:
             with self._lock:
+                if server is None or self._server is not server:
+                    # A call that waited across a stop must not run on a later listener.
+                    raise DesktopError("The desktop bridge listener stopped.")
                 conn, stream = self._conn, self._stream
                 if conn is None or stream is None:
                     raise DesktopError("the desktop bridge disconnected.")
@@ -289,8 +296,15 @@ class DesktopSession:
             for name, spec in sorted(config.DESKTOP_APPS.items())
         )
         if not self.connected:
-            self.start()
-            self.wait_for_bridge(CONNECT_GRACE)
+            if not self._managed:
+                try:
+                    self.start()
+                except OSError:
+                    return ("Another Jarvis process holds the desktop bridge port, so the bridge "
+                            f"reports to it and not to this command.\n\nRegistered apps:\n{registry}")
+            # A managed session is opened only by its daemon; asking never opens it.
+            if self.bound_port is not None:
+                self.wait_for_bridge(CONNECT_GRACE)
         if not self.connected:
             return (
                 "The Windows desktop bridge is NOT connected.\n"
