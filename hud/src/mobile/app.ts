@@ -62,6 +62,8 @@ import { waitingCount, type InboxRow } from "../lib/inbox";
 import { brandButton, orbState, renderOrb } from "./orb";
 import { inboxIcon, chatsIcon, settingsIcon, lockIcon, unlockIcon } from "./icons";
 import { createProjectFolds } from "./folds";
+import { Drawer, drawerSwipe } from "./drawer";
+import { openOverlay, refreshOverlays, type Overlay } from "./overlays";
 import { getJson, errorWord, postJson, reachOfGot, reachOfPosted, type Got, type Posted, type Reach } from "./net";
 import { absoluteWords, agoWords, refreshTimes } from "./reltime";
 import { cardView, deadlineAt, deadlineWords, parseDetail, parseRule, parseSecure, type CardState, type Rule, type Secure } from "./card";
@@ -88,7 +90,7 @@ import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
-import { reviewLine, reviewView, type ReviewActions } from "./review";
+import { reviewLine, reviewReachable, reviewView, type ReviewActions } from "./review";
 import { ScrollMemory, byAttr, menuView, sheetView, signOutSheet, trayView, type MenuItem } from "./nav";
 import { RowScroll } from "./rowScroll";
 import { staleAt } from "../lib/approvalSummary";
@@ -304,9 +306,11 @@ export class PhoneApp {
   /** The open chat's Needs-you tray folded to its bar by the owner. */
   trayFolded = false;
   private menuWrap: HTMLElement;
+  private drawer: Drawer | null = null;
+  private unbindEdge: (() => void) | null = null;
+  private cardOverlay: Overlay | null = null;
   private signOutOverlay: { close: () => void } | null = null;
   private lockNote = "";
-  private readonly topBar: HTMLElement;
   private readonly tabBar: HTMLElement;
   private readonly sheetHost: HTMLElement;
   private readonly chatViewport: ResizeObserver | null;
@@ -374,7 +378,10 @@ export class PhoneApp {
     frame.dataset.screen = "app";
     frame.dataset.stale = "false";
     const top = el("header", "top");
-    this.brand = brandButton(() => this.deps.onBrand?.());
+    this.brand = brandButton(() => {
+      this.deps.onBrand?.();
+      this.openDrawer();
+    });
     top.append(this.brand);
     // The pill opens Lock now and Settings.
     // The pill remains the phone's copy of the unlock window, never authorization.
@@ -409,7 +416,6 @@ export class PhoneApp {
       settings: make("settings", "Settings", settingsIcon) };
     this.sheetHost = el("div", "m-sheet-host");
     frame.append(top, this.banner, this.main, nav, this.sheetHost);
-    this.topBar = top;
     this.tabBar = nav;
     // A tap outside an open ⋯ menu closes it.
     frame.addEventListener("click", (e) => {
@@ -446,6 +452,21 @@ export class PhoneApp {
       unauthorized: () => void this.recheckSession(),
       online: () => this.online,
     });
+    this.drawer = new Drawer(frame, this.brand, this.folds, () => this.drawerState(), {
+      section: (section) => {
+        // Tasks is an Inbox filter; a previous task's Back filter must not override this shortcut.
+        if (section === "tasks") this.taskBack = "tasks";
+        if (section === "chats") this.thread = null;
+        if (section === "inbox") this.filter = null;
+        this.show(section);
+      },
+      thread: (thread) => { void this.openThread(thread.id, thread); },
+      lock: () => { void this.lockNow(); },
+    });
+    this.unbindEdge = drawerSwipe(frame, "open", () => this.canOpenDrawer() && !this.drawer?.isOpen, {
+      begin: () => this.openDrawer(), move: (dx) => this.drawer?.follow(dx),
+      end: (commit) => this.drawer?.finishOpening(commit),
+    });
     this.unsubscribeFolds = this.folds.subscribe(() => {
       if (this.stopped || this.tab !== "chats" || this.thread || this.sheet) return;
       const focus = document.activeElement;
@@ -479,7 +500,11 @@ export class PhoneApp {
   }
 
   stop(): void {
+    this.unbindEdge?.();
+    this.unbindEdge = null;
+    this.drawer?.stop();
     this.signOutOverlay?.close();
+    this.cardOverlay?.close(); this.cardOverlay = null;
     this.stopped = true;
     this.unsubscribeFolds();
     this.rowScroll.stop();
@@ -710,6 +735,7 @@ export class PhoneApp {
     });
     if (!report) return;
     this.refreshSettings();
+    this.drawer?.refresh();
     const first = this.reviewFirst;
     this.reviewFirst = false;
     if (first && report.opensHere && this.tab === "inbox" && !this.card) {
@@ -913,9 +939,12 @@ export class PhoneApp {
   }
 
   openCard(row: InboxRow): void {
+    // Navigation finishes before the detail opens; closing it returns to the brand.
+    const fromDrawer = !!this.drawer?.isOpen;
+    this.drawer?.close();
     this.flash = "";
     this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
-    this.invoker = this.tab === "review" ? "m-review-open-card" : "m-item-review";
+    this.invoker = fromDrawer ? "m-brand" : this.tab === "review" ? "m-review-open-card" : "m-item-review";
     // PX-4: the sheet opens over whatever the owner is looking at (the list, a chat, the review), its scroll kept.
     if (this.menuOpen) { this.menuOpen = null; this.renderMenu(); }
     this.render();
@@ -1666,6 +1695,7 @@ export class PhoneApp {
       everOpened: this.everOpened, firstOpenTimedOut: this.firstOpenTimedOut,
       secure: this.secure, working, lastRead: this.lastRead, now: this.now() }));
     this.refreshSettings();
+    this.drawer?.refresh();
   }
 
   /** The lock pill: the phone's copy of the window (display only). */
@@ -1688,12 +1718,14 @@ export class PhoneApp {
     pill.setAttribute("aria-controls", "m-menu-panel");
     pill.setAttribute("aria-expanded", String(this.menuOpen === "app"));
     this.refreshSettings();
+    this.drawer?.refresh();
   }
 
   async loadChats(): Promise<void> {
     const [p, t] = [await this.read("/m/api/projects"), await this.read("/m/api/threads")];
     if (p && "body" in p) this.applyRead("projects", decodeProjects(p.body), (value) => { this.projects = value; });
     if (t && "body" in t) this.applyRead("threads", decodeThreads(t.body), (value) => { this.threads = value; });
+    this.drawer?.refresh();
     if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
@@ -1707,6 +1739,7 @@ export class PhoneApp {
     this.applyRead(`threads?project=${encodeURIComponent(projectId)}`, decodeThreads(r.body), (value) => {
       this.threads = this.threads.filter((t) => t.project_id !== projectId).concat(value);
     });
+    this.drawer?.refresh();
     if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
@@ -2177,10 +2210,10 @@ export class PhoneApp {
   }
 
   private menuInert(): void {
-    const open = this.menuOpen === "app" || !!this.signOutOverlay;
-    if (this.signOutOverlay) this.topBar.setAttribute("inert", "");
+    if (refreshOverlays(this.frame)) return;
+    const open = this.menuOpen === "app";
     for (const node of [this.brand, this.main, this.tabBar, this.banner]) {
-      if (open || this.card) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+      if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
     }
   }
 
@@ -2254,6 +2287,33 @@ export class PhoneApp {
     if (tab === "chats" && !this.thread) void this.loadChats();
   }
 
+  private canOpenDrawer(): boolean {
+    return !this.stopped && !this.card && !this.sheet && !this.signOutOverlay
+      && !(this.tab === "chats" && this.thread) && ["inbox", "chats", "settings"].includes(this.tab);
+  }
+
+  private openDrawer(): void {
+    if (this.stopped || this.card || this.sheet || this.signOutOverlay) return;
+    if (this.menuOpen) this.toggleMenu(null);
+    this.drawer?.open();
+  }
+
+  private drawerState() {
+    const connection = this.brand.querySelector<HTMLElement>('[data-testid="m-conn"]')!;
+    return {
+      section: this.tab === "inbox" && this.filter === "tasks" ? "tasks" as const : this.tab,
+      connection: { state: connection.dataset.state, tone: connection.dataset.tone, word: connection.textContent ?? "Connecting…" } as ReturnType<typeof orbState>,
+      lastRead: this.lastRead === null ? "not read yet" : absoluteWords(this.lastRead, this.now()),
+      projects: this.projects, threads: this.threads,
+      needs: new Set([...(this.inbox ?? []).filter(waiting).flatMap((r) => r.thread_id ? [r.thread_id] : []),
+        ...(this.entries ?? []).filter((e) => e.status === "needs_input").map((e) => e.thread_id)]),
+      running: new Set((this.entries ?? []).filter((e) => e.status === "working").map((e) => e.thread_id)),
+      count: this.inbox ? waitingCount(this.inbox) : 0,
+      review: reviewReachable(this.review) ? this.review!.open : 0,
+      unlock: pillLabel(this.unlock.mirror, this.now()), unlocked: this.unlock.mirror.open(), lockNote: this.lockNote,
+    };
+  }
+
   private confirmSignOut(): void {
     if (this.signOutOverlay) return;
     this.signOutOverlay = signOutSheet(this.frame, () => void this.signOut(), () => {
@@ -2297,6 +2357,7 @@ export class PhoneApp {
 
   private renderBadge(): void {
     this.refreshSettings();
+    this.drawer?.refresh();
     const n = this.inbox ? waitingCount(this.inbox) : 0;
     const icon = this.tabs.inbox.querySelector(".m-tab-icon")!;
     let badge = icon.querySelector<HTMLElement>(".m-tab-badge");
@@ -2378,6 +2439,7 @@ export class PhoneApp {
         && n.querySelector(`[data-testid="${this.invoker}"]`));
       const row = holder?.querySelector<HTMLElement>(`[data-testid="${this.invoker}"]`);
       if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
+      else if (this.invoker === "m-brand") this.brand.focus({ preventScroll: true });
       else row?.focus({ preventScroll: true });
     }
   }
@@ -2494,13 +2556,20 @@ export class PhoneApp {
     this.held = this.card ? key : null;
     this.drawSheet();
     this.moveFocus(kept);
+    this.drawer?.refresh();
   }
 
   /** The approval sheet over the view (§3.3): `cardView`, unchanged, in a bottom sheet; nothing behind it takes a tap or Tab. */
   private drawSheet(): void {
     const open = !!this.card;
-    for (const node of [this.topBar, this.banner, this.main, this.tabBar]) {
-      if (open) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+    if (open && !this.cardOverlay) {
+      this.cardOverlay = openOverlay(this.frame, this.sheetHost, {
+        focus: () => this.sheetHost.querySelector<HTMLElement>('[data-testid="m-card-heading"]'),
+        restore: () => null, // moveFocus resolves the redrawn row or answer receipt.
+        dismiss: () => { if (this.card && !this.card.busy) this.goBack(); },
+      });
+    } else if (!open && this.cardOverlay) {
+      this.cardOverlay.close(); this.cardOverlay = null;
     }
     this.menuInert();
     if (open) this.frame.dataset.sheet = "open"; else delete this.frame.dataset.sheet;

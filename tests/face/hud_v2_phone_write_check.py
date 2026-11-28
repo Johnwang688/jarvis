@@ -228,7 +228,7 @@ def run(browser, check, until):
             page.wait_for_timeout(50)
         return predicate()
 
-    def clean():
+    def clean(forge=False):
         # Like CODE_SVG in vitest, by position rather than by class (a class and aria-hidden can be
         # forged by markup): an SVG is the app's only where code puts one, as the direct child of a
         # code-built control (the brand's orb, the lock pill's icon). Add a slot here with each new
@@ -236,24 +236,42 @@ def run(browser, check, until):
         header = 'html > body > main#app.app-root > .app > header.top'
         chats = 'html > body > main#app.app-root > .app > main.main > section.view[data-testid="m-chats"]'
         tabs = 'html > body > main#app.app-root > .app > nav.tabs'
+        drawer = 'html > body > main#app.app-root > .app > .m-drawer-host > aside.m-drawer[data-testid="m-drawer"]'
         icon_slots = (f'{header} > button[data-testid="m-brand"] > .m-orb > svg, '
                       f'{header} > .m-menu > button[data-testid="m-lock-pill"] > svg.m-icon:first-child, '
                       f'{chats} > section.project > h2.m-project-heading > button[data-testid="m-project-head"] > svg.m-icon:first-child, '
                       f'{tabs} > button[data-testid="m-tab-inbox"] > span.m-tab-icon > svg.m-icon, '
                       f'{tabs} > button[data-testid="m-tab-chats"] > span.m-tab-icon > svg.m-icon, '
-                      f'{tabs} > button[data-testid="m-tab-settings"] > span.m-tab-icon > svg.m-icon')
+                      f'{tabs} > button[data-testid="m-tab-settings"] > span.m-tab-icon > svg.m-icon, '
+                      f'{drawer} > .m-drawer-head > .m-drawer-identity > .m-orb > svg, '
+                      f'{drawer} > .m-drawer-body > button:is([data-testid="m-drawer-inbox"], '
+                      '[data-testid="m-drawer-chats"], [data-testid="m-drawer-review"], [data-testid="m-drawer-tasks"], '
+                      '[data-testid="m-drawer-settings"], [data-testid="m-drawer-project"]) > svg.m-icon:first-child, '
+                      f'{drawer} > .m-drawer-foot > .m-drawer-lock > svg.m-icon:first-child')
         server_text = (".plain-text, .chat-title, .m-project-name, .group, .subtitle, .brief, .m-notice, .headline, .m-why, "
                        ".reason, .pr-note, .pr-why, .pr-title, .pr-fixline, .m-error, .offline, .as-text, "
                        ".as-line, .m-review-text, .m-review-receipt, .card-line, .m-band-note, .m-deadline, "
                        ".option-text, .step-text, .step-body, .m-thread-title, .row-title, .msg-bubble, "
                        ".msg-body, .diff-status, .m-flash, .m-thread-project, .m-thread-provider, .m-limited, "
-                       ".tool, [data-testid$='-note'], [role='status']")
+                       ".m-drawer-label, .m-drawer-lock-label, .m-drawer-identity .conn, .tool, [data-testid$='-note'], [role='status']")
         other_markup = MARKUP.replace("svg, ", "")
-        return (page.locator(f".app :is({other_markup})").count() == 0
-                and page.locator(".app svg").evaluate_all("""(nodes, slots) => nodes.every(e =>
-                    e.matches(slots) && e.getAttribute('aria-hidden') === 'true')""", icon_slots)
-                and page.locator(f".app :is({server_text}) :is({MARKUP})").count() == 0
-                and page.evaluate("window.__pwned === undefined"))
+        # One evaluation keeps a live drawer redraw from racing the forged-node check.
+        return page.evaluate("""({slots, server, markup, other, forge}) => {
+            let forged;
+            if (forge) {
+                forged = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                forged.setAttribute('class', 'm-icon'); forged.setAttribute('aria-hidden', 'true');
+                document.querySelector('.m-drawer-label').append(forged);
+            }
+            try {
+                return !document.querySelector(`.app :is(${other})`)
+                    && [...document.querySelectorAll('.app svg')].every(e =>
+                        e.matches(slots) && e.getAttribute('aria-hidden') === 'true')
+                    && !document.querySelector(`.app :is(${server}) :is(${markup})`)
+                    && window.__pwned === undefined;
+            } finally { forged?.remove(); }
+        }""", {"slots": icon_slots, "server": server_text, "markup": MARKUP,
+                "other": other_markup, "forge": forge})
 
     def small_targets():
         return page.evaluate("""Array.from(document.querySelectorAll('.app button, .app select, .app textarea'))
@@ -286,6 +304,11 @@ def run(browser, check, until):
         project_head = tid("m-project-head").first
         check("RD-5 Chats: an idle project starts folded", project_head.get_attribute("aria-expanded") == "false")
         project_head.click()
+        tid("m-brand").click()
+        check("RD-6 drawer icons occupy only root-anchored code slots", clean())
+        # A forged icon in a server-text slot must fail, even with the code icon's attributes.
+        check("RD-6 forged drawer icon is rejected", not clean(forge=True))
+        tid("m-drawer-close").click()
         page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').click()
         until(lambda: tid("m-compose-text").count() == 1, timeout=8)
         box = tid("m-compose-text")
