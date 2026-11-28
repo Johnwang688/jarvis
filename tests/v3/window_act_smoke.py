@@ -34,6 +34,7 @@ MENUS = ("view", "edit", "file")
 # pixels; an open menu or a scrolled page of text changes far more.
 CHANGED = 0.002
 LINES = 400
+CHECK_FILE = "scroll-check"
 HANDS_OFF = 4
 SETTLE = 0.6
 WORDS = ("scroll", "check", "window", "bridge", "wheel", "notch", "page", "line", "text")
@@ -90,6 +91,8 @@ def content_shift(before, after):
     if changed_fraction(before, after, text_area=True) <= CHANGED:
         return 0
     first, second = (_pixels(shot, text_area=True)[:, ::4] for shot in (before, after))
+    if first.shape != second.shape:
+        return None  # the window changed size between the two pictures
     height = first.shape[0]
     still = numpy.abs(second - first).mean()
     best, shift = still, 0
@@ -102,11 +105,17 @@ def content_shift(before, after):
     return shift if shift and best < still / 2 else None
 
 
-def pick_window(before, after, app="notepad.exe"):
-    """The new window of `app`, else the frontmost one that was already open."""
+def pick_window(before, after, app="notepad.exe", showing=CHECK_FILE):
+    """The window of `app` whose title names the check file, a new window first.
+
+    Notepad may open the file as a tab in a window that was already open, so an
+    earlier window counts too, but only while it shows this file. A Notepad
+    window showing anything else is never picked.
+    """
     known = {row["window"] for row in before}
     ours = [row for row in after
-            if (row.get("app") or "").casefold() == app and row.get("access") == "drivable"]
+            if (row.get("app") or "").casefold() == app and row.get("access") == "drivable"
+            and showing in (row.get("title") or "").casefold()]
     return next((row for row in ours if row["window"] not in known), ours[0] if ours else None)
 
 
@@ -194,6 +203,12 @@ def drive(ask, window, report):
             "a negative amount scrolls down and a positive one up", all(standard),
             "as the tool describes" if all(standard) else
             "REVERSED: a negative amount scrolled up" if not any(standard) else "mixed results")
+    if moves[0][1]:
+        # The first turn moved the page, so the opposite turn has room to move it back.
+        back = moves[1][1] if len(moves) == 2 else None
+        report.verdict("the opposite turn moved the page back",
+                       bool(back) and (back > 0) != (moves[0][1] > 0),
+                       _describe(back) if len(moves) == 2 else "the second turn did not run")
 
 
 def _bridge_dir():
@@ -204,7 +219,7 @@ def _bridge_dir():
 def _scroll_file(prefix):
     folder = prefix / "smoke"
     folder.mkdir(exist_ok=True)
-    path = folder / "scroll-check.txt"
+    path = folder / f"{CHECK_FILE}.txt"
     # Lines of uneven length, so a scrolled page lines up with the earlier one at one offset only.
     rng = Random(7)
     path.write_text("".join(
@@ -251,7 +266,7 @@ def main():
                 return 1
             target = pick_window(before, listed["windows"])
         if target is None:
-            print("FAIL  no drivable Notepad window appeared within 15 seconds")
+            print("FAIL  no drivable Notepad window showing the check file appeared within 15 seconds")
             return 1
         print(f"PASS  Notepad window found. Hands off the mouse and keyboard; starting in {HANDS_OFF} s.")
         time.sleep(HANDS_OFF)
