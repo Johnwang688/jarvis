@@ -1,14 +1,21 @@
 """Command-line entry points for v3."""
 
 import argparse
+import base64
+from datetime import datetime
+import fcntl
 import getpass
 from http.client import HTTPConnection, HTTPException
 import json
 from math import isfinite
+import os
 from pathlib import Path
+import secrets
 import signal
 import sqlite3
+import stat
 import sys
+import tempfile
 import time
 import warnings
 
@@ -407,6 +414,135 @@ def voice_helper(args) -> int:
     return 1
 
 
+_COMPUTER_CODE_HELP = "Pass the code with --code or set JARVIS_COMPUTER_CODE."
+
+
+def _write_screenshot(path, image, *, directory=None):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600, dir_fd=directory), "wb") as output:
+        try:
+            output.write(image)
+            output.flush()
+        except OSError:
+            # Remove a partial output only while the name still identifies its file.
+            try:
+                entry = os.stat(path, dir_fd=directory, follow_symlinks=False)
+                if os.path.samestat(entry, os.fstat(output.fileno())):
+                    os.unlink(path, dir_fd=directory)
+            except OSError:
+                pass
+            raise
+
+
+def _save_screenshot(image, destination):
+    if destination is not None:
+        path = Path(destination).absolute()
+        _write_screenshot(path, image)
+        return path
+
+    uid = os.getuid()
+    folder = Path(tempfile.gettempdir()).absolute() / f"jarvis-computer-{uid}"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) & 0o077:
+            raise PermissionError("The screenshot folder must be private and owned by you.")
+        # Keep the save and retention pass together across concurrent CLI calls.
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        name = f"shot-{stamp}-{secrets.token_hex(4)}.png"
+        _write_screenshot(name, image, directory=directory)
+        with os.scandir(directory) as entries:
+            shots = sorted((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name)
+                           for entry in entries if entry.name != name and entry.name.startswith("shot-")
+                           and entry.name.endswith(".png") and entry.is_file(follow_symlinks=False))
+        for _, old in shots[:-19]:
+            os.unlink(old, dir_fd=directory)
+        return folder / name
+    finally:
+        os.close(directory)
+
+
+def _print_screenshot(data, destination) -> int:
+    image, size = data.get("image_b64"), data.get("size")
+    app, title = data.get("app"), data.get("title")
+    if (not isinstance(image, str) or not image or not isinstance(size, list)
+            or len(size) != 2 or any(type(side) is not int or side < 1 for side in size)
+            or not isinstance(app, str) or not isinstance(title, str)):
+        print("The v3 daemon returned an invalid screenshot.")
+        return 1
+    try:
+        picture = base64.b64decode(image, validate=True)
+    except ValueError:
+        print("The v3 daemon returned an invalid screenshot.")
+        return 1
+    try:
+        path = _save_screenshot(picture, destination)
+    except FileExistsError:
+        print("The screenshot output already exists.")
+        return 1
+    except OSError:
+        print("Could not save the screenshot to the requested output or private screenshot folder.")
+        return 1
+    print(path)
+    print("window: " + " ".join(app.splitlines()) + " - " + " ".join(title.splitlines()))
+    print(f"size: {size[0]}x{size[1]}")
+    return 0
+
+
+def computer_command(args) -> int:
+    action = args.action
+    path = "/v3/owner/computer"
+    body = {"action": action}
+    if action == "screenshot":
+        code = args.code if args.code is not None else os.environ.get("JARVIS_COMPUTER_CODE")
+        if not code:
+            print(_COMPUTER_CODE_HELP)
+            return 1
+        path += "/do"
+        body = {"op": action, "code": code}
+
+    port = config.V3_API_PORT
+    address = f"127.0.0.1:{port}"
+    connection = HTTPConnection("127.0.0.1", port, timeout=75 if action == "screenshot" else 15)
+    try:
+        connection.request("POST", path, json.dumps(body),
+                           {"Host": address, "Origin": f"http://{address}",
+                            "Content-Type": "application/json"})
+        response = connection.getresponse()
+        data = json.loads(response.read())
+    except (OSError, HTTPException, ValueError):
+        print("Could not reach the v3 daemon for desktop driving.")
+        return 1
+    finally:
+        connection.close()
+
+    if isinstance(data, dict):
+        message = data.get("message")
+        if response.status != 200 and isinstance(message, str):
+            print(message)
+            return 1
+        if response.status == 200:
+            if action == "screenshot":
+                return _print_screenshot(data, args.out)
+            if action == "start" and isinstance(data.get("code"), str) and data["code"]:
+                print(data["code"])
+                print(_COMPUTER_CODE_HELP)
+                return 0
+            if action == "stop" and isinstance(message, str):
+                print(message)
+                return 0
+            if action == "status" and all(type(data.get(key)) is bool for key in ("enabled", "driving", "bridge")):
+                enabled = "enabled" if data["enabled"] else "disabled"
+                driving = "active" if data["driving"] else "stopped"
+                bridge = "connected" if data["bridge"] else "disconnected"
+                print(f"Desktop driving {enabled}, grant {driving}, bridge {bridge}.")
+                return 0
+    print("The v3 daemon returned an unexpected desktop driving reply.")
+    return 1
+
+
 def _print_voice_status(voice):
     brain, brain_state, turns = voice.get("brain"), voice.get("brain_state"), voice.get("turns")
     if brain == "claude" and brain_state in ("idle", "warming", "running", "stopping", "closed"):
@@ -470,6 +606,15 @@ def add_commands(sub, *, voice=True):
         voice_sub = voice_cmd.add_subparsers(dest="action", required=True)
         for action in VOICE_ACTIONS:
             voice_sub.add_parser(action).set_defaults(func=voice_helper)
+
+    computer = sub.add_parser("computer", help="capture the front Windows window")
+    computer.set_defaults(func=computer_command)
+    computer_sub = computer.add_subparsers(dest="action", required=True)
+    for action in ("start", "stop", "status"):
+        computer_sub.add_parser(action)
+    screenshot = computer_sub.add_parser("screenshot")
+    screenshot.add_argument("--code", help="desktop driving code")
+    screenshot.add_argument("--out", type=Path, help="path for the new PNG file")
 
     agentd = sub.add_parser("agentd", help="run the v3 daemon in the foreground")
     agentd.set_defaults(func=run_daemon)
