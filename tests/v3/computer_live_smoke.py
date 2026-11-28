@@ -33,8 +33,10 @@ RAW_SCOPE = "computer-live-smoke"
 
 def is_check_window(reply):
     """Whether a screenshot or window row is the Notepad showing the check file."""
+    # The title starts with the file's name ("*" marks unsaved changes); a file that merely
+    # has the name somewhere in its own is another window.
     return ((reply.get("app") or "").casefold() == "notepad.exe"
-            and base.CHECK_FILE in (reply.get("title") or "").casefold())
+            and (reply.get("title") or "").casefold().lstrip("*").startswith(base.CHECK_FILE))
 
 
 def changed_box(before, after):

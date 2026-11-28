@@ -1255,8 +1255,11 @@ def op_windows(_req):
 
 def op_window_front(req):
     window = req.get("window")
+    hwnd = _WINDOW_GUARD.forward(window)
     _WINDOW_DESKTOP.require_idle_input()
-    hwnd = _WINDOW_GUARD.forward(window)  # judged last, right before the window is raised
+    # Judged again last, right before the window is raised: the checks above take time.
+    if _WINDOW_GUARD.forward(window) != hwnd:
+        raise Refused("The window changed. List windows again.")
     if not _WINDOW_DESKTOP.bring_forward(hwnd):
         raise Refused("Windows did not bring that window to the front.")
     if _WINDOW_GUARD.forward(window) != hwnd:

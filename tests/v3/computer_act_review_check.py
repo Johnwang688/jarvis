@@ -1,10 +1,13 @@
 """Regression tests from the independent review of click, scroll and window switching."""
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -79,12 +82,15 @@ class StopBeforeWireCheck(unittest.TestCase):
     def test_stop_and_start_take_the_send_gate_and_do_not_wait_long_for_a_stuck_send(self):
         gate = Mock()
         gate.acquire.return_value = True
-        drive = ComputerDrive(SimpleNamespace(connected=True, send_gate=gate), enabled=lambda: True)
+        desktop = SimpleNamespace(connected=True, send_gate=gate, drop_bridge=Mock())
+        drive = ComputerDrive(desktop, enabled=lambda: True)
         drive.start()
         drive.stop()
         self.assertEqual(gate.acquire.call_args_list, [unittest.mock.call(timeout=2)] * 2)
         self.assertEqual(gate.release.call_count, 2)
-        # A send that never finishes: the grant is revoked all the same, and the gate is not released by us.
+        desktop.drop_bridge.assert_not_called()
+        # A send that never finishes: the connection is closed so its bytes never arrive, the
+        # grant is revoked all the same, and the gate is not released by us.
         gate.reset_mock()
         gate.acquire.return_value = False
         code = drive.start()
@@ -92,13 +98,78 @@ class StopBeforeWireCheck(unittest.TestCase):
         with self.assertRaises(ComputerError):
             drive.screenshot(code)
         gate.release.assert_not_called()
+        self.assertEqual(desktop.drop_bridge.call_count, 2)
+
+    def test_stop_cuts_off_a_send_that_is_stuck(self):
+        # From the second review: stop gave up waiting after two seconds and the buffered click
+        # could still reach Windows when the bridge started reading again.
+        session = self.session()
+        conn = Mock()
+        session._conn = conn
+        sent, flushing = [], Event()
+        stream = session._stream = Mock()
+        stream.write.side_effect = lambda data: sent.append(json.loads(data)["op"])
+
+        def reply(result):
+            stream.readline.return_value = json.dumps({"id": session._next_id, "ok": True, "result": result}).encode()
+
+        def flush():
+            reply({"windows": [row(A, front=True)]})
+            if sent[-1] != "window_front":
+                return
+            flushing.set()
+            sent.pop()  # the bytes sit in the buffer; the bridge is not reading
+            for _ in range(800):
+                if conn.shutdown.called:
+                    raise BrokenPipeError("the connection was closed under the send")
+                time.sleep(0.01)
+            sent.append("window_front")  # the bridge read them after all
+
+        stream.flush.side_effect = flush
+        stream.close.side_effect = BrokenPipeError("bytes still buffered")
+        drive = ComputerDrive(session, enabled=lambda: True, log=lambda record: None)
+        code = drive.start()
+        drive.windows(code)
+        with ThreadPoolExecutor() as pool:
+            action = pool.submit(drive.front, code, 1)
+            self.assertTrue(flushing.wait(2))
+            started = time.monotonic()
+            self.assertTrue(drive.stop())
+            self.assertLess(time.monotonic() - started, 4)
+            with self.assertRaises(ComputerError):
+                action.result(timeout=4)
+        self.assertNotIn("window_front", sent)
+        self.assertFalse(session.connected)
+
+    def test_a_connection_dropped_before_the_last_check_gets_nothing_written(self):
+        session = self.session()
+        stream = session._stream = Mock()
+        session._conn = SimpleNamespace(settimeout=lambda _: setattr(session, "_conn", None))
+        with self.assertRaises(DesktopError) as caught:
+            session.request("ping")
+        self.assertIn("disconnected", str(caught.exception))
+        stream.write.assert_not_called()
+
+    def test_stopping_a_session_survives_a_stream_that_cannot_flush_on_close(self):
+        session = DesktopSession(port=0)
+        session.start()
+        stream = session._stream = Mock()
+        stream.close.side_effect = BrokenPipeError("bytes still buffered")
+        session._conn = Mock()
+        session.stop()
+        self.assertIsNone(session.bound_port)
+        self.assertFalse(session.connected)
 
 
 class CheckingDesktop(FakeDesktop):
     """Like the real session, it asks `current()` right before sending."""
 
+    before_check = None
+
     def request(self, op, timeout=90.0, *, require_pair=False, current=None, **fields):
         self.current = current
+        if self.before_check is not None:
+            self.before_check(op)
         if current is not None and not current():
             raise DesktopError("The owner chat turn is no longer current.")
         return super().request(op, timeout, require_pair=require_pair, current=current, **fields)
@@ -129,6 +200,25 @@ class StaleSelectionCheck(unittest.TestCase):
                 self.assertTrue(refreshed)
                 self.assertNotIn(wire_op, [op for op, _ in desktop.calls])
                 self.assertEqual([record["state"] for record in records], ["start", "failed"])
+
+    def test_a_selection_replaced_while_the_call_waits_for_the_bridge_is_not_sent(self):
+        # The check made before handing the call to the bridge session is not enough: the call
+        # can wait there, so the session's own last check has to ask again.
+        desktop = CheckingDesktop([row(A, front=True)])
+        drive = ComputerDrive(desktop, enabled=lambda: True, log=lambda record: None)
+        code = drive.start()
+        drive.screenshot(code)
+
+        def newer_screenshot(op):
+            if op == "window_click":
+                desktop.before_check = None
+                drive.screenshot(code)
+
+        desktop.before_check = newer_screenshot
+        with self.assertRaises(ComputerError) as caught:
+            drive.click(code, 1, 1)
+        self.assertIn("Look again", str(caught.exception))
+        self.assertNotIn("window_click", [op for op, _ in desktop.calls])
 
     def test_an_input_call_carries_a_live_check_that_ends_with_the_grant(self):
         desktop = CheckingDesktop([row(A, front=True)])
@@ -192,6 +282,25 @@ class BridgeFrontCheck(unittest.TestCase):
         exec(compile(ast.Module([helper], []), str(bridge_check.BRIDGE), "exec"), scope)
         return scope["_force_foreground"], user32
 
+    def test_front_refuses_input_that_becomes_held_during_target_check(self):
+        fixture = self.fixture()
+        forward, held = fixture.guard.forward, Event()
+
+        def inspect(window):
+            hwnd = forward(window)
+            held.set()
+            return hwnd
+
+        def idle():
+            if held.is_set():
+                raise Refused("Release held mouse buttons or modifiers and try again.")
+
+        with patch.object(fixture.guard, "forward", side_effect=inspect), \
+                patch.object(fixture.desktop, "require_idle_input", side_effect=idle):
+            with self.assertRaises(Refused):
+                fixture.front()
+        fixture.force.assert_not_called()
+
     def test_failed_foreground_does_not_inject_keys(self):
         fixture = self.fixture()
         helper, user32 = self.run_real_helper(fixture)
@@ -224,6 +333,30 @@ class LogFileCheck(unittest.TestCase):
         self.log(new)
         expected = "".join(json.dumps(item) + "\n" for item in (old, new))
         self.assertEqual(self.path.read_text(), expected)
+
+    def test_short_write_cannot_remove_another_loggers_successful_append(self):
+        first, second = ComputerActionLog(self.root), ComputerActionLog(self.root)
+        record = {"state": "done"}
+        write = os.write
+        with ThreadPoolExecutor() as pool:
+            append = None
+
+            def short_write(fd, data):
+                nonlocal append
+                if b'"broken"' not in data:
+                    return write(fd, data)
+                append = pool.submit(second, record)
+                try:
+                    append.result(timeout=0.5)  # a writer that waits its turn finishes after the rollback
+                except TimeoutError:
+                    pass
+                return write(fd, data[:3])
+
+            with patch("jarvis.v3.computer.os.write", side_effect=short_write):
+                with self.assertRaises(OSError):
+                    first({"state": "broken"})
+                append.result(timeout=2)
+        self.assertEqual(self.path.read_text(), json.dumps(record) + "\n")
 
     def test_a_hard_link_to_the_log_is_refused(self):
         self.log({"state": "start"})

@@ -177,6 +177,17 @@ class ComputerLiveReviewCheck(unittest.TestCase):
                                   and fields.get("window") == OTHER], output)
                 self.assertTrue(report.failed, output)
 
+    def test_another_notepad_with_a_similar_file_name_is_never_acted_on(self):
+        for title in ("my-scroll-check-notes.txt - Notepad", "Notes about scroll-check - Notepad"):
+            with self.subTest(title=title):
+                desktop, report, _ = self.run_check(notepad_title=title)
+                self.assertEqual({op for op, _ in desktop.calls}, {"windows"})
+                self.assertTrue(report.failed)
+
+    def test_unsaved_changes_in_the_title_still_count_as_the_check_file(self):
+        _, report, output = self.run_check(notepad_title="*scroll-check.txt - Notepad")
+        self.assertEqual(report.failed, [], output)
+
     def test_output_never_carries_a_window_title(self):
         _, _, output = self.run_check()
         text = "\n".join(output)

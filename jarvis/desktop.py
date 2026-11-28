@@ -159,7 +159,7 @@ class DesktopSession:
             for sock in (self._server, self._handshake, self._conn):
                 self._shutdown(sock)
             if self._stream is not None:
-                self._stream.close()
+                self._close_stream(self._stream)
             self._conn = self._server = self._stream = self._handshake = None
             self._bridge_info = None
             self._paired = False
@@ -241,13 +241,30 @@ class DesktopSession:
             raise DesktopError(reply.get("error", "unknown bridge error"))
         return reply.get("result", {})
 
+    @staticmethod
+    def _close_stream(stream):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass  # bytes still buffered for a dead socket; there is nothing left to send them to
+
     def _drop_peer(self, conn, stream):
         with self._lock:
             if self._conn is conn:
                 self._shutdown(conn)
-                stream.close()
+                self._close_stream(stream)
                 self._conn = self._stream = self._bridge_info = None
                 self._paired = False
+
+    def drop_bridge(self) -> None:
+        """Close the bridge connection, so a request whose bytes are stuck never arrives.
+
+        The bridge redials within a couple of seconds.
+        """
+        with self._lock:
+            conn, stream = self._conn, self._stream
+        if conn is not None:
+            self._drop_peer(conn, stream)
 
     # -- operations --------------------------------------------------------
 

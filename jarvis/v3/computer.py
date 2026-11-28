@@ -1,6 +1,7 @@
 """Memory-only grants for driving Windows, with a private action log."""
 
 import base64
+import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,9 +37,13 @@ class ComputerActionLog:
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                         or info.st_mode & 0o077 or info.st_nlink != 1):
                     raise OSError("The desktop action log must be a private regular file.")
+                # One writer at a time across processes too, so taking a fragment back cannot
+                # remove another writer's line.
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                size = os.fstat(fd).st_size
                 if os.write(fd, line) != len(line):
                     # Take the fragment back, or the next record would be glued to it.
-                    os.ftruncate(fd, info.st_size)
+                    os.ftruncate(fd, size)
                     raise OSError("Incomplete desktop action log write.")
             finally:
                 os.close(fd)
@@ -78,8 +83,8 @@ class ComputerDrive:
     def _no_send(self):
         """Hold off the bridge session's sends, so that after stop() returns nothing new goes out.
 
-        A send that is stuck must not hold up the owner's stop: after two seconds the grant is
-        revoked anyway.
+        A send that is stuck must not hold up the owner's stop: after two seconds the bridge
+        connection is closed instead, so the stuck bytes never arrive, and the grant is revoked.
         """
         gate = getattr(self._desktop, "send_gate", None)
         held = gate is not None and gate.acquire(timeout=2)
@@ -88,6 +93,8 @@ class ComputerDrive:
         finally:
             if held:
                 gate.release()
+            elif gate is not None:
+                self._desktop.drop_bridge()
 
     def start(self) -> str:
         with self._no_send(), self._lock:

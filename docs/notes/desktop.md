@@ -150,9 +150,10 @@ Clicking, scrolling and switching windows (same day, the next change):
   driving code, pictures and window ids are never written.
 - **Stop.** After `jarvis computer stop` returns, no further input is written to
   the bridge: the bridge session holds a send gate from a request's last
-  permission check until its bytes are written, and stop takes that gate (for
-  at most two seconds, so a stuck send cannot hold a stop up). A request already
-  written may still complete, and its outcome is logged. An action aimed with a
+  permission check until its bytes are written, and stop takes that gate. If a
+  send is stuck for two seconds, stop closes the bridge connection instead, so
+  the stuck bytes never arrive (the bridge reconnects by itself). A request
+  already written may still complete, and its outcome is logged. An action aimed with a
   screenshot or list that a parallel command has since replaced is not sent.
   Bringing a window forward never taps a key to get past the foreground lock,
   so it can be refused where the older app tools would have succeeded.
