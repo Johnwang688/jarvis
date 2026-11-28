@@ -21,6 +21,7 @@ from jarvis.v3 import cli
 IMAGE_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWioAAAAASUVORK5CYII=")
 PICTURE = base64.b64decode(IMAGE_B64)
 SHOT = {"image_b64": IMAGE_B64, "size": [1, 1], "app": "notepad.exe", "title": "Example"}
+ACTION_ARGS = (("click", "10", "20"), ("scroll", "10", "20", "-3"), ("windows",), ("front", "2"))
 
 
 class ComputerCliCheck(unittest.TestCase):
@@ -181,6 +182,73 @@ class ComputerCliCheck(unittest.TestCase):
                 method, route, payload, _ = connection.request.call_args.args
                 self.assertEqual((method, route, json.loads(payload)),
                                  ("POST", "/v3/owner/computer", {"action": action}))
+
+    def test_action_output_and_integer_request_fields(self):
+        label = {"app": "example\napp.exe", "title": "Window\r\nTitle"}
+        control = {"name": "Open\nitem", "role": "push\nbutton"}
+        connection = self.reply()
+        read = connection.getresponse.return_value.read
+        os.environ["JARVIS_COMPUTER_CODE"] = "fake-env-code"
+        for args, fields, reply, expected in (
+            (ACTION_ARGS[0], {"x": 10, "y": 20}, {**label, "control": control},
+             ['clicked: push button "Open item" in example app.exe - Window Title']),
+            (ACTION_ARGS[1], {"x": 10, "y": 20, "amount": -3}, {**label, "control": control, "amount": -3},
+             ['scrolled -3: push button "Open item" in example app.exe - Window Title']),
+            (ACTION_ARGS[2], {}, {"windows": [
+                {"n": 1, **label, "front": False, "access": "drivable"},
+                {"n": 2, **label, "front": True, "access": "see_only"},
+            ]}, ["1. example app.exe - Window Title", "2. example app.exe - Window Title (front) (view only)"]),
+            (ACTION_ARGS[3], {"n": 2}, label, ["front: example app.exe - Window Title"]),
+        ):
+            with self.subTest(args=args):
+                read.return_value = json.dumps(reply).encode()
+                self.assertEqual(self.run_cli(*args), (0, expected))
+                method, route, payload, _ = connection.request.call_args.args
+                self.assertEqual((method, route), ("POST", "/v3/owner/computer/do"))
+                self.assertEqual(json.loads(payload), {"op": args[0], "code": "fake-env-code", **fields})
+
+    def test_each_action_prints_refusal_on_one_line(self):
+        self.reply({"message": "Refused: Try again\nafter refreshing."}, status=409)
+        for args in ACTION_ARGS:
+            with self.subTest(args=args):
+                self.assertEqual(self.run_cli(*args, "--code", "fake-code"),
+                                 (1, ["Refused: Try again after refreshing."]))
+
+    def test_each_action_needs_a_code_before_contacting_daemon(self):
+        with patch.object(cli, "HTTPConnection") as connect:
+            for args in ACTION_ARGS:
+                with self.subTest(args=args):
+                    self.assertEqual(self.run_cli(*args),
+                                     (1, ["Pass the code with --code or set JARVIS_COMPUTER_CODE."]))
+            connect.assert_not_called()
+
+    def test_invalid_action_replies_print_one_line_and_fail(self):
+        connection = self.reply()
+        read = connection.getresponse.return_value.read
+        for args, reply in zip(ACTION_ARGS, (
+            {"app": "Editor", "title": "Example", "control": {"name": "Open", "role": None}},
+            {"app": "Editor", "title": "Example", "control": {"name": "Open", "role": "button"}, "amount": True},
+            {"windows": [{"n": 1, "app": "Editor", "title": "Example", "front": False, "access": "drivable"},
+                         {"n": 2, "app": "Editor", "title": "Example", "front": 1, "access": "see_only"}]},
+            {"app": "Editor", "title": []},
+        ), strict=True):
+            with self.subTest(args=args):
+                read.return_value = json.dumps(reply).encode()
+                result, lines = self.run_cli(*args, "--code", "fake-code")
+                self.assertEqual(result, 1)
+                self.assertEqual(len(lines), 1)
+
+    def test_empty_window_list(self):
+        self.reply({"windows": []})
+        self.assertEqual(self.run_cli("windows", "--code", "fake-code"), (0, ["No windows are available."]))
+
+    def test_guide_prints_the_exact_file_without_daemon_or_code(self):
+        guide = Path(__file__).resolve().parents[2] / "jarvis" / "v3" / "prompts" / "computer_guide.md"
+        parsed = self.parser.parse_args(["computer", "guide"])
+        with patch.object(cli, "HTTPConnection") as connect, redirect_stdout(StringIO()) as output:
+            self.assertEqual(parsed.func(parsed), 0)
+            connect.assert_not_called()
+        self.assertEqual(output.getvalue().encode("utf-8"), guide.read_bytes())
 
 
 if __name__ == "__main__":

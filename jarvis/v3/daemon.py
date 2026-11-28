@@ -30,7 +30,7 @@ from .approvals import ApprovalBroker
 from .browser.desk import BrowserDesk
 from .browser.service import BrowserService
 from .chat import ChatService
-from .computer import ComputerDrive
+from .computer import ComputerActionLog, ComputerDrive
 from .executor import Executor, Worker as ExecutorWorker
 from .jobs import Job, Scheduler, default_jobs, idle_seconds
 from .logins import Store
@@ -376,8 +376,10 @@ class Daemon:
             desktop_port = 0
         self.desktop = DesktopSession(port=desktop_port, managed=True)
         self._computer_online = False
-        self.computer = ComputerDrive(self.desktop, enabled=lambda: self._computer_online and config.desktop_drive())
         self._data_dir = Path(config.V3_DIR if data_dir is None else data_dir)
+        self.computer = ComputerDrive(self.desktop,
+                                      enabled=lambda: self._computer_online and config.desktop_drive(),
+                                      log=ComputerActionLog(self._data_dir))
         self._hud_dir = None if hud_dir is None else Path(hud_dir)
         self._work = work
         self._proposals = proposals

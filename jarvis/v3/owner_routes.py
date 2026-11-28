@@ -342,16 +342,24 @@ def _computer_control(body, computer):
     return 200, computer.status()
 
 
-def _computer_screenshot(body, computer):
-    if (not isinstance(body, dict) or set(body) != {"op", "code"}
-            or body["op"] != "screenshot" or not isinstance(body["code"], str)):
-        return 400, {"error": "Invalid screenshot request."}
+_COMPUTER_OP_FIELDS = {
+    "screenshot": (), "click": ("x", "y"), "scroll": ("x", "y", "amount"),
+    "windows": (), "front": ("n",),
+}
+
+
+def _computer_do(body, computer):
+    op = body.get("op") if isinstance(body, dict) else None
+    fields = _COMPUTER_OP_FIELDS.get(op) if isinstance(op, str) else None
+    if fields is None or set(body) != {"op", "code", *fields} or not isinstance(body["code"], str):
+        return 400, {"error": "Invalid desktop driving request."}
     if computer is None:
         return 503, {"message": "Desktop driving is unavailable."}
     try:
-        return 200, computer.screenshot(body["code"])
+        result = getattr(computer, op)(body["code"], **{field: body[field] for field in fields})
     except ComputerError as exc:
         return 409, {"message": str(exc)}
+    return 200, {"windows": result} if op == "windows" else result
 
 
 ROUTES: dict[tuple[str, str], Route] = {
@@ -361,7 +369,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v3/owner/voice/settings"): Route(_voice_panel, with_voice_panel=True),
     ("POST", "/v3/owner/voice/helper"): Route(_voice_helper, with_voice_helper=True),
     ("POST", "/v3/owner/computer"): Route(_computer_control, with_computer=True),
-    ("POST", "/v3/owner/computer/do"): Route(_computer_screenshot, with_computer=True),
+    ("POST", "/v3/owner/computer/do"): Route(_computer_do, with_computer=True),
     ("GET", "/v3/owner/work"): Route(_work_snapshot, with_work=True),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),
