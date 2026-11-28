@@ -41,9 +41,13 @@ class DesktopError(RuntimeError):
 
 
 class DesktopSession:
-    """Listens for the bridge and marshals one request at a time."""
+    """Listens for the bridge and marshals one request at a time.
 
-    def __init__(self, port: int | None = None, *, key_path=None):
+    A managed session starts only with its daemon and accepts paired peers.
+    Explicit lifecycle control lets the daemon close in-flight sockets on stop.
+    """
+
+    def __init__(self, port: int | None = None, *, key_path=None, managed=False):
         # `is None`, not `or`: port 0 means "any free port", which the tests
         # rely on to avoid fighting a real bridge for the fixed one.
         self.port = config.DESKTOP_PORT if port is None else port
@@ -51,6 +55,9 @@ class DesktopSession:
         self._conn: socket.socket | None = None
         self._stream: Any = None
         self._lock = threading.Lock()
+        self._requests = threading.Lock()
+        self._handshake: socket.socket | None = None
+        self._managed = managed
         self._accept_thread: threading.Thread | None = None
         self._next_id = 0
         self._bridge_info: dict | None = None
@@ -68,28 +75,51 @@ class DesktopSession:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             # Loopback only: the bridge reaches us through WSL's localhost
             # forwarding, so there is never a reason to be on the network.
-            server.bind(("127.0.0.1", self.port))
-            server.listen(1)
-            self._server = server
-            self._accept_thread = threading.Thread(
-                target=self._accept_loop, name="jarvis-desktop", daemon=True)
-            self._accept_thread.start()
+            try:
+                server.bind(("127.0.0.1", self.port))
+                server.listen(1)
+                self._server = server
+                self._accept_thread = threading.Thread(
+                    target=self._accept_loop, args=(server,), name="jarvis-desktop", daemon=True)
+                self._accept_thread.start()
+            except (OSError, RuntimeError):
+                self._server = self._accept_thread = None
+                server.close()
+                raise
 
-    def _accept_loop(self) -> None:
+    @property
+    def bound_port(self) -> int | None:
+        with self._lock:
+            return self._server.getsockname()[1] if self._server is not None else None
+
+    @staticmethod
+    def _shutdown(sock):
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def _accept_loop(self, server) -> None:
         while True:
-            server = self._server
-            if server is None:
-                return
             try:
                 conn, _ = server.accept()
             except OSError:
                 return
+            with self._lock:
+                if self._server is not server:
+                    conn.close()
+                    return
+                self._handshake = conn
             stream = None
             try:
                 conn.settimeout(3.0)
                 stream = conn.makefile("rwb")
                 hello = voicewire.read_json(stream, 4096)
                 paired = hello.get("hello") == "jarvis-desktop-bridge" and hello.get("version") == "2"
+                if self._managed and not paired:
+                    raise DesktopError("The daemon requires a paired desktop bridge.")
                 if paired:
                     key = desktopwire.private_key(self._key_path or config.voice_link_key())
                     desktopwire.prove_daemon(stream, hello, key)
@@ -98,16 +128,23 @@ class DesktopSession:
                 if stream is not None:
                     stream.close()
                 conn.close()
+                with self._lock:
+                    if self._handshake is conn:
+                        self._handshake = None
                 continue
-            with self._lock:
+            # Wait for a request in flight: replacing its connection would fail a
+            # call whose action may already have happened. stop() still ends both.
+            with self._requests, self._lock:
+                if self._handshake is conn:
+                    self._handshake = None
                 if self._server is not server or (self._conn is not None and self._paired and not paired):
                     stream.close()
                     conn.close()
                     continue
                 if self._conn is not None:
                     try:
+                        self._shutdown(self._conn)
                         self._stream.close()
-                        self._conn.close()
                     except OSError:
                         pass
                 self._conn, self._stream = conn, stream
@@ -116,14 +153,16 @@ class DesktopSession:
 
     def stop(self) -> None:
         with self._lock:
-            for sock in (self._stream, self._conn, self._server):
-                try:
-                    if sock:
-                        sock.close()
-                except OSError:
-                    pass
-            self._conn = self._server = self._stream = None
+            for sock in (self._server, self._handshake, self._conn):
+                self._shutdown(sock)
+            if self._stream is not None:
+                self._stream.close()
+            self._conn = self._server = self._stream = self._handshake = None
             self._bridge_info = None
+            self._paired = False
+            worker, self._accept_thread = self._accept_thread, None
+        if worker is not None:
+            worker.join()
 
     @property
     def connected(self) -> bool:
@@ -142,7 +181,13 @@ class DesktopSession:
 
     def request(self, op: str, timeout: float = 90.0, *, require_pair=False, current=None, **fields) -> dict:
         """Send one op to the bridge and wait for its reply."""
-        self.start()
+        if self._managed:
+            if self.bound_port is None:
+                raise DesktopError("The desktop bridge listener is stopped.")
+        else:
+            self.start()
+        with self._lock:
+            server = self._server
         # The bridge redials every couple of seconds, so a Jarvis that just
         # started has to give it a moment to find the new listener. Without
         # this wait the first desktop call of every session reports "no
@@ -154,38 +199,48 @@ class DesktopSession:
                 "the Windows desktop bridge is not running. Start it on the "
                 f"Windows side with:  {config.DESKTOP_BRIDGE_CMD}"
             )
-        with self._lock:
-            conn, stream = self._conn, self._stream
-            if conn is None or stream is None:
-                raise DesktopError("the desktop bridge disconnected.")
-            if require_pair and not self._paired:
-                raise DesktopError("Start the paired Windows desktop bridge to use it from HUD chats.")
-            if current is not None and not current():
-                raise DesktopError("The owner chat turn is no longer current.")
-            self._next_id += 1
-            payload = {"id": self._next_id, "op": op, **fields}
+        with self._requests:
+            with self._lock:
+                if server is None or self._server is not server:
+                    # A call that waited across a stop must not run on a later listener.
+                    raise DesktopError("The desktop bridge listener stopped.")
+                conn, stream = self._conn, self._stream
+                if conn is None or stream is None:
+                    raise DesktopError("the desktop bridge disconnected.")
+                if require_pair and not self._paired:
+                    raise DesktopError("Start the paired Windows desktop bridge to use it from HUD chats.")
+                if current is not None and not current():
+                    raise DesktopError("The owner chat turn is no longer current.")
+                self._next_id += 1
+                payload = {"id": self._next_id, "op": op, **fields}
             try:
                 conn.settimeout(timeout)
                 stream.write((json.dumps(payload) + "\n").encode())
                 stream.flush()
                 line = stream.readline()
-            except (OSError, socket.timeout) as exc:
-                self._conn = self._stream = None
+            except (OSError, ValueError) as exc:
+                self._drop_peer(conn, stream)
                 raise DesktopError(
                     f"lost the desktop bridge mid-request ({type(exc).__name__}). "
                     "Restart it on the Windows side."
                 ) from exc
-        if not line:
-            with self._lock:
-                if self._conn is conn:
-                    self._conn = self._stream = None
-            raise DesktopError("the desktop bridge closed the connection.")
+            if not line:
+                self._drop_peer(conn, stream)
+                raise DesktopError("the desktop bridge closed the connection.")
         reply = json.loads(line)
         if reply.get("id") != payload["id"]:
             raise DesktopError("Mismatched reply from the Windows desktop bridge.")
         if not reply.get("ok"):
             raise DesktopError(reply.get("error", "unknown bridge error"))
         return reply.get("result", {})
+
+    def _drop_peer(self, conn, stream):
+        with self._lock:
+            if self._conn is conn:
+                self._shutdown(conn)
+                stream.close()
+                self._conn = self._stream = self._bridge_info = None
+                self._paired = False
 
     # -- operations --------------------------------------------------------
 
@@ -241,8 +296,15 @@ class DesktopSession:
             for name, spec in sorted(config.DESKTOP_APPS.items())
         )
         if not self.connected:
-            self.start()
-            self.wait_for_bridge(CONNECT_GRACE)
+            if not self._managed:
+                try:
+                    self.start()
+                except OSError:
+                    return ("Another Jarvis process holds the desktop bridge port, so the bridge "
+                            f"reports to it and not to this command.\n\nRegistered apps:\n{registry}")
+            # A managed session is opened only by its daemon; asking never opens it.
+            if self.bound_port is not None:
+                self.wait_for_bridge(CONNECT_GRACE)
         if not self.connected:
             return (
                 "The Windows desktop bridge is NOT connected.\n"

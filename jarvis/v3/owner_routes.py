@@ -16,6 +16,7 @@ from jarvis import config
 
 from .approvals import ApprovalConflict
 from .chat import ChatBusy, ChatInboxFull
+from .computer import ComputerDrive, ComputerError
 
 if TYPE_CHECKING:
     from .chat import ChatService
@@ -47,13 +48,17 @@ class Route:
     with_proposals: bool = field(default=False, kw_only=True)
     with_voice_helper: bool = field(default=False, kw_only=True)
     with_voice_panel: bool = field(default=False, kw_only=True)
+    with_computer: bool = field(default=False, kw_only=True)
 
     def run(self, body: dict | None, get_feed: Callable[[], Feed],
             chat: ChatService | None = None, *, data_dir: Path | None = None,
             get_work: Callable[[], tuple[Registry, Ledger]] | None = None,
             get_proposals: Callable[[], ProposalStore] | None = None,
             voice_helper: Callable | None = None,
-            voice_panel: Callable | None = None) -> tuple[int, object]:
+            voice_panel: Callable | None = None,
+            computer: ComputerDrive | None = None) -> tuple[int, object]:
+        if self.with_computer:
+            return self.handler(body, computer)
         if self.with_voice_panel:
             return self.handler(body, voice_panel)
         if self.with_voice_helper:
@@ -319,12 +324,44 @@ def _voice_panel(body, panel):
     return panel(body)
 
 
+def _computer_control(body, computer):
+    if not isinstance(body, dict) or set(body) != {"action"} or body["action"] not in ("start", "stop", "status"):
+        return 400, {"error": "Invalid action."}
+    if computer is None:
+        return 503, {"message": "Desktop driving is unavailable."}
+    action = body["action"]
+    if action == "start":
+        try:
+            return 200, {"code": computer.start(), "message": "Desktop driving started."}
+        except ComputerError as exc:
+            return 409, {"message": str(exc)}
+    if action == "stop":
+        stopped = computer.stop("owner")
+        message = "Desktop driving stopped." if stopped else "Desktop driving was already stopped."
+        return 200, {"stopped": stopped, "message": message}
+    return 200, computer.status()
+
+
+def _computer_screenshot(body, computer):
+    if (not isinstance(body, dict) or set(body) != {"op", "code"}
+            or body["op"] != "screenshot" or not isinstance(body["code"], str)):
+        return 400, {"error": "Invalid screenshot request."}
+    if computer is None:
+        return 503, {"message": "Desktop driving is unavailable."}
+    try:
+        return 200, computer.screenshot(body["code"])
+    except ComputerError as exc:
+        return 409, {"message": str(exc)}
+
+
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v3/owner/whoami"): Route(lambda body: (200, {"owner": True})),
     ("POST", "/v3/owner/ping"): Route(lambda body: (200, {"ok": True})),
     ("GET", "/v3/owner/voice"): Route(_voice_panel, with_voice_panel=True),
     ("POST", "/v3/owner/voice/settings"): Route(_voice_panel, with_voice_panel=True),
     ("POST", "/v3/owner/voice/helper"): Route(_voice_helper, with_voice_helper=True),
+    ("POST", "/v3/owner/computer"): Route(_computer_control, with_computer=True),
+    ("POST", "/v3/owner/computer/do"): Route(_computer_screenshot, with_computer=True),
     ("GET", "/v3/owner/work"): Route(_work_snapshot, with_work=True),
     ("GET", "/v3/owner/feed"): Route(_feed_snapshot, with_feed=True),
     ("POST", "/v3/owner/feed/answer"): Route(_feed_answer, with_feed=True),

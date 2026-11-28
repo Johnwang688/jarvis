@@ -246,6 +246,10 @@ class Guard:
         return (kind if hud_kind == policy.DRIVABLE else hud_kind), masks
 
     def windows(self) -> list[dict]:
+        try:
+            foreground = self._read("foreground")
+        except Refused:
+            foreground = None
         previous = {identity: window_id for window_id, identity in self._ids.items()}
         current = {}
         result = []
@@ -267,7 +271,8 @@ class Guard:
                 self._issued.add(window_id)
                 current[window_id] = identity
             result.append({"window": window_id, "title": self._read("title", hwnd),
-                           "app": policy.image_name(facts.image), "access": kind})
+                           "app": policy.image_name(facts.image), "access": kind,
+                           "front": foreground is not None and hwnd == foreground})
         self._ids = current
         return result
 
@@ -298,6 +303,9 @@ class Guard:
         if not usable_rect(rect):
             raise Refused("The window's screen bounds are unavailable.")
         return rect
+
+    def in_front(self, hwnd) -> bool:
+        return self._read("foreground") == hwnd
 
     def capture(self, window_id) -> Grant:
         hwnd, order, kind, masks = self._target(window_id)
